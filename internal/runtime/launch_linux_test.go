@@ -423,9 +423,10 @@ func TestGameActivityInputTargetWiring(t *testing.T) {
 
 // TestPlatformParamsMatchesPointerDeviceMode pins the coherence contract:
 // PlatformParams must present exactly the pointer identity the input
-// dispatchers present — isTouchDevice == isMouseDevice's negation, driven
-// by the same source of truth (TIPSY_INPUT_DEVICE). X11 defaults to mouse;
-// touch remains an explicit Android-identity A/B control.
+// dispatchers present — the official APK derives both keyboard and mouse from
+// android.hardware.type.pc, while touchscreen is independent. All three are
+// driven by the same source of truth (TIPSY_INPUT_DEVICE). X11 defaults to the
+// PC profile; touch remains an explicit Android-phone A/B control.
 func TestPlatformParamsMatchesPointerDeviceMode(t *testing.T) {
 	vm, err := jni.NewVM()
 	if err != nil {
@@ -441,8 +442,8 @@ func TestPlatformParamsMatchesPointerDeviceMode(t *testing.T) {
 		if got := env.BoolField(p, "isMouseDevice"); got != !wantTouch {
 			t.Fatalf("isMouseDevice = %v, want %v", got, !wantTouch)
 		}
-		if got := env.BoolField(p, "isKeyboardDevice"); !got {
-			t.Fatal("isKeyboardDevice = false, want true (keys are unaffected by the pointer identity)")
+		if got := env.BoolField(p, "isKeyboardDevice"); got != !wantTouch {
+			t.Fatalf("isKeyboardDevice = %v, want %v", got, !wantTouch)
 		}
 	}
 

@@ -975,7 +975,7 @@ func makePlatformParams(env *jni.Env, assets string, width, height int) uintptr 
 	// X11 launches default to a mouse; TIPSY_INPUT_DEVICE=touch retains the
 	// Android phone identity as an explicit A/B control.
 	touch := jni.PointerDeviceIsTouch()
-	env.PutField(p, "isKeyboardDevice", true)
+	env.PutField(p, "isKeyboardDevice", !touch)
 	env.PutField(p, "isMouseDevice", !touch)
 	env.PutField(p, "isTouchDevice", touch)
 	setPlatformViewport(env, p, width, height)

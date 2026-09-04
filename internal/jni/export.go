@@ -549,6 +549,18 @@ func (vm *VM) dispatch(obj C.jobject, class, name, sig string, args *C.jvalue) (
 		p := vm.newObjectLocked(cls)
 		vm.mu.Unlock()
 		return idToJobject(p.id), true
+	case "hasSystemFeature(Ljava/lang/String;)Z":
+		// The official APK's PlatformParams builder asks PackageManager for
+		// android.hardware.type.pc and uses that one answer for both its mouse
+		// and keyboard capability bits. Tipsy is running on a real Linux PC
+		// desktop and supplies those devices, so advertise that exact Android
+		// feature in the default profile. The explicit touch diagnostic profile
+		// reports touchscreen instead; every unrelated feature remains absent
+		// unless its host bridge is independently implemented and proven.
+		if class == "android/content/pm/PackageManager" && platformSystemFeature(vm.stringFromArg(args, 0)) {
+			return idToJobject(1), true
+		}
+		return jnull(), true
 	case "getApplicationInfo()Landroid/content/pm/ApplicationInfo;":
 		vm.mu.Lock()
 		cls := vm.classes["android/content/pm/ApplicationInfo"]

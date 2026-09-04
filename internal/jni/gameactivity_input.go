@@ -417,14 +417,20 @@ func SetGameActivityInputTarget(env, activity, handle uintptr) {
 	defer inputTarget.mu.Unlock()
 	inputTarget.env, inputTarget.activity, inputTarget.handle = env, activity, handle
 	if handle != 0 {
+		touch := pointerDeviceIsTouch()
 		mode := "mouse"
-		if pointerDeviceIsTouch() {
+		if touch {
 			mode = "touch"
 		}
 		logging.Logger(logging.CatJNI).Info("[jni] input device mode",
 			"mode", mode,
 			"source", fmt.Sprintf("%#x", pointerSource()),
-			"toolType", pointerTool())
+			"toolType", pointerTool(),
+			"androidPCFeature", !touch,
+			"keyboardDevice", !touch,
+			"mouseDevice", !touch,
+			"touchDevice", touch,
+			"apkProduct", "Android")
 	}
 }
 

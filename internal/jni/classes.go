@@ -176,6 +176,7 @@ var implementedMethods = map[string]bool{
 	"getDefaultDisplay()Landroid/view/Display;":                                                               true,
 	"getResources()Landroid/content/res/Resources;":                                                           true,
 	"getPackageManager()Landroid/content/pm/PackageManager;":                                                  true,
+	"hasSystemFeature(Ljava/lang/String;)Z":                                                                  true,
 	"getApplicationInfo()Landroid/content/pm/ApplicationInfo;":                                                true,
 	"getSystemService(Ljava/lang/String;)Ljava/lang/Object;":                                                  true,
 	"getSystemService(Ljava/lang/Class;)Ljava/lang/Object;":                                                   true,
