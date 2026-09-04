@@ -2,8 +2,9 @@
 /bin/
 /dist/
 /out/
-tipsy
-tipsy-gui
+/tipsy
+/tipsy-gui
+/Archive.zip
 *.exe
 *.test
 *.out
