@@ -19,12 +19,13 @@ type Config struct {
 // Layout is the XDG directory set for Tipsy.
 // Named separately from func Paths because Go forbids a type and func sharing an identifier.
 type Layout struct {
-	ConfigDir  string `json:"configDir"`
-	DataDir    string `json:"dataDir"`
-	CacheDir   string `json:"cacheDir"`
-	StateDir   string `json:"stateDir"`
-	ConfigFile string `json:"configFile"`
-	LogDir     string `json:"logDir"`
+	ConfigDir          string `json:"configDir"`
+	DataDir            string `json:"dataDir"`
+	CacheDir           string `json:"cacheDir"`
+	StateDir           string `json:"stateDir"`
+	ConfigFile         string `json:"configFile"`
+	ClientSettingsFile string `json:"clientSettingsFile"`
+	LogDir             string `json:"logDir"`
 }
 
 func Paths() Layout {
@@ -33,12 +34,13 @@ func Paths() Layout {
 	cacheDir := xdgDir("XDG_CACHE_HOME", ".cache")
 	stateDir := xdgDir("XDG_STATE_HOME", filepath.Join(".local", "state"))
 	return Layout{
-		ConfigDir:  configDir,
-		DataDir:    dataDir,
-		CacheDir:   cacheDir,
-		StateDir:   stateDir,
-		ConfigFile: filepath.Join(configDir, "config.json"),
-		LogDir:     stateDir,
+		ConfigDir:          configDir,
+		DataDir:            dataDir,
+		CacheDir:           cacheDir,
+		StateDir:           stateDir,
+		ConfigFile:         filepath.Join(configDir, "config.json"),
+		ClientSettingsFile: filepath.Join(configDir, "client-settings.json"),
+		LogDir:             stateDir,
 	}
 }
 
@@ -74,13 +76,10 @@ func Save(c *Config) error {
 		c = &Config{}
 	}
 	p := Paths()
-	if err := os.MkdirAll(p.ConfigDir, 0o755); err != nil {
-		return err
-	}
 	data, err := json.MarshalIndent(c, "", "  ")
 	if err != nil {
 		return err
 	}
 	data = append(data, '\n')
-	return os.WriteFile(p.ConfigFile, data, 0o600)
+	return AtomicWriteFile(p.ConfigFile, data, 0o600)
 }

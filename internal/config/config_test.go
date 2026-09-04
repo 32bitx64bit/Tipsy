@@ -33,8 +33,43 @@ func TestPathsRespectsXDG(t *testing.T) {
 	if p.ConfigFile != filepath.Join(tmp, "cfg", "tipsy", "config.json") {
 		t.Fatalf("ConfigFile = %s", p.ConfigFile)
 	}
+	if p.ClientSettingsFile != filepath.Join(tmp, "cfg", "tipsy", "client-settings.json") {
+		t.Fatalf("ClientSettingsFile = %s", p.ClientSettingsFile)
+	}
 	if p.LogDir != p.StateDir {
 		t.Fatalf("LogDir = %s, want StateDir %s", p.LogDir, p.StateDir)
+	}
+}
+
+func TestSaveIsAtomicPrivateAndRejectsSymlink(t *testing.T) {
+	tmp := t.TempDir()
+	t.Setenv("XDG_CONFIG_HOME", tmp)
+	if err := Save(&Config{LogLevel: "debug"}); err != nil {
+		t.Fatal(err)
+	}
+	path := Paths().ConfigFile
+	st, err := os.Stat(path)
+	if err != nil || st.Mode().Perm() != 0o600 {
+		t.Fatalf("mode=%v err=%v", st, err)
+	}
+	if leftovers, _ := filepath.Glob(filepath.Join(filepath.Dir(path), ".tipsy-config-*")); len(leftovers) != 0 {
+		t.Fatalf("temporary files remain: %v", leftovers)
+	}
+	if err := os.Remove(path); err != nil {
+		t.Fatal(err)
+	}
+	target := filepath.Join(tmp, "outside")
+	if err := os.WriteFile(target, []byte("untouched"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(target, path); err != nil {
+		t.Fatal(err)
+	}
+	if err := Save(&Config{LogLevel: "info"}); err == nil {
+		t.Fatal("expected symlink rejection")
+	}
+	if got, _ := os.ReadFile(target); string(got) != "untouched" {
+		t.Fatalf("symlink target changed: %q", got)
 	}
 }
 

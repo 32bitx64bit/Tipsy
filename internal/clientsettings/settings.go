@@ -1,0 +1,507 @@
+// Copyright 2026 The Tipsy Authors
+// SPDX-License-Identifier: GPL-3.0-or-later
+
+// Package clientsettings owns the small, validated Roblox settings surface
+// exposed by Tipsy. It deliberately does not expose arbitrary fast flags.
+package clientsettings
+
+import (
+	"bytes"
+	"context"
+	"encoding/json"
+	"encoding/xml"
+	"errors"
+	"fmt"
+	"io"
+	"os"
+	"path/filepath"
+	"strconv"
+	"strings"
+	"time"
+
+	"github.com/tipsy-linux/tipsy/internal/config"
+	"github.com/tipsy-linux/tipsy/internal/graphics"
+)
+
+type Renderer string
+
+const (
+	RendererAuto   Renderer = "auto"
+	RendererOpenGL Renderer = "opengl"
+	RendererVulkan Renderer = "vulkan"
+
+	flagPreferOpenGL = "FFlagDebugGraphicsPreferOpenGL"
+	flagPreferVulkan = "FFlagDebugGraphicsPreferVulkan"
+
+	maxSettingsBytes  = 64 << 10
+	maxRobloxXMLBytes = 4 << 20
+	unlimitedFPSValue = "9999"
+)
+
+type RendererOption struct {
+	Renderer  Renderer `json:"renderer"`
+	Available bool     `json:"available"`
+	Reason    string   `json:"reason,omitempty"`
+}
+
+func RendererOptions() []RendererOption {
+	caps := graphics.ProbeRendererCapabilities()
+	return []RendererOption{
+		{Renderer: RendererAuto, Available: caps.OpenGL.Available, Reason: caps.OpenGL.Reason},
+		{Renderer: RendererOpenGL, Available: caps.OpenGL.Available, Reason: caps.OpenGL.Reason},
+		{Renderer: RendererVulkan, Available: caps.Vulkan.Available, Reason: caps.Vulkan.Reason},
+	}
+}
+
+type UnsupportedRendererError = graphics.UnsupportedRendererError
+
+type FrameRateMode string
+
+const (
+	FrameRateAuto      FrameRateMode = "auto"
+	FrameRateLimited   FrameRateMode = "limited"
+	FrameRateUnlimited FrameRateMode = "unlimited"
+	MinFrameRate                     = 30
+	MaxFrameRate                     = 240
+)
+
+type FrameRate struct {
+	Mode  FrameRateMode `json:"mode"`
+	Limit int           `json:"limit,omitempty"`
+}
+
+type Settings struct {
+	Renderer  Renderer  `json:"renderer"`
+	FrameRate FrameRate `json:"frameRate"`
+}
+
+type ApplyResult struct {
+	Settings         Settings `json:"settings"`
+	RestartRequired  bool     `json:"restartRequired"`
+	FrameRateApplied bool     `json:"frameRateApplied"`
+	FrameRateNote    string   `json:"frameRateNote,omitempty"`
+}
+
+type persistedSettings struct {
+	Settings
+	FPSOwned    bool   `json:"fpsOwned,omitempty"`
+	FPSOriginal string `json:"fpsOriginal,omitempty"`
+	FPSApplied  string `json:"fpsApplied,omitempty"`
+}
+
+type Service struct {
+	Path    string
+	XMLPath string
+	now     func() time.Time
+}
+
+func New() *Service {
+	return &Service{
+		Path:    config.Paths().ClientSettingsFile,
+		XMLPath: RobloxSettingsPath(),
+		now:     time.Now,
+	}
+}
+
+func RobloxSettingsPath() string {
+	return filepath.Join(config.Paths().DataDir, "app-data", "com.roblox.client", "files", "appData", "GlobalBasicSettings_13.xml")
+}
+
+func Default() Settings {
+	return Settings{Renderer: RendererAuto, FrameRate: FrameRate{Mode: FrameRateAuto}}
+}
+
+func (s Settings) Validate() error {
+	s = normalized(s)
+	if err := s.validateShape(); err != nil {
+		return err
+	}
+	return graphics.RequireRenderer(graphics.Renderer(s.Renderer))
+}
+
+// validateShape checks durable data independently of host capabilities. A
+// renderer choice can become temporarily unavailable without making the
+// persisted settings document corrupt.
+func (s Settings) validateShape() error {
+	switch s.Renderer {
+	case RendererAuto, RendererOpenGL, RendererVulkan:
+	default:
+		return fmt.Errorf("renderer must be auto, opengl, or vulkan")
+	}
+	switch s.FrameRate.Mode {
+	case FrameRateAuto, FrameRateUnlimited:
+		if s.FrameRate.Limit != 0 {
+			return fmt.Errorf("automatic and unlimited frame-rate modes do not accept a numeric limit")
+		}
+	case FrameRateLimited:
+		if s.FrameRate.Limit < MinFrameRate || s.FrameRate.Limit > MaxFrameRate {
+			return fmt.Errorf("limited frame rate must be between %d and %d", MinFrameRate, MaxFrameRate)
+		}
+	default:
+		return fmt.Errorf("frame-rate mode must be auto, limited, or unlimited")
+	}
+	return nil
+}
+
+func normalized(s Settings) Settings {
+	if s.Renderer == "" {
+		s.Renderer = RendererAuto
+	}
+	if s.FrameRate.Mode == "" {
+		s.FrameRate.Mode = FrameRateAuto
+	}
+	return s
+}
+
+func (s *Service) Load(ctx context.Context) (Settings, error) {
+	doc, err := s.loadDocument(ctx)
+	return doc.Settings, err
+}
+
+func (s *Service) Apply(ctx context.Context, wanted Settings) (ApplyResult, error) {
+	wanted = normalized(wanted)
+	if err := wanted.Validate(); err != nil {
+		return ApplyResult{}, err
+	}
+	release, err := AcquireClientLock()
+	if err != nil {
+		return ApplyResult{}, err
+	}
+	defer release()
+	return s.applyLocked(ctx, wanted)
+}
+
+func (s *Service) applyLocked(ctx context.Context, wanted Settings) (ApplyResult, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if err := ctx.Err(); err != nil {
+		return ApplyResult{}, err
+	}
+	oldDoc, err := s.loadDocument(ctx)
+	if err != nil {
+		return ApplyResult{}, err
+	}
+	newDoc := oldDoc
+	newDoc.Settings = wanted
+
+	xmlPath := s.xmlPath()
+	oldXML, readErr := readRegularFile(xmlPath, maxRobloxXMLBytes)
+	xmlExists := readErr == nil
+	if readErr != nil && !errors.Is(readErr, os.ErrNotExist) {
+		return ApplyResult{}, readErr
+	}
+	newXML := oldXML
+	xmlChanged := false
+	note := ""
+	if xmlExists {
+		_, current, err := updateFramerateCap(oldXML, "")
+		if err != nil {
+			s.backupMalformedXML(oldXML)
+			return ApplyResult{}, fmt.Errorf("Roblox settings XML is malformed; the original was preserved: %w", err)
+		}
+		switch wanted.FrameRate.Mode {
+		case FrameRateAuto:
+			if oldDoc.FPSOwned && current == oldDoc.FPSApplied {
+				newXML, _, err = updateFramerateCap(oldXML, oldDoc.FPSOriginal)
+				if err != nil {
+					return ApplyResult{}, err
+				}
+				xmlChanged = !bytes.Equal(oldXML, newXML)
+			}
+			newDoc.FPSOwned = false
+			newDoc.FPSOriginal = ""
+			newDoc.FPSApplied = ""
+		case FrameRateLimited, FrameRateUnlimited:
+			value := fpsValue(wanted.FrameRate)
+			if !oldDoc.FPSOwned {
+				newDoc.FPSOriginal = current
+			}
+			newDoc.FPSOwned = true
+			newDoc.FPSApplied = value
+			newXML, _, err = updateFramerateCap(oldXML, value)
+			if err != nil {
+				return ApplyResult{}, err
+			}
+			xmlChanged = !bytes.Equal(oldXML, newXML)
+		}
+	} else if wanted.FrameRate.Mode != FrameRateAuto {
+		note = "Roblox has not created GlobalBasicSettings_13.xml yet; the choice is saved and will be applied on a later launch."
+	}
+
+	semanticChanged := oldDoc.Settings != wanted
+	docChanged := oldDoc != newDoc
+	if xmlChanged {
+		if err := config.AtomicWriteFile(xmlPath, newXML, 0o600); err != nil {
+			return ApplyResult{}, fmt.Errorf("write Roblox frame-rate setting: %w", err)
+		}
+	}
+	if docChanged {
+		if err := s.writeDocument(newDoc); err != nil {
+			if xmlChanged {
+				_ = config.AtomicWriteFile(xmlPath, oldXML, 0o600)
+			}
+			return ApplyResult{}, err
+		}
+	}
+	return ApplyResult{
+		Settings:         wanted,
+		RestartRequired:  semanticChanged || xmlChanged,
+		FrameRateApplied: xmlExists,
+		FrameRateNote:    noteForFrameRate(wanted.FrameRate, note),
+	}, nil
+}
+
+// ReconcileWhileClientLocked reapplies an explicit XML frame-rate choice just
+// before launch. The caller must hold the client lock for the full launch.
+func (s *Service) ReconcileWhileClientLocked(ctx context.Context) error {
+	doc, err := s.loadDocument(ctx)
+	if err != nil {
+		return err
+	}
+	if doc.FrameRate.Mode == FrameRateAuto {
+		return nil
+	}
+	_, err = s.applyLocked(ctx, doc.Settings)
+	return err
+}
+
+func (s *Service) Reset(ctx context.Context) (Settings, error) {
+	want := Default()
+	_, err := s.Apply(ctx, want)
+	return want, err
+}
+
+// Overrides converts renderer choices into Roblox ClientAppSettings strings.
+// FPS is intentionally absent: Tipsy owns only the verified UserGameSettings
+// FramerateCap XML field for FPS, avoiding contradictory configuration paths.
+func Overrides(s Settings) (map[string]any, error) {
+	s = normalized(s)
+	if err := s.Validate(); err != nil {
+		return nil, err
+	}
+	out := make(map[string]any, 1)
+	switch s.Renderer {
+	case RendererOpenGL:
+		out[flagPreferOpenGL] = "True"
+	case RendererVulkan:
+		out[flagPreferVulkan] = "True"
+	}
+	return out, nil
+}
+
+func (s *Service) LoadOverrides(ctx context.Context) (map[string]any, error) {
+	settings, err := s.Load(ctx)
+	if err != nil {
+		return nil, err
+	}
+	return Overrides(settings)
+}
+
+func fpsValue(f FrameRate) string {
+	if f.Mode == FrameRateUnlimited {
+		return unlimitedFPSValue
+	}
+	return strconv.Itoa(f.Limit)
+}
+
+func noteForFrameRate(f FrameRate, prior string) string {
+	if prior != "" {
+		return prior
+	}
+	if f.Mode == FrameRateUnlimited {
+		return "Experimental: Tipsy requests an effectively uncapped value; Roblox may normalize or enforce a 240 FPS ceiling."
+	}
+	return ""
+}
+
+func (s *Service) loadDocument(ctx context.Context) (persistedSettings, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if err := ctx.Err(); err != nil {
+		return persistedSettings{}, err
+	}
+	path := s.settingsPath()
+	data, err := readRegularFile(path, maxSettingsBytes)
+	if errors.Is(err, os.ErrNotExist) {
+		return persistedSettings{Settings: Default()}, nil
+	}
+	if err != nil {
+		return persistedSettings{}, err
+	}
+	var got persistedSettings
+	if err := json.Unmarshal(data, &got); err != nil {
+		return s.recoverMalformed(ctx, path)
+	}
+	got.Settings = normalized(got.Settings)
+	if err := got.Settings.validateShape(); err != nil {
+		return s.recoverMalformed(ctx, path)
+	}
+	if got.FPSOwned && (got.FPSOriginal == "" || got.FPSApplied == "") {
+		return s.recoverMalformed(ctx, path)
+	}
+	return got, nil
+}
+
+func (s *Service) writeDocument(doc persistedSettings) error {
+	data, err := json.MarshalIndent(doc, "", "  ")
+	if err != nil {
+		return err
+	}
+	data = append(data, '\n')
+	return config.AtomicWriteFile(s.settingsPath(), data, 0o600)
+}
+
+func (s *Service) settingsPath() string {
+	if s != nil && s.Path != "" {
+		return s.Path
+	}
+	return config.Paths().ClientSettingsFile
+}
+
+func (s *Service) xmlPath() string {
+	if s != nil && s.XMLPath != "" {
+		return s.XMLPath
+	}
+	return RobloxSettingsPath()
+}
+
+func (s *Service) recoverMalformed(ctx context.Context, path string) (persistedSettings, error) {
+	if err := ctx.Err(); err != nil {
+		return persistedSettings{}, err
+	}
+	backup := s.invalidPath(path)
+	if err := os.Rename(path, backup); err != nil {
+		return persistedSettings{}, fmt.Errorf("recover malformed settings: %w", err)
+	}
+	doc := persistedSettings{Settings: Default()}
+	if err := s.writeDocument(doc); err != nil {
+		_ = os.Rename(backup, path)
+		return persistedSettings{}, fmt.Errorf("recover malformed settings: %w", err)
+	}
+	return doc, nil
+}
+
+func (s *Service) backupMalformedXML(data []byte) {
+	_ = config.AtomicWriteFile(s.invalidPath(s.xmlPath()), data, 0o600)
+}
+
+func (s *Service) invalidPath(path string) string {
+	stamp := time.Now().UTC()
+	if s != nil && s.now != nil {
+		stamp = s.now().UTC()
+	}
+	base := fmt.Sprintf("%s.invalid-%s", path, stamp.Format("20060102T150405.000000000Z"))
+	for i := 0; ; i++ {
+		candidate := base
+		if i > 0 {
+			candidate = fmt.Sprintf("%s-%d", base, i)
+		}
+		if _, err := os.Lstat(candidate); err != nil {
+			// A permission or I/O error will be reported by the subsequent
+			// rename/write. Do not spin forever while choosing a backup name.
+			return candidate
+		}
+	}
+}
+
+func readRegularFile(path string, limit int64) ([]byte, error) {
+	st, err := os.Lstat(path)
+	if err != nil {
+		return nil, err
+	}
+	if st.Mode()&os.ModeSymlink != 0 || !st.Mode().IsRegular() {
+		return nil, fmt.Errorf("settings path is not a regular file")
+	}
+	if st.Size() > limit {
+		return nil, fmt.Errorf("settings file exceeds %d bytes", limit)
+	}
+	f, err := os.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+	data, err := io.ReadAll(io.LimitReader(f, limit+1))
+	if err != nil {
+		return nil, err
+	}
+	if int64(len(data)) > limit {
+		return nil, fmt.Errorf("settings file exceeds %d bytes", limit)
+	}
+	if err := os.Chmod(path, 0o600); err != nil {
+		return nil, err
+	}
+	return data, nil
+}
+
+func updateFramerateCap(data []byte, replacement string) ([]byte, string, error) {
+	dec := xml.NewDecoder(bytes.NewReader(data))
+	type scope struct{ name, class string }
+	var stack []scope
+	start, end := -1, -1
+	value := ""
+	for {
+		tok, err := dec.Token()
+		if errors.Is(err, io.EOF) {
+			break
+		}
+		if err != nil {
+			return nil, "", err
+		}
+		switch t := tok.(type) {
+		case xml.StartElement:
+			class, attrName := "", ""
+			for _, a := range t.Attr {
+				if a.Name.Local == "class" {
+					class = a.Value
+				}
+				if a.Name.Local == "name" {
+					attrName = a.Value
+				}
+			}
+			inSettings, inProperties := false, false
+			for _, sc := range stack {
+				if sc.name == "Item" && sc.class == "UserGameSettings" {
+					inSettings = true
+				}
+				if inSettings && sc.name == "Properties" {
+					inProperties = true
+				}
+			}
+			stack = append(stack, scope{name: t.Name.Local, class: class})
+			if t.Name.Local == "int" && attrName == "FramerateCap" && inSettings && inProperties {
+				if start >= 0 {
+					return nil, "", fmt.Errorf("multiple UserGameSettings FramerateCap fields")
+				}
+				start = int(dec.InputOffset())
+			}
+		case xml.CharData:
+			if start >= 0 && end < start && len(stack) > 0 && stack[len(stack)-1].name == "int" {
+				end = int(dec.InputOffset())
+				value = strings.TrimSpace(string(t))
+			}
+		case xml.EndElement:
+			if len(stack) > 0 {
+				stack = stack[:len(stack)-1]
+			}
+		}
+	}
+	if start < 0 || end < start || value == "" {
+		return nil, "", fmt.Errorf("unique UserGameSettings FramerateCap field not found")
+	}
+	if _, err := strconv.Atoi(value); err != nil {
+		return nil, "", fmt.Errorf("FramerateCap is not an integer")
+	}
+	if replacement == "" {
+		return append([]byte(nil), data...), value, nil
+	}
+	span := data[start:end]
+	prefixLen := len(span) - len(bytes.TrimLeft(span, " \t\r\n"))
+	suffixLen := len(span) - len(bytes.TrimRight(span, " \t\r\n"))
+	var out []byte
+	out = append(out, data[:start+prefixLen]...)
+	out = append(out, replacement...)
+	out = append(out, data[end-suffixLen:]...)
+	return out, value, nil
+}

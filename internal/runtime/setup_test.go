@@ -190,3 +190,45 @@ func TestApplicationSettingsFromResponse(t *testing.T) {
 		t.Fatalf("empty envelope: n=%d json=%s", n, empty)
 	}
 }
+
+func TestApplicationSettingsUserOverridesMergeWithOfficial(t *testing.T) {
+	raw := []byte(`{"applicationSettings":{"OfficialOnly":"kept","FFlagDebugGraphicsPreferVulkan":"True","FFlagDebugGraphicsDisableVulkan":"True","DFIntTaskSchedulerTargetFps":"60"}}`)
+	overrides := map[string]any{
+		"FFlagDebugGraphicsPreferOpenGL": "True",
+		"DFIntTaskSchedulerTargetFps":    "144",
+	}
+	got, n, err := applicationSettingsFromResponseWithOverrides(raw, overrides)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n != 4 {
+		t.Fatalf("official count=%d want 4", n)
+	}
+	var envelope map[string]map[string]any
+	if err := json.Unmarshal([]byte(got), &envelope); err != nil {
+		t.Fatal(err)
+	}
+	for _, key := range []string{"applicationSettings", "ClientAppSettings"} {
+		m := envelope[key]
+		if m["OfficialOnly"] != "kept" || m["DFIntTaskSchedulerTargetFps"] != "144" || m["FFlagDebugGraphicsPreferOpenGL"] != "True" {
+			t.Fatalf("%s merge=%v", key, m)
+		}
+		if _, ok := m["FFlagDebugGraphicsPreferVulkan"]; ok {
+			t.Fatalf("%s retained conflicting Vulkan key: %v", key, m)
+		}
+		if _, ok := m["FFlagDebugGraphicsDisableVulkan"]; ok {
+			t.Fatalf("%s retained conflicting disable key: %v", key, m)
+		}
+	}
+}
+
+func TestApplicationSettingsAutoDoesNotReplaceOfficial(t *testing.T) {
+	raw := []byte(`{"applicationSettings":{"FFlagDebugGraphicsPreferVulkan":"True","DFIntTaskSchedulerTargetFps":"60"}}`)
+	got, _, err := applicationSettingsFromResponseWithOverrides(raw, map[string]any{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(got, `"FFlagDebugGraphicsPreferVulkan":"True"`) || !strings.Contains(got, `"DFIntTaskSchedulerTargetFps":"60"`) {
+		t.Fatalf("auto replaced official settings: %s", got)
+	}
+}

@@ -11,6 +11,8 @@ import (
 	"net/http"
 	"os"
 	"time"
+
+	"github.com/tipsy-linux/tipsy/internal/clientsettings"
 )
 
 // Official public client-settings endpoint the Android app uses.
@@ -19,6 +21,10 @@ const androidAppSettingsURL = "https://clientsettingscdn.roblox.com/v2/settings/
 // applicationSettingsFromResponse extracts the flag map as a JSON object.
 // Does not log flag names or values.
 func applicationSettingsFromResponse(body []byte) (string, int, error) {
+	return applicationSettingsFromResponseWithOverrides(body, nil)
+}
+
+func applicationSettingsFromResponseWithOverrides(body []byte, overrides map[string]any) (string, int, error) {
 	var wrap struct {
 		ApplicationSettings map[string]any `json:"applicationSettings"`
 	}
@@ -39,6 +45,19 @@ func applicationSettingsFromResponse(body []byte) (string, int, error) {
 		m = map[string]any{}
 	} else {
 		m = cloneFlagMap(m)
+	}
+	// Explicit renderer choices own this narrow conflict set. Auto produces no
+	// renderer override, leaving the official fetched defaults untouched.
+	if _, ok := overrides["FFlagDebugGraphicsPreferOpenGL"]; ok {
+		delete(m, "FFlagDebugGraphicsPreferVulkan")
+		delete(m, "FFlagDebugGraphicsDisableVulkan")
+	}
+	if _, ok := overrides["FFlagDebugGraphicsPreferVulkan"]; ok {
+		delete(m, "FFlagDebugGraphicsPreferOpenGL")
+		delete(m, "FFlagDebugGraphicsDisableVulkan")
+	}
+	for k, v := range overrides {
+		m[k] = v
 	}
 	// 7a14858 / ShadowFValuesEnabled defaults false and is absent from CDN.
 	// Commit 0x2e77680 runs apply (store+0x10 list → shadow maps) and sets
@@ -65,16 +84,22 @@ func cloneFlagMap(m map[string]any) map[string]any {
 }
 
 func loadAndroidAppSettings(cachePath string) (string, int, error) {
+	overrides, overrideErr := clientsettings.New().LoadOverrides(context.Background())
+	if overrideErr != nil {
+		// A settings-permission/symlink failure must not prevent use of the
+		// official client settings; the rejected override is simply not applied.
+		overrides = nil
+	}
 	body, err := fetchAndroidAppSettings()
 	if err != nil {
 		if cachePath != "" {
 			if cached, rerr := os.ReadFile(cachePath); rerr == nil && len(cached) > 2 {
-				return applicationSettingsFromResponse(cached)
+				return applicationSettingsFromResponseWithOverrides(cached, overrides)
 			}
 		}
 		return "", 0, err
 	}
-	js, n, err := applicationSettingsFromResponse(body)
+	js, n, err := applicationSettingsFromResponseWithOverrides(body, overrides)
 	if err != nil {
 		return "", 0, err
 	}
