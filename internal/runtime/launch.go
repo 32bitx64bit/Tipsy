@@ -20,6 +20,7 @@ import (
 	"unsafe"
 
 	"github.com/tipsy-linux/tipsy/internal/android"
+	"github.com/tipsy-linux/tipsy/internal/clientsettings"
 	"github.com/tipsy-linux/tipsy/internal/graphics"
 	"github.com/tipsy-linux/tipsy/internal/jni"
 	"github.com/tipsy-linux/tipsy/internal/loader"
@@ -129,11 +130,26 @@ func Launch(ctx context.Context, opt LaunchOptions) error {
 	if _, err := os.Stat(lib); err != nil {
 		return fmt.Errorf("runtime not set up; run: tipsy setup <official-apk-or-dir>")
 	}
+	releaseClientLock, err := clientsettings.AcquireClientLock()
+	if err != nil {
+		return err
+	}
+	defer releaseClientLock()
 	storage, migration, err := prepareAppStorage(dir)
 	if err != nil {
 		return fmt.Errorf("persistent app storage: %w", err)
 	}
 	logAppStorageMigration(migration)
+	settingsService := clientsettings.New()
+	if err := settingsService.ReconcileWhileClientLocked(ctx); err != nil {
+		return fmt.Errorf("client settings: %w", err)
+	}
+	// Roblox may normalize experimental values while shutting down. Reapply an
+	// explicit Tipsy-owned value after the client loop exits, while the launch
+	// lock still excludes GUI settings writes. The next launch also reconciles.
+	defer func() {
+		_ = settingsService.ReconcileWhileClientLocked(context.Background())
+	}()
 	files := storage.FilesDir
 	cache := storage.CacheDir
 	assets := filepath.Join(dir, "assets")
