@@ -1,0 +1,14 @@
+#!/bin/sh
+# Copyright 2026 The Tipsy Authors
+# SPDX-License-Identifier: GPL-3.0-or-later
+set -eu
+
+appdir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+
+export APPDIR="$appdir"
+export PATH="$appdir/usr/bin${PATH:+:$PATH}"
+export LD_LIBRARY_PATH="$appdir/usr/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+export QT_PLUGIN_PATH="$appdir/usr/plugins"
+export QT_QPA_PLATFORM_PLUGIN_PATH="$appdir/usr/plugins/platforms"
+
+exec "$appdir/usr/bin/tipsy-gui" "$@"

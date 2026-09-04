@@ -8,6 +8,7 @@ usage() {
 }
 
 fail=0
+release_candidate=0
 
 reject() {
     echo "public-tree guard: forbidden path: $1" >&2
@@ -16,6 +17,17 @@ reject() {
 
 check_path() {
     path=$1
+
+    if [ "$release_candidate" -eq 1 ]; then
+        case "$path" in
+            # A built AppDir contains audited, redistributable host libraries.
+            # check-release-tree.sh separately rejects libroblox and every
+            # private/runtime payload while validating the ELF closure.
+            usr/lib/*.so|usr/lib/*.so.*)
+                return
+                ;;
+        esac
+    fi
 
     case "$path" in
         .tipsy-private|.tipsy-private/*|docs|docs/*|AGENTS.md|README.md|CONTRIBUTING.md|.cursor|.cursor/*)
@@ -95,6 +107,7 @@ if [ "$#" -eq 0 ]; then
     check_list "$list_file" "$root"
 else
     candidate=$1
+    release_candidate=1
     [ -d "$candidate" ] || usage
     (
         cd "$candidate"
