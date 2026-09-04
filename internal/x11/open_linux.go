@@ -19,18 +19,12 @@ package x11
 #include <string.h>
 #include <unistd.h>
 
-#include <X11/Xlib.h>
-#include <X11/Xatom.h>
-#include <X11/Xutil.h>
-#include <stdint.h>
-#include <stdlib.h>
-#include <string.h>
-
 static int tipsy_x_error_code;
 static int tipsy_x_io_error;
 static int tipsy_x_inited;
 static XIM tipsy_xim;
 static XIC tipsy_xic;
+static int tipsy_f11_down;
 
 // Input event capture. kinds: 0 focus, 1 key, 2 pointer, 3 resize, 4 text.
 // focus: a = 1 gained / 0 lost.
@@ -82,6 +76,16 @@ static void tipsy_input_push(int kind, int a, long b, long c, float x, float y) 
 		tipsy_input_ring[last].a == 2) {
 		tipsy_input_ring[last].x = x;
 		tipsy_input_ring[last].y = y;
+		pthread_mutex_unlock(&tipsy_input_mu);
+		return;
+	}
+	// Reparenting window managers may report the same final client geometry
+	// more than once while processing one resize request. Keep one ordered
+	// resize edge; the Android bridge is dimension-deduplicated as well.
+	if (kind == TIPSY_INPUT_RESIZE &&
+		tipsy_input_head != tipsy_input_tail &&
+		tipsy_input_ring[last].kind == TIPSY_INPUT_RESIZE &&
+		tipsy_input_ring[last].b == b && tipsy_input_ring[last].c == c) {
 		pthread_mutex_unlock(&tipsy_input_mu);
 		return;
 	}
@@ -251,11 +255,103 @@ int tipsy_x11_io_error(void) {
 	return tipsy_x_io_error;
 }
 
+static void tipsy_x11_set_title(Display *dpy, Window win, const char *title) {
+	if (title == NULL) {
+		title = "";
+	}
+	// ICCCM properties keep older window managers working. EWMH UTF-8
+	// properties are what modern desktops use for the title bar/task switcher.
+	XStoreName(dpy, win, title);
+	XSetIconName(dpy, win, title);
+	Atom utf8 = XInternAtom(dpy, "UTF8_STRING", False);
+	Atom net_name = XInternAtom(dpy, "_NET_WM_NAME", False);
+	Atom net_icon_name = XInternAtom(dpy, "_NET_WM_ICON_NAME", False);
+	int len = (int)strlen(title);
+	XChangeProperty(dpy, win, net_name, utf8, 8, PropModeReplace,
+		(const unsigned char *)title, len);
+	XChangeProperty(dpy, win, net_icon_name, utf8, 8, PropModeReplace,
+		(const unsigned char *)title, len);
+}
+
+static void tipsy_x11_set_icon(Display *dpy, Window win,
+	const unsigned long *icon, int icon_len) {
+	if (icon == NULL || icon_len < 3) {
+		return;
+	}
+	Atom net_icon = XInternAtom(dpy, "_NET_WM_ICON", False);
+	// Xlib requires native unsigned longs for format=32 on LP64 even though
+	// each property item contains exactly 32 significant bits.
+	XChangeProperty(dpy, win, net_icon, XA_CARDINAL, 32, PropModeReplace,
+		(const unsigned char *)icon, icon_len);
+}
+
+#define TIPSY_NET_WM_STATE_REMOVE 0
+#define TIPSY_NET_WM_STATE_ADD 1
+
+static int tipsy_x11_has_fullscreen(Display *dpy, Window win) {
+	Atom state = XInternAtom(dpy, "_NET_WM_STATE", False);
+	Atom fullscreen = XInternAtom(dpy, "_NET_WM_STATE_FULLSCREEN", False);
+	Atom actual = None;
+	int format = 0;
+	unsigned long count = 0;
+	unsigned long remaining = 0;
+	unsigned char *raw = NULL;
+	int found = 0;
+	if (XGetWindowProperty(dpy, win, state, 0, 1024, False, XA_ATOM,
+		&actual, &format, &count, &remaining, &raw) == Success &&
+		actual == XA_ATOM && format == 32 && raw != NULL) {
+		Atom *atoms = (Atom *)raw;
+		for (unsigned long i = 0; i < count; i++) {
+			if (atoms[i] == fullscreen) {
+				found = 1;
+				break;
+			}
+		}
+	}
+	if (raw != NULL) {
+		XFree(raw);
+	}
+	return found;
+}
+
+static int tipsy_x11_request_fullscreen(uintptr_t dpy_ptr, Window win, int enabled) {
+	Display *dpy = (Display *)dpy_ptr;
+	if (dpy == NULL || win == 0 || tipsy_x_io_error) {
+		return -1;
+	}
+	XEvent ev;
+	memset(&ev, 0, sizeof(ev));
+	ev.xclient.type = ClientMessage;
+	ev.xclient.display = dpy;
+	ev.xclient.window = win;
+	ev.xclient.message_type = XInternAtom(dpy, "_NET_WM_STATE", False);
+	ev.xclient.format = 32;
+	ev.xclient.data.l[0] = enabled ? TIPSY_NET_WM_STATE_ADD : TIPSY_NET_WM_STATE_REMOVE;
+	ev.xclient.data.l[1] = (long)XInternAtom(dpy, "_NET_WM_STATE_FULLSCREEN", False);
+	ev.xclient.data.l[2] = 0;
+	ev.xclient.data.l[3] = 1; // EWMH source indication: normal application.
+	ev.xclient.data.l[4] = 0;
+	Window root = RootWindow(dpy, DefaultScreen(dpy));
+	if (XSendEvent(dpy, root, False,
+		SubstructureRedirectMask | SubstructureNotifyMask, &ev) == 0) {
+		return -2;
+	}
+	XFlush(dpy);
+	return 0;
+}
+
+static int tipsy_x11_toggle_fullscreen(Display *dpy, Window win) {
+	return tipsy_x11_request_fullscreen((uintptr_t)dpy, win,
+		!tipsy_x11_has_fullscreen(dpy, win));
+}
+
 int tipsy_x11_open(const char *title, int width, int height,
+	const unsigned long *icon, int icon_len,
 	uintptr_t *out_dpy, unsigned long *out_xid, unsigned long *out_delete) {
 	tipsy_x11_once();
 	tipsy_x_error_code = 0;
 	tipsy_x_io_error = 0;
+	tipsy_f11_down = 0;
 
 	Display *dpy = XOpenDisplay(NULL);
 	if (dpy == NULL) {
@@ -297,10 +393,8 @@ int tipsy_x11_open(const char *title, int width, int height,
 			NULL);
 	}
 
-	if (title == NULL) {
-		title = "";
-	}
-	XStoreName(dpy, win, title);
+	tipsy_x11_set_title(dpy, win, title);
+	tipsy_x11_set_icon(dpy, win, icon, icon_len);
 
 	XClassHint hint;
 	hint.res_name = "Tipsy";
@@ -417,6 +511,18 @@ int tipsy_x11_pump(uintptr_t dpy_ptr, unsigned long xid, unsigned long wm_delete
 		case KeyRelease:
 			if (ev.xkey.window == win) {
 				KeySym ks = XLookupKeysym(&ev.xkey, 0);
+				// F11 is the normal desktop fullscreen affordance. It is consumed
+				// here as a window-manager command rather than also forwarding it
+				// to the Android client, which could otherwise toggle twice.
+				if (ks == XK_F11) {
+					if (ev.type == KeyPress && !tipsy_f11_down) {
+						tipsy_f11_down = 1;
+						tipsy_x11_toggle_fullscreen(dpy, win);
+					} else if (ev.type == KeyRelease) {
+						tipsy_f11_down = 0;
+					}
+					break;
+				}
 				tipsy_input_push(TIPSY_INPUT_KEY,
 					ev.type == KeyPress ? 1 : 0,
 					tipsy_android_keycode(ks),
@@ -610,12 +716,27 @@ func Open(title string, width, height int) (*Window, error) {
 	if width < 1 || height < 1 {
 		return nil, ErrInvalidSize
 	}
+	if title == "Roblox" {
+		title = RobloxWindowTitle
+	}
 	ctitle := C.CString(title)
 	defer C.free(unsafe.Pointer(ctitle))
+	icon32, err := windowIconARGB()
+	if err != nil {
+		return nil, err
+	}
+	icon := make([]C.ulong, len(icon32))
+	for i, value := range icon32 {
+		icon[i] = C.ulong(value)
+	}
+	var iconPtr *C.ulong
+	if len(icon) != 0 {
+		iconPtr = &icon[0]
+	}
 
 	var dpy C.uintptr_t
 	var xid, del C.ulong
-	rc := C.tipsy_x11_open(ctitle, C.int(width), C.int(height), &dpy, &xid, &del)
+	rc := C.tipsy_x11_open(ctitle, C.int(width), C.int(height), iconPtr, C.int(len(icon)), &dpy, &xid, &del)
 	if rc != 0 || dpy == 0 || xid == 0 {
 		return nil, fmt.Errorf("%w (DISPLAY=%q)", ErrNoDisplay, os.Getenv("DISPLAY"))
 	}
@@ -637,6 +758,20 @@ func Open(title string, width, height int) (*Window, error) {
 	logging.Logger(logging.CatX11).Info("opened X11 window",
 		"title", title, "width", w.width, "height", w.height, "xid", w.xid)
 	return w, nil
+}
+
+// setFullscreenLocked sends the EWMH state request while the Window mutex is
+// held. The WM applies it asynchronously and reports the resulting geometry
+// through ConfigureNotify.
+func setFullscreenLocked(w *Window, enabled bool) error {
+	value := C.int(0)
+	if enabled {
+		value = 1
+	}
+	if C.tipsy_x11_request_fullscreen(C.uintptr_t(w.display), C.ulong(w.xid), value) != 0 {
+		return ErrFullscreen
+	}
+	return nil
 }
 
 // Pump processes pending X events without blocking.

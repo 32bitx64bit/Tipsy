@@ -14,9 +14,14 @@ import (
 const (
 	xkEscape = 0xff1b
 	xkLeft   = 0xff51
+	xkF11    = 0xffc8
 	xkA      = 0x61 // physical key plus committed text
 	button1  = 1
 	button3  = 3
+	button4  = 4
+	button5  = 5
+	button6  = 6
+	button7  = 7
 	maskBtn1 = 0x100
 )
 

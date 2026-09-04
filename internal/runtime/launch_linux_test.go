@@ -51,6 +51,13 @@ func TestLoggedOutAppStartExport(t *testing.T) {
 	}
 }
 
+func TestSurfaceUpdateExportName(t *testing.T) {
+	const want = "Java_com_roblox_engine_jni_NativeGLInterface_nativeAppBridgeV2UpdateSurfaceAppWithPlatformParams"
+	if updateSurfaceSym != want {
+		t.Fatalf("updateSurfaceSym=%q want %q", updateSurfaceSym, want)
+	}
+}
+
 func TestDirectKeyExportName(t *testing.T) {
 	const want = "Java_com_roblox_engine_jni_NativeGLInterface_nativePassKeyEvent"
 	if directKeyEventSym != want {
@@ -357,6 +364,10 @@ func (r *recordingResizeSink) postAppCmd(cmd byte) {
 	r.events = append(r.events, fmt.Sprintf("cmd%d", cmd))
 }
 
+func (r *recordingResizeSink) updateSurface(width, height int) {
+	r.events = append(r.events, fmt.Sprintf("v2surface %dx%d", width, height))
+}
+
 func (r *recordingResizeSink) callNative(name, sig string, extra ...uintptr) {
 	if len(extra) >= 4 {
 		r.events = append(r.events, fmt.Sprintf("%s %d,%d,%d,%d", name, extra[0], extra[1], extra[2], extra[3]))
@@ -400,8 +411,9 @@ func TestSurfaceResizeIgnoresInvalidSizes(t *testing.T) {
 }
 
 // TestSurfaceResizeDeliversOncePerDeltaInOrder pins the exact per-delta
-// delivery: one genuine delta runs buffers → DisplayMetrics → cmds 3,4,5 →
-// content-rect callback {0,0,w,h} → insets callback, exactly once; an
+// delivery: one genuine delta runs buffers → DisplayMetrics → cmds 3,4 →
+// V2 surface bridge → cmd 5 → content-rect callback {0,0,w,h} →
+// insets callback, exactly once; an
 // unchanged size re-delivers nothing; the next genuine delta repeats the
 // sequence once.
 func TestSurfaceResizeDeliversOncePerDeltaInOrder(t *testing.T) {
@@ -412,6 +424,7 @@ func TestSurfaceResizeDeliversOncePerDeltaInOrder(t *testing.T) {
 		"display 1920x1080",
 		"cmd3",
 		"cmd4",
+		"v2surface 1920x1080",
 		"cmd5",
 		"onContentRectChangedNative 0,0,1920,1080",
 		"onWindowInsetsChangedNative",
@@ -431,6 +444,7 @@ func TestSurfaceResizeDeliversOncePerDeltaInOrder(t *testing.T) {
 		"display 1024x768",
 		"cmd3",
 		"cmd4",
+		"v2surface 1024x768",
 		"cmd5",
 		"onContentRectChangedNative 0,0,1024,768",
 		"onWindowInsetsChangedNative",
@@ -456,8 +470,8 @@ func TestSurfaceResizeFailedGeometryAbortsDelivery(t *testing.T) {
 	}
 	rec.failResize = false
 	s.observe(1600, 900)
-	if got := len(rec.events); got != 7 {
-		t.Fatalf("retry after failed geometry delivered %d events, want 7: %v", got, rec.events)
+	if got := len(rec.events); got != 8 {
+		t.Fatalf("retry after failed geometry delivered %d events, want 8: %v", got, rec.events)
 	}
 }
 

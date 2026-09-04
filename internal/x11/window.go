@@ -5,6 +5,7 @@ package x11
 
 import (
 	"errors"
+	"sort"
 	"sync"
 )
 
@@ -15,24 +16,30 @@ var (
 	ErrNoDisplay = errors.New("x11: XOpenDisplay failed")
 	// ErrClosed is returned by Pump after WM_DELETE_WINDOW or Close.
 	ErrClosed = errors.New("x11: window closed")
-	// ErrFullscreen is returned by SetFullscreen until ICCCM/_NET_WM_STATE is implemented.
-	ErrFullscreen = errors.New("x11: fullscreen not implemented")
+	// ErrFullscreen is returned when the window manager rejects an EWMH
+	// fullscreen request.
+	ErrFullscreen = errors.New("x11: fullscreen request failed")
 	// ErrInvalidSize is returned when Open is given a non-positive size.
 	ErrInvalidSize = errors.New("x11: width and height must be positive")
 )
 
+// RobloxWindowTitle is the desktop title of the official Roblox client when
+// it is hosted by Tipsy.
+const RobloxWindowTitle = "Roblox - Tipsy"
+
 // Window is a mapped native X11 InputOutput window.
 type Window struct {
-	mu       sync.Mutex
-	display  uintptr // Display*
-	xid      uintptr // X11 Window
-	wmDelete uintptr // Atom WM_DELETE_WINDOW
-	width    int
-	height   int
-	closed   bool
-	focused  bool
-	pump     uintptr // C tipsy_pump* background thread, or 0
-	cursor   uintptr // transparent X cursor owned by this client window, or 0
+	mu        sync.Mutex
+	display   uintptr // Display*
+	xid       uintptr // X11 Window
+	wmDelete  uintptr // Atom WM_DELETE_WINDOW
+	width     int
+	height    int
+	closed    bool
+	dismissed bool
+	focused   bool
+	pump      uintptr // C tipsy_pump* background thread, or 0
+	cursor    uintptr // transparent X cursor owned by this client window, or 0
 }
 
 // InputKind classifies a captured window input event.
@@ -141,8 +148,13 @@ func notifyInput(evs []InputEvent) {
 	}
 	inputMu.RLock()
 	fns := make([]func(InputEvent), 0, len(inputSubs))
-	for _, fn := range inputSubs {
-		fns = append(fns, fn)
+	ids := make([]int, 0, len(inputSubs))
+	for id := range inputSubs {
+		ids = append(ids, id)
+	}
+	sort.Ints(ids)
+	for _, id := range ids {
+		fns = append(fns, inputSubs[id])
 	}
 	inputMu.RUnlock()
 	for _, ev := range evs {
@@ -194,8 +206,17 @@ func (w *Window) CursorHidden() bool {
 	return w.cursor != 0
 }
 
-// SetFullscreen is a Milestone 9 stub.
+// SetFullscreen asks the EWMH window manager to add or remove
+// _NET_WM_STATE_FULLSCREEN. The request is asynchronous; ConfigureNotify
+// events report the resulting client size through the normal resize stream.
 func (w *Window) SetFullscreen(enabled bool) error {
-	_ = enabled
-	return ErrFullscreen
+	if w == nil {
+		return ErrClosed
+	}
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if w.closed || w.display == 0 || w.xid == 0 {
+		return ErrClosed
+	}
+	return setFullscreenLocked(w, enabled)
 }

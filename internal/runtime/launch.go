@@ -63,6 +63,12 @@ const (
 	initStorageManagerV3Sym   = "Java_com_roblox_client_LocalStorageManager_initStorageManagerNativeV3"
 	initStorageManagerV3Sig   = "(Landroid/content/res/AssetManager;Ljava/lang/String;Ljava/lang/String;)V"
 	appStartSym               = "Java_com_roblox_engine_jni_NativeAppBridgeInterface_nativeAppBridgeAppStart__Ljava_lang_String_2Ljava_lang_String_2ZLjava_lang_String_2Ljava_lang_String_2Ljava_lang_String_2"
+	// updateSurfaceSym is the APK-declared, non-overloaded static native
+	// NativeGLInterface.nativeAppBridgeV2UpdateSurfaceAppWithPlatformParams(
+	// Surface, PlatformParams). It is the public app bridge Android invokes
+	// after a real surface-size change; unlike the registered GameActivity
+	// onSurfaceChangedNative callback, it does not re-enter surface creation.
+	updateSurfaceSym          = "Java_com_roblox_engine_jni_NativeGLInterface_nativeAppBridgeV2UpdateSurfaceAppWithPlatformParams"
 	directMouseButtonSym      = "Java_com_roblox_engine_jni_NativeInputInterface_nativePassMouseButton"
 	directMouseMoveSym        = "Java_com_roblox_engine_jni_NativeInputInterface_nativePassMouseMove"
 	directKeyEventSym         = "Java_com_roblox_engine_jni_NativeGLInterface_nativePassKeyEvent"
@@ -454,7 +460,7 @@ func dispatchGameActivityLifecycle(ctx context.Context, vm *jni.VM, mod *loader.
 			"name", n[0], "fn", fmt.Sprintf("%#x", vm.NativeMethod("com/google/androidgamesdk/GameActivity", n[0], n[1])))
 	}
 	return &surfaceResize{
-		sink:   &engineResizeSink{mod: mod, vm: vm, env: env, activity: activity, handle: handle, aw: aw},
+		sink:   &engineResizeSink{mod: mod, vm: vm, env: env, activity: activity, handle: handle, aw: aw, gl: gl, surface: surface, platform: platform},
 		seeded: true, width: width, height: height,
 	}
 }
@@ -479,6 +485,7 @@ type resizeSink interface {
 	resizeBuffers(width, height int) error
 	setDisplaySize(width, height int)
 	postAppCmd(cmd byte)
+	updateSurface(width, height int)
 	callNative(name, sig string, extra ...uintptr)
 }
 
@@ -490,6 +497,9 @@ type engineResizeSink struct {
 	activity uintptr
 	handle   uintptr
 	aw       *android.Window
+	gl       uintptr
+	surface  uintptr
+	platform uintptr
 }
 
 func (s *engineResizeSink) resizeBuffers(width, height int) error { return s.aw.Resize(width, height) }
@@ -497,6 +507,14 @@ func (s *engineResizeSink) resizeBuffers(width, height int) error { return s.aw.
 func (s *engineResizeSink) setDisplaySize(width, height int) { s.vm.SetDisplaySize(width, height) }
 
 func (s *engineResizeSink) postAppCmd(cmd byte) { postAndroidAppCmd(s.mod, cmd) }
+
+func (s *engineResizeSink) updateSurface(width, height int) {
+	if s == nil || s.mod == nil || s.env == nil || s.gl == 0 || s.surface == 0 || s.platform == 0 {
+		return
+	}
+	setPlatformViewport(s.env, s.platform, width, height)
+	callRobloxJNI(s.mod, s.env.Raw(), s.gl, updateSurfaceSym, s.surface, s.platform)
+}
 
 func (s *engineResizeSink) callNative(name, sig string, extra ...uintptr) {
 	callGameActivityNative(s.vm, s.env, s.activity, s.handle, name, sig, extra...)
@@ -507,13 +525,13 @@ func (s *engineResizeSink) callNative(name, sig string, extra ...uintptr) {
 // and one genuine positive delta produces exactly one delivery, in the
 // startup order: ANativeWindow geometry, DisplayMetrics, then the public
 // GameActivity resize contract — APP_CMD_WINDOW_RESIZED (3) and
-// APP_CMD_WINDOW_REDRAW_NEEDED (4), which the engine decodes into
-// APP_CMD_WINDOW_RESIZED / APP_CMD_WINDOW_REDRAW_NEEDED +
-// nativeActivity_onSurfaceChanged (appcmd-lifecycle-reconcile.md), followed
-// by APP_CMD_CONTENT_RECT_CHANGED (5) + onContentRectChangedNative +
-// onWindowInsetsChangedNative, the proven content-rect delivery
-// (content-rect-callbacks.md). A failed geometry update aborts the delivery
-// honestly instead of delivering a rect the surface does not have.
+// APP_CMD_WINDOW_REDRAW_NEEDED (4). The current client consumes those
+// commands but its NativeDM fallback may return before updating the render
+// size, so follow them with the APK-declared V2 surface-update JNI bridge and
+// refreshed PlatformParams. APP_CMD_CONTENT_RECT_CHANGED (5) plus the
+// content-rect/insets callbacks remain last. A failed geometry update aborts
+// the delivery honestly instead of delivering a surface size the native
+// window does not have.
 func (s *surfaceResize) observe(w, h int) {
 	if s == nil || w <= 0 || h <= 0 {
 		return
@@ -528,6 +546,7 @@ func (s *surfaceResize) observe(w, h int) {
 	s.sink.setDisplaySize(w, h)
 	s.sink.postAppCmd(appCmdWindowResized)
 	s.sink.postAppCmd(appCmdWindowRedraw)
+	s.sink.updateSurface(w, h)
 	s.sink.postAppCmd(appCmdContentRectChanged)
 	s.sink.callNative("onContentRectChangedNative", "(JIIII)V", 0, 0, uintptr(w), uintptr(h))
 	s.sink.callNative("onWindowInsetsChangedNative", "(J)V")
@@ -805,17 +824,26 @@ func makePlatformParams(env *jni.Env, assets string, width, height int) uintptr 
 	p := env.AllocObject(env.FindClass("com/roblox/engine/jni/model/PlatformParams"))
 	env.PutField(p, "assetFolderPath", assets)
 	env.PutField(p, "dpiScale", float32(1))
-	// One coherent pointer identity shared with the input dispatchers:
-	// touch (default) is the identity the Android phone client presents
-	// and the only one the APK declares (touchscreen uses-feature);
-	// TIPSY_INPUT_DEVICE=mouse restores the legacy desktop identity.
+	// One coherent pointer identity shared with the input dispatchers. Native
+	// X11 launches default to a mouse; TIPSY_INPUT_DEVICE=touch retains the
+	// Android phone identity as an explicit A/B control.
 	touch := jni.PointerDeviceIsTouch()
 	env.PutField(p, "isKeyboardDevice", true)
 	env.PutField(p, "isMouseDevice", !touch)
 	env.PutField(p, "isTouchDevice", touch)
-	env.PutField(p, "viewportWidthMm", int32(width*254/1600))
-	env.PutField(p, "viewportHeightMm", int32(height*254/1600))
+	setPlatformViewport(env, p, width, height)
 	return p
+}
+
+// setPlatformViewport refreshes the two geometry fields present in the
+// official PlatformParams DEX class. Width/height stay X11 density-1 pixels;
+// the existing 160 dpi conversion is preserved exactly from startup.
+func setPlatformViewport(env *jni.Env, platform uintptr, width, height int) {
+	if env == nil || platform == 0 || width <= 0 || height <= 0 {
+		return
+	}
+	env.PutField(platform, "viewportWidthMm", int32(width*254/1600))
+	env.PutField(platform, "viewportHeightMm", int32(height*254/1600))
 }
 
 func makeDeviceParams(env *jni.Env, width, height int) uintptr {

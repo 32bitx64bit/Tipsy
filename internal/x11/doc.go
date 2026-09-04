@@ -4,6 +4,7 @@
 // Package x11 creates a native X11 InputOutput window for Tipsy.
 //
 // This is the display backend Roblox will render into. It does not use
-// Wayland. Fullscreen, DPI, and input beyond WM_DELETE_WINDOW / Expose
-// are later Milestone 9 work.
+// Wayland. It owns the EWMH title/icon/fullscreen contract and reports real
+// ConfigureNotify geometry and desktop input to the Android compatibility
+// layer.
 package x11
