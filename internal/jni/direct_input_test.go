@@ -28,7 +28,7 @@ func selectKeyboardPath(t *testing.T, value string) {
 func wireRecordingDirectTarget(t *testing.T, env, class uintptr) {
 	t.Helper()
 	testDirectRecReset()
-	if !SetRobloxDirectInputTarget(env, class, testDirectRecordButtonFn(), testDirectRecordMoveFn()) {
+	if !SetRobloxDirectInputTarget(env, class, testDirectRecordButtonFn(), testDirectRecordMoveFn(), testDirectRecordWheelFn()) {
 		t.Fatal("recording direct target did not wire")
 	}
 	t.Cleanup(ClearRobloxDirectInputTarget)
@@ -111,6 +111,54 @@ func TestDirectMouseMoveABI(t *testing.T) {
 	}
 	if got := RobloxDirectInputStats().MoveDelivered - before.MoveDelivered; got != 1 {
 		t.Fatalf("direct move delivery delta = %d, want 1", got)
+	}
+}
+
+// TestDirectMouseWheelABI pins the APK's unique nativePassMouseWheel(FFF)V
+// static native. The official ACTION_SCROLL caller passes cached logical x/y
+// followed by MotionEvent AXIS_VSCROLL (9).
+func TestDirectMouseWheelABI(t *testing.T) {
+	const env, class = uintptr(0x1234), uintptr(0x5678)
+	wireRecordingDirectTarget(t, env, class)
+	before := RobloxDirectInputStats()
+
+	if !DispatchRobloxDirectScroll(401.25, 299.5, 0, -1) {
+		t.Fatal("vertical wheel was not delivered")
+	}
+	if got := testDirectRecWheelID(0); got != env {
+		t.Fatalf("recorded env = %#x, want %#x", got, env)
+	}
+	if got := testDirectRecWheelID(1); got != class {
+		t.Fatalf("recorded class = %#x, want %#x", got, class)
+	}
+	if x, y, delta := testDirectRecWheelFloat(0), testDirectRecWheelFloat(1), testDirectRecWheelFloat(2); x != 401.25 || y != 299.5 || delta != -1 {
+		t.Fatalf("wheel args = (%v,%v,%v), want (401.25,299.5,-1)", x, y, delta)
+	}
+	if got := RobloxDirectInputStats().WheelDelivered - before.WheelDelivered; got != 1 {
+		t.Fatalf("direct wheel delivery delta = %d, want 1", got)
+	}
+
+	// The same APK listener reads only AXIS_VSCROLL on ACTION_SCROLL. Do not
+	// turn horizontal core-X11 wheel buttons into a touch-pan gesture.
+	dropped := RobloxDirectInputStats().Dropped
+	if DispatchRobloxDirectScroll(1, 2, 1, 0) {
+		t.Fatal("horizontal wheel used an unproven native route")
+	}
+	if got := RobloxDirectInputStats().Dropped - dropped; got != 1 {
+		t.Fatalf("horizontal wheel drop delta = %d, want 1", got)
+	}
+}
+
+func TestX11ScrollBridgeUsesDirectWheelPath(t *testing.T) {
+	selectPointerPath(t, "direct")
+	wireRecordingDirectTarget(t, 0x1234, 0x5678)
+	before := RobloxDirectInputStats()
+	handleX11InputEvent(x11.InputEvent{Kind: x11.InputScroll, X: 50, Y: 60, ScrollY: 1})
+	if got := testDirectRecWheelFloat(2); got != 1 {
+		t.Fatalf("direct wheel delta = %v, want +1", got)
+	}
+	if got := RobloxDirectInputStats().WheelDelivered - before.WheelDelivered; got != 1 {
+		t.Fatalf("direct wheel delivery delta = %d, want 1", got)
 	}
 }
 

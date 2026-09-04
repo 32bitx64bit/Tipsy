@@ -25,6 +25,12 @@ static void tipsy_direct_mouse_move(void *fn, uintptr_t env, uintptr_t cls,
 		(JNIEnv *)env, (jclass)cls, x, y, dx, dy);
 }
 
+static void tipsy_direct_mouse_wheel(void *fn, uintptr_t env, uintptr_t cls,
+	float x, float y, float delta) {
+	((void (*)(JNIEnv *, jclass, jfloat, jfloat, jfloat))fn)(
+		(JNIEnv *)env, (jclass)cls, x, y, delta);
+}
+
 // Exact caller for the public static native method declared by the official
 // 2.734.917 classes2.dex NativeGLInterface:
 // nativePassKeyEvent(ZIIZ)V. The four declared arguments are entirely
@@ -43,6 +49,8 @@ static int tipsy_direct_rec_button_index;
 static uintptr_t tipsy_direct_rec_button_ids[2];
 static float tipsy_direct_rec_move_f[4];
 static uintptr_t tipsy_direct_rec_move_ids[2];
+static float tipsy_direct_rec_wheel_f[3];
+static uintptr_t tipsy_direct_rec_wheel_ids[2];
 static int tipsy_direct_rec_key_i[4];
 static uintptr_t tipsy_direct_rec_key_ids[2];
 
@@ -66,6 +74,15 @@ static void tipsy_direct_record_move(JNIEnv *env, jclass cls, jfloat x,
 	tipsy_direct_rec_move_f[3] = dy;
 }
 
+static void tipsy_direct_record_wheel(JNIEnv *env, jclass cls, jfloat x,
+	jfloat y, jfloat delta) {
+	tipsy_direct_rec_wheel_ids[0] = (uintptr_t)env;
+	tipsy_direct_rec_wheel_ids[1] = (uintptr_t)cls;
+	tipsy_direct_rec_wheel_f[0] = x;
+	tipsy_direct_rec_wheel_f[1] = y;
+	tipsy_direct_rec_wheel_f[2] = delta;
+}
+
 static void tipsy_direct_record_key(JNIEnv *env, jclass cls, jboolean down,
 	jint scan_code, jint key_code, jboolean repeat) {
 	tipsy_direct_rec_key_ids[0] = (uintptr_t)env;
@@ -78,6 +95,7 @@ static void tipsy_direct_record_key(JNIEnv *env, jclass cls, jboolean down,
 
 static void *tipsy_direct_record_button_fn(void) { return (void *)tipsy_direct_record_button; }
 static void *tipsy_direct_record_move_fn(void) { return (void *)tipsy_direct_record_move; }
+static void *tipsy_direct_record_wheel_fn(void) { return (void *)tipsy_direct_record_wheel; }
 static void *tipsy_direct_record_key_fn(void) { return (void *)tipsy_direct_record_key; }
 static uintptr_t tipsy_direct_rec_button_id(int i) { return tipsy_direct_rec_button_ids[i]; }
 static float tipsy_direct_rec_button_float(int i) { return tipsy_direct_rec_button_f[i]; }
@@ -85,6 +103,8 @@ static int tipsy_direct_rec_button_bool(void) { return tipsy_direct_rec_button_p
 static int tipsy_direct_rec_button_int(void) { return tipsy_direct_rec_button_index; }
 static uintptr_t tipsy_direct_rec_move_id(int i) { return tipsy_direct_rec_move_ids[i]; }
 static float tipsy_direct_rec_move_float(int i) { return tipsy_direct_rec_move_f[i]; }
+static uintptr_t tipsy_direct_rec_wheel_id(int i) { return tipsy_direct_rec_wheel_ids[i]; }
+static float tipsy_direct_rec_wheel_float(int i) { return tipsy_direct_rec_wheel_f[i]; }
 static uintptr_t tipsy_direct_rec_key_id(int i) { return tipsy_direct_rec_key_ids[i]; }
 static int tipsy_direct_rec_key_int(int i) { return tipsy_direct_rec_key_i[i]; }
 static void tipsy_direct_rec_reset(void) {
@@ -94,6 +114,8 @@ static void tipsy_direct_rec_reset(void) {
 		tipsy_direct_rec_move_ids[i] = 0;
 	}
 	for (int i = 0; i < 4; ++i) tipsy_direct_rec_move_f[i] = 0;
+	for (int i = 0; i < 3; ++i) tipsy_direct_rec_wheel_f[i] = 0;
+	for (int i = 0; i < 2; ++i) tipsy_direct_rec_wheel_ids[i] = 0;
 	for (int i = 0; i < 4; ++i) tipsy_direct_rec_key_i[i] = 0;
 	for (int i = 0; i < 2; ++i) tipsy_direct_rec_key_ids[i] = 0;
 	tipsy_direct_rec_button_pressed = 0;
@@ -239,31 +261,34 @@ var directInputTarget struct {
 	class       uintptr
 	buttonFn    uintptr
 	moveFn      uintptr
+	wheelFn     uintptr
 	havePointer bool
 	lastX       float32
 	lastY       float32
 }
 
-// SetRobloxDirectInputTarget wires the two nativePassMouse* methods that exist
-// in client 2.734.917. nativePassMouse itself does not exist in this APK and is
-// intentionally neither resolved nor invented.
-func SetRobloxDirectInputTarget(env, class, buttonFn, moveFn uintptr) bool {
+// SetRobloxDirectInputTarget wires the three direct mouse methods used by the
+// official client listener: button, move, and vertical wheel. Exact DEX
+// descriptors are (FFZI)V, (FFFF)V, and (FFF)V respectively.
+func SetRobloxDirectInputTarget(env, class, buttonFn, moveFn, wheelFn uintptr) bool {
 	directInputTarget.mu.Lock()
 	directInputTarget.env = env
 	directInputTarget.class = class
 	directInputTarget.buttonFn = buttonFn
 	directInputTarget.moveFn = moveFn
+	directInputTarget.wheelFn = wheelFn
 	directInputTarget.havePointer = false
 	directInputTarget.lastX = 0
 	directInputTarget.lastY = 0
-	ready := env != 0 && class != 0 && buttonFn != 0 && moveFn != 0
+	ready := env != 0 && class != 0 && buttonFn != 0 && moveFn != 0 && wheelFn != 0
 	directInputTarget.mu.Unlock()
 
 	logging.Logger(logging.CatJNI).Info("[jni] pointer delivery path",
 		"mode", pointerDeliveryPath().String(),
 		"directReady", ready,
 		"mouseButton", fmt.Sprintf("%#x", buttonFn),
-		"mouseMove", fmt.Sprintf("%#x", moveFn))
+		"mouseMove", fmt.Sprintf("%#x", moveFn),
+		"mouseWheel", fmt.Sprintf("%#x", wheelFn))
 	return ready
 }
 
@@ -274,6 +299,7 @@ func ClearRobloxDirectInputTarget() {
 	directInputTarget.class = 0
 	directInputTarget.buttonFn = 0
 	directInputTarget.moveFn = 0
+	directInputTarget.wheelFn = 0
 	directInputTarget.havePointer = false
 	directInputTarget.lastX = 0
 	directInputTarget.lastY = 0
@@ -325,6 +351,7 @@ func ClearRobloxDirectKeyTarget() {
 type DirectInputStats struct {
 	ButtonDelivered uint64
 	MoveDelivered   uint64
+	WheelDelivered  uint64
 	KeyDelivered    uint64
 	Dropped         uint64
 }
@@ -336,9 +363,39 @@ func RobloxDirectInputStats() DirectInputStats {
 	return DirectInputStats{
 		ButtonDelivered: atomic.LoadUint64(&directInputStats.ButtonDelivered),
 		MoveDelivered:   atomic.LoadUint64(&directInputStats.MoveDelivered),
+		WheelDelivered:  atomic.LoadUint64(&directInputStats.WheelDelivered),
 		KeyDelivered:    atomic.LoadUint64(&directInputStats.KeyDelivered),
 		Dropped:         atomic.LoadUint64(&directInputStats.Dropped),
 	}
+}
+
+// DispatchRobloxDirectScroll maps a core-X11 vertical wheel detent to the
+// supplied APK's exact nativePassMouseWheel(FFF)V method. The APK's generic
+// mouse listener passes its cached logical x/y and MotionEvent AXIS_VSCROLL
+// (axis 9) as the third float, so Button4/Button5 map to +1/-1 without pixel
+// scaling. Its ACTION_SCROLL branch never reads AXIS_HSCROLL; horizontal
+// Button6/Button7 events are rejected honestly instead of being reinterpreted
+// as an unrelated touch-pan gesture.
+func DispatchRobloxDirectScroll(x, y, deltaX, deltaY float32) bool {
+	if deltaY == 0 {
+		dropDirectEvent("scroll: APK listener has no horizontal wheel route")
+		return false
+	}
+	if deltaX != 0 {
+		dropDirectEvent("scroll: simultaneous horizontal wheel component")
+		return false
+	}
+	directInputTarget.mu.RLock()
+	env, class, fn := directInputTarget.env, directInputTarget.class, directInputTarget.wheelFn
+	directInputTarget.mu.RUnlock()
+	if env == 0 || class == 0 || fn == 0 {
+		dropDirectEvent("scroll: no direct wheel target wired")
+		return false
+	}
+	C.tipsy_direct_mouse_wheel(unsafe.Pointer(fn), C.uintptr_t(env), C.uintptr_t(class),
+		C.float(x), C.float(y), C.float(deltaY))
+	atomic.AddUint64(&directInputStats.WheelDelivered, 1)
+	return true
 }
 
 func dropDirectEvent(reason string) {
@@ -487,6 +544,7 @@ func DispatchRobloxDirectKey(x11Keycode, androidKeycode int32, pressed bool) boo
 // Test hooks for the recording natives above. _test.go cannot import C.
 func testDirectRecordButtonFn() uintptr { return uintptr(C.tipsy_direct_record_button_fn()) }
 func testDirectRecordMoveFn() uintptr   { return uintptr(C.tipsy_direct_record_move_fn()) }
+func testDirectRecordWheelFn() uintptr  { return uintptr(C.tipsy_direct_record_wheel_fn()) }
 func testDirectRecordKeyFn() uintptr    { return uintptr(C.tipsy_direct_record_key_fn()) }
 func testDirectRecButtonID(i int) uintptr {
 	return uintptr(C.tipsy_direct_rec_button_id(C.int(i)))
@@ -501,6 +559,12 @@ func testDirectRecMoveID(i int) uintptr {
 }
 func testDirectRecMoveFloat(i int) float32 {
 	return float32(C.tipsy_direct_rec_move_float(C.int(i)))
+}
+func testDirectRecWheelID(i int) uintptr {
+	return uintptr(C.tipsy_direct_rec_wheel_id(C.int(i)))
+}
+func testDirectRecWheelFloat(i int) float32 {
+	return float32(C.tipsy_direct_rec_wheel_float(C.int(i)))
 }
 func testDirectRecKeyID(i int) uintptr {
 	return uintptr(C.tipsy_direct_rec_key_id(C.int(i)))

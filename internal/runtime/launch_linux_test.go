@@ -6,6 +6,7 @@
 package runtime
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"os"
@@ -29,6 +30,31 @@ func TestGameActivityCommandConstants(t *testing.T) {
 func TestInputDispatchInterval(t *testing.T) {
 	if inputDispatchInterval != 4*time.Millisecond {
 		t.Fatalf("input dispatch interval = %s, want 4ms", inputDispatchInterval)
+	}
+}
+
+func TestLaunchStartedAcknowledgementIsOnceAndNilSafe(t *testing.T) {
+	var calls int
+	ack := &launchStartedAck{fn: func() { calls++ }}
+	ack.signal()
+	ack.signal()
+	if calls != 1 {
+		t.Fatalf("Started callback calls = %d, want exactly 1", calls)
+	}
+	(&launchStartedAck{}).signal()
+	var nilAck *launchStartedAck
+	nilAck.signal()
+}
+
+func TestLaunchDoesNotAcknowledgeImmediateFailure(t *testing.T) {
+	t.Setenv("XDG_DATA_HOME", t.TempDir())
+	var calls int
+	err := Launch(context.Background(), LaunchOptions{Started: func() { calls++ }})
+	if err == nil {
+		t.Fatal("Launch without an installed runtime unexpectedly succeeded")
+	}
+	if calls != 0 {
+		t.Fatalf("Started callback calls = %d, want 0 before client-loop readiness", calls)
 	}
 }
 
@@ -62,6 +88,104 @@ func TestDirectKeyExportName(t *testing.T) {
 	const want = "Java_com_roblox_engine_jni_NativeGLInterface_nativePassKeyEvent"
 	if directKeyEventSym != want {
 		t.Fatalf("directKeyEventSym=%q want %q", directKeyEventSym, want)
+	}
+}
+
+func TestDirectWheelExportName(t *testing.T) {
+	const want = "Java_com_roblox_engine_jni_NativeInputInterface_nativePassMouseWheel"
+	if directMouseWheelSym != want {
+		t.Fatalf("directMouseWheelSym=%q want %q", directMouseWheelSym, want)
+	}
+}
+
+func TestGameActivitySessionShutdownOrderAndOnce(t *testing.T) {
+	var calls []string
+	s := &gameActivitySession{call: func(name, sig string, extra ...uintptr) {
+		calls = append(calls, name+sig)
+		if name == "onWindowFocusChangedNative" {
+			if len(extra) != 1 || extra[0] != 0 {
+				t.Fatalf("focus-loss args = %v, want [0]", extra)
+			}
+		}
+	}}
+	s.shutdown("test-wm-close")
+	s.shutdown("test-second-close")
+	want := []string{
+		"onWindowFocusChangedNative(JZ)V",
+		"onPauseNative(J)V",
+		"onSurfaceDestroyedNative(J)V",
+		"onStopNative(J)V",
+		"terminateNativeCode(J)V",
+	}
+	if len(calls) != len(want) {
+		t.Fatalf("shutdown calls = %v, want %v", calls, want)
+	}
+	for i := range want {
+		if calls[i] != want[i] {
+			t.Fatalf("shutdown calls = %v, want %v", calls, want)
+		}
+	}
+}
+
+func TestGameActivitySessionShutdownHasBoundedLastResort(t *testing.T) {
+	enteredTerminate := make(chan struct{})
+	releaseTerminate := make(chan struct{})
+	forced := make(chan int, 1)
+	done := make(chan struct{})
+	s := &gameActivitySession{
+		shutdownDeadline: 20 * time.Millisecond,
+		forceExit: func(code int) {
+			forced <- code
+		},
+		call: func(name, sig string, extra ...uintptr) {
+			if name == "terminateNativeCode" {
+				close(enteredTerminate)
+				<-releaseTerminate
+			}
+		},
+	}
+	go func() {
+		s.shutdown("test-stalled-join")
+		close(done)
+	}()
+	<-enteredTerminate
+	select {
+	case code := <-forced:
+		if code != 0 {
+			t.Fatalf("fallback exit code = %d, want 0 for user close", code)
+		}
+	case <-time.After(500 * time.Millisecond):
+		t.Fatal("stalled terminateNativeCode did not trigger bounded fallback")
+	}
+	close(releaseTerminate)
+	select {
+	case <-done:
+	case <-time.After(500 * time.Millisecond):
+		t.Fatal("shutdown did not return after releasing terminateNativeCode")
+	}
+}
+
+func TestClientModuleLifetimeRetainsStartedImage(t *testing.T) {
+	for _, tc := range []struct {
+		name          string
+		clientStarted bool
+		wantCloses    int
+	}{
+		{name: "pre-start failure closes", clientStarted: false, wantCloses: 1},
+		{name: "started client retained", clientStarted: true, wantCloses: 0},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			closes := 0
+			if err := closeClientModuleBeforeStart(tc.clientStarted, func() error {
+				closes++
+				return nil
+			}); err != nil {
+				t.Fatalf("closeClientModuleBeforeStart: %v", err)
+			}
+			if closes != tc.wantCloses {
+				t.Fatalf("close count = %d, want %d", closes, tc.wantCloses)
+			}
+		})
 	}
 }
 

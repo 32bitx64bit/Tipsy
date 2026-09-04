@@ -36,6 +36,8 @@ static int tipsy_f11_down;
 //        moves arrive both with and without a pressed button. The direct
 //        Roblox mouse path needs both forms; it computes real deltas from
 //        this ordered stream.
+// scroll: a = horizontal detents, b = vertical detents. Core X11 encodes
+//        wheel motion as Button4..7; only ButtonPress is one detent.
 // resize:  b = width, c = height. ConfigureNotify lives in this stream so
 //        the Android surface is resized before subsequent pointer events.
 // text: committed UTF-8 from X11's input method. It follows the originating
@@ -44,8 +46,10 @@ static int tipsy_f11_down;
 #define TIPSY_INPUT_FOCUS 0
 #define TIPSY_INPUT_KEY 1
 #define TIPSY_INPUT_POINTER 2
-#define TIPSY_INPUT_RESIZE 3
-#define TIPSY_INPUT_TEXT 4
+#define TIPSY_INPUT_SCROLL 3
+#define TIPSY_INPUT_RESIZE 4
+#define TIPSY_INPUT_TEXT 5
+#define TIPSY_INPUT_CLOSE 6
 #define TIPSY_INPUT_RING 256
 #define TIPSY_INPUT_TEXT_BYTES 256
 #define TIPSY_X11_BACKGROUND_POLL_USEC 2000
@@ -553,12 +557,24 @@ int tipsy_x11_pump(uintptr_t dpy_ptr, unsigned long xid, unsigned long wm_delete
 			break;
 		case ButtonPress:
 		case ButtonRelease:
-			if (ev.xbutton.window == win &&
-				(ev.xbutton.button == Button1 ||
-				 ev.xbutton.button == Button3)) {
+			if (ev.xbutton.window != win) {
+				break;
+			}
+			if (ev.xbutton.button == Button1 || ev.xbutton.button == Button3) {
 				tipsy_input_push(TIPSY_INPUT_POINTER,
 					ev.type == ButtonPress ? 0 : 1,
 					(long)ev.xbutton.button, 0,
+					(float)ev.xbutton.x, (float)ev.xbutton.y);
+			} else if (ev.type == ButtonPress &&
+				(ev.xbutton.button == Button4 || ev.xbutton.button == Button5 ||
+				 ev.xbutton.button == 6 || ev.xbutton.button == 7)) {
+				int dx = 0;
+				long dy = 0;
+				if (ev.xbutton.button == Button4) dy = 1;
+				if (ev.xbutton.button == Button5) dy = -1;
+				if (ev.xbutton.button == 6) dx = -1;
+				if (ev.xbutton.button == 7) dx = 1;
+				tipsy_input_push(TIPSY_INPUT_SCROLL, dx, dy, 0,
 					(float)ev.xbutton.x, (float)ev.xbutton.y);
 			}
 			break;
@@ -588,7 +604,12 @@ int tipsy_x11_pump(uintptr_t dpy_ptr, unsigned long xid, unsigned long wm_delete
 			break;
 		case ClientMessage:
 			if (ev.xclient.window == win &&
+				ev.xclient.message_type == XInternAtom(dpy, "WM_PROTOCOLS", False) &&
 				(Atom)ev.xclient.data.l[0] == (Atom)wm_delete) {
+				// The blocking-start background pump may be the Xlib caller that
+				// consumes this ClientMessage. Preserve the close edge in the
+				// shared ordered ring so the Go launch loop cannot miss it.
+				tipsy_input_push(TIPSY_INPUT_CLOSE, 0, (long)win, 0, 0, 0);
 				*out_closed = 1;
 			} else if (ev.xclient.window == win &&
 				(Atom)ev.xclient.data.l[0] == XInternAtom(dpy, "WM_TAKE_FOCUS", False)) {
@@ -600,6 +621,7 @@ int tipsy_x11_pump(uintptr_t dpy_ptr, unsigned long xid, unsigned long wm_delete
 			break;
 		case DestroyNotify:
 			if (ev.xdestroywindow.window == win) {
+				tipsy_input_push(TIPSY_INPUT_CLOSE, 0, (long)win, 0, 0, 0);
 				*out_closed = 1;
 			}
 			break;
@@ -696,6 +718,16 @@ void tipsy_x11_close(uintptr_t dpy_ptr, unsigned long xid) {
 	}
 	XCloseDisplay(dpy);
 }
+
+int tipsy_x11_unmap(uintptr_t dpy_ptr, unsigned long xid) {
+	Display *dpy = (Display *)dpy_ptr;
+	if (dpy == NULL || xid == 0 || tipsy_x_io_error) {
+		return -1;
+	}
+	XUnmapWindow(dpy, (Window)xid);
+	XFlush(dpy);
+	return tipsy_x_io_error ? -1 : 0;
+}
 */
 import "C"
 
@@ -774,6 +806,15 @@ func setFullscreenLocked(w *Window, enabled bool) error {
 	return nil
 }
 
+func dismissLocked(w *Window) error {
+	if C.tipsy_x11_unmap(C.uintptr_t(w.display), C.ulong(w.xid)) != 0 {
+		return ErrClosed
+	}
+	w.dismissed = true
+	logging.Logger(logging.CatX11).Info("dismissed X11 window", "xid", w.xid)
+	return nil
+}
+
 // Pump processes pending X events without blocking.
 func (w *Window) Pump() error {
 	if w == nil {
@@ -801,9 +842,10 @@ func (w *Window) Pump() error {
 		w.mu.Unlock()
 		return ErrClosed
 	}
-	evs := w.drainInputLocked()
-	if closed != 0 {
+	evs, closeRequested := w.drainInputLocked()
+	if closed != 0 || closeRequested {
 		w.closed = true
+		_ = dismissLocked(w)
 		w.mu.Unlock()
 		notifyInput(evs)
 		return ErrClosed
@@ -815,13 +857,14 @@ func (w *Window) Pump() error {
 
 // drainInputLocked moves captured events from the C ring into Go events
 // and applies focus state. Called with w.mu held.
-func (w *Window) drainInputLocked() []InputEvent {
+func (w *Window) drainInputLocked() ([]InputEvent, bool) {
 	var raw [TIPSYInputRingLen]C.struct_tipsy_input_ev
 	n := int(C.tipsy_x11_input_drain(&raw[0], C.int(len(raw))))
 	if n == 0 {
-		return nil
+		return nil, false
 	}
 	evs := make([]InputEvent, 0, n)
+	closeRequested := false
 	for i := 0; i < n; i++ {
 		r := &raw[i]
 		switch r.kind {
@@ -849,6 +892,8 @@ func (w *Window) drainInputLocked() []InputEvent {
 				action = PointerMove
 			}
 			evs = append(evs, InputEvent{Kind: InputPointer, PointerAction: action, Button: int32(r.b), X: float32(r.x), Y: float32(r.y)})
+		case C.TIPSY_INPUT_SCROLL:
+			evs = append(evs, InputEvent{Kind: InputScroll, X: float32(r.x), Y: float32(r.y), ScrollX: float32(r.a), ScrollY: float32(r.b)})
 		case C.TIPSY_INPUT_RESIZE:
 			width, height := int(r.b), int(r.c)
 			if width <= 0 || height <= 0 {
@@ -868,9 +913,16 @@ func (w *Window) drainInputLocked() []InputEvent {
 			// Text can contain credentials. Preserve it for the subscribed
 			// editor adapter, but never log it here.
 			evs = append(evs, InputEvent{Kind: InputText, Text: text})
+		case C.TIPSY_INPUT_CLOSE:
+			// The C ring is process-global because Tipsy hosts one Roblox
+			// window. Still match the XID so a late close from an already
+			// destroyed test window cannot close a later one.
+			if uintptr(r.b) == w.xid {
+				closeRequested = true
+			}
 		}
 	}
-	return evs
+	return evs, closeRequested
 }
 
 // StartBackgroundPump runs Pump on a C pthread so V2Start can block on
@@ -943,5 +995,6 @@ func (w *Window) Close() error {
 	w.display = 0
 	w.xid = 0
 	w.closed = true
+	w.dismissed = true
 	return nil
 }

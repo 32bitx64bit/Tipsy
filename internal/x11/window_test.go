@@ -223,6 +223,38 @@ func TestBackgroundPump(t *testing.T) {
 	}
 }
 
+func TestBackgroundPumpPreservesWMDeleteForGoLoop(t *testing.T) {
+	ensureDisplay(t)
+	requireProbe(t)
+	w, err := Open("Tipsy background close", 64, 64)
+	if err != nil {
+		if errors.Is(err, ErrUnavailable) || errors.Is(err, ErrNoDisplay) {
+			t.Skip(err)
+		}
+		t.Fatalf("Open: %v", err)
+	}
+	defer w.Close()
+	if err := w.StartBackgroundPump(); err != nil {
+		t.Fatalf("StartBackgroundPump: %v", err)
+	}
+	if err := x11probe.WMDelete(w.XID()); err != nil {
+		t.Fatalf("WM_DELETE_WINDOW: %v", err)
+	}
+	deadline := time.Now().Add(750 * time.Millisecond)
+	for time.Now().Before(deadline) {
+		if err := w.Pump(); errors.Is(err, ErrClosed) {
+			if x11probe.Viewable(w.XID()) {
+				t.Fatal("WM_DELETE acknowledged but the client window stayed viewable")
+			}
+			return
+		} else if err != nil {
+			t.Fatalf("Pump: %v", err)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatal("background pump consumed WM_DELETE_WINDOW without notifying Go")
+}
+
 func ensureDisplay(t *testing.T) {
 	t.Helper()
 	if os.Getenv("DISPLAY") != "" {

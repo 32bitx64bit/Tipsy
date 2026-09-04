@@ -20,6 +20,11 @@ func setFullscreenLocked(w *Window, enabled bool) error {
 	return ErrUnavailable
 }
 
+func dismissLocked(w *Window) error {
+	w.dismissed = true
+	return nil
+}
+
 // Pump reports that native X11 is unavailable on this build.
 func (w *Window) Pump() error {
 	if w == nil || w.closed {
@@ -55,5 +60,6 @@ func (w *Window) Close() error {
 	w.display = 0
 	w.xid = 0
 	w.cursor = 0
+	w.dismissed = true
 	return nil
 }

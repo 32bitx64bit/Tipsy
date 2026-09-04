@@ -59,6 +59,11 @@ const (
 	// motion. Both ordinary hover and button-held motion are delivered;
 	// the direct Roblox mouse path needs their continuous positions.
 	InputPointer
+	// InputScroll is one real core-X11 wheel detent. Vertical wheel buttons
+	// 4/5 carry ScrollY +1/-1; horizontal buttons 6/7 carry ScrollX -1/+1.
+	// Only ButtonPress creates a detent because X11 wheel releases do not
+	// represent a second scroll step.
+	InputScroll
 	// InputResize is a real ConfigureNotify for the Roblox client window.
 	// It shares the input stream so consumers can update surface geometry
 	// before a later pointer event uses the new window coordinates.
@@ -89,6 +94,8 @@ type InputEvent struct {
 	PointerAction int32   // PointerDown/Up/Move
 	Button        int32   // 1 left, 3 right (InputPointer down/up)
 	X, Y          float32 // pointer position in window pixels
+	ScrollX       float32 // horizontal wheel detents (InputScroll)
+	ScrollY       float32 // vertical wheel detents (InputScroll)
 	Width, Height int     // new client dimensions (InputResize)
 }
 
@@ -204,6 +211,21 @@ func (w *Window) CursorHidden() bool {
 	w.mu.Lock()
 	defer w.mu.Unlock()
 	return w.cursor != 0
+}
+
+// Dismiss immediately removes the client window from the desktop while its
+// X11 connection remains valid for orderly EGL/GameActivity teardown. It is
+// idempotent and may be called after Pump reports ErrClosed.
+func (w *Window) Dismiss() error {
+	if w == nil {
+		return nil
+	}
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if w.display == 0 || w.xid == 0 || w.dismissed {
+		return nil
+	}
+	return dismissLocked(w)
 }
 
 // SetFullscreen asks the EWMH window manager to add or remove

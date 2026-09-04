@@ -43,6 +43,76 @@ type launchStartedAck struct {
 	fn   func()
 }
 
+type gameActivitySession struct {
+	resize           *surfaceResize
+	call             func(name, sig string, extra ...uintptr)
+	forceExit        func(int)
+	shutdownDeadline time.Duration
+	shutdownOnce     sync.Once
+	shutdownDuration time.Duration
+}
+
+const gracefulShutdownDeadline = 2 * time.Second
+
+// closeClientModuleBeforeStart releases a client image only when no
+// GameActivity session was established. Once initializeNativeCode succeeds,
+// Roblox can retain official worker threads beyond terminateNativeCode (the
+// HttpClient thread is one observed example). Unmapping libroblox beneath
+// those threads is unsafe; the process teardown that immediately follows a
+// completed launch is the owner of that mapping instead.
+func closeClientModuleBeforeStart(clientStarted bool, closeFn func() error) error {
+	if clientStarted || closeFn == nil {
+		return nil
+	}
+	return closeFn()
+}
+
+// shutdown follows the official GameActivity Java lifecycle already declared
+// by this APK: focus loss, pause, surface destruction, stop, then
+// terminateNativeCode. The final call posts APP_CMD_DESTROY and joins the
+// native app thread before Launch's deferred module unmap can run. sync.Once
+// prevents a context cancellation racing a WM close from double-destroying
+// the native handle.
+func (s *gameActivitySession) shutdown(reason string) time.Duration {
+	if s == nil || s.call == nil {
+		return 0
+	}
+	s.shutdownOnce.Do(func() {
+		started := time.Now()
+		logging.Logger(logging.CatGameActivity).Info("graceful shutdown started", "reason", reason)
+		// The runtime is an in-process host: returning and unmapping libroblox
+		// while terminateNativeCode is still executing is unsafe. Give the
+		// official lifecycle/join path a generous deadline, then terminate the
+		// already-dismissed host process as a last resort so an engine teardown
+		// stall cannot leave a hidden Tipsy process indefinitely. Normal closes
+		// stop this watchdog hundreds of times before it can fire.
+		var watchdog *time.Timer
+		if s.forceExit != nil {
+			deadline := s.shutdownDeadline
+			if deadline <= 0 {
+				deadline = gracefulShutdownDeadline
+			}
+			watchdog = time.AfterFunc(deadline, func() {
+				logging.Logger(logging.CatGameActivity).Error("graceful shutdown deadline exceeded; exiting host",
+					"reason", reason, "deadline", deadline)
+				s.forceExit(0)
+			})
+		}
+		s.call("onWindowFocusChangedNative", "(JZ)V", 0)
+		s.call("onPauseNative", "(J)V")
+		s.call("onSurfaceDestroyedNative", "(J)V")
+		s.call("onStopNative", "(J)V")
+		s.call("terminateNativeCode", "(J)V")
+		if watchdog != nil {
+			watchdog.Stop()
+		}
+		s.shutdownDuration = time.Since(started)
+		logging.Logger(logging.CatGameActivity).Info("graceful shutdown completed",
+			"reason", reason, "duration", s.shutdownDuration)
+	})
+	return s.shutdownDuration
+}
+
 func (a *launchStartedAck) signal() {
 	if a == nil || a.fn == nil {
 		return
@@ -68,10 +138,11 @@ const (
 	// Surface, PlatformParams). It is the public app bridge Android invokes
 	// after a real surface-size change; unlike the registered GameActivity
 	// onSurfaceChangedNative callback, it does not re-enter surface creation.
-	updateSurfaceSym          = "Java_com_roblox_engine_jni_NativeGLInterface_nativeAppBridgeV2UpdateSurfaceAppWithPlatformParams"
-	directMouseButtonSym      = "Java_com_roblox_engine_jni_NativeInputInterface_nativePassMouseButton"
-	directMouseMoveSym        = "Java_com_roblox_engine_jni_NativeInputInterface_nativePassMouseMove"
-	directKeyEventSym         = "Java_com_roblox_engine_jni_NativeGLInterface_nativePassKeyEvent"
+	updateSurfaceSym     = "Java_com_roblox_engine_jni_NativeGLInterface_nativeAppBridgeV2UpdateSurfaceAppWithPlatformParams"
+	directMouseButtonSym = "Java_com_roblox_engine_jni_NativeInputInterface_nativePassMouseButton"
+	directMouseMoveSym   = "Java_com_roblox_engine_jni_NativeInputInterface_nativePassMouseMove"
+	directMouseWheelSym  = "Java_com_roblox_engine_jni_NativeInputInterface_nativePassMouseWheel"
+	directKeyEventSym    = "Java_com_roblox_engine_jni_NativeGLInterface_nativePassKeyEvent"
 	// setInputConnectionName/Sig is the exact Java→native handshake the
 	// engine registered (DEX ground truth, classes2.dex method table,
 	// 2.734.917 — descriptors only, never vendored):
@@ -113,7 +184,6 @@ const (
 // Launch starts the official extracted Android x86-64 client under native X11.
 // It intentionally performs no writes to libroblox.so text.
 func Launch(ctx context.Context, opt LaunchOptions) error {
-	started := &launchStartedAck{fn: opt.Started}
 	if ctx == nil {
 		ctx = context.Background()
 	}
@@ -128,6 +198,7 @@ func Launch(ctx context.Context, opt LaunchOptions) error {
 	if opt.Height <= 0 {
 		opt.Height = 720
 	}
+	started := &launchStartedAck{fn: opt.Started}
 	dir, err := filepath.Abs(RuntimeDir())
 	if err != nil {
 		return fmt.Errorf("runtime directory: %w", err)
@@ -222,7 +293,12 @@ func Launch(ctx context.Context, opt LaunchOptions) error {
 	if err != nil {
 		return err
 	}
-	defer mod.Close()
+	clientStarted := false
+	defer func() {
+		if err := closeClientModuleBeforeStart(clientStarted, mod.Close); err != nil {
+			logging.Logger(logging.CatRuntime).Info("client module close failed", "err", err)
+		}
+	}()
 	android.Register("libroblox.so", func(sym string) (uintptr, error) { return mod.Lookup(sym) })
 	android.RegisterImage(mod.Base, lib)
 	if err := mod.Init(); err != nil {
@@ -243,10 +319,16 @@ func Launch(ctx context.Context, opt LaunchOptions) error {
 	if opt.Probe {
 		return nil
 	}
-	resize, err := startGameActivity(ctx, vm, mod, aw, files, cache, obb, opt.Width, opt.Height)
+	session, err := startGameActivity(ctx, vm, mod, aw, files, cache, obb, opt.Width, opt.Height)
 	if err != nil {
 		return err
 	}
+	// A successful session means initializeNativeCode has entered the official
+	// client and may have created engine-owned workers. Keep the image mapped
+	// until the CLI/GUI host process exits; do not race those workers with
+	// loader.Module.Close/rawMunmap after the visible window is dismissed.
+	clientStarted = true
+	resize := session.resize
 	defer jni.ClearRobloxDirectInputTarget()
 	defer jni.ClearRobloxDirectKeyTarget()
 	defer jni.ClearRobloxTextInputTarget()
@@ -270,10 +352,16 @@ func Launch(ctx context.Context, opt LaunchOptions) error {
 	// targets are wired, and resize/input subscribers plus loop tickers are
 	// installed. Immediate failures and --probe return before this boundary.
 	started.signal()
-
+	shutdownClient := func(reason string) {
+		_ = win.Dismiss()
+		_ = win.StopBackgroundPump()
+		eglSurf.StopSwapThread()
+		session.shutdown(reason)
+	}
 	for {
 		select {
 		case <-ctx.Done():
+			shutdownClient("context-cancelled")
 			return ctx.Err()
 		case <-stats.C:
 			s := jni.InputDeliveryStats()
@@ -283,11 +371,16 @@ func Launch(ctx context.Context, opt LaunchOptions) error {
 				"path", jni.PointerInputPath().String(),
 				"focus", s.FocusDelivered, "gameActivityKeys", s.KeyDelivered, "gameActivityPointers", s.PointerDelivered,
 				"gameActivityConsumed", s.KeyConsumed+s.PointerConsumed, "gameActivityDropped", s.Dropped,
-				"directKeys", d.KeyDelivered, "directButtons", d.ButtonDelivered, "directMoves", d.MoveDelivered, "directDropped", d.Dropped,
+				"directKeys", d.KeyDelivered, "directButtons", d.ButtonDelivered, "directMoves", d.MoveDelivered, "directWheels", d.WheelDelivered, "directDropped", d.Dropped,
 				"textPass", textPass, "textReturn", textReturn, "textSync", textSync, "textDropped", textDrop)
 		case <-ticker.C:
 			if err := win.Pump(); err != nil {
 				if err == x11.ErrClosed {
+					// Pump has already unmapped the window, bounding visible close
+					// response independently from native teardown. Stop producers,
+					// then let the official GameActivity destroy/join complete before
+					// the deferred libroblox unmap.
+					shutdownClient("wm-delete-window")
 					return nil
 				}
 				return err
@@ -309,7 +402,7 @@ func installCrashDiagHandler() error {
 	return nil
 }
 
-func startGameActivity(ctx context.Context, vm *jni.VM, mod *loader.Module, aw *android.Window, files, cache, obb string, width, height int) (*surfaceResize, error) {
+func startGameActivity(ctx context.Context, vm *jni.VM, mod *loader.Module, aw *android.Window, files, cache, obb string, width, height int) (*gameActivitySession, error) {
 	env := vm.Env()
 	activity := env.AllocObject(env.FindClass("com/roblox/client/startup/MainGameActivity"))
 	if activity == 0 {
@@ -368,20 +461,24 @@ func deliverTextInputConnection(vm *jni.VM, env *jni.Env, activity, handle uintp
 	return conn
 }
 
-// wireRobloxDirectInput resolves only the two public static native methods
-// proven by the official 2.734.917 DEX. `nativePassMouse` is absent and must
-// not be guessed. Delivery remains A/B-gated inside internal/jni.
+// wireRobloxDirectInput resolves only the three public static native methods
+// used by the official 2.734.917 mouse listener. `nativePassMouse` is absent
+// and must not be guessed. Delivery remains A/B-gated inside internal/jni.
 func wireRobloxDirectInput(mod *loader.Module, env *jni.Env) {
 	buttonFn, buttonErr := mod.Lookup(directMouseButtonSym)
 	moveFn, moveErr := mod.Lookup(directMouseMoveSym)
+	wheelFn, wheelErr := mod.Lookup(directMouseWheelSym)
 	if buttonErr != nil {
 		logging.Logger(logging.CatJNI).Info("[jni] missing direct input export", "sym", directMouseButtonSym, "err", buttonErr)
 	}
 	if moveErr != nil {
 		logging.Logger(logging.CatJNI).Info("[jni] missing direct input export", "sym", directMouseMoveSym, "err", moveErr)
 	}
+	if wheelErr != nil {
+		logging.Logger(logging.CatJNI).Info("[jni] missing direct input export", "sym", directMouseWheelSym, "err", wheelErr)
+	}
 	class := env.FindClass("com/roblox/engine/jni/NativeInputInterface")
-	jni.SetRobloxDirectInputTarget(env.Raw(), class, buttonFn, moveFn)
+	jni.SetRobloxDirectInputTarget(env.Raw(), class, buttonFn, moveFn, wheelFn)
 }
 
 // wireRobloxDirectKey resolves the separate public static native key route
@@ -420,7 +517,7 @@ func wireRobloxTextInput(mod *loader.Module, env *jni.Env) {
 	jni.SetRobloxTextInputTarget(env, class, passFn, returnFn, syncFn, loader.CallP8)
 }
 
-func dispatchGameActivityLifecycle(ctx context.Context, vm *jni.VM, mod *loader.Module, env *jni.Env, activity, handle uintptr, files, cache string, width, height int, aw *android.Window) *surfaceResize {
+func dispatchGameActivityLifecycle(ctx context.Context, vm *jni.VM, mod *loader.Module, env *jni.Env, activity, handle uintptr, files, cache string, width, height int, aw *android.Window) *gameActivitySession {
 	call := func(name, sig string, extra ...uintptr) {
 		callGameActivityNative(vm, env, activity, handle, name, sig, extra...)
 	}
@@ -459,9 +556,17 @@ func dispatchGameActivityLifecycle(ctx context.Context, vm *jni.VM, mod *loader.
 		logging.Logger(logging.CatGameActivity).Info("input native lookup",
 			"name", n[0], "fn", fmt.Sprintf("%#x", vm.NativeMethod("com/google/androidgamesdk/GameActivity", n[0], n[1])))
 	}
-	return &surfaceResize{
-		sink:   &engineResizeSink{mod: mod, vm: vm, env: env, activity: activity, handle: handle, aw: aw, gl: gl, surface: surface, platform: platform},
-		seeded: true, width: width, height: height,
+	return &gameActivitySession{
+		call:             call,
+		forceExit:        os.Exit,
+		shutdownDeadline: gracefulShutdownDeadline,
+		resize: &surfaceResize{
+			sink: &engineResizeSink{
+				mod: mod, vm: vm, env: env, activity: activity, handle: handle, aw: aw,
+				gl: gl, surface: surface, platform: platform,
+			},
+			seeded: true, width: width, height: height,
+		},
 	}
 }
 

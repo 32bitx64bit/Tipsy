@@ -292,6 +292,44 @@ func TestPointerMotionCoalescesToLatestPosition(t *testing.T) {
 	}
 }
 
+func TestWheelButtonsDeliverOneDetentPerPress(t *testing.T) {
+	w := openInputWindow(t)
+	c := collectInput(t)
+	requireProbe(t)
+	c.clearAndSettle(t, w)
+
+	for _, step := range []struct {
+		button      uint64
+		wantX       float32
+		wantY       float32
+		wantScrollX float32
+		wantScrollY float32
+	}{
+		{button: button4, wantX: 11, wantY: 12, wantScrollY: 1},
+		{button: button5, wantX: 13, wantY: 14, wantScrollY: -1},
+		{button: button6, wantX: 15, wantY: 16, wantScrollX: -1},
+		{button: button7, wantX: 17, wantY: 18, wantScrollX: 1},
+	} {
+		if err := x11probe.Button(w.XID(), int(step.wantX), int(step.wantY), step.button, true); err != nil {
+			t.Fatalf("wheel button %d press: %v", step.button, err)
+		}
+		if err := x11probe.Button(w.XID(), int(step.wantX), int(step.wantY), step.button, false); err != nil {
+			t.Fatalf("wheel button %d release: %v", step.button, err)
+		}
+		drainPump(w, t)
+		ev := c.next(t, w)
+		if ev.Kind != InputScroll || ev.X != step.wantX || ev.Y != step.wantY ||
+			ev.ScrollX != step.wantScrollX || ev.ScrollY != step.wantScrollY {
+			t.Fatalf("wheel button %d event = %+v", step.button, ev)
+		}
+		select {
+		case extra := <-c.ch:
+			t.Fatalf("wheel button %d release created an extra detent: %+v", step.button, extra)
+		case <-time.After(40 * time.Millisecond):
+		}
+	}
+}
+
 func TestResizePrecedesFollowingPointerDelivery(t *testing.T) {
 	w := openInputWindow(t)
 	c := collectInput(t)

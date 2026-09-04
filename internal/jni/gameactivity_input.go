@@ -772,6 +772,14 @@ func handleX11InputEvent(ev x11.InputEvent) {
 		if path == PointerPathDirect || path == PointerPathBoth {
 			DispatchRobloxDirectPointer(ev.PointerAction, ev.X, ev.Y, ev.Button)
 		}
+	case x11.InputScroll:
+		// The final APK mouse listener sends ACTION_SCROLL only through the
+		// direct NativeInputInterface wheel native. GameActivity's replaced
+		// touch listener has no faithful wheel equivalent.
+		path := pointerDeliveryPath()
+		if path == PointerPathDirect || path == PointerPathBoth {
+			DispatchRobloxDirectScroll(ev.X, ev.Y, ev.ScrollX, ev.ScrollY)
+		}
 	}
 }
 
