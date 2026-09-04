@@ -21,7 +21,7 @@ Commands:
   config              Show or edit XDG config
   version             Print version
   logs                Show log directory and TIPSY_LOG usage
-  setup               Extract official x86-64 libraries into the runtime dir
+  setup               Verify and install the official x86-64 client
   launch              Load the official client (X11). Use --probe to exit after JNI_OnLoad
   repair              Repair install (not yet implemented)
   help                Show this help
@@ -69,8 +69,9 @@ Combined machine-readable compatibility report (APK + ELF + hints).
 
 const setupHelp = `Usage: tipsy setup <apk-or-dir> [...]
 
-Extract official Roblox APKs, split APKs, or .apkm/.xapk/.zip sets into the
-XDG runtime directory. Pass official APK/dir paths. Never commit Roblox packages.
+Cryptographically verify and atomically install official Roblox APKs, split
+APKs, or .apkm/.xapk/.apks/.zip sets. Pass regular package files obtained
+through your own authorized account. Never commit Roblox packages.
 `
 
 const launchHelp = `Usage: tipsy launch [--probe]

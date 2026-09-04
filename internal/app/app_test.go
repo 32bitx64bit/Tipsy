@@ -90,7 +90,7 @@ func TestRunSetupRequiresPath(t *testing.T) {
 	}
 }
 
-func TestRunSetupExtracts(t *testing.T) {
+func TestRunSetupRejectsUnverifiedPackage(t *testing.T) {
 	xdg := t.TempDir()
 	t.Setenv("XDG_DATA_HOME", xdg)
 	t.Setenv("XDG_CACHE_HOME", filepath.Join(xdg, "cache-home"))
@@ -102,14 +102,14 @@ func TestRunSetupExtracts(t *testing.T) {
 	})
 
 	code, out, errOut := runArgs(t, "setup", apkPath)
-	if code != 0 {
-		t.Fatalf("exit %d stderr=%s", code, errOut)
+	if code != 1 {
+		t.Fatalf("exit %d stdout=%s stderr=%s", code, out, errOut)
 	}
-	if !strings.Contains(out, "Extracted to") {
-		t.Fatalf("stdout=%s", out)
+	if !strings.Contains(errOut, "package inspection failed") && !strings.Contains(errOut, "signature") {
+		t.Fatalf("expected actionable verification failure: %s", errOut)
 	}
-	if !strings.Contains(out, filepath.Join(xdg, "tipsy", "runtime")) {
-		t.Fatalf("missing runtime dir in stdout: %s", out)
+	if _, err := os.Stat(filepath.Join(xdg, "tipsy", "runtime")); !os.IsNotExist(err) {
+		t.Fatalf("unverified package created runtime: %v", err)
 	}
 }
 

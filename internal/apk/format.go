@@ -93,6 +93,9 @@ func writePackage(b *strings.Builder, p *Package) {
 func writeSigning(b *strings.Builder, indent string, s SigningInfo) {
 	fmt.Fprintf(b, "%sSigning: v1=%t v2=%t v3=%t v3.1=%t\n",
 		indent, s.HasV1, s.HasV2, s.HasV3, s.HasV3_1)
+	if s.CryptographicallyValid {
+		fmt.Fprintf(b, "%sCryptographic signature: verified\n", indent)
+	}
 	for i, h := range s.CertSHA256 {
 		subj := ""
 		if i < len(s.Subjects) {

@@ -13,6 +13,7 @@ import (
 	"github.com/tipsy-linux/tipsy/internal/elfinspect"
 	"github.com/tipsy-linux/tipsy/internal/logging"
 	"github.com/tipsy-linux/tipsy/internal/runtime"
+	"github.com/tipsy-linux/tipsy/internal/setupsvc"
 )
 
 func cmdSetup(ctx context.Context, args []string, stdout, stderr io.Writer) int {
@@ -30,19 +31,17 @@ func cmdSetup(ctx context.Context, args []string, stdout, stderr io.Writer) int 
 		fmt.Fprint(stderr, setupHelp)
 		return 2
 	}
-	res, err := runtime.Setup(ctx, f.rest)
+	res, err := setupsvc.New().Install(ctx, setupsvc.InstallRequest{Mode: setupsvc.InstallLocal, LocalPaths: f.rest}, nil)
 	if err != nil {
 		fmt.Fprintln(stderr, logging.Redact(err.Error()))
 		return 1
 	}
-	fmt.Fprintf(stdout, "Extracted to %s\n", res.DestDir)
-	if res.Report != nil && res.Report.Merged != nil {
-		m := res.Report.Merged
-		if m.PackageName != "" {
-			fmt.Fprintf(stdout, "Package: %s %s (%d)\n", m.PackageName, m.VersionName, m.VersionCode)
-		}
+	snapshot := res.Snapshot
+	fmt.Fprintf(stdout, "Extracted to %s\n", snapshot.RuntimeDir)
+	if snapshot.PackageName != "" {
+		fmt.Fprintf(stdout, "Package: %s %s (%d)\n", snapshot.PackageName, snapshot.VersionName, snapshot.VersionCode)
 	}
-	fmt.Fprintf(stdout, "Libraries: %d\n", len(res.Libraries))
+	fmt.Fprintln(stdout, "Architecture: x86_64")
 	return 0
 }
 

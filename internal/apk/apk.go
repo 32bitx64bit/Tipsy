@@ -57,13 +57,15 @@ type NativeLib struct {
 
 // SigningInfo is JAR v1 and APK Signature Scheme v2/v3/v3.1 metadata.
 type SigningInfo struct {
-	HasV1      bool     `json:"hasV1"`
-	HasV2      bool     `json:"hasV2"`
-	HasV3      bool     `json:"hasV3"`
-	HasV3_1    bool     `json:"hasV3_1"`
-	CertSHA256 []string `json:"certSha256,omitempty"`
-	Subjects   []string `json:"subjects,omitempty"`
-	ParseError string   `json:"parseError,omitempty"`
+	HasV1                  bool     `json:"hasV1"`
+	HasV2                  bool     `json:"hasV2"`
+	HasV3                  bool     `json:"hasV3"`
+	HasV3_1                bool     `json:"hasV3_1"`
+	CertSHA256             []string `json:"certSha256,omitempty"`
+	Subjects               []string `json:"subjects,omitempty"`
+	CryptographicallyValid bool     `json:"cryptographicallyValid,omitempty"`
+	VerifiedCertSHA256     []string `json:"verifiedCertSha256,omitempty"`
+	ParseError             string   `json:"parseError,omitempty"`
 }
 
 // Merged is the union of a split set: one package name/version, all ABIs and natives.
@@ -381,7 +383,7 @@ func collectDir(dir string) ([]*apkSource, error) {
 func collectFile(path string) ([]*apkSource, error) {
 	ext := strings.ToLower(filepath.Ext(path))
 	switch ext {
-	case ".apkm", ".xapk":
+	case ".apkm", ".xapk", ".apks":
 		return openNestedContainer(path, true)
 	case ".zip":
 		return openNestedContainer(path, false)
@@ -560,6 +562,7 @@ func mergePackages(pkgs []Package) *Merged {
 		m.Signing.HasV2 = m.Signing.HasV2 || p.Signing.HasV2
 		m.Signing.HasV3 = m.Signing.HasV3 || p.Signing.HasV3
 		m.Signing.HasV3_1 = m.Signing.HasV3_1 || p.Signing.HasV3_1
+		m.Signing.CryptographicallyValid = m.Signing.CryptographicallyValid || p.Signing.CryptographicallyValid
 		if p.Signing.ParseError != "" && m.Signing.ParseError == "" {
 			m.Signing.ParseError = p.Signing.ParseError
 		}
@@ -577,6 +580,7 @@ func mergePackages(pkgs []Package) *Merged {
 				}
 			}
 		}
+		m.Signing.VerifiedCertSHA256 = appendUnique(m.Signing.VerifiedCertSHA256, p.Signing.VerifiedCertSHA256...)
 	}
 	m.Architectures = sortABIs(keys(abiSet))
 	m.NativeCode = uniqueSorted(keys(ncSet))

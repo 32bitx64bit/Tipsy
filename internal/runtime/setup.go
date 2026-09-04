@@ -48,3 +48,31 @@ func Setup(ctx context.Context, apkPaths []string) (*apk.ExtractResult, error) {
 	}
 	return res, nil
 }
+
+// PrepareAppStorageForSetup preserves the version-independent Android FilesDir
+// before a staged runtime update is committed. Package installers should call
+// this only after the replacement package has passed validation.
+func PrepareAppStorageForSetup() error {
+	_, migration, err := prepareAppStorage(RuntimeDir())
+	if err != nil {
+		return fmt.Errorf("persistent app storage: %w", err)
+	}
+	logAppStorageMigration(migration)
+	return nil
+}
+
+// ExtractSetup writes a complete runtime into dest without changing RuntimeDir.
+// It exists for staged installers; persistent account data is never placed in
+// dest.
+func ExtractSetup(ctx context.Context, apkPaths []string, dest string) (*apk.ExtractResult, error) {
+	res, err := apk.Extract(ctx, apkPaths, dest)
+	if err != nil {
+		return nil, err
+	}
+	if res != nil && res.AssetsDir != "" {
+		if err := EnsureOfficialPatches(ctx, res.AssetsDir); err != nil {
+			return nil, fmt.Errorf("official ExtraContent: %w", err)
+		}
+	}
+	return res, nil
+}
