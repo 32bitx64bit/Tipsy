@@ -194,11 +194,11 @@ func TestDiagnoseUnimplemented(t *testing.T) {
 func TestDiagnoseAudioBridge(t *testing.T) {
 	t.Setenv("TIPSY_DISABLE_MICROPHONE", "true")
 	r := Diagnose(context.Background(), "audio")
-	if r.Status != "ready" || r.Milestone != "15" {
+	if r.Status != "playback not yet verified" || r.Milestone != "15" {
 		t.Fatalf("audio status=%q milestone=%q", r.Status, r.Milestone)
 	}
 	text := FormatSubsystem(r)
-	for _, want := range []string{"OpenSL ES", "PulseAudio", "disabled by TIPSY_DISABLE_MICROPHONE"} {
+	for _, want := range []string{"FMOD AudioTrack", "OpenSL ES", "PulseAudio", "disabled by TIPSY_DISABLE_MICROPHONE", "does not play sound"} {
 		if !strings.Contains(text, want) {
 			t.Fatalf("audio diagnostics missing %q:\n%s", want, text)
 		}

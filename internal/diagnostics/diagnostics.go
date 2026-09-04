@@ -182,17 +182,17 @@ func Diagnose(ctx context.Context, subsystem string) *SubsystemReport {
 		}
 		return &SubsystemReport{
 			Subsystem: "audio",
-			Status:    "ready",
+			Status:    "playback not yet verified",
 			Milestone: "15",
 			Facts: []string{
-				"Client API: OpenSL ES buffer queues",
+				"Client APIs: FMOD AudioTrack playback and OpenSL ES buffer queues",
 				"Host bridge: PulseAudio / PipeWire Pulse server",
-				"Playback: asynchronous worker with reconnect",
+				"Playback: device access is checked when Roblox opens a stream",
 				"Microphone: " + mic,
 				"PipeWire: " + a.PipeWire,
 				"Pulse: " + a.Pulse,
 			},
-			Message: "OpenSL ES playback and capture are bridged to the host. Device access is verified when Roblox starts a stream.",
+			Message: "Audio support is installed. This diagnostic does not play sound or verify audio in Roblox.",
 		}
 	case "jni":
 		return &SubsystemReport{

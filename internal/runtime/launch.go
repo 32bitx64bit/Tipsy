@@ -230,7 +230,7 @@ func Launch(ctx context.Context, opt LaunchOptions) error {
 	}()
 	files := storage.FilesDir
 	cache := storage.CacheDir
-	preferences := storage.PreferencesFile
+	preferences := storage.CookieFile
 	assets := filepath.Join(dir, "assets")
 	obb := filepath.Join(dir, "obb")
 	for _, d := range []string{obb, filepath.Join(dir, "android")} {
@@ -321,6 +321,9 @@ func Launch(ctx context.Context, opt LaunchOptions) error {
 	if opt.Probe {
 		return nil
 	}
+	if err := configureRobloxCookieBridge(vm, mod, vm.Env(), storage.CookieFile); err != nil {
+		return err
+	}
 	session, err := startGameActivity(ctx, vm, mod, aw, files, cache, preferences, obb, opt.Width, opt.Height)
 	if err != nil {
 		return err
@@ -363,9 +366,9 @@ func Launch(ctx context.Context, opt LaunchOptions) error {
 		// package-private path and process-wide client lock are still live.
 		// Treat the payload as opaque: flush file + containing directory only.
 		if err := syncPrivateOpaqueFile(preferences); err != nil {
-			logging.Logger(logging.CatFilesystem).Info("native preferences sync failed", "err", err)
+			logging.Logger(logging.CatFilesystem).Info("official cookie storage sync failed", "err", err)
 		} else {
-			logging.Logger(logging.CatFilesystem).Info("native preferences synchronized")
+			logging.Logger(logging.CatFilesystem).Info("official cookie storage synchronized")
 		}
 	}
 	for {
@@ -533,7 +536,6 @@ func dispatchGameActivityLifecycle(ctx context.Context, vm *jni.VM, mod *loader.
 	}
 	call("onStartNative", "(J)V")
 	setRobloxCacheAndFiles(mod, env, activity, files, cache)
-	setRobloxPreferencesFile(mod, env, activity, preferences)
 	setRobloxAssetPath(mod, env, activity)
 	startRobloxApp(mod, env, activity, files)
 	call("onResumeNative", "(J)V")
@@ -722,35 +724,100 @@ func setRobloxCacheAndFiles(mod *loader.Module, env *jni.Env, activity uintptr, 
 	initRobloxLocalStorageManager(mod, env, files, cache)
 }
 
-// setRobloxPreferencesFile supplies the one native persistence identity that
-// the official APK declares specifically for the engine-owned account/cookie
-// store. The payload and file format remain entirely Roblox-owned and opaque;
-// Tipsy supplies only a private, version-independent path and never logs it.
-func setRobloxPreferencesFile(mod *loader.Module, env *jni.Env, activity uintptr, path string) {
-	if mod == nil || env == nil || activity == 0 {
+// setRobloxPreferencesFile follows NativeHelper.P -> el/y.f: the parameter is
+// an Android SharedPreferences NAME, not a filesystem path. "rbx.prefs" is only
+// the APK's logging tag. Cookie persistence is the separate CookieProtocol.
+func setRobloxPreferencesFile(mod *loader.Module, env *jni.Env) {
+	class := env.FindClass("com/roblox/engine/jni/NativeSettingsInterface")
+	callRobloxJNI(mod, env.Raw(), class, setPreferencesFileSym, env.NewStringUTF(robloxPreferencesID))
+}
+
+// configureRobloxCookieBridge implements the APK's Java-owned lifecycle:
+// MainGameActivity.onCreate restores scoped cookies before native creation;
+// NativeHelper initializes CookieProtocol's official callback. Cookie content
+// never enters diagnostics, flags, account stubs, or engine memory patches.
+func configureRobloxCookieBridge(vm *jni.VM, mod *loader.Module, env *jni.Env, path string) error {
+	const baseURL = "https://www.roblox.com/"
+	const registerSym = "Java_com_roblox_universalapp_cookie_JNICookieProtocol_updateOnSetCookieHandler"
+	register, err := mod.Lookup(registerSym)
+	if err != nil || register == 0 {
+		return fmt.Errorf("official cookie callback unavailable")
+	}
+	if err = vm.ConfigureAuthCookies(path, baseURL); err != nil {
+		return fmt.Errorf("prepare official cookie storage: %w", err)
+	}
+	protocol := env.AllocObject(env.FindClass("com/roblox/universalapp/cookie/JNICookieProtocol"))
+	handler := env.AllocObject(env.FindClass("com/roblox/universalapp/cookie/CookieProtocol$OnSetCookieHandlerImpl"))
+	vm.SetAuthCookieRegistration(func() {
+		setRobloxPreferencesFile(mod, env)
+		loader.CallP8(register, env.Raw(), protocol, handler, 0, 0, 0, 0, 0)
+		logging.Logger(logging.CatFilesystem).Info("official cookie callback registered")
+	})
+	header, err := vm.RestoreAuthCookies()
+	if err != nil {
+		return err
+	}
+	if err := restoreRobloxCookieHeader(env, header, func(symbol string, settings, first, second uintptr) error {
+		fn, err := mod.Lookup(symbol)
+		if err != nil || fn == 0 {
+			return fmt.Errorf("official cookie startup API unavailable: %s", symbol)
+		}
+		loader.CallP8(fn, env.Raw(), settings, first, second, 0, 0, 0, 0)
+		return nil
+	}); err != nil {
+		return err
+	}
+	logging.Logger(logging.CatFilesystem).Info("official cookie restore delivered", "stored_cookies", header != "")
+	logNativeCookieRestoreState(mod, env, "before-native-init")
+	return nil
+}
+
+// restoreRobloxCookieHeader preserves rh/w0.V0 -> R0's ordered JNI contract.
+// The native cookie setter filters against its configured origin; calling
+// restore before nativeSetBaseUrl silently discards valid saved cookies.
+func restoreRobloxCookieHeader(env *jni.Env, header string, invoke func(symbol string, settings, first, second uintptr) error) error {
+	const baseURL = "https://www.roblox.com/"
+	settings := env.FindClass("com/roblox/engine/jni/NativeSettingsInterface")
+	if err := invoke("Java_com_roblox_engine_jni_NativeSettingsInterface_nativeSetBaseUrl", settings, env.NewStringUTF(baseURL), env.NewStringUTF("https://api.roblox.com/")); err != nil {
+		return err
+	}
+	return invoke("Java_com_roblox_engine_jni_NativeSettingsInterface_nativeSetMultipleCookies", settings, env.NewStringUTF(baseURL), env.NewStringUTF(header))
+}
+
+// logNativeCookieRestoreState is an opt-in, read-only check of the named APK
+// cookie getter. It emits only record counts and auth-category presence, never
+// cookie names, values, URLs, paths, account data, or raw native strings.
+func logNativeCookieRestoreState(mod *loader.Module, env *jni.Env, phase string) {
+	if os.Getenv("TIPSY_AUTH_RESTORE_DIAGNOSTICS") != "1" {
 		return
 	}
-	abs, err := filepath.Abs(path)
-	if err != nil || filepath.Base(abs) != robloxPreferencesName {
-		logging.Logger(logging.CatFilesystem).Info("native preferences unavailable")
-		return
-	}
-	if err := ensurePrivateDir(filepath.Dir(abs)); err != nil {
-		logging.Logger(logging.CatFilesystem).Info("native preferences unavailable", "err", err)
-		return
-	}
-	if err := securePrivateFileIfPresent(abs); err != nil {
-		logging.Logger(logging.CatFilesystem).Info("native preferences unavailable", "err", err)
-		return
-	}
-	fn, err := mod.Lookup(setPreferencesFileSym)
+	const sym = "Java_com_roblox_engine_jni_NativeSettingsInterface_nativeGetCookiesInNetscapeFormat"
+	fn, err := mod.Lookup(sym)
 	if err != nil || fn == 0 {
-		logging.Logger(logging.CatGameActivity).Info("missing JNI export", "sym", setPreferencesFileSym)
+		logging.Logger(logging.CatFilesystem).Info("official cookie readback unavailable")
 		return
 	}
-	loader.CallP8(fn, env.Raw(), activity, env.NewStringUTF(abs), 0, 0, 0, 0, 0)
-	logging.Logger(logging.CatFilesystem).Info("native preferences configured",
-		"method", "NativeSettingsInterface.nativeSetPreferencesFile")
+	result := loader.CallP8(fn, env.Raw(), env.FindClass("com/roblox/engine/jni/NativeSettingsInterface"), env.NewStringUTF("https://www.roblox.com/"), 0, 0, 0, 0, 0)
+	if result == 0 {
+		logging.Logger(logging.CatFilesystem).Info("official cookie readback unavailable")
+		return
+	}
+	snapshot, err := env.GetStringUTFChars(uintptr(result))
+	if err != nil {
+		logging.Logger(logging.CatFilesystem).Info("official cookie readback unavailable")
+		return
+	}
+	count, authPresent := 0, false
+	for _, record := range strings.Split(snapshot, ";") {
+		fields := strings.Split(record, "\t")
+		if len(fields) == 6 || len(fields) == 7 {
+			count++
+			if fields[5] == ".ROBLOSECURITY" && len(fields) == 7 && fields[6] != "" {
+				authPresent = true
+			}
+		}
+	}
+	logging.Logger(logging.CatFilesystem).Info("official cookie readback", "phase", phase, "records", count, "auth_present", authPresent)
 }
 
 func initRobloxLocalStorageManager(mod *loader.Module, env *jni.Env, files, cache string) {
@@ -773,15 +840,23 @@ func startRobloxApp(mod *loader.Module, env *jni.Env, activity uintptr, files st
 	if gl == 0 {
 		gl = activity
 	}
-	callRobloxJNI(mod, env.Raw(), gl, "Java_com_roblox_engine_jni_NativeGLInterface_nativeInitClientSettings", env.NewString(flags), env.NewString(""), env.NewString(""))
+	settingsStatus := callRobloxJNI(mod, env.Raw(), gl, "Java_com_roblox_engine_jni_NativeGLInterface_nativeInitClientSettings", env.NewString(flags), env.NewString(""), env.NewString(""))
 	callRobloxJNI(mod, env.Raw(), gl, "Java_com_roblox_engine_jni_NativeGLInterface_nativePostClientSettingsLoadedInitialization3", env.NewArrayList())
+	// Complete the APK Java setup phase which owns CookieProtocol construction.
+	if int32(settingsStatus) == 0 {
+		env.CompleteAuthCookieInitialization()
+	} else {
+		logging.Logger(logging.CatFilesystem).Error("official cookie initialization unavailable after client-settings failure")
+	}
+	logNativeCookieRestoreState(mod, env, "after-native-init")
 	callRobloxJNI(mod, env.Raw(), activity, "Java_com_roblox_client_startup_MainGameActivity_nativePreloadFlagOverrides", env.NewStringUTF(""))
 	startLoggedOutAppBridge(mod, env)
+	logNativeCookieRestoreState(mod, env, "after-app-start")
 }
 
-// startLoggedOutAppBridge follows the Android bridge order observed for a
-// logged-out client. The six generic arguments are empty/false, not account
-// identity values; NativeUser remains responsible for user state.
+// startLoggedOutAppBridge follows the Android bridge order for app startup.
+// APK yk/l0 passes rh/w0.g() as the first argument: the production base URL,
+// not account identity. NativeUser remains responsible for user state.
 func startLoggedOutAppBridge(mod *loader.Module, env *jni.Env) {
 	if mod == nil || env == nil {
 		return
@@ -797,7 +872,7 @@ func startLoggedOutAppBridge(mod *loader.Module, env *jni.Env) {
 	}
 	logging.Logger(logging.CatGameActivity).Info("calling logged-out JNI bridge", "sym", appStartSym)
 	loader.CallP8(fn, env.Raw(), bridge,
-		env.NewStringUTF(""), env.NewStringUTF(""), 0,
+		env.NewStringUTF("https://www.roblox.com/"), env.NewStringUTF(""), 0,
 		env.NewStringUTF(""), env.NewStringUTF(""), env.NewStringUTF(""))
 }
 

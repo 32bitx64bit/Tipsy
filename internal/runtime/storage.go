@@ -19,7 +19,9 @@ import (
 
 const (
 	robloxPackageName      = "com.roblox.client"
-	robloxPreferencesName  = "rbx.prefs"
+	robloxPreferencesName  = "rbx.prefs" // Retained legacy artifact; never a JNI preference name.
+	robloxPreferencesID    = "prefs"
+	robloxCookieFileName   = "cookies-v1.json"
 	legacyMigrationMarker  = ".legacy-runtime-files-migrated-v1"
 	legacyMigrationVersion = "tipsy-app-storage-v1\n"
 )
@@ -32,7 +34,8 @@ type AppStorageLayout struct {
 	DataRoot        string
 	FilesDir        string
 	PreferencesDir  string
-	PreferencesFile string
+	PreferencesFile string // Legacy artifact retained without interpreting or deleting it.
+	CookieFile      string
 	CacheRoot       string
 	CacheDir        string
 }
@@ -48,6 +51,7 @@ func AppStorage() AppStorageLayout {
 		FilesDir:        filepath.Join(dataRoot, "files"),
 		PreferencesDir:  filepath.Join(dataRoot, "shared_prefs"),
 		PreferencesFile: filepath.Join(dataRoot, "shared_prefs", robloxPreferencesName),
+		CookieFile:      filepath.Join(dataRoot, "shared_prefs", robloxCookieFileName),
 		CacheRoot:       cacheRoot,
 		CacheDir:        filepath.Join(cacheRoot, "cache"),
 	}
@@ -86,6 +90,9 @@ func prepareAppStorage(runtimeDir string) (AppStorageLayout, appStorageMigration
 	}
 	if err := securePrivateFileIfPresent(layout.PreferencesFile); err != nil {
 		return AppStorageLayout{}, appStorageMigration{}, fmt.Errorf("secure native preferences file: %w", err)
+	}
+	if err := securePrivateFileIfPresent(layout.CookieFile); err != nil {
+		return AppStorageLayout{}, appStorageMigration{}, fmt.Errorf("secure cookie storage: %w", err)
 	}
 	if err := hardenPrivateTree(layout.FilesDir); err != nil {
 		return AppStorageLayout{}, appStorageMigration{}, fmt.Errorf("secure persistent FilesDir: %w", err)
@@ -134,8 +141,8 @@ func cleanupInterruptedPrivateWrites(dir string) error {
 
 // securePrivateFileIfPresent validates and tightens the official client's
 // opaque native-preferences file without opening or interpreting its payload.
-// The file is allowed not to exist on a first launch: libroblox creates it
-// after nativeSetPreferencesFile supplies the APK-declared path.
+// The file is allowed not to exist on a first launch. NativeSetPreferencesFile
+// takes an Android preference name; it does not create any file itself.
 func securePrivateFileIfPresent(path string) error {
 	st, err := os.Lstat(path)
 	if errors.Is(err, os.ErrNotExist) {

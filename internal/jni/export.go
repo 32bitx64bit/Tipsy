@@ -430,6 +430,9 @@ func (vm *VM) dispatch(obj C.jobject, class, name, sig string, args *C.jvalue) (
 	if name == "<init>" {
 		return obj, true
 	}
+	if v, ok := vm.dispatchFmodAudio(o, class, name, sig, args); ok {
+		return v, true
+	}
 	if v, ok := vm.dispatchInput(o, class, name, sig, args); ok {
 		return v, true
 	}
@@ -440,6 +443,9 @@ func (vm *VM) dispatch(obj C.jobject, class, name, sig string, args *C.jvalue) (
 		return v, true
 	}
 	if v, ok := vm.dispatchNativeHelper(o, class, name, sig, args); ok {
+		return v, true
+	}
+	if v, ok := vm.dispatchAuthCookies(o, class, name, sig, args); ok {
 		return v, true
 	}
 	if v, ok := vm.dispatchTextInput(o, class, name, sig, args); ok {
