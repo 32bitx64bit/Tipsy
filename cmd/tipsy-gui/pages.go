@@ -1,0 +1,588 @@
+package main
+
+import (
+	"context"
+	"fmt"
+	"html"
+	"os"
+	"path/filepath"
+	"strings"
+
+	qt "github.com/mappu/miqt/qt6"
+
+	"github.com/tipsy-linux/tipsy/internal/config"
+	guimodel "github.com/tipsy-linux/tipsy/internal/gui"
+)
+
+func (w *mainWindow) buildHomePage() *qt.QWidget {
+	page, layout, scroll := newPage("Home", "A focused place to launch, update, and tune Roblox on Linux.")
+
+	hero, heroLayout := newCard("heroCard")
+	heroLayout.SetContentsMargins(30, 26, 30, 26)
+	heroLayout.SetSpacing(16)
+	copy := qt.NewQWidget2()
+	copyLayout := qt.NewQVBoxLayout(copy)
+	copyLayout.SetContentsMargins(0, 0, 0, 0)
+	copyLayout.SetSpacing(8)
+	eyebrow := qt.NewQLabel3("READY WHEN YOU ARE")
+	setObjectName(eyebrow.QObject, "heroEyebrow")
+	copyLayout.AddWidget(eyebrow.QWidget)
+	title := qt.NewQLabel3("Roblox on Linux.\nWithout the beige launcher.")
+	setObjectName(title.QObject, "heroTitle")
+	title.SetWordWrap(true)
+	copyLayout.AddWidget(title.QWidget)
+	w.playState = qt.NewQLabel3("Your Roblox sign-in remains in the client, not in Tipsy")
+	setObjectName(w.playState.QObject, "heroBody")
+	w.playState.SetWordWrap(true)
+	w.playState.SetAccessibleName("Launch status")
+	copyLayout.AddWidget(w.playState.QWidget)
+	copyLayout.AddSpacing(8)
+	w.playButton = qt.NewQPushButton3("Play Roblox")
+	setObjectName(w.playButton.QObject, "playButton")
+	w.playButton.SetAccessibleName("Play Roblox")
+	w.playButton.SetDefault(true)
+	w.playButton.OnClicked(w.launchRoblox)
+	copyLayout.AddWidget(w.playButton.QWidget)
+	w.pageEntry = append(w.pageEntry, w.playButton.QWidget)
+	copyLayout.AddStretch()
+	heroLayout.AddWidget2(copy, 1)
+	mark := qt.NewQLabel2()
+	mark.SetPixmap(w.icon.Pixmap2(104, 104))
+	mark.SetFixedSize2(104, 104)
+	mark.SetAlignment(qt.AlignCenter)
+	mark.SetAccessibleName("Tipsy logo")
+	heroLayout.AddWidget(mark.QWidget)
+	layout.AddWidget(hero.QWidget)
+
+	row := qt.NewQWidget2()
+	rowLayout := qt.NewQGridLayout(row)
+	rowLayout.SetContentsMargins(0, 0, 0, 0)
+	rowLayout.SetSpacing(16)
+
+	installCard, installLayout := newVerticalCard("card")
+	cardTop := qt.NewQHBoxLayout2()
+	cardTop.AddWidget(sectionLabel("Installation").QWidget)
+	cardTop.AddStretch()
+	w.installBadge = qt.NewQLabel3("CHECKING")
+	setObjectName(w.installBadge.QObject, "statusNeutral")
+	cardTop.AddWidget(w.installBadge.QWidget)
+	installLayout.AddLayout(cardTop.QLayout)
+	w.installVersion = qt.NewQLabel3("Checking…")
+	setObjectName(w.installVersion.QObject, "metricValue")
+	installLayout.AddWidget(w.installVersion.QWidget)
+	w.installDetail = qt.NewQLabel3("Reading the installed client status.")
+	setObjectName(w.installDetail.QObject, "mutedText")
+	w.installDetail.SetWordWrap(true)
+	installLayout.AddWidget(w.installDetail.QWidget)
+	manage := qt.NewQPushButton3("Manage installation")
+	setObjectName(manage.QObject, "secondaryButton")
+	manage.SetAccessibleDescription("Open the installation and update page")
+	manage.OnClicked(func() { w.selectPage(1) })
+	installLayout.AddWidget(manage.QWidget)
+	rowLayout.AddWidget2(installCard.QWidget, 0, 0)
+
+	settingsCard, settingsLayout := newVerticalCard("card")
+	settingsLayout.AddWidget(sectionLabel("Graphics profile").QWidget)
+	profile := w.settings.View().Draft
+	profileText := rendererDisplay(profile.Renderer) + " · " + fpsDisplay(profile)
+	w.settingsProfile = qt.NewQLabel3(profileText)
+	setObjectName(w.settingsProfile.QObject, "metricValueSmall")
+	w.settingsProfile.SetWordWrap(true)
+	settingsLayout.AddWidget(w.settingsProfile.QWidget)
+	note := qt.NewQLabel3("Changes are written through the shared client-settings backend and take effect after a Roblox restart.")
+	setObjectName(note.QObject, "mutedText")
+	note.SetWordWrap(true)
+	settingsLayout.AddWidget(note.QWidget)
+	openSettings := qt.NewQPushButton3("Open settings")
+	setObjectName(openSettings.QObject, "secondaryButton")
+	openSettings.SetAccessibleDescription("Open renderer and frame-rate settings")
+	openSettings.OnClicked(func() { w.selectPage(2) })
+	settingsLayout.AddWidget(openSettings.QWidget)
+	rowLayout.AddWidget2(settingsCard.QWidget, 0, 1)
+	rowLayout.SetColumnStretch(0, 1)
+	rowLayout.SetColumnStretch(1, 1)
+	twoColumns := true
+	row.OnResizeEvent(func(super func(event *qt.QResizeEvent), event *qt.QResizeEvent) {
+		super(event)
+		wantTwoColumns := event.Size().Width() >= 620
+		if wantTwoColumns == twoColumns {
+			return
+		}
+		rowLayout.RemoveWidget(installCard.QWidget)
+		rowLayout.RemoveWidget(settingsCard.QWidget)
+		if wantTwoColumns {
+			rowLayout.AddWidget2(installCard.QWidget, 0, 0)
+			rowLayout.AddWidget2(settingsCard.QWidget, 0, 1)
+			rowLayout.SetColumnStretch(1, 1)
+		} else {
+			rowLayout.AddWidget2(installCard.QWidget, 0, 0)
+			rowLayout.AddWidget2(settingsCard.QWidget, 1, 0)
+			rowLayout.SetColumnStretch(1, 0)
+		}
+		twoColumns = wantTwoColumns
+	})
+
+	layout.AddWidget(row)
+	layout.AddStretch()
+	return w.registerPage(page, scroll)
+}
+
+func (w *mainWindow) buildInstallPage() *qt.QWidget {
+	page, layout, scroll := newPage("Installation", "Install the official Android x86-64 client, or refresh an existing installation.")
+
+	card, cardLayout := newVerticalCard("card")
+	cardTop := qt.NewQHBoxLayout2()
+	cardTop.AddWidget(sectionLabel("Roblox client").QWidget)
+	cardTop.AddStretch()
+	w.installPageBadge = qt.NewQLabel3("CHECKING")
+	setObjectName(w.installPageBadge.QObject, "statusNeutral")
+	cardTop.AddWidget(w.installPageBadge.QWidget)
+	cardLayout.AddLayout(cardTop.QLayout)
+	w.installPageVer = qt.NewQLabel3("Checking…")
+	setObjectName(w.installPageVer.QObject, "metricValueSmall")
+	w.installPageVer.SetWordWrap(true)
+	cardLayout.AddWidget(w.installPageVer.QWidget)
+	w.installPageDetail = qt.NewQLabel3("Reading the installed client status.")
+	setObjectName(w.installPageDetail.QObject, "mutedText")
+	w.installPageDetail.SetWordWrap(true)
+	cardLayout.AddWidget(w.installPageDetail.QWidget)
+	description := qt.NewQLabel3("Tipsy verifies package identity and architecture before extraction. Account data is kept separately, so updating the client does not replace your sign-in storage.")
+	setObjectName(description.QObject, "bodyText")
+	description.SetWordWrap(true)
+	cardLayout.AddWidget(description.QWidget)
+	cardLayout.AddSpacing(8)
+	setup := qt.NewQPushButton3("Open setup assistant")
+	setObjectName(setup.QObject, "primaryButton")
+	setup.SetAccessibleDescription("Install, update, or repair the official Roblox client")
+	setup.OnClicked(func() { w.ShowSetupWizard(false) })
+	cardLayout.AddWidget(setup.QWidget)
+	w.pageEntry = append(w.pageEntry, setup.QWidget)
+	layout.AddWidget(card.QWidget)
+
+	sourceCard, sourceLayout := newVerticalCard("card")
+	sourceLayout.AddWidget(sectionLabel("Package sources").QWidget)
+	automatic := w.setup.View().Automatic
+	autoTitle := "Automatic download"
+	if automatic.Available && automatic.SourceName != "" {
+		autoTitle += " · " + automatic.SourceName
+	}
+	auto := qt.NewQLabel3("<b>" + html.EscapeString(autoTitle) + "</b><br>" + html.EscapeString(automaticExplanation(automatic)))
+	auto.SetTextFormat(qt.RichText)
+	auto.SetWordWrap(true)
+	setObjectName(auto.QObject, "sourceRow")
+	sourceLayout.AddWidget(auto.QWidget)
+	local := qt.NewQLabel3("<b>Choose APK or bundle</b><br>Use APK, APKM, XAPK, ZIP, or a split set that you obtained lawfully. Tipsy never asks for Roblox credentials.")
+	local.SetTextFormat(qt.RichText)
+	local.SetWordWrap(true)
+	setObjectName(local.QObject, "sourceRow")
+	sourceLayout.AddWidget(local.QWidget)
+	layout.AddWidget(sourceCard.QWidget)
+	layout.AddStretch()
+	return w.registerPage(page, scroll)
+}
+
+func (w *mainWindow) buildSettingsPage() *qt.QWidget {
+	page, layout, scroll := newPage("Settings", "Tune the official client without hand-editing XML or launch flags.")
+
+	card, cardLayout := newVerticalCard("card")
+	cardLayout.AddWidget(sectionLabel("Graphics and performance").QWidget)
+
+	form := qt.NewQFormLayout2()
+	form.SetHorizontalSpacing(24)
+	form.SetVerticalSpacing(16)
+	form.SetRowWrapPolicy(qt.QFormLayout__WrapLongRows)
+	form.SetFieldGrowthPolicy(qt.QFormLayout__AllNonFixedFieldsGrow)
+	w.settingsRenderer = qt.NewQComboBox2()
+	rendererModel := qt.NewQStandardItemModel3(w.win.QObject)
+	for _, option := range w.settings.View().RendererOptions {
+		item := qt.NewQStandardItem()
+		item.SetText(rendererOptionText(option))
+		item.SetEnabled(option.Available)
+		if option.Reason != "" {
+			item.SetToolTip(option.Reason)
+		}
+		rendererModel.AppendRowWithItem(item)
+	}
+	w.settingsRenderer.SetModel(rendererModel.QAbstractItemModel)
+	w.settingsRenderer.SetAccessibleName("Rendering backend")
+	w.settingsRenderer.SetToolTip("Vulkan requires a Vulkan bridge and working host driver")
+	w.settingsRenderer.SetMaximumWidth(560)
+	w.pageEntry = append(w.pageEntry, w.settingsRenderer.QWidget)
+	form.AddRow3("Renderer", w.settingsRenderer.QWidget)
+
+	w.settingsFPSMode = qt.NewQComboBox2()
+	w.settingsFPSMode.AddItems([]string{"Automatic (recommended)", "Limited", "Unlimited (experimental)"})
+	w.settingsFPSMode.SetAccessibleName("Frame-rate mode")
+	w.settingsFPSMode.SetMaximumWidth(560)
+	form.AddRow3("Frame-rate mode", w.settingsFPSMode.QWidget)
+
+	w.settingsFPS = qt.NewQSpinBox2()
+	w.settingsFPS.SetRange(guimodel.MinFrameRate, guimodel.MaxFrameRate)
+	w.settingsFPS.SetSingleStep(10)
+	w.settingsFPS.SetSuffix(" FPS")
+	w.settingsFPS.SetButtonSymbols(qt.QAbstractSpinBox__NoButtons)
+	w.settingsFPS.SetAccessibleName("Frame-rate limit")
+	w.settingsFPS.SetToolTip("Set a finite client frame-rate limit from 30 to 240 FPS")
+	w.settingsFPS.SetMaximumWidth(240)
+	form.AddRow3("Limit", w.settingsFPS.QWidget)
+	cardLayout.AddLayout(form.QLayout)
+
+	w.settingsHint = qt.NewQLabel3("Roblox must be restarted before renderer or frame-rate changes take effect.")
+	w.settingsHint.SetWordWrap(true)
+	setObjectName(w.settingsHint.QObject, "noticeInfo")
+	cardLayout.AddWidget(w.settingsHint.QWidget)
+
+	actions := qt.NewQHBoxLayout2()
+	actions.AddStretch()
+	w.settingsReset = qt.NewQPushButton3("Reset defaults")
+	setObjectName(w.settingsReset.QObject, "secondaryButton")
+	w.settingsReset.SetAccessibleDescription("Restore the safe automatic renderer and frame-rate defaults")
+	w.settingsReset.OnClicked(w.resetSettings)
+	actions.AddWidget(w.settingsReset.QWidget)
+	w.settingsApply = qt.NewQPushButton3("Apply changes")
+	setObjectName(w.settingsApply.QObject, "primaryButton")
+	w.settingsApply.SetAccessibleDescription("Save renderer and frame-rate settings")
+	w.settingsApply.OnClicked(w.applySettings)
+	actions.AddWidget(w.settingsApply.QWidget)
+	cardLayout.AddLayout(actions.QLayout)
+	layout.AddWidget(card.QWidget)
+
+	if w.settingsErr != nil {
+		w.settingsHint.SetText("Settings could not be loaded: " + w.settingsErr.Error())
+		setObjectName(w.settingsHint.QObject, "noticeError")
+		w.settingsRenderer.SetEnabled(false)
+		w.settingsFPSMode.SetEnabled(false)
+		w.settingsFPS.SetEnabled(false)
+		w.settingsApply.SetEnabled(false)
+		w.settingsReset.SetEnabled(false)
+	} else {
+		w.bindSettings(w.settings.View().Draft)
+		w.settingsRenderer.OnCurrentIndexChanged(func(int) { w.settingsEdited() })
+		w.settingsFPSMode.OnCurrentIndexChanged(func(int) { w.settingsEdited() })
+		w.settingsFPS.OnValueChanged(func(int) { w.settingsEdited() })
+		w.updateSettingsControls()
+	}
+
+	limits, limitsLayout := newVerticalCard("subtleCard")
+	limitsLayout.AddWidget(sectionLabel("Renderer and frame-rate notes").QWidget)
+	limitsText := qt.NewQLabel3("<b>Auto</b> leaves Roblox's frame-rate choice alone. <b>Limited</b> supports 30–240 FPS. <b>Unlimited</b> is experimental: the client may still enforce 240 FPS, and higher rates can increase power use and instability.<br><br><b>Vulkan</b> is visible for future compatibility but disabled until Tipsy has a Vulkan bridge and a working host driver.")
+	limitsText.SetTextFormat(qt.RichText)
+	limitsText.SetWordWrap(true)
+	setObjectName(limitsText.QObject, "mutedText")
+	limitsLayout.AddWidget(limitsText.QWidget)
+	layout.AddWidget(limits.QWidget)
+	layout.AddStretch()
+	return w.registerPage(page, scroll)
+}
+
+func (w *mainWindow) bindSettings(settings guimodel.Settings) {
+	switch settings.Renderer {
+	case guimodel.RendererOpenGL:
+		w.settingsRenderer.SetCurrentIndex(1)
+	case guimodel.RendererVulkan:
+		// Unsupported persisted values are displayed honestly but cannot be
+		// newly selected or applied by this build.
+		w.settingsRenderer.SetCurrentIndex(2)
+	default:
+		w.settingsRenderer.SetCurrentIndex(0)
+	}
+	switch settings.FPSMode {
+	case guimodel.FPSLimited:
+		w.settingsFPSMode.SetCurrentIndex(1)
+	case guimodel.FPSUnlimited:
+		w.settingsFPSMode.SetCurrentIndex(2)
+	default:
+		w.settingsFPSMode.SetCurrentIndex(0)
+	}
+	if settings.FrameRate >= guimodel.MinFrameRate && settings.FrameRate <= guimodel.MaxFrameRate {
+		w.settingsFPS.SetValue(settings.FrameRate)
+	} else {
+		w.settingsFPS.SetValue(60)
+	}
+}
+
+func (w *mainWindow) settingsEdited() {
+	if w.settingsRenderer == nil {
+		return
+	}
+	renderer := guimodel.RendererAuto
+	if w.settingsRenderer.CurrentIndex() == 1 {
+		renderer = guimodel.RendererOpenGL
+	} else if w.settingsRenderer.CurrentIndex() == 2 {
+		renderer = guimodel.RendererVulkan
+	}
+	fpsMode := guimodel.FPSAuto
+	switch w.settingsFPSMode.CurrentIndex() {
+	case 1:
+		fpsMode = guimodel.FPSLimited
+	case 2:
+		fpsMode = guimodel.FPSUnlimited
+	}
+	w.settings.Edit(guimodel.Settings{Renderer: renderer, FPSMode: fpsMode, FrameRate: w.settingsFPS.Value()})
+	w.updateSettingsControls()
+}
+
+func (w *mainWindow) updateSettingsControls() {
+	view := w.settings.View()
+	w.settingsFPS.SetEnabled(view.Draft.FPSMode == guimodel.FPSLimited)
+	canApply := view.Dirty && view.ValidationError == ""
+	w.settingsApply.SetEnabled(canApply)
+	if view.ValidationError != "" {
+		w.settingsHint.SetText(view.ValidationError)
+		if reason := unavailableRendererReason(view.RendererOptions, view.Draft.Renderer); reason != "" {
+			w.settingsHint.SetText(rendererName(view.Draft.Renderer) + " is not available: " + reason)
+		}
+		setObjectName(w.settingsHint.QObject, "noticeWarning")
+	} else if view.Dirty && view.Draft.FPSMode == guimodel.FPSUnlimited {
+		w.settingsHint.SetText("Unlimited is experimental. Roblox may still cap at 240 FPS; expect higher power use and possible instability. Restart required.")
+		setObjectName(w.settingsHint.QObject, "noticeWarning")
+	} else if view.Dirty {
+		w.settingsHint.SetText("Changes are not saved yet. Applying them requires a Roblox restart.")
+		setObjectName(w.settingsHint.QObject, "noticeWarning")
+	} else if view.ApplyNote != "" {
+		message := view.ApplyNote
+		if view.RestartRequired {
+			message += " Restart Roblox to apply the saved choice."
+		}
+		w.settingsHint.SetText(message)
+		setObjectName(w.settingsHint.QObject, "noticeWarning")
+	} else if view.RestartRequired {
+		w.settingsHint.SetText("Changes saved. Restart Roblox to apply them.")
+		setObjectName(w.settingsHint.QObject, "noticeSuccess")
+	} else {
+		w.settingsHint.SetText("Roblox must be restarted before renderer or frame-rate changes take effect.")
+		setObjectName(w.settingsHint.QObject, "noticeInfo")
+	}
+	refreshStyle(w.settingsHint.QWidget)
+	if !view.Dirty {
+		w.refreshSettingsProfile()
+	}
+}
+
+func rendererOptionText(option guimodel.RendererOption) string {
+	var text string
+	switch option.Renderer {
+	case guimodel.RendererAuto:
+		text = "Auto (recommended)"
+	case guimodel.RendererOpenGL:
+		text = "OpenGL"
+	case guimodel.RendererVulkan:
+		text = "Vulkan"
+	default:
+		text = "Unknown renderer"
+	}
+	if !option.Available {
+		text += " — not available in this build"
+	}
+	return text
+}
+
+func unavailableRendererReason(options []guimodel.RendererOption, renderer guimodel.Renderer) string {
+	for _, option := range options {
+		if option.Renderer == renderer && !option.Available {
+			return option.Reason
+		}
+	}
+	return ""
+}
+
+func (w *mainWindow) applySettings() {
+	result, err := w.settings.Apply(context.Background())
+	if err != nil {
+		qt.QMessageBox_Critical(w.win.QWidget, "Could not save settings", err.Error())
+		return
+	}
+	w.updateSettingsControls()
+	if result.RestartRequired {
+		w.status.ShowMessage2("Settings saved — restart Roblox to apply them.", 7000)
+	} else {
+		w.status.ShowMessage2("Settings saved.", 5000)
+	}
+}
+
+func (w *mainWindow) resetSettings() {
+	settings, err := w.settings.Reset(context.Background())
+	if err != nil {
+		qt.QMessageBox_Critical(w.win.QWidget, "Could not reset settings", err.Error())
+		return
+	}
+	w.bindSettings(settings)
+	w.updateSettingsControls()
+	w.status.ShowMessage2("Settings reset to safe defaults.", 5000)
+}
+
+func (w *mainWindow) buildDiagnosticsPage() *qt.QWidget {
+	page, layout, scroll := newPage("Diagnostics", "A privacy-safe readiness view for your display, graphics stack, and installation.")
+
+	summaryCard, summaryLayout := newVerticalCard("card")
+	top := qt.NewQHBoxLayout2()
+	top.AddWidget(sectionLabel("System readiness").QWidget)
+	top.AddStretch()
+	run := qt.NewQPushButton3("Run checks")
+	setObjectName(run.QObject, "secondaryButton")
+	run.SetAccessibleDescription("Refresh the local system-readiness report")
+	run.OnClicked(w.runDoctor)
+	top.AddWidget(run.QWidget)
+	w.pageEntry = append(w.pageEntry, run.QWidget)
+	summaryLayout.AddLayout(top.QLayout)
+	w.doctorSummary = qt.NewQLabel3("Run checks to review system readiness.")
+	w.doctorSummary.SetTextFormat(qt.RichText)
+	w.doctorSummary.SetWordWrap(true)
+	w.doctorSummary.SetTextInteractionFlags(qt.TextBrowserInteraction)
+	setObjectName(w.doctorSummary.QObject, "doctorSummary")
+	summaryLayout.AddWidget(w.doctorSummary.QWidget)
+	w.doctorDetails = qt.NewQPlainTextEdit2()
+	w.doctorDetails.SetReadOnly(true)
+	w.doctorDetails.SetPlaceholderText("Technical check details appear here.")
+	w.doctorDetails.SetMinimumHeight(170)
+	w.doctorDetails.SetAccessibleName("Technical check details")
+	applyMonoFont(w.doctorDetails)
+	summaryLayout.AddWidget(w.doctorDetails.QWidget)
+	layout.AddWidget(summaryCard.QWidget)
+
+	pathsCard, pathsLayout := newVerticalCard("card")
+	pathsLayout.AddWidget(sectionLabel("Useful locations").QWidget)
+	paths := config.Paths()
+	grid := qt.NewQGridLayout2()
+	grid.SetHorizontalSpacing(12)
+	grid.SetVerticalSpacing(12)
+	grid.AddWidget2(pathTitle("Logs").QWidget, 0, 0)
+	grid.AddWidget2(pathValue(paths.LogDir).QWidget, 0, 1)
+	openLogs := qt.NewQPushButton3("Open")
+	setObjectName(openLogs.QObject, "secondaryButton")
+	openLogs.SetAccessibleName("Open logs folder")
+	openLogs.OnClicked(func() { openLocalDirectory(w.win.QWidget, paths.LogDir) })
+	grid.AddWidget2(openLogs.QWidget, 0, 2)
+	grid.AddWidget2(pathTitle("Configuration").QWidget, 1, 0)
+	grid.AddWidget2(pathValue(filepath.Dir(paths.ConfigFile)).QWidget, 1, 1)
+	openConfig := qt.NewQPushButton3("Open")
+	setObjectName(openConfig.QObject, "secondaryButton")
+	openConfig.SetAccessibleName("Open configuration folder")
+	openConfig.OnClicked(func() { openLocalDirectory(w.win.QWidget, filepath.Dir(paths.ConfigFile)) })
+	grid.AddWidget2(openConfig.QWidget, 1, 2)
+	grid.SetColumnStretch(1, 1)
+	pathsLayout.AddLayout(grid.QLayout)
+	privacy := qt.NewQLabel3("Tipsy diagnostics never display passwords, cookies, tokens, or Roblox account storage.")
+	privacy.SetWordWrap(true)
+	setObjectName(privacy.QObject, "noticeInfo")
+	pathsLayout.AddWidget(privacy.QWidget)
+	layout.AddWidget(pathsCard.QWidget)
+	layout.AddStretch()
+	return w.registerPage(page, scroll)
+}
+
+func (w *mainWindow) runDoctor() {
+	if w.doctorSummary == nil {
+		return
+	}
+	report, err := w.service.Doctor(context.Background())
+	if err != nil {
+		w.doctorSummary.SetText("<b>Checks could not be completed.</b>")
+		w.doctorDetails.SetPlainText(err.Error())
+		return
+	}
+	var rows []string
+	var details []string
+	for _, check := range report.Checks {
+		color, marker := "#66758f", "•"
+		switch check.Status {
+		case guimodel.CheckReady:
+			color, marker = "#14805e", "✓"
+		case guimodel.CheckWarning:
+			color, marker = "#946500", "!"
+		case guimodel.CheckBlocked:
+			color, marker = "#bd3155", "×"
+		}
+		rows = append(rows, fmt.Sprintf("<p><span style='color:%s;font-size:18px'><b>%s</b></span>&nbsp;&nbsp;<b>%s</b><br><span style='color:#66758f'>%s</span></p>", color, marker, html.EscapeString(check.Name), html.EscapeString(check.Detail)))
+		line := check.Name + ": " + check.Detail
+		if check.Remedy != "" {
+			line += "\n  Next: " + check.Remedy
+		}
+		details = append(details, line)
+	}
+	if len(rows) == 0 {
+		rows = append(rows, "<p>No readiness checks were returned.</p>")
+	}
+	headline := "Some items need attention"
+	if report.Ready {
+		headline = "Ready to run Tipsy"
+	}
+	w.doctorSummary.SetText("<h3>" + headline + "</h3>" + strings.Join(rows, ""))
+	w.doctorDetails.SetPlainText(strings.Join(details, "\n\n"))
+	w.status.ShowMessage2("System checks complete.", 5000)
+}
+
+func rendererDisplay(renderer guimodel.Renderer) string {
+	switch renderer {
+	case guimodel.RendererOpenGL:
+		return "OpenGL"
+	case guimodel.RendererVulkan:
+		return "Vulkan unavailable"
+	default:
+		return "Auto renderer"
+	}
+}
+
+func rendererName(renderer guimodel.Renderer) string {
+	switch renderer {
+	case guimodel.RendererOpenGL:
+		return "OpenGL"
+	case guimodel.RendererVulkan:
+		return "Vulkan"
+	default:
+		return "Auto"
+	}
+}
+
+func fpsDisplay(settings guimodel.Settings) string {
+	switch settings.FPSMode {
+	case guimodel.FPSLimited:
+		return fmt.Sprintf("%d FPS", settings.FrameRate)
+	case guimodel.FPSUnlimited:
+		return "Unlimited FPS (experimental)"
+	default:
+		return "Automatic FPS"
+	}
+}
+
+func automaticExplanation(a guimodel.AutomaticAvailability) string {
+	if a.Available {
+		if a.Explanation != "" {
+			return a.Explanation
+		}
+		return "Downloads from the verified source selected by the setup backend."
+	}
+	if a.Reason != "" {
+		return "Unavailable: " + a.Reason
+	}
+	return "Unavailable until a lawful, verifiable package provider is configured."
+}
+
+func pathTitle(text string) *qt.QLabel {
+	label := qt.NewQLabel3(text)
+	setObjectName(label.QObject, "formLabel")
+	return label
+}
+
+func pathValue(text string) *qt.QLabel {
+	label := qt.NewQLabel3(text)
+	setObjectName(label.QObject, "pathValue")
+	label.SetTextInteractionFlags(qt.TextSelectableByMouse)
+	label.SetWordWrap(true)
+	return label
+}
+
+func openLocalDirectory(parent *qt.QWidget, path string) {
+	if path == "" {
+		qt.QMessageBox_Warning(parent, "Location unavailable", "This location is not configured.")
+		return
+	}
+	if _, err := os.Stat(path); err != nil {
+		qt.QMessageBox_Warning(parent, "Location unavailable", "The directory does not exist yet:\n"+path)
+		return
+	}
+	url := qt.QUrl_FromLocalFile(path)
+	if !qt.QDesktopServices_OpenUrl(url) {
+		qt.QMessageBox_Warning(parent, "Could not open location", path)
+	}
+}

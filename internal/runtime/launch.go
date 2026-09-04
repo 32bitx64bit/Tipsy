@@ -14,6 +14,7 @@ import (
 	"path/filepath"
 	goruntime "runtime"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 	"unsafe"
@@ -27,9 +28,25 @@ import (
 )
 
 type LaunchOptions struct {
-	Probe  bool
-	Width  int
-	Height int
+	Probe   bool
+	Width   int
+	Height  int
+	Started func()
+}
+
+// launchStartedAck gives in-process frontends one deterministic handoff from
+// launcher chrome to the live client. The sync.Once guard makes the API safe
+// if the loop setup is refactored to have more than one entry edge later.
+type launchStartedAck struct {
+	once sync.Once
+	fn   func()
+}
+
+func (a *launchStartedAck) signal() {
+	if a == nil || a.fn == nil {
+		return
+	}
+	a.once.Do(a.fn)
 }
 
 type xidHandle struct{ xid uintptr }
@@ -89,6 +106,7 @@ const (
 // Launch starts the official extracted Android x86-64 client under native X11.
 // It intentionally performs no writes to libroblox.so text.
 func Launch(ctx context.Context, opt LaunchOptions) error {
+	started := &launchStartedAck{fn: opt.Started}
 	if ctx == nil {
 		ctx = context.Background()
 	}
@@ -225,6 +243,12 @@ func Launch(ctx context.Context, opt LaunchOptions) error {
 	defer ticker.Stop()
 	stats := time.NewTicker(2 * time.Second)
 	defer stats.Stop()
+	// Everything needed by the in-process client loop is live: X11/EGL and
+	// its pump were established above, GameActivity startup succeeded, input
+	// targets are wired, and resize/input subscribers plus loop tickers are
+	// installed. Immediate failures and --probe return before this boundary.
+	started.signal()
+
 	for {
 		select {
 		case <-ctx.Done():

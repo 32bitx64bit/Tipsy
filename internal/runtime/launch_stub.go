@@ -12,9 +12,10 @@ import (
 
 // LaunchOptions controls tipsy launch.
 type LaunchOptions struct {
-	Probe  bool
-	Width  int
-	Height int
+	Probe   bool
+	Width   int
+	Height  int
+	Started func()
 }
 
 // Launch is only implemented on Linux x86-64 with cgo.

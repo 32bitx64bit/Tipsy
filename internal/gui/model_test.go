@@ -1,0 +1,381 @@
+// Copyright 2026 The Tipsy Authors
+// SPDX-License-Identifier: GPL-3.0-or-later
+
+package gui
+
+import (
+	"context"
+	"errors"
+	"slices"
+	"sync"
+	"testing"
+	"time"
+)
+
+type fakeService struct {
+	mu             sync.Mutex
+	snapshot       InstallSnapshot
+	doctor         DoctorSummary
+	automatic      AutomaticAvailability
+	settings       Settings
+	renderers      []RendererOption
+	installErr     error
+	installStarted chan struct{}
+	waitForCancel  bool
+	installCalls   []InstallRequest
+	applyCalls     []Settings
+	launches       int
+	launchErr      error
+	launchStarted  bool
+	launchDone     chan struct{}
+}
+
+func (f *fakeService) Snapshot(context.Context) (InstallSnapshot, error) { return f.snapshot, nil }
+func (f *fakeService) Doctor(context.Context) (DoctorSummary, error)     { return f.doctor, nil }
+func (f *fakeService) AutomaticAvailability(context.Context) AutomaticAvailability {
+	return f.automatic
+}
+func (f *fakeService) Install(ctx context.Context, req InstallRequest, progress func(InstallProgress)) error {
+	f.mu.Lock()
+	f.installCalls = append(f.installCalls, req)
+	started := f.installStarted
+	wait := f.waitForCancel
+	err := f.installErr
+	f.mu.Unlock()
+	if started != nil {
+		close(started)
+	}
+	progress(InstallProgress{Phase: "Download", Message: "Downloading", Percent: 37})
+	if wait {
+		<-ctx.Done()
+		return ctx.Err()
+	}
+	if err == nil {
+		f.snapshot = InstallSnapshot{Installed: true, Version: "2.0", Status: "Ready"}
+	}
+	return err
+}
+func (f *fakeService) Launch(_ context.Context, started func()) error {
+	f.mu.Lock()
+	f.launches++
+	acknowledge, done, err := f.launchStarted, f.launchDone, f.launchErr
+	f.mu.Unlock()
+	if acknowledge {
+		started()
+		started() // The model must tolerate a defensive duplicate acknowledgement.
+	}
+	if done != nil {
+		<-done
+	}
+	return err
+}
+func (f *fakeService) LoadSettings(context.Context) (Settings, error) { return f.settings, nil }
+func (f *fakeService) RendererOptions(context.Context) []RendererOption {
+	if f.renderers != nil {
+		return slices.Clone(f.renderers)
+	}
+	return []RendererOption{
+		{Renderer: RendererAuto, Available: true},
+		{Renderer: RendererOpenGL, Available: true},
+		{Renderer: RendererVulkan, Reason: "Requires the Vulkan bridge"},
+	}
+}
+func (f *fakeService) ApplySettings(_ context.Context, settings Settings) (ApplyResult, error) {
+	f.applyCalls = append(f.applyCalls, settings)
+	f.settings = settings
+	return ApplyResult{RestartRequired: true, FrameRateNote: "Experimental frame-rate note"}, nil
+}
+func (f *fakeService) ResetSettings(context.Context) (Settings, error) {
+	f.settings = DefaultSettings()
+	return f.settings, nil
+}
+
+func TestWizardTransitionsAndSourceValidation(t *testing.T) {
+	view := SetupView{
+		Automatic: AutomaticAvailability{Available: true},
+		Request:   InstallRequest{Mode: InstallAutomatic},
+	}
+	step := WizardWelcome
+	for _, want := range []WizardStep{WizardDoctor, WizardSource, WizardInstall} {
+		var err error
+		step, err = AdvanceWizard(step, view)
+		if err != nil || step != want {
+			t.Fatalf("advance: step=%v err=%v, want %v", step, err, want)
+		}
+	}
+	if _, err := AdvanceWizard(step, view); err == nil {
+		t.Fatal("installation page advanced before success")
+	}
+	view.State = SetupComplete
+	if got, err := AdvanceWizard(step, view); err != nil || got != WizardReady {
+		t.Fatalf("complete advance: step=%v err=%v", got, err)
+	}
+
+	view.Request = InstallRequest{Mode: InstallLocal}
+	if _, err := AdvanceWizard(WizardSource, view); err == nil {
+		t.Fatal("empty local selection accepted")
+	}
+}
+
+func TestSetupSuccessProgressAndRetryableError(t *testing.T) {
+	fake := &fakeService{
+		automatic: AutomaticAvailability{Available: true, SourceName: "Trusted fixture"},
+		settings:  DefaultSettings(),
+	}
+	model := NewSetupModel(fake)
+	if err := model.Load(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if err := model.Start(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	waitForModel(t, model)
+	view := model.View()
+	if view.State != SetupComplete || view.Progress.Percent != 100 || !view.Snapshot.Installed {
+		t.Fatalf("unexpected completed view: %+v", view)
+	}
+	if len(fake.installCalls) != 1 || fake.installCalls[0].Mode != InstallAutomatic {
+		t.Fatalf("unexpected install calls: %+v", fake.installCalls)
+	}
+
+	fake.installErr = errors.New("signature could not be verified; choose another package")
+	if err := model.Start(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	waitForModel(t, model)
+	view = model.View()
+	if view.State != SetupFailed || view.Error == "" {
+		t.Fatalf("actionable failure missing: %+v", view)
+	}
+}
+
+func TestSetupCancel(t *testing.T) {
+	fake := &fakeService{
+		automatic:      AutomaticAvailability{Available: true},
+		settings:       DefaultSettings(),
+		installStarted: make(chan struct{}),
+		waitForCancel:  true,
+	}
+	model := NewSetupModel(fake)
+	if err := model.Load(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if err := model.Start(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-fake.installStarted:
+	case <-time.After(time.Second):
+		t.Fatal("install did not start")
+	}
+	if !model.Cancel() {
+		t.Fatal("cancel did not signal running installation")
+	}
+	waitForModel(t, model)
+	if got := model.View().State; got != SetupCancelled {
+		t.Fatalf("state=%q, want cancelled", got)
+	}
+}
+
+func TestSettingsBindingValidationApplyAndReset(t *testing.T) {
+	fake := &fakeService{settings: Settings{Renderer: RendererOpenGL, FPSMode: FPSLimited, FrameRate: 144}}
+	model := NewSettingsModel(fake)
+	if err := model.Load(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if got := model.View().Draft; got != fake.settings {
+		t.Fatalf("loaded=%+v want=%+v", got, fake.settings)
+	}
+	view := model.Edit(Settings{Renderer: RendererOpenGL, FPSMode: FPSLimited, FrameRate: 240})
+	if !view.Dirty || view.ValidationError != "" {
+		t.Fatalf("valid edit view: %+v", view)
+	}
+	result, err := model.Apply(context.Background())
+	if err != nil || !result.RestartRequired || result.FrameRateNote == "" || len(fake.applyCalls) != 1 {
+		t.Fatalf("apply result=%+v err=%v calls=%v", result, err, fake.applyCalls)
+	}
+	if model.View().ApplyNote != result.FrameRateNote {
+		t.Fatalf("backend frame-rate note was not retained: %+v", model.View())
+	}
+	view = model.Edit(Settings{Renderer: RendererAuto, FPSMode: FPSLimited, FrameRate: MaxFrameRate + 1})
+	if view.ValidationError == "" {
+		t.Fatal("out-of-range FPS accepted")
+	}
+	if _, err := model.Apply(context.Background()); err == nil {
+		t.Fatal("invalid settings applied")
+	}
+	reset, err := model.Reset(context.Background())
+	if err != nil || reset != DefaultSettings() || model.View().Dirty {
+		t.Fatalf("reset=%+v err=%v view=%+v", reset, err, model.View())
+	}
+}
+
+func TestFrameRateModesAreSemantic(t *testing.T) {
+	for _, settings := range []Settings{
+		{Renderer: RendererAuto, FPSMode: FPSAuto},
+		{Renderer: RendererOpenGL, FPSMode: FPSLimited, FrameRate: 60},
+	} {
+		if err := ValidateSettings(settings, (&fakeService{}).RendererOptions(context.Background())); err != nil {
+			t.Fatalf("ValidateSettings(%+v): %v", settings, err)
+		}
+	}
+	options := (&fakeService{}).RendererOptions(context.Background())
+	if err := ValidateSettings(Settings{Renderer: RendererAuto, FPSMode: FPSLimited, FrameRate: MaxFrameRate + 1}, options); err == nil {
+		t.Fatal("out-of-range numeric limit accepted")
+	}
+	model := NewSettingsModel(&fakeService{settings: DefaultSettings()})
+	model.Edit(Settings{Renderer: RendererAuto, FPSMode: FPSUnlimited, FrameRate: 144})
+	if got := model.View().Draft.FrameRate; got != 0 {
+		t.Fatalf("unlimited mode leaked numeric surrogate %d", got)
+	}
+}
+
+func TestUnavailableRendererIsVisibleButRejected(t *testing.T) {
+	fake := &fakeService{settings: DefaultSettings()}
+	model := NewSettingsModel(fake)
+	if err := model.Load(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	options := model.View().RendererOptions
+	if len(options) != 3 || options[2].Renderer != RendererVulkan || options[2].Available || options[2].Reason == "" {
+		t.Fatalf("Vulkan capability was not preserved for the UI: %+v", options)
+	}
+	view := model.Edit(Settings{Renderer: RendererVulkan, FPSMode: FPSAuto})
+	if view.ValidationError == "" {
+		t.Fatal("unavailable Vulkan renderer was accepted")
+	}
+	if _, err := model.Apply(context.Background()); err == nil || len(fake.applyCalls) != 0 {
+		t.Fatalf("unavailable renderer reached backend: err=%v calls=%v", err, fake.applyCalls)
+	}
+}
+
+func TestUnavailableAutomaticSelectsLocal(t *testing.T) {
+	fake := &fakeService{
+		automatic: AutomaticAvailability{Reason: "provider not configured"},
+		settings:  DefaultSettings(),
+	}
+	model := NewSetupModel(fake)
+	if err := model.Load(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if got := model.View().Request.Mode; got != InstallLocal {
+		t.Fatalf("mode=%q, want local", got)
+	}
+	if err := model.Start(context.Background()); err == nil {
+		t.Fatal("empty local package accepted")
+	}
+}
+
+func TestLaunchModelAcknowledgesStartThenRecordsCleanExit(t *testing.T) {
+	fake := &fakeService{settings: DefaultSettings(), launchStarted: true}
+	model := NewLaunchModel(fake)
+	if err := model.Start(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	if err := model.Wait(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if fake.launches != 1 || model.View().State != LaunchExited || !model.View().Started {
+		t.Fatalf("launches=%d view=%+v", fake.launches, model.View())
+	}
+}
+
+func TestLaunchModelPublishesRunningOnlyAfterAcknowledgement(t *testing.T) {
+	done := make(chan struct{})
+	fake := &fakeService{settings: DefaultSettings(), launchStarted: true, launchDone: done}
+	model := NewLaunchModel(fake)
+	if err := model.Start(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	deadline := time.Now().Add(time.Second)
+	for model.View().State != LaunchRunning && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+	}
+	if view := model.View(); view.State != LaunchRunning || !view.Started {
+		t.Fatalf("view=%+v, want acknowledged running client", view)
+	}
+	if err := model.Start(context.Background()); err == nil {
+		t.Fatal("second launch accepted while acknowledged client is running")
+	}
+	close(done)
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	if err := model.Wait(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if view := model.View(); view.State != LaunchExited || !view.Started {
+		t.Fatalf("view=%+v, want clean acknowledged exit", view)
+	}
+}
+
+func TestLaunchModelRejectsCleanReturnWithoutStartAcknowledgement(t *testing.T) {
+	fake := &fakeService{settings: DefaultSettings()}
+	model := NewLaunchModel(fake)
+	if err := model.Start(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	if err := model.Wait(ctx); err != nil {
+		t.Fatal(err)
+	}
+	view := model.View()
+	if view.State != LaunchFailed || view.Started || view.Error == "" {
+		t.Fatalf("view=%+v, want pre-start failure", view)
+	}
+}
+
+func TestLaunchModelPreservesStartedOnLaterFailure(t *testing.T) {
+	fake := &fakeService{settings: DefaultSettings(), launchStarted: true, launchErr: errors.New("client failed")}
+	model := NewLaunchModel(fake)
+	if err := model.Start(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	if err := model.Wait(ctx); err != nil {
+		t.Fatal(err)
+	}
+	view := model.View()
+	if view.State != LaunchFailed || !view.Started || view.Error != "client failed" {
+		t.Fatalf("view=%+v", view)
+	}
+}
+
+func TestLaunchModelCancellationRespectsStartBoundary(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		started bool
+		want    LaunchState
+	}{
+		{name: "before acknowledgement", want: LaunchIdle},
+		{name: "after acknowledgement", started: true, want: LaunchExited},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			fake := &fakeService{settings: DefaultSettings(), launchStarted: tc.started, launchErr: context.Canceled}
+			model := NewLaunchModel(fake)
+			if err := model.Start(context.Background()); err != nil {
+				t.Fatal(err)
+			}
+			ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+			defer cancel()
+			if err := model.Wait(ctx); err != nil {
+				t.Fatal(err)
+			}
+			if view := model.View(); view.State != tc.want || view.Started != tc.started {
+				t.Fatalf("view=%+v, want state=%s started=%t", view, tc.want, tc.started)
+			}
+		})
+	}
+}
+
+func waitForModel(t *testing.T, model *SetupModel) {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	if err := model.Wait(ctx); err != nil {
+		t.Fatal(err)
+	}
+}

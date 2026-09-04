@@ -1,0 +1,24 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<component type="desktop-application">
+  <id>io.github.tipsy_linux.Tipsy</id>
+  <name>Tipsy</name>
+  <summary>Run the official Roblox Android client on Linux</summary>
+  <metadata_license>CC0-1.0</metadata_license>
+  <project_license>GPL-3.0-or-later</project_license>
+  <developer id="io.github.tipsy-linux">
+    <name>Tipsy contributors</name>
+  </developer>
+  <description>
+    <p>Tipsy is a Linux compatibility runtime and Qt 6 desktop application for a user-provided official Roblox Android x86-64 client.</p>
+    <p>Roblox is not included. Tipsy does not collect Roblox credentials.</p>
+  </description>
+  <launchable type="desktop-id">io.github.tipsy_linux.Tipsy.desktop</launchable>
+  <url type="homepage">https://github.com/tipsy-linux/tipsy</url>
+  <provides>
+    <binary>tipsy-gui</binary>
+  </provides>
+  <categories>
+    <category>Game</category>
+  </categories>
+  <content_rating type="oars-1.1"/>
+</component>
