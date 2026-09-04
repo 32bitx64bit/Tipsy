@@ -1,0 +1,2 @@
+Synthetic Tipsy fixtures only. Never Roblox. Refresh with:
+TIPSY_WRITE_APK_FIXTURES=1 go test ./internal/apk -run TestGenerateTestdata

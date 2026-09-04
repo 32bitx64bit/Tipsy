@@ -1,0 +1,13 @@
+/.tipsy-private export-ignore
+/.tipsy-private/** export-ignore
+/AGENTS.md export-ignore
+/.cursor export-ignore
+/.cursor/** export-ignore
+/docs export-ignore
+/docs/** export-ignore
+/README.md export-ignore
+/CONTRIBUTING.md export-ignore
+/appData export-ignore
+/appData/** export-ignore
+/cache export-ignore
+/cache/** export-ignore

@@ -1,0 +1,33 @@
+Tipsy
+Copyright (C) 2026 Tipsy contributors
+
+This program is free software: you can redistribute it and/or modify
+it under the terms of the GNU General Public License as published by
+the Free Software Foundation, either version 3 of the License, or
+(at your option) any later version.
+
+See the LICENSE file for the full license text.
+
+-----------------------------------------------------------------------------
+Third-party and adjacent works
+-----------------------------------------------------------------------------
+
+Tipsy project code
+    Licensed under GPL-3.0-or-later.
+
+Roblox client, assets, and native libraries
+    Copyright Roblox Corporation.
+    Not distributed by this project.
+    Users must obtain official Roblox Android packages through legitimate
+    channels. Tipsy never patches, redistributes, or reimplements Roblox.
+
+Qt
+    Copyright The Qt Company Ltd. and other contributors.
+    Subject to Qt's own licensing terms (typically LGPL-3.0 when dynamically
+    linked). Tipsy uses Qt 6 via the MIQT Go bindings.
+
+MIQT (github.com/mappu/miqt)
+    MIT-licensed Qt bindings for Go.
+
+Other third-party Go modules
+    Subject to their respective licenses. See go.mod / go.sum.

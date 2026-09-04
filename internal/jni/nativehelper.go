@@ -1,0 +1,186 @@
+// Copyright 2026 The Tipsy Authors
+// SPDX-License-Identifier: GPL-3.0-or-later
+
+//go:build linux && amd64
+
+package jni
+
+/*
+#cgo CFLAGS: -I${SRCDIR}/../../native
+#include "jni_bridge.h"
+*/
+import "C"
+
+import (
+	"sync"
+	"sync/atomic"
+
+	"github.com/tipsy-linux/tipsy/internal/logging"
+)
+
+// nativeHelperClass is the engine's Java callback surface
+// (com/roblox/client/startup/NativeHelper). The engine resolves these
+// methods with GetMethodID and calls them natively; Tipsy must provide
+// the Java side of that contract.
+const nativeHelperClass = "com/roblox/client/startup/NativeHelper"
+
+// appReadyReceived counts the gameActivity_onAppReady announcements this
+// process actually received from the engine. Tipsy never sets readiness
+// itself — receiving and recording the engine's own statement is the whole
+// implementation; nothing here fabricates readiness or login state.
+var appReadyReceived uint64
+
+var (
+	appReadyLastMu   sync.Mutex
+	appReadyLastStep string
+)
+
+// Orientation announcements received from the engine
+// (gameActivity_onScreenOrientationChanged(IZ)V). Official Java
+// (classes2.dex NativeHelper) logs the request and forwards it to
+// Activity.setRequestedOrientation / requestOrientationAsDefault on the UI
+// thread. X11 has no orientation surface — the window manager owns
+// orientation and no rotation API exists — so receiving and recording the
+// engine's announcement is the complete honest Tipsy-side behavior; the
+// request itself is never faked as applied.
+var (
+	orientationReceivedMu    sync.Mutex
+	orientationReceivedCount uint64
+	orientationLastValue     int32
+	orientationLastDefault   bool
+)
+
+// Game-loaded announcements received from the engine
+// (gameActivity_onGameLoaded(J)V). The engine calls this once per launch
+// at startup in the experience-lifecycle batch (launch logs: the same
+// second as NativeGLJavaInterface.gameLoadedCallback(J)V with handle=0,
+// screenOrientationChanged, and onDataModelNotificationCallback, right
+// after the logged-out NativeUser group) — observed live with a J
+// argument of 0. Receiving and recording the engine's announcement is the
+// complete honest Tipsy-side behavior: nothing fabricates loaded state,
+// and Tipsy never acts on the handle.
+var (
+	gameLoadedMu         sync.Mutex
+	gameLoadedCount      uint64
+	gameLoadedLastHandle int64
+)
+
+// appReadyStepName makes the engine-provided app-step string safe for a
+// log line: printable ASCII only, capped at 128 bytes, control bytes
+// replaced with '?'. Official traces show the payload is the engine's own
+// step identifier (e.g. "PlatformAccountRouter", "Startup", "Landing");
+// it is never user text, and no other argument data is read or stored.
+func appReadyStepName(s string) string {
+	const maxStep = 128
+	cap := len(s)
+	if cap > maxStep {
+		cap = maxStep
+	}
+	b := make([]byte, 0, cap)
+	for i := 0; i < len(s) && len(b) < maxStep; i++ {
+		if c := s[i]; c >= 0x20 && c < 0x7f {
+			b = append(b, c)
+		} else {
+			b = append(b, '?')
+		}
+	}
+	return string(b)
+}
+
+// dispatchNativeHelper serves the observed NativeHelper engine→Java
+// callback contract. Only identities with local evidence are handled;
+// everything else falls through to the honest stub path.
+func (vm *VM) dispatchNativeHelper(o *Object, class, name, sig string, args *C.jvalue) (C.jobject, bool) {
+	if class != nativeHelperClass {
+		return jnull(), false
+	}
+	switch {
+	case name == "gameActivity_onAppReady" && sig == "(Ljava/lang/String;)V":
+		step := appReadyStepName(vm.stringFromArg(args, 0))
+		atomic.AddUint64(&appReadyReceived, 1)
+		appReadyLastMu.Lock()
+		appReadyLastStep = step
+		appReadyLastMu.Unlock()
+		logging.Logger(logging.CatJNI).Info("[jni] onAppReady", "step", step)
+	case name == "gameActivity_onScreenOrientationChanged" && sig == "(IZ)V":
+		// jvalueIAt treats nil args as zero registers (CallVoidMethod always
+		// passes the full register array for this 2-arg signature).
+		orient := jvalueIAt(args, 0)
+		def := jvalueIAt(args, 1) != 0
+		orientationReceivedMu.Lock()
+		orientationReceivedCount++
+		orientationLastValue, orientationLastDefault = orient, def
+		orientationReceivedMu.Unlock()
+		logging.Logger(logging.CatJNI).Info("[jni] onScreenOrientationChanged",
+			"orientation", orient, "requestDefault", def)
+	case name == "gameActivity_onGameLoaded" && sig == "(J)V":
+		// The single J slot carries the engine's native handle (observed 0
+		// at startup in every launch log); a nil slot reads as 0, never a
+		// fabricated value.
+		var handle int64
+		if args != nil {
+			handle = int64(C.tipsy_jvalue_j(args))
+		}
+		gameLoadedMu.Lock()
+		gameLoadedCount++
+		gameLoadedLastHandle = handle
+		gameLoadedMu.Unlock()
+		logging.Logger(logging.CatJNI).Info("[jni] onGameLoaded", "handle", handle)
+	default:
+		return jnull(), false
+	}
+	if o != nil {
+		return idToJobject(o.id), true
+	}
+	return jnull(), true
+}
+
+// NativeHelperOrientationAnnouncements reports the
+// gameActivity_onScreenOrientationChanged announcements received from the
+// engine: count, the most recent orientation value, and its
+// requestDefault flag. A count of 0 means the engine has not announced an
+// orientation to the Java side — never a fabricated value.
+func NativeHelperOrientationAnnouncements() (count uint64, orientation int32, requestDefault bool) {
+	orientationReceivedMu.Lock()
+	defer orientationReceivedMu.Unlock()
+	return orientationReceivedCount, orientationLastValue, orientationLastDefault
+}
+
+// NativeHelperAppReady reports the gameActivity_onAppReady announcements
+// received from the engine: the count and the most recent sanitized step
+// name. A count of 0 means the engine has not announced readiness to the
+// Java side — never a fabricated value.
+func NativeHelperAppReady() (count uint64, lastStep string) {
+	count = atomic.LoadUint64(&appReadyReceived)
+	appReadyLastMu.Lock()
+	lastStep = appReadyLastStep
+	appReadyLastMu.Unlock()
+	return count, lastStep
+}
+
+// NativeHelperGameLoaded reports the gameActivity_onGameLoaded
+// announcements received from the engine: the count and the most recent
+// handle value. A count of 0 means the engine has not announced
+// game-loaded to the Java side — never a fabricated value.
+func NativeHelperGameLoaded() (count uint64, handle int64) {
+	gameLoadedMu.Lock()
+	defer gameLoadedMu.Unlock()
+	return gameLoadedCount, gameLoadedLastHandle
+}
+
+// testPackObjectArg packs one jobject argument slot for tests (test files
+// cannot import "C" in this package).
+func testPackObjectArg(id int64) *C.jvalue {
+	sl := make([]C.jvalue, 1)
+	C.tipsy_jvalue_set_l(&sl[0], idToJobject(id))
+	return &sl[0]
+}
+
+// testPackTwoInts packs two jint argument slots for tests (e.g. the
+// (IZ)V orientation callback: I then Z).
+func testPackTwoInts(a, b int32) *C.jvalue {
+	sl := make([]C.jvalue, 2)
+	C.tipsy_jvalue_set_i(&sl[0], C.jint(a))
+	C.tipsy_jvalue_set_i(&sl[1], C.jint(b))
+	return &sl[0]
+}

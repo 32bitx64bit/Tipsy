@@ -1,0 +1,63 @@
+# Build artifacts
+/bin/
+/dist/
+/out/
+tipsy
+tipsy-gui
+*.exe
+*.test
+*.out
+coverage.out
+coverage.html
+
+# Go
+/vendor/
+*.prof
+
+# Proprietary Roblox artifacts must never be committed
+*.apk
+*.apkm
+*.xapk
+*.apks
+*.obb
+*.rbxm
+libroblox.so
+lib/*.so
+
+# Allow synthetic fixtures
+!testdata/**/*.apk
+!testdata/**/*.so
+
+# Runtime / user data
+/.tipsy/
+/appData/
+/cache/
+*.log
+
+# Private local engineering material and local discovery bridges
+/.tipsy-private/
+/AGENTS.md
+/.cursor
+/docs/
+/README.md
+/CONTRIBUTING.md
+
+# Credentials and private key material
+/.env
+/.env.*
+*.pem
+*.key
+*.p12
+*.pfx
+
+# Editors / OS
+.idea/
+.vscode/
+*.swp
+*~
+.DS_Store
+
+# Cgo / Qt
+*.o
+*.a
+moc_*.cpp
