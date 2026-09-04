@@ -129,6 +129,7 @@ const (
 	setAssetPathSym           = "Java_com_roblox_client_startup_MainGameActivity_nativeSetAssetPath"
 	setCacheDirSym            = "Java_com_roblox_engine_jni_NativeSettingsInterface_nativeSetCacheDirectory"
 	setFilesDirSym            = "Java_com_roblox_engine_jni_NativeSettingsInterface_nativeSetFilesDirectory"
+	setPreferencesFileSym     = "Java_com_roblox_engine_jni_NativeSettingsInterface_nativeSetPreferencesFile"
 	assetManagerInitNativeSym = "Java_com_roblox_client_JNIAAssetManagerSetup_initNative"
 	initStorageManagerV3Sym   = "Java_com_roblox_client_LocalStorageManager_initStorageManagerNativeV3"
 	initStorageManagerV3Sig   = "(Landroid/content/res/AssetManager;Ljava/lang/String;Ljava/lang/String;)V"
@@ -229,6 +230,7 @@ func Launch(ctx context.Context, opt LaunchOptions) error {
 	}()
 	files := storage.FilesDir
 	cache := storage.CacheDir
+	preferences := storage.PreferencesFile
 	assets := filepath.Join(dir, "assets")
 	obb := filepath.Join(dir, "obb")
 	for _, d := range []string{obb, filepath.Join(dir, "android")} {
@@ -319,7 +321,7 @@ func Launch(ctx context.Context, opt LaunchOptions) error {
 	if opt.Probe {
 		return nil
 	}
-	session, err := startGameActivity(ctx, vm, mod, aw, files, cache, obb, opt.Width, opt.Height)
+	session, err := startGameActivity(ctx, vm, mod, aw, files, cache, preferences, obb, opt.Width, opt.Height)
 	if err != nil {
 		return err
 	}
@@ -357,6 +359,14 @@ func Launch(ctx context.Context, opt LaunchOptions) error {
 		_ = win.StopBackgroundPump()
 		eglSurf.StopSwapThread()
 		session.shutdown(reason)
+		// The official terminateNativeCode join has completed, while the
+		// package-private path and process-wide client lock are still live.
+		// Treat the payload as opaque: flush file + containing directory only.
+		if err := syncPrivateOpaqueFile(preferences); err != nil {
+			logging.Logger(logging.CatFilesystem).Info("native preferences sync failed", "err", err)
+		} else {
+			logging.Logger(logging.CatFilesystem).Info("native preferences synchronized")
+		}
 	}
 	for {
 		select {
@@ -402,7 +412,7 @@ func installCrashDiagHandler() error {
 	return nil
 }
 
-func startGameActivity(ctx context.Context, vm *jni.VM, mod *loader.Module, aw *android.Window, files, cache, obb string, width, height int) (*gameActivitySession, error) {
+func startGameActivity(ctx context.Context, vm *jni.VM, mod *loader.Module, aw *android.Window, files, cache, preferences, obb string, width, height int) (*gameActivitySession, error) {
 	env := vm.Env()
 	activity := env.AllocObject(env.FindClass("com/roblox/client/startup/MainGameActivity"))
 	if activity == 0 {
@@ -430,7 +440,7 @@ func startGameActivity(ctx context.Context, vm *jni.VM, mod *loader.Module, aw *
 	wireRobloxDirectInput(mod, env)
 	wireRobloxDirectKey(mod, env)
 	wireRobloxTextInput(mod, env)
-	return dispatchGameActivityLifecycle(ctx, vm, mod, env, activity, uintptr(handle), files, cache, width, height, aw), nil
+	return dispatchGameActivityLifecycle(ctx, vm, mod, env, activity, uintptr(handle), files, cache, preferences, width, height, aw), nil
 }
 
 // deliverTextInputConnection ensures the Tipsy-owned InputConnection object
@@ -517,12 +527,13 @@ func wireRobloxTextInput(mod *loader.Module, env *jni.Env) {
 	jni.SetRobloxTextInputTarget(env, class, passFn, returnFn, syncFn, loader.CallP8)
 }
 
-func dispatchGameActivityLifecycle(ctx context.Context, vm *jni.VM, mod *loader.Module, env *jni.Env, activity, handle uintptr, files, cache string, width, height int, aw *android.Window) *gameActivitySession {
+func dispatchGameActivityLifecycle(ctx context.Context, vm *jni.VM, mod *loader.Module, env *jni.Env, activity, handle uintptr, files, cache, preferences string, width, height int, aw *android.Window) *gameActivitySession {
 	call := func(name, sig string, extra ...uintptr) {
 		callGameActivityNative(vm, env, activity, handle, name, sig, extra...)
 	}
 	call("onStartNative", "(J)V")
 	setRobloxCacheAndFiles(mod, env, activity, files, cache)
+	setRobloxPreferencesFile(mod, env, activity, preferences)
 	setRobloxAssetPath(mod, env, activity)
 	startRobloxApp(mod, env, activity, files)
 	call("onResumeNative", "(J)V")
@@ -709,6 +720,37 @@ func setRobloxCacheAndFiles(mod *loader.Module, env *jni.Env, activity uintptr, 
 	callRobloxJNI(mod, env.Raw(), activity, setCacheDirSym, env.NewStringUTF(cache))
 	callRobloxJNI(mod, env.Raw(), activity, setFilesDirSym, env.NewStringUTF(files))
 	initRobloxLocalStorageManager(mod, env, files, cache)
+}
+
+// setRobloxPreferencesFile supplies the one native persistence identity that
+// the official APK declares specifically for the engine-owned account/cookie
+// store. The payload and file format remain entirely Roblox-owned and opaque;
+// Tipsy supplies only a private, version-independent path and never logs it.
+func setRobloxPreferencesFile(mod *loader.Module, env *jni.Env, activity uintptr, path string) {
+	if mod == nil || env == nil || activity == 0 {
+		return
+	}
+	abs, err := filepath.Abs(path)
+	if err != nil || filepath.Base(abs) != robloxPreferencesName {
+		logging.Logger(logging.CatFilesystem).Info("native preferences unavailable")
+		return
+	}
+	if err := ensurePrivateDir(filepath.Dir(abs)); err != nil {
+		logging.Logger(logging.CatFilesystem).Info("native preferences unavailable", "err", err)
+		return
+	}
+	if err := securePrivateFileIfPresent(abs); err != nil {
+		logging.Logger(logging.CatFilesystem).Info("native preferences unavailable", "err", err)
+		return
+	}
+	fn, err := mod.Lookup(setPreferencesFileSym)
+	if err != nil || fn == 0 {
+		logging.Logger(logging.CatGameActivity).Info("missing JNI export", "sym", setPreferencesFileSym)
+		return
+	}
+	loader.CallP8(fn, env.Raw(), activity, env.NewStringUTF(abs), 0, 0, 0, 0, 0)
+	logging.Logger(logging.CatFilesystem).Info("native preferences configured",
+		"method", "NativeSettingsInterface.nativeSetPreferencesFile")
 }
 
 func initRobloxLocalStorageManager(mod *loader.Module, env *jni.Env, files, cache string) {

@@ -11,6 +11,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"github.com/tipsy-linux/tipsy/internal/config"
 	"github.com/tipsy-linux/tipsy/internal/logging"
@@ -18,6 +19,7 @@ import (
 
 const (
 	robloxPackageName      = "com.roblox.client"
+	robloxPreferencesName  = "rbx.prefs"
 	legacyMigrationMarker  = ".legacy-runtime-files-migrated-v1"
 	legacyMigrationVersion = "tipsy-app-storage-v1\n"
 )
@@ -27,10 +29,12 @@ const (
 // APK replacement. CacheDir is deliberately under XDG_CACHE_HOME and may be
 // discarded without losing the account session.
 type AppStorageLayout struct {
-	DataRoot  string
-	FilesDir  string
-	CacheRoot string
-	CacheDir  string
+	DataRoot        string
+	FilesDir        string
+	PreferencesDir  string
+	PreferencesFile string
+	CacheRoot       string
+	CacheDir        string
 }
 
 // AppStorage returns the stable, version-independent storage paths for the
@@ -40,10 +44,12 @@ func AppStorage() AppStorageLayout {
 	dataRoot := filepath.Join(p.DataDir, "app-data", robloxPackageName)
 	cacheRoot := filepath.Join(p.CacheDir, "app-data", robloxPackageName)
 	return AppStorageLayout{
-		DataRoot:  dataRoot,
-		FilesDir:  filepath.Join(dataRoot, "files"),
-		CacheRoot: cacheRoot,
-		CacheDir:  filepath.Join(cacheRoot, "cache"),
+		DataRoot:        dataRoot,
+		FilesDir:        filepath.Join(dataRoot, "files"),
+		PreferencesDir:  filepath.Join(dataRoot, "shared_prefs"),
+		PreferencesFile: filepath.Join(dataRoot, "shared_prefs", robloxPreferencesName),
+		CacheRoot:       cacheRoot,
+		CacheDir:        filepath.Join(cacheRoot, "cache"),
 	}
 }
 
@@ -70,10 +76,16 @@ func logAppStorageMigration(m appStorageMigration) {
 // parses, prints, or assigns meaning to session data.
 func prepareAppStorage(runtimeDir string) (AppStorageLayout, appStorageMigration, error) {
 	layout := AppStorage()
-	for _, dir := range []string{layout.DataRoot, layout.FilesDir, layout.CacheRoot, layout.CacheDir} {
+	for _, dir := range []string{layout.DataRoot, layout.FilesDir, layout.PreferencesDir, layout.CacheRoot, layout.CacheDir} {
 		if err := ensurePrivateDir(dir); err != nil {
 			return AppStorageLayout{}, appStorageMigration{}, fmt.Errorf("prepare private app storage: %w", err)
 		}
+	}
+	if err := cleanupInterruptedPrivateWrites(layout.PreferencesDir); err != nil {
+		return AppStorageLayout{}, appStorageMigration{}, fmt.Errorf("recover native preferences directory: %w", err)
+	}
+	if err := securePrivateFileIfPresent(layout.PreferencesFile); err != nil {
+		return AppStorageLayout{}, appStorageMigration{}, fmt.Errorf("secure native preferences file: %w", err)
 	}
 	if err := hardenPrivateTree(layout.FilesDir); err != nil {
 		return AppStorageLayout{}, appStorageMigration{}, fmt.Errorf("secure persistent FilesDir: %w", err)
@@ -85,6 +97,82 @@ func prepareAppStorage(runtimeDir string) (AppStorageLayout, appStorageMigration
 		return AppStorageLayout{}, result, fmt.Errorf("migrate legacy FilesDir: %w", err)
 	}
 	return layout, result, nil
+}
+
+// cleanupInterruptedPrivateWrites removes only Tipsy's own atomic-write
+// staging names. A crash can leave one behind, but rename guarantees the
+// official primary file remains either the old complete generation or the new
+// complete generation. The process-wide client lock excludes a live writer.
+func cleanupInterruptedPrivateWrites(dir string) error {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return err
+	}
+	removed := false
+	for _, entry := range entries {
+		if !strings.HasPrefix(entry.Name(), ".tipsy-atomic-") {
+			continue
+		}
+		path := filepath.Join(dir, entry.Name())
+		info, err := os.Lstat(path)
+		if err != nil {
+			return err
+		}
+		if info.IsDir() {
+			return fmt.Errorf("interrupted private write staging entry is a directory")
+		}
+		if err := os.Remove(path); err != nil {
+			return err
+		}
+		removed = true
+	}
+	if removed {
+		return syncDirectory(dir)
+	}
+	return nil
+}
+
+// securePrivateFileIfPresent validates and tightens the official client's
+// opaque native-preferences file without opening or interpreting its payload.
+// The file is allowed not to exist on a first launch: libroblox creates it
+// after nativeSetPreferencesFile supplies the APK-declared path.
+func securePrivateFileIfPresent(path string) error {
+	st, err := os.Lstat(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	if st.Mode()&os.ModeSymlink != 0 || !st.Mode().IsRegular() {
+		return fmt.Errorf("native preferences path is not a regular file")
+	}
+	return os.Chmod(path, 0o600)
+}
+
+// syncPrivateOpaqueFile establishes the graceful-close durability boundary
+// after Roblox's lifecycle callbacks have returned. It never reads the file,
+// and therefore cannot expose or make assumptions about account state. The
+// process-wide client lock serializes it against other Tipsy launches.
+func syncPrivateOpaqueFile(path string) error {
+	if err := securePrivateFileIfPresent(path); err != nil {
+		return err
+	}
+	f, err := os.OpenFile(path, os.O_RDONLY, 0)
+	if errors.Is(err, os.ErrNotExist) {
+		return syncDirectory(filepath.Dir(path))
+	}
+	if err != nil {
+		return err
+	}
+	if err := f.Sync(); err != nil {
+		f.Close()
+		return err
+	}
+	if err := f.Close(); err != nil {
+		return err
+	}
+	return syncDirectory(filepath.Dir(path))
 }
 
 func migrateLegacyFiles(source, dataRoot, filesDir string) (appStorageMigration, error) {

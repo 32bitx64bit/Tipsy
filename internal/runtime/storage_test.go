@@ -5,6 +5,7 @@ package runtime
 
 import (
 	"bytes"
+	"errors"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -29,16 +30,123 @@ func TestAppStorageUsesStableSeparateXDGRoots(t *testing.T) {
 	if got.FilesDir != filepath.Join(got.DataRoot, "files") {
 		t.Fatalf("FilesDir=%q", got.FilesDir)
 	}
+	if got.PreferencesDir != filepath.Join(got.DataRoot, "shared_prefs") {
+		t.Fatalf("PreferencesDir=%q", got.PreferencesDir)
+	}
+	if got.PreferencesFile != filepath.Join(got.PreferencesDir, robloxPreferencesName) {
+		t.Fatalf("PreferencesFile=%q", got.PreferencesFile)
+	}
 	if want := filepath.Join(root, "cache", "tipsy", "app-data", robloxPackageName); got.CacheRoot != want {
 		t.Fatalf("CacheRoot=%q want %q", got.CacheRoot, want)
 	}
 	if got.CacheDir != filepath.Join(got.CacheRoot, "cache") {
 		t.Fatalf("CacheDir=%q", got.CacheDir)
 	}
-	for _, p := range []string{got.DataRoot, got.FilesDir, got.CacheRoot, got.CacheDir} {
+	for _, p := range []string{got.DataRoot, got.FilesDir, got.PreferencesDir, got.PreferencesFile, got.CacheRoot, got.CacheDir} {
 		if strings.Contains(p, "runtime") {
 			t.Fatalf("app storage is coupled to replaceable runtime: %q", p)
 		}
+	}
+}
+
+func TestPrepareAppStoragePreservesOpaquePreferencesAcrossRestartAndUpdate(t *testing.T) {
+	setStorageXDG(t)
+	firstRuntime := filepath.Join(t.TempDir(), "runtime-v1")
+	layout, _, err := prepareAppStorage(firstRuntime)
+	if err != nil {
+		t.Fatal(err)
+	}
+	opaque := []byte{0x00, 0xff, 0x81, '{', 'n', 'o', 't', '-', 'a', '-', 'f', 'o', 'r', 'm', 'a', 't', '}'}
+	if err := writePrivateFileAtomic(layout.PreferencesFile, opaque); err != nil {
+		t.Fatal(err)
+	}
+
+	// Process recreation and a differently versioned/replaced runtime both
+	// resolve to the same package-owned preference file. Its bytes remain
+	// opaque and untouched.
+	for _, runtimeDir := range []string{firstRuntime, filepath.Join(t.TempDir(), "runtime-v2")} {
+		got, _, err := prepareAppStorage(runtimeDir)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got.PreferencesFile != layout.PreferencesFile {
+			t.Fatalf("preference path changed across recreation/update")
+		}
+		body, err := os.ReadFile(got.PreferencesFile)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !bytes.Equal(body, opaque) {
+			t.Fatal("opaque preference payload changed")
+		}
+	}
+	assertMode(t, layout.PreferencesDir, 0o700)
+	assertMode(t, layout.PreferencesFile, 0o600)
+}
+
+func TestPrepareAppStorageRejectsPreferenceSymlink(t *testing.T) {
+	setStorageXDG(t)
+	layout := AppStorage()
+	if err := os.MkdirAll(layout.PreferencesDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	outside := filepath.Join(t.TempDir(), "outside")
+	if err := os.WriteFile(outside, []byte("opaque"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(outside, layout.PreferencesFile); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := prepareAppStorage(filepath.Join(t.TempDir(), "runtime")); err == nil || !strings.Contains(err.Error(), "preferences") {
+		t.Fatalf("preference symlink accepted: %v", err)
+	}
+}
+
+func TestSyncPrivateOpaqueFileHandlesAbsentAndCorruptBytes(t *testing.T) {
+	setStorageXDG(t)
+	layout, _, err := prepareAppStorage(filepath.Join(t.TempDir(), "runtime"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := syncPrivateOpaqueFile(layout.PreferencesFile); err != nil {
+		t.Fatalf("absent file sync: %v", err)
+	}
+	opaque := []byte{0xff, 0x00, 0xfe, 0x01}
+	if err := os.WriteFile(layout.PreferencesFile, opaque, 0o666); err != nil {
+		t.Fatal(err)
+	}
+	if err := syncPrivateOpaqueFile(layout.PreferencesFile); err != nil {
+		t.Fatal(err)
+	}
+	if body, err := os.ReadFile(layout.PreferencesFile); err != nil || !bytes.Equal(body, opaque) {
+		t.Fatalf("opaque file changed: err=%v", err)
+	}
+	assertMode(t, layout.PreferencesFile, 0o600)
+}
+
+func TestPrepareAppStorageRecoversInterruptedAtomicPreferenceWrite(t *testing.T) {
+	setStorageXDG(t)
+	layout, _, err := prepareAppStorage(filepath.Join(t.TempDir(), "runtime"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	complete := []byte{0x10, 0x20, 0x30, 0x40}
+	if err := writePrivateFileAtomic(layout.PreferencesFile, complete); err != nil {
+		t.Fatal(err)
+	}
+	staging := filepath.Join(layout.PreferencesDir, ".tipsy-atomic-interrupted")
+	if err := os.WriteFile(staging, []byte{0xde, 0xad}, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, _, err := prepareAppStorage(filepath.Join(t.TempDir(), "runtime-replaced")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Lstat(staging); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("interrupted staging file remains: %v", err)
+	}
+	if body, err := os.ReadFile(layout.PreferencesFile); err != nil || !bytes.Equal(body, complete) {
+		t.Fatalf("last complete generation changed: err=%v", err)
 	}
 }
 
