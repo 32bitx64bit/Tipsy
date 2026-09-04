@@ -6,7 +6,7 @@
 package android
 
 /*
-#cgo LDFLAGS: -ldl
+#cgo LDFLAGS: -ldl -lpulse-simple -lpulse
 #cgo CFLAGS: -D_GNU_SOURCE
 #include "android_bridge.h"
 #include <stdlib.h>
@@ -163,6 +163,39 @@ func pollOnce(timeoutMs int) int {
 
 func condWaitPollsLooper() int {
 	return int(C.tipsy_test_cond_wait_polls_looper())
+}
+
+func audioTestPlayback(rate, channels, bytes uint32) (uint64, uint32, int) {
+	var written C.uint64_t
+	var callbacks C.uint32_t
+	rc := C.tipsy_audio_test_playback(C.uint32_t(rate), C.uint32_t(channels), C.uint32_t(bytes), &written, &callbacks)
+	return uint64(written), uint32(callbacks), int(rc)
+}
+
+func audioTestCapture(rate, channels, bytes uint32) (uint64, uint32, int) {
+	var read C.uint64_t
+	var callbacks C.uint32_t
+	rc := C.tipsy_audio_test_capture(C.uint32_t(rate), C.uint32_t(channels), C.uint32_t(bytes), &read, &callbacks)
+	return uint64(read), uint32(callbacks), int(rc)
+}
+
+func audioTestInvalidFormat() int {
+	return int(C.tipsy_audio_test_invalid_format())
+}
+
+func audioTestRetry() (uint32, uint32, uint32, int) {
+	var opens C.uint32_t
+	var writes C.uint32_t
+	var callbacks C.uint32_t
+	rc := C.tipsy_audio_test_retry(&opens, &writes, &callbacks)
+	return uint32(opens), uint32(writes), uint32(callbacks), int(rc)
+}
+
+func audioTestHostPlayback(rate, channels, bytes uint32) (uint64, uint32, int) {
+	var written C.uint64_t
+	var callbacks C.uint32_t
+	rc := C.tipsy_audio_test_host_playback(C.uint32_t(rate), C.uint32_t(channels), C.uint32_t(bytes), &written, &callbacks)
+	return uint64(written), uint32(callbacks), int(rc)
 }
 
 func soname(lib string) string {

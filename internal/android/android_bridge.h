@@ -151,6 +151,17 @@ void tipsy_dlhandle_free(void *handle);
 void tipsy_register_image(uintptr_t load_bias, const char *name);
 int tipsy_dl_iterate_count(void);
 
+/* OpenSL ES host bridge test probes. These exercise the same public interface
+ * vtables used by the client while selecting a deterministic in-memory host. */
+int tipsy_audio_test_playback(uint32_t rate, uint32_t channels, uint32_t bytes,
+                              uint64_t *written, uint32_t *callbacks);
+int tipsy_audio_test_capture(uint32_t rate, uint32_t channels, uint32_t bytes,
+                             uint64_t *read_bytes, uint32_t *callbacks);
+int tipsy_audio_test_invalid_format(void);
+int tipsy_audio_test_retry(uint32_t *opens, uint32_t *writes, uint32_t *callbacks);
+int tipsy_audio_test_host_playback(uint32_t rate, uint32_t channels, uint32_t bytes,
+                                   uint64_t *written, uint32_t *callbacks);
+
 #ifdef __cplusplus
 }
 #endif

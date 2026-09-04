@@ -1,7 +1,8 @@
 /* Copyright 2026 The Tipsy Authors
  * SPDX-License-Identifier: GPL-3.0-or-later
  *
- * Stubs for libmediandk, libOpenSLES, libOpenMAXAL, libjnigraphics.
+ * Stubs for libmediandk, libOpenMAXAL, and libjnigraphics. OpenSL ES lives
+ * in opensles.c because it has a real host-audio bridge.
  * Relocations succeed; calls log and return NULL / error codes.
  */
 #include "android_bridge.h"
@@ -269,53 +270,16 @@ const char *AMEDIAFORMAT_KEY_STRIDE = "stride";
 const char *AMEDIAFORMAT_KEY_SLICE_HEIGHT = "slice-height";
 const char *AMEDIAFORMAT_KEY_ROTATION = "rotation-degrees";
 
-static uint32_t sl_iid_engine[4] = { 1, 0, 0, 0 };
-static uint32_t sl_iid_play[4] = { 2, 0, 0, 0 };
-static uint32_t sl_iid_bufferqueue[4] = { 3, 0, 0, 0 };
-static uint32_t sl_iid_volume[4] = { 4, 0, 0, 0 };
-static uint32_t sl_iid_outputmix[4] = { 5, 0, 0, 0 };
-static uint32_t sl_iid_androidconfig[4] = { 6, 0, 0, 0 };
-static uint32_t sl_iid_androidsimplebufferqueue[4] = { 7, 0, 0, 0 };
-static uint32_t sl_iid_record[4] = { 8, 0, 0, 0 };
-static uint32_t sl_iid_seek[4] = { 9, 0, 0, 0 };
-static uint32_t sl_iid_prefetch[4] = { 10, 0, 0, 0 };
-static uint32_t sl_iid_androidbufferqueue[4] = { 11, 0, 0, 0 };
 static uint32_t xa_iid_engine[4] = { 101, 0, 0, 0 };
 static uint32_t xa_iid_play[4] = { 102, 0, 0, 0 };
 static uint32_t xa_iid_outputmix[4] = { 103, 0, 0, 0 };
 
-const void *SL_IID_ENGINE = sl_iid_engine;
-const void *SL_IID_PLAY = sl_iid_play;
-const void *SL_IID_BUFFERQUEUE = sl_iid_bufferqueue;
-const void *SL_IID_VOLUME = sl_iid_volume;
-const void *SL_IID_OUTPUTMIX = sl_iid_outputmix;
-const void *SL_IID_ANDROIDCONFIGURATION = sl_iid_androidconfig;
-const void *SL_IID_ANDROIDSIMPLEBUFFERQUEUE = sl_iid_androidsimplebufferqueue;
-const void *SL_IID_RECORD = sl_iid_record;
-const void *SL_IID_SEEK = sl_iid_seek;
-const void *SL_IID_PREFETCHSTATUS = sl_iid_prefetch;
-const void *SL_IID_ANDROIDBUFFERQUEUESOURCE = sl_iid_androidbufferqueue;
 const void *XA_IID_ENGINE = xa_iid_engine;
 const void *XA_IID_PLAY = xa_iid_play;
 const void *XA_IID_OUTPUTMIX = xa_iid_outputmix;
 
 /* SL_RESULT_FEATURE_UNSUPPORTED = 0x0000000C, SL_RESULT_RESOURCE_ERROR = 0x00000009 */
 #define SL_RESULT_FEATURE_UNSUPPORTED ((uint32_t)0x0000000C)
-
-uint32_t tipsy_slCreateEngine(void *pEngine, uint32_t numOptions, const void *pEngineOptions,
-			      uint32_t numInterfaces, const void *pInterfaceIds, const void *pInterfaceRequired)
-{
-	(void)numOptions;
-	(void)pEngineOptions;
-	(void)numInterfaces;
-	(void)pInterfaceIds;
-	(void)pInterfaceRequired;
-	GoAndroid_LogMissing("slCreateEngine");
-	if (pEngine != NULL) {
-		*(void **)pEngine = NULL;
-	}
-	return SL_RESULT_FEATURE_UNSUPPORTED;
-}
 
 uint32_t tipsy_xaCreateEngine(void *pEngine, uint32_t numOptions, const void *pEngineOptions,
 			      uint32_t numInterfaces, const void *pInterfaceIds, const void *pInterfaceRequired)

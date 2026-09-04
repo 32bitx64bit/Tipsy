@@ -168,7 +168,6 @@ func TestDiagnoseUnimplemented(t *testing.T) {
 	}{
 		{"x11", "9"},
 		{"graphics", "10"},
-		{"audio", "15"},
 		{"jni", "6"},
 		{"loader", "4"},
 		{"roblox", "11"},
@@ -189,6 +188,20 @@ func TestDiagnoseUnimplemented(t *testing.T) {
 				t.Fatalf("format missing status:\n%s", text)
 			}
 		})
+	}
+}
+
+func TestDiagnoseAudioBridge(t *testing.T) {
+	t.Setenv("TIPSY_DISABLE_MICROPHONE", "true")
+	r := Diagnose(context.Background(), "audio")
+	if r.Status != "ready" || r.Milestone != "15" {
+		t.Fatalf("audio status=%q milestone=%q", r.Status, r.Milestone)
+	}
+	text := FormatSubsystem(r)
+	for _, want := range []string{"OpenSL ES", "PulseAudio", "disabled by TIPSY_DISABLE_MICROPHONE"} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("audio diagnostics missing %q:\n%s", want, text)
+		}
 	}
 }
 

@@ -49,6 +49,11 @@ func GoAndroid_LogMissing(name *C.char) {
 	androidLog().Error("[android] missing native symbol: " + n)
 }
 
+//export GoAndroid_LogAudio
+func GoAndroid_LogAudio(event, detail *C.char) {
+	logging.Logger(logging.CatAudio).Info("[audio] "+C.GoString(event), "detail", C.GoString(detail))
+}
+
 //export GoAndroid_AbortMessage
 func GoAndroid_AbortMessage(msg *C.char) {
 	androidLog().Error("[android] abort message: " + C.GoString(msg))

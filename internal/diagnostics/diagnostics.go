@@ -176,15 +176,23 @@ func Diagnose(ctx context.Context, subsystem string) *SubsystemReport {
 		}
 	case "audio":
 		a := probeAudio()
+		mic := "opens on demand when Roblox starts recording"
+		if disabled, _ := strconv.ParseBool(os.Getenv("TIPSY_DISABLE_MICROPHONE")); disabled {
+			mic = "disabled by TIPSY_DISABLE_MICROPHONE"
+		}
 		return &SubsystemReport{
 			Subsystem: "audio",
-			Status:    "not implemented yet (milestone 15)",
+			Status:    "ready",
 			Milestone: "15",
 			Facts: []string{
+				"Client API: OpenSL ES buffer queues",
+				"Host bridge: PulseAudio / PipeWire Pulse server",
+				"Playback: asynchronous worker with reconnect",
+				"Microphone: " + mic,
 				"PipeWire: " + a.PipeWire,
 				"Pulse: " + a.Pulse,
 			},
-			Message: "AAudio/OpenSL ES → PipeWire/Pulse is not implemented yet (needed by milestone 15).",
+			Message: "OpenSL ES playback and capture are bridged to the host. Device access is verified when Roblox starts a stream.",
 		}
 	case "jni":
 		return &SubsystemReport{
