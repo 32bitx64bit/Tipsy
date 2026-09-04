@@ -293,7 +293,8 @@ func TestGameActivityInputTargetWiring(t *testing.T) {
 // TestPlatformParamsMatchesPointerDeviceMode pins the coherence contract:
 // PlatformParams must present exactly the pointer identity the input
 // dispatchers present — isTouchDevice == isMouseDevice's negation, driven
-// by the same source of truth (TIPSY_INPUT_DEVICE).
+// by the same source of truth (TIPSY_INPUT_DEVICE). X11 defaults to mouse;
+// touch remains an explicit Android-identity A/B control.
 func TestPlatformParamsMatchesPointerDeviceMode(t *testing.T) {
 	vm, err := jni.NewVM()
 	if err != nil {
@@ -314,26 +315,24 @@ func TestPlatformParamsMatchesPointerDeviceMode(t *testing.T) {
 		}
 	}
 
-	t.Run("default-touch", func(t *testing.T) {
-		t.Cleanup(jni.ResetPointerDeviceMode)
-		jni.ResetPointerDeviceMode()
-		if os.Getenv("TIPSY_INPUT_DEVICE") == "mouse" {
-			t.Skip("TIPSY_INPUT_DEVICE=mouse selects the legacy identity")
-		}
-		if !jni.PointerDeviceIsTouch() {
-			t.Fatal("default device mode is not touch")
-		}
-		check(t, true)
-	})
-
-	t.Run("mouse-gate", func(t *testing.T) {
-		t.Setenv("TIPSY_INPUT_DEVICE", "mouse")
+	t.Run("default-mouse", func(t *testing.T) {
+		t.Setenv("TIPSY_INPUT_DEVICE", "")
 		t.Cleanup(jni.ResetPointerDeviceMode)
 		jni.ResetPointerDeviceMode()
 		if jni.PointerDeviceIsTouch() {
-			t.Fatal("TIPSY_INPUT_DEVICE=mouse did not select the mouse identity")
+			t.Fatal("default device mode is not mouse")
 		}
 		check(t, false)
+	})
+
+	t.Run("touch-gate", func(t *testing.T) {
+		t.Setenv("TIPSY_INPUT_DEVICE", "touch")
+		t.Cleanup(jni.ResetPointerDeviceMode)
+		jni.ResetPointerDeviceMode()
+		if !jni.PointerDeviceIsTouch() {
+			t.Fatal("TIPSY_INPUT_DEVICE=touch did not select the touch identity")
+		}
+		check(t, true)
 	})
 }
 

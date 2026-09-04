@@ -7,7 +7,6 @@ package jni
 
 import (
 	"math"
-	"os"
 	"testing"
 	"time"
 
@@ -163,6 +162,7 @@ func TestGetAxisValueAndroidArgumentOrder(t *testing.T) {
 // pinned by TestGetAxisValueAndroidArgumentOrder; this pins the bridge hop
 // in front of it (ev.X→x, ev.Y→y must not swap) and the unmapped-key guard.
 func TestX11BridgeKeepsXYDistinct(t *testing.T) {
+	selectPointerPath(t, "gameactivity")
 	vm := inputTestVM(t, map[string]uintptr{
 		methodLogName(gameActivityClass, "onTouchEventNative", "(JLandroid/view/MotionEvent;IIIIIJJIIIIIIFF)Z"): testRecordTouchFn(),
 	})
@@ -619,18 +619,16 @@ func TestKeyGestureDownTimeSemantics(t *testing.T) {
 	}
 }
 
-// TestPointerDeviceTouchIdentity pins the default coherent touch identity
+// TestPointerDeviceTouchIdentity pins the explicit coherent touch identity
 // against the public Android constants: SOURCE_TOUCHSCREEN (0x1002) +
 // TOOL_TYPE_FINGER (1) on every MotionEvent, with the KeyEvent stream
 // untouched (SOURCE_KEYBOARD).
 func TestPointerDeviceTouchIdentity(t *testing.T) {
+	t.Setenv("TIPSY_INPUT_DEVICE", "touch")
 	t.Cleanup(ResetPointerDeviceMode)
 	ResetPointerDeviceMode()
-	if os.Getenv("TIPSY_INPUT_DEVICE") == "mouse" {
-		t.Skip("TIPSY_INPUT_DEVICE=mouse selects the legacy identity")
-	}
 	if !PointerDeviceIsTouch() {
-		t.Fatal("default device mode is not touch")
+		t.Fatal("TIPSY_INPUT_DEVICE=touch did not select the touch identity")
 	}
 	vm, err := NewVM()
 	if err != nil {
@@ -655,17 +653,16 @@ func TestPointerDeviceTouchIdentity(t *testing.T) {
 }
 
 // TestTouchModeCoherentDelivery drives the production x11→GameActivity
-// bridge in the default touch mode: a real left DOWN/UP and its drag MOVE
+// bridge in explicit touch mode: a real left DOWN/UP and its drag MOVE
 // arrive as SOURCE_TOUCHSCREEN/TOOL_TYPE_FINGER with buttonState 0 (touch
 // events carry no mouse buttons) and gesture-paired downTimes; a real
 // right-button press has no honest touch identity and is dropped; a MOVE
 // without an open gesture is dropped.
 func TestTouchModeCoherentDelivery(t *testing.T) {
+	selectPointerPath(t, "gameactivity")
+	t.Setenv("TIPSY_INPUT_DEVICE", "touch")
 	t.Cleanup(ResetPointerDeviceMode)
 	ResetPointerDeviceMode()
-	if os.Getenv("TIPSY_INPUT_DEVICE") == "mouse" {
-		t.Skip("TIPSY_INPUT_DEVICE=mouse selects the legacy identity")
-	}
 	vm := inputTestVM(t, map[string]uintptr{
 		methodLogName(gameActivityClass, "onTouchEventNative", "(JLandroid/view/MotionEvent;IIIIIJJIIIIIIFF)Z"): testRecordTouchFn(),
 	})
@@ -719,16 +716,17 @@ func TestTouchModeCoherentDelivery(t *testing.T) {
 	}
 }
 
-// TestPointerDeviceMouseIdentity pins the A/B gate: TIPSY_INPUT_DEVICE=mouse
-// restores the legacy desktop identity end to end — SOURCE_MOUSE (0x2002) +
+// TestPointerDeviceMouseIdentity pins the default desktop identity end to end
+// — SOURCE_MOUSE (0x2002) +
 // TOOL_TYPE_MOUSE (3), right-button delivery, and BUTTON_PRIMARY-derived
 // buttonState on the primitives.
 func TestPointerDeviceMouseIdentity(t *testing.T) {
-	t.Setenv("TIPSY_INPUT_DEVICE", "mouse")
+	selectPointerPath(t, "gameactivity")
+	t.Setenv("TIPSY_INPUT_DEVICE", "")
 	t.Cleanup(ResetPointerDeviceMode)
 	ResetPointerDeviceMode()
 	if PointerDeviceIsTouch() {
-		t.Fatal("TIPSY_INPUT_DEVICE=mouse did not select the mouse identity")
+		t.Fatal("default device mode is not mouse")
 	}
 	vm := inputTestVM(t, map[string]uintptr{
 		methodLogName(gameActivityClass, "onTouchEventNative", "(JLandroid/view/MotionEvent;IIIIIJJIIIIIIFF)Z"): testRecordTouchFn(),

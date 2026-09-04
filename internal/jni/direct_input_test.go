@@ -286,10 +286,11 @@ func TestPointerDeliveryPathGate(t *testing.T) {
 		wantGA     uint64
 		wantDirect uint64
 	}{
-		{name: "default gameactivity control", path: "", wantGA: 2, wantDirect: 0},
+		{name: "default direct desktop path", path: "", wantGA: 0, wantDirect: 2},
 		{name: "direct only", path: "direct", wantGA: 0, wantDirect: 2},
+		{name: "gameactivity is an explicit control", path: "gameactivity", wantGA: 2, wantDirect: 0},
 		{name: "both explicit", path: "both", wantGA: 2, wantDirect: 2},
-		{name: "unknown is safe control", path: "not-a-mode", wantGA: 2, wantDirect: 0},
+		{name: "unknown falls back to production default", path: "not-a-mode", wantGA: 0, wantDirect: 2},
 	}
 
 	for _, tc := range tests {

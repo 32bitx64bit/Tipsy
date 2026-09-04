@@ -113,6 +113,7 @@ import "C"
 import (
 	"fmt"
 	"os"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -164,13 +165,12 @@ const (
 // source/toolType, touch primitives, and PlatformParams) so the engine
 // sees exactly one coherent device, never a mix:
 //
-//   - touch (default): SOURCE_TOUCHSCREEN (0x1002) + TOOL_TYPE_FINGER (1)
-//     and PlatformParams.isTouchDevice=true — the identity the official
-//     Android phone client presents, and the only identity the APK itself
-//     declares (manifest uses-feature android.hardware.touchscreen).
-//   - mouse (TIPSY_INPUT_DEVICE=mouse): the legacy desktop identity
+//   - mouse (default): the native desktop identity
 //     SOURCE_MOUSE (0x2002) + TOOL_TYPE_MOUSE (3) +
-//     PlatformParams.isMouseDevice=true, kept verbatim as an A/B gate.
+//     PlatformParams.isMouseDevice=true.
+//   - touch (TIPSY_INPUT_DEVICE=touch): SOURCE_TOUCHSCREEN (0x1002) +
+//     TOOL_TYPE_FINGER (1) and PlatformParams.isTouchDevice=true — the
+//     official Android phone identity, retained as an explicit A/B control.
 var pointerDevice struct {
 	sync.Once
 	touch bool
@@ -178,7 +178,7 @@ var pointerDevice struct {
 
 func pointerDeviceIsTouch() bool {
 	pointerDevice.Do(func() {
-		pointerDevice.touch = os.Getenv("TIPSY_INPUT_DEVICE") != "mouse"
+		pointerDevice.touch = strings.EqualFold(strings.TrimSpace(os.Getenv("TIPSY_INPUT_DEVICE")), "touch")
 	})
 	return pointerDevice.touch
 }
@@ -213,8 +213,8 @@ func ResetPointerDeviceMode() { pointerDevice.Once = sync.Once{} }
 
 // newMotionEventLocked builds a single-pointer MotionEvent object whose
 // getters (dispatchInput) answer from real X11 pointer data, carrying the
-// selected device identity (touch finger by default, mouse behind the
-// TIPSY_INPUT_DEVICE=mouse gate).
+// selected device identity (desktop mouse by default, touch finger behind the
+// TIPSY_INPUT_DEVICE=touch gate).
 func (vm *VM) newMotionEventLocked(action int32, x, y float32, downTime, eventTime int64) *Object {
 	cls := vm.ensureClassLocked(motionEventClass)
 	o := vm.newObjectLocked(cls)

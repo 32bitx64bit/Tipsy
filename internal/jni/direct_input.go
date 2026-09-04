@@ -114,8 +114,9 @@ import (
 )
 
 // PointerDeliveryPath selects which descriptor-proven pointer surface receives
-// each real X11 event. The default stays on the pre-existing GameActivity
-// control until live A/B evidence justifies promoting the direct APK path.
+// each real X11 event. The desktop default is the APK's final direct Roblox
+// listener: it accepts ordinary mouse hover as well as button edges. The
+// GameActivity touch listener remains available as an explicit A/B control.
 type PointerDeliveryPath uint8
 
 const (
@@ -143,12 +144,12 @@ var pointerPath struct {
 func pointerDeliveryPath() PointerDeliveryPath {
 	pointerPath.Do(func() {
 		switch strings.ToLower(strings.TrimSpace(os.Getenv("TIPSY_INPUT_PATH"))) {
-		case "direct":
-			pointerPath.value = PointerPathDirect
+		case "gameactivity":
+			pointerPath.value = PointerPathGameActivity
 		case "both":
 			pointerPath.value = PointerPathBoth
 		default:
-			pointerPath.value = PointerPathGameActivity
+			pointerPath.value = PointerPathDirect
 		}
 	})
 	return pointerPath.value
@@ -161,7 +162,7 @@ func PointerInputPath() PointerDeliveryPath { return pointerDeliveryPath() }
 // It is a test seam; production never changes paths within a process.
 func ResetPointerInputPath() {
 	pointerPath.Once = sync.Once{}
-	pointerPath.value = PointerPathGameActivity
+	pointerPath.value = PointerPathDirect
 }
 
 // KeyboardDeliveryPath selects the event family for physical keyboard input.
@@ -226,7 +227,7 @@ func KeyboardInputPath() KeyboardDeliveryPath { return keyboardDeliveryPath() }
 // It is a test seam; production never changes paths within a process.
 func ResetKeyboardInputPath() {
 	keyboardPath.Once = sync.Once{}
-	keyboardPath.value = KeyboardPathGameActivity
+	keyboardPath.value = KeyboardPathDirect
 }
 
 // The direct input target is the exact JNI static-native identity from the APK:
