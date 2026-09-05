@@ -30,6 +30,26 @@ func TestGameActivityCommandConstants(t *testing.T) {
 	}
 }
 
+func TestStutterDiagnosticsRequiresExactOptIn(t *testing.T) {
+	for _, value := range []string{"", "0", "true", "yes", "2"} {
+		value := value
+		if stutterDiagnosticsRequested(func(string) string { return value }) {
+			t.Errorf("value %q enabled diagnostics", value)
+		}
+	}
+	if !stutterDiagnosticsRequested(func(name string) string {
+		if name != "TIPSY_STUTTER_DIAG" {
+			t.Fatalf("queried unexpected environment key %q", name)
+		}
+		return "1"
+	}) {
+		t.Fatal("exact value 1 did not enable diagnostics")
+	}
+	if stutterDiagnosticsRequested(nil) {
+		t.Fatal("nil environment reader enabled diagnostics")
+	}
+}
+
 func TestInputDispatchInterval(t *testing.T) {
 	// The launch loop waits on Window.InputReady rather than a 4ms Pump ticker.
 	// Size() cannot change without InputResize on this X11 backend

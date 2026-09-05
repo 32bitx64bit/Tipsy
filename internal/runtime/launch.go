@@ -54,6 +54,76 @@ type gameActivitySession struct {
 
 const gracefulShutdownDeadline = 2 * time.Second
 
+func stutterDiagnosticsRequested(getenv func(string) string) bool {
+	return getenv != nil && getenv("TIPSY_STUTTER_DIAG") == "1"
+}
+
+// Present timing can run without the synchronization wrappers so millions of
+// guest mutex calls cannot perturb a frame-timing control capture.
+func vulkanPresentTimingRequested(getenv func(string) string) bool {
+	return getenv != nil && (getenv("TIPSY_PRESENT_TIMING") == "1" || stutterDiagnosticsRequested(getenv))
+}
+
+func logVulkanPresentTiming(batch android.VulkanPresentTimingBatch) {
+	if len(batch.Samples) == 0 && batch.Overwritten == 0 {
+		return
+	}
+	timestamps := make([]uint64, len(batch.Samples))
+	for i, sample := range batch.Samples {
+		timestamps[i] = sample.MonotonicNS
+	}
+	logging.Logger(logging.CatGraphics).Info("Vulkan present timing",
+		"cursor", batch.Cursor, "overwritten", batch.Overwritten,
+		"monotonicNS", timestamps)
+}
+
+func logStutterDiagnostics(wait android.StutterWaitStats, calls jni.JNIStutterStats, bionic android.BionicSyncStats) {
+	workerMutex := bionic.Path(android.BionicSyncThreadRBXWorker, android.BionicSyncModuleRoblox, android.BionicSyncMutexLock)
+	workerTryMutex := bionic.Path(android.BionicSyncThreadRBXWorker, android.BionicSyncModuleRoblox, android.BionicSyncMutexTryLock)
+	workerTimedMutex := bionic.Path(android.BionicSyncThreadRBXWorker, android.BionicSyncModuleRoblox, android.BionicSyncMutexTimedLock)
+	workerUnlock := bionic.Path(android.BionicSyncThreadRBXWorker, android.BionicSyncModuleRoblox, android.BionicSyncMutexUnlock)
+	workerSignal := bionic.Path(android.BionicSyncThreadRBXWorker, android.BionicSyncModuleRoblox, android.BionicSyncCondSignal)
+	workerBroadcast := bionic.Path(android.BionicSyncThreadRBXWorker, android.BionicSyncModuleRoblox, android.BionicSyncCondBroadcast)
+	workerYield := bionic.Path(android.BionicSyncThreadRBXWorker, android.BionicSyncModuleRoblox, android.BionicSyncSchedYield)
+	workerAffinity := bionic.Path(android.BionicSyncThreadRBXWorker, android.BionicSyncModuleRoblox, android.BionicSyncPthreadSetAffinity)
+	mainMutex := bionic.Path(android.BionicSyncThreadMain, android.BionicSyncModuleRoblox, android.BionicSyncMutexLock)
+	logging.Logger(logging.CatRuntime).Info("shared-wait diagnostic aggregate",
+		"condCalls", wait.Cond.Calls, "condSlices", wait.Cond.Slices,
+		"condSamples", wait.Cond.Samples, "condSampled", wait.Cond.SampledDuration,
+		"condMax", wait.Cond.MaxDuration,
+		"timedCondCalls", wait.TimedCond.Calls, "timedCondSlices", wait.TimedCond.Slices,
+		"timedCondSamples", wait.TimedCond.Samples, "timedCondSampled", wait.TimedCond.SampledDuration,
+		"timedCondMax", wait.TimedCond.MaxDuration,
+		"futexPumpCalls", wait.FutexPump.Calls, "futexPumpSlices", wait.FutexPump.Slices,
+		"futexPumpSamples", wait.FutexPump.Samples, "futexPumpSampled", wait.FutexPump.SampledDuration,
+		"futexPumpMax", wait.FutexPump.MaxDuration,
+		"jniWorkerInstance", calls.Calls[jni.JNIThreadRBXWorker][jni.JNICALLInstance],
+		"jniWorkerStatic", calls.Calls[jni.JNIThreadRBXWorker][jni.JNICALLStatic],
+		"jniWorkerNonvirtual", calls.Calls[jni.JNIThreadRBXWorker][jni.JNICALLNonvirtual],
+		"jniMainInstance", calls.Calls[jni.JNIThreadMain][jni.JNICALLInstance],
+		"jniMainStatic", calls.Calls[jni.JNIThreadMain][jni.JNICALLStatic],
+		"jniMainNonvirtual", calls.Calls[jni.JNIThreadMain][jni.JNICALLNonvirtual],
+		"jniOtherInstance", calls.Calls[jni.JNIThreadOther][jni.JNICALLInstance],
+		"jniOtherStatic", calls.Calls[jni.JNIThreadOther][jni.JNICALLStatic],
+		"jniOtherNonvirtual", calls.Calls[jni.JNIThreadOther][jni.JNICALLNonvirtual],
+		"bionicWorkerMutexLock", workerMutex.Calls, "bionicWorkerMutexLockSamples", workerMutex.Samples,
+		"bionicWorkerMutexLockSampled", workerMutex.SampledDuration, "bionicWorkerMutexLockMax", workerMutex.MaxDuration,
+		"bionicWorkerMutexTry", workerTryMutex.Calls, "bionicWorkerMutexTryContended", workerTryMutex.Contention,
+		"bionicWorkerMutexTryErrors", workerTryMutex.Errors, "bionicWorkerMutexTimed", workerTimedMutex.Calls,
+		"bionicWorkerMutexTimedContended", workerTimedMutex.Contention, "bionicWorkerMutexTimedErrors", workerTimedMutex.Errors,
+		"bionicWorkerMutexUnlock", workerUnlock.Calls, "bionicWorkerCondSignal", workerSignal.Calls,
+		"bionicWorkerCondBroadcast", workerBroadcast.Calls, "bionicWorkerYield", workerYield.Calls,
+		"bionicWorkerPthreadSetAffinity", workerAffinity.Calls, "bionicMainMutexLock", mainMutex.Calls,
+		"bionicMainMutexLockSampled", mainMutex.SampledDuration, "bionicMainMutexLockMax", mainMutex.MaxDuration,
+		"bionicAllMutexLock", bionic.Aggregate(android.BionicSyncMutexLock).Calls,
+		"bionicAllMutexLockMax", bionic.Aggregate(android.BionicSyncMutexLock).MaxDuration,
+		"bionicAllMutexUnlock", bionic.Aggregate(android.BionicSyncMutexUnlock).Calls,
+		"bionicAllCondSignal", bionic.Aggregate(android.BionicSyncCondSignal).Calls,
+		"bionicAllCondBroadcast", bionic.Aggregate(android.BionicSyncCondBroadcast).Calls,
+		"bionicAllYield", bionic.Aggregate(android.BionicSyncSchedYield).Calls,
+		"bionicWorkerUnknownMutexLock", bionic.Path(android.BionicSyncThreadRBXWorker, android.BionicSyncModuleUnknown, android.BionicSyncMutexLock).Calls)
+}
+
 // closeClientModuleBeforeStart releases a client image only when no
 // GameActivity session was established. Once initializeNativeCode succeeds,
 // Roblox can retain official worker threads beyond terminateNativeCode (the
@@ -310,6 +380,33 @@ const (
 func Launch(ctx context.Context, opt LaunchOptions) error {
 	if ctx == nil {
 		ctx = context.Background()
+	}
+	presentTiming := vulkanPresentTimingRequested(os.Getenv)
+	presentTimingCursor := android.SetVulkanPresentTiming(presentTiming)
+	if presentTiming {
+		logging.Logger(logging.CatGraphics).Info("Vulkan present timing enabled", "capacity", android.VulkanPresentTimingCapacity)
+		defer func() {
+			android.SetVulkanPresentTiming(false)
+			logVulkanPresentTiming(android.VulkanPresentTimingSnapshot(presentTimingCursor))
+		}()
+	}
+	stutterDiag := stutterDiagnosticsRequested(os.Getenv)
+	if stutterDiag {
+		android.SetStutterWaitDiagnostics(true)
+		android.SetBionicSyncDiagnostics(true)
+		jni.SetStutterDiagnostics(true)
+		_ = android.StutterWaitSnapshot(true)
+		_ = android.BionicSyncSnapshot(true)
+		_ = jni.StutterSnapshot(true)
+		logging.Logger(logging.CatRuntime).Info("shared-wait diagnostics enabled",
+			"sampleRate", "1/64", "interval", 2*time.Second,
+			"bionicResolverOnly", true)
+		defer func() {
+			logStutterDiagnostics(android.StutterWaitSnapshot(true), jni.StutterSnapshot(true), android.BionicSyncSnapshot(true))
+			android.SetStutterWaitDiagnostics(false)
+			android.SetBionicSyncDiagnostics(false)
+			jni.SetStutterDiagnostics(false)
+		}()
 	}
 	// Android app-private files are owner-only by default. Keep that invariant
 	// for files the unmodified client creates itself, not only files Tipsy
