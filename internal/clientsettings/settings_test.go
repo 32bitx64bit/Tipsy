@@ -62,7 +62,7 @@ func TestDefaultsAndRestartSurvival(t *testing.T) {
 	if err != nil || got != Default() {
 		t.Fatalf("defaults=%+v err=%v", got, err)
 	}
-	want := Settings{Renderer: RendererOpenGL, FrameRate: FrameRate{Mode: FrameRateLimited, Limit: 144}}
+	want := Settings{Renderer: RendererOpenGL, FrameRate: FrameRate{Mode: FrameRateLimited, Limit: 144}, Display: DisplayPrimary}
 	result, err := s.Apply(context.Background(), want)
 	if err != nil {
 		t.Fatal(err)
@@ -114,8 +114,58 @@ func TestVSyncDefaultsOffAndMigratesExistingSettings(t *testing.T) {
 		t.Fatalf("reloaded VSync=%+v err=%v", reloaded, err)
 	}
 	reset, err := s.Reset(context.Background())
-	if err != nil || reset.VSync {
+	if err != nil || reset.VSync || reset.Display != DisplayPrimary {
 		t.Fatalf("reset VSync=%+v err=%v", reset, err)
+	}
+}
+
+func TestDisplayDefaultsToPrimaryAndPointerDoesNotRestart(t *testing.T) {
+	s := testService(t)
+	writeXML(t, s, "-1")
+	if err := os.MkdirAll(filepath.Dir(s.Path), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	old := []byte(`{"renderer":"auto","frameRate":{"mode":"auto"}}`)
+	if err := os.WriteFile(s.Path, old, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := s.Load(context.Background())
+	if err != nil || got.Display != DisplayPrimary {
+		t.Fatalf("old config display=%+v err=%v", got, err)
+	}
+	unchanged, err := os.ReadFile(s.Path)
+	if err != nil || !bytes.Equal(unchanged, old) {
+		t.Fatalf("load rewrote old config=%q err=%v", unchanged, err)
+	}
+
+	got.Display = DisplayPointer
+	result, err := s.Apply(context.Background(), got)
+	if err != nil || result.RestartRequired || result.Settings.Display != DisplayPointer {
+		t.Fatalf("pointer display result=%+v err=%v", result, err)
+	}
+	if !strings.Contains(result.FrameRateNote, "follow the mouse") {
+		t.Fatalf("pointer note=%q", result.FrameRateNote)
+	}
+	reloaded, err := s.Load(context.Background())
+	if err != nil || reloaded.Display != DisplayPointer {
+		t.Fatalf("reloaded display=%+v err=%v", reloaded, err)
+	}
+
+	named := reloaded
+	named.Display = "DP-1"
+	result, err = s.Apply(context.Background(), named)
+	if err != nil || result.RestartRequired || result.Settings.Display != "DP-1" {
+		t.Fatalf("named display result=%+v err=%v", result, err)
+	}
+
+	_, err = s.Apply(context.Background(), Settings{Renderer: RendererAuto, FrameRate: FrameRate{Mode: FrameRateAuto}, Display: "bad/name"})
+	if err == nil {
+		t.Fatal("path-like monitor name accepted")
+	}
+	reset, err := s.Reset(context.Background())
+	if err != nil || reset.Display != DisplayPrimary {
+		t.Fatalf("reset display=%+v err=%v", reset, err)
 	}
 }
 
@@ -300,6 +350,7 @@ func TestUnavailableRendererRemainsPersistedButCannotApply(t *testing.T) {
 	want := persistedSettings{Settings: Settings{
 		Renderer:  RendererVulkan,
 		FrameRate: FrameRate{Mode: FrameRateAuto},
+		Display:   DisplayPrimary,
 	}}
 	raw, err := json.Marshal(want)
 	if err != nil {

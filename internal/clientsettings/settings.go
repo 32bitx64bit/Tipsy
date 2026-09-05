@@ -78,6 +78,10 @@ const (
 	FrameRateUnlimited FrameRateMode = "unlimited"
 	MinFrameRate                     = 30
 	MaxFrameRate                     = 240
+
+	DisplayPrimary  = "primary"
+	DisplayPointer  = "pointer"
+	maxDisplayBytes = 128
 )
 
 type FrameRate struct {
@@ -109,6 +113,11 @@ type Settings struct {
 	Renderer  Renderer  `json:"renderer"`
 	FrameRate FrameRate `json:"frameRate"`
 	VSync     bool      `json:"vsync"`
+	// Display selects where Tipsy maps the launcher and Roblox windows.
+	// "primary" (default) pins them to the current main monitor, "pointer"
+	// restores window-manager mouse placement, and any other value is an
+	// XRandR/Qt output name. A missing output falls back to primary at spawn.
+	Display string `json:"display,omitempty"`
 }
 
 // NeedsUnthrottledPresentation reports the inverse of the user's independent
@@ -151,7 +160,7 @@ func RobloxSettingsPath() string {
 }
 
 func Default() Settings {
-	return Settings{Renderer: RendererAuto, FrameRate: FrameRate{Mode: FrameRateAuto}}
+	return Settings{Renderer: RendererAuto, FrameRate: FrameRate{Mode: FrameRateAuto}, Display: DisplayPrimary}
 }
 
 func (s Settings) Validate() error {
@@ -183,7 +192,26 @@ func (s Settings) validateShape() error {
 	default:
 		return fmt.Errorf("frame-rate mode must be auto, limited, or unlimited")
 	}
+	return validateDisplay(s.Display)
+}
+
+func validateDisplay(display string) error {
+	display = NormalizeDisplay(display)
+	if len(display) > maxDisplayBytes {
+		return fmt.Errorf("monitor name is too long")
+	}
+	if strings.ContainsAny(display, "/\\\x00") {
+		return fmt.Errorf("monitor name is invalid")
+	}
 	return nil
+}
+
+// NormalizeDisplay maps a missing value to the primary-monitor default.
+func NormalizeDisplay(display string) string {
+	if display == "" {
+		return DisplayPrimary
+	}
+	return display
 }
 
 func normalized(s Settings) Settings {
@@ -193,6 +221,7 @@ func normalized(s Settings) Settings {
 	if s.FrameRate.Mode == "" {
 		s.FrameRate.Mode = FrameRateAuto
 	}
+	s.Display = NormalizeDisplay(s.Display)
 	return s
 }
 
@@ -272,7 +301,8 @@ func (s *Service) applyLocked(ctx context.Context, wanted Settings) (ApplyResult
 		note = "Roblox has not created GlobalBasicSettings_13.xml yet; the choice is saved and will be applied on a later launch."
 	}
 
-	semanticChanged := oldDoc.Settings != wanted
+	graphicsChanged := oldDoc.Renderer != wanted.Renderer || oldDoc.FrameRate != wanted.FrameRate || oldDoc.VSync != wanted.VSync
+	placementChanged := oldDoc.Display != wanted.Display
 	docChanged := oldDoc != newDoc
 	if xmlChanged {
 		if err := config.AtomicWriteFile(xmlPath, newXML, 0o600); err != nil {
@@ -287,11 +317,15 @@ func (s *Service) applyLocked(ctx context.Context, wanted Settings) (ApplyResult
 			return ApplyResult{}, err
 		}
 	}
+	applyNote := noteForFrameRate(wanted.FrameRate, note)
+	if placementChanged && !graphicsChanged && !xmlChanged {
+		applyNote = noteForDisplay(wanted.Display)
+	}
 	return ApplyResult{
 		Settings:         wanted,
-		RestartRequired:  semanticChanged || xmlChanged,
+		RestartRequired:  graphicsChanged || xmlChanged,
 		FrameRateApplied: xmlExists,
-		FrameRateNote:    noteForFrameRate(wanted.FrameRate, note),
+		FrameRateNote:    applyNote,
 	}, nil
 }
 
@@ -380,6 +414,17 @@ func noteForFrameRate(f FrameRate, prior string) string {
 		return "Experimental: Tipsy requests a high finite 9999 FPS target; Roblox, the graphics driver, or the hardware may impose another limit."
 	}
 	return ""
+}
+
+func noteForDisplay(display string) string {
+	switch NormalizeDisplay(display) {
+	case DisplayPointer:
+		return "The next Tipsy and Roblox windows follow the mouse, the same way the window manager used to place them."
+	case DisplayPrimary:
+		return "The next Tipsy and Roblox windows open on the main monitor."
+	default:
+		return "The next Tipsy and Roblox windows open on the selected monitor."
+	}
 }
 
 func (s *Service) loadDocument(ctx context.Context) (persistedSettings, error) {
