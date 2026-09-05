@@ -25,14 +25,15 @@ done
 required=(
 	AppRun
 	.DirIcon
-	io.github.tipsy_linux.Tipsy.desktop
+	io.github.tipsy_linux.Tipsy.Play.desktop
 	tipsy.png
 	usr/bin/tipsy
 	usr/bin/tipsy-gui
 	usr/bin/qt.conf
 	usr/plugins/platforms/libqoffscreen.so
 	usr/plugins/platforms/libqxcb.so
-	usr/share/applications/io.github.tipsy_linux.Tipsy.desktop
+	usr/share/applications/io.github.tipsy_linux.Tipsy.Play.desktop
+	usr/share/applications/io.github.tipsy_linux.Tipsy.Settings.desktop
 	usr/share/icons/hicolor/512x512/apps/tipsy.png
 	usr/share/licenses/tipsy/LICENSE
 	usr/share/licenses/tipsy/NOTICE
@@ -50,7 +51,7 @@ done
 while IFS= read -r -d '' entry; do
 	relative=${entry#"$appdir"/}
 	case "$relative" in
-		AppRun|.DirIcon|io.github.tipsy_linux.Tipsy.desktop|tipsy.png|usr|usr/*)
+		AppRun|.DirIcon|io.github.tipsy_linux.Tipsy.Play.desktop|tipsy.png|usr|usr/*)
 			;;
 		*)
 			fail "unexpected top-level content: $relative"

@@ -24,7 +24,8 @@ for tipsy_tool in go install mktemp; do
 done
 
 if command -v desktop-file-validate >/dev/null 2>&1; then
-	desktop-file-validate "${tipsy_repo}/share/applications/io.github.tipsy_linux.Tipsy.desktop"
+	desktop-file-validate "${tipsy_repo}/share/applications/io.github.tipsy_linux.Tipsy.Play.desktop"
+	desktop-file-validate "${tipsy_repo}/share/applications/io.github.tipsy_linux.Tipsy.Settings.desktop"
 fi
 if command -v appstreamcli >/dev/null 2>&1; then
 	appstreamcli validate --no-net "${tipsy_repo}/share/metainfo/io.github.tipsy_linux.Tipsy.metainfo.xml"
@@ -53,10 +54,19 @@ mkdir -p \
 install -m 0755 "${tipsy_work}/tipsy" "${tipsy_target}/bin/tipsy"
 install -m 0755 "${tipsy_work}/tipsy-gui" "${tipsy_target}/bin/tipsy-gui"
 install -m 0644 tipsy.png "${tipsy_target}/share/icons/hicolor/512x512/apps/tipsy.png"
-install -m 0644 share/applications/io.github.tipsy_linux.Tipsy.desktop "${tipsy_target}/share/applications/io.github.tipsy_linux.Tipsy.desktop"
+install -m 0644 share/applications/io.github.tipsy_linux.Tipsy.Play.desktop "${tipsy_target}/share/applications/io.github.tipsy_linux.Tipsy.Play.desktop"
+install -m 0644 share/applications/io.github.tipsy_linux.Tipsy.Settings.desktop "${tipsy_target}/share/applications/io.github.tipsy_linux.Tipsy.Settings.desktop"
 install -m 0644 share/metainfo/io.github.tipsy_linux.Tipsy.metainfo.xml "${tipsy_target}/share/metainfo/io.github.tipsy_linux.Tipsy.metainfo.xml"
 install -m 0644 LICENSE "${tipsy_target}/share/licenses/tipsy/LICENSE"
 install -m 0644 NOTICE "${tipsy_target}/share/licenses/tipsy/NOTICE"
 
 printf '%s\n' "Installed Tipsy ${tipsy_version} to ${tipsy_target}."
 printf '%s\n' "If ${tipsy_prefix}/bin is not on PATH, add it before launching the desktop entry."
+
+if [ -z "${tipsy_destdir}" ] && command -v update-desktop-database >/dev/null 2>&1; then
+	update-desktop-database "${tipsy_target}/share/applications" >/dev/null 2>&1 || true
+fi
+if [ -z "${tipsy_destdir}" ] && command -v xdg-mime >/dev/null 2>&1; then
+	xdg-mime default io.github.tipsy_linux.Tipsy.Play.desktop x-scheme-handler/roblox-player >/dev/null 2>&1 || true
+	xdg-mime default io.github.tipsy_linux.Tipsy.Play.desktop x-scheme-handler/roblox >/dev/null 2>&1 || true
+fi

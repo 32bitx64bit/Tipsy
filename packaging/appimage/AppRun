@@ -11,4 +11,257 @@ export LD_LIBRARY_PATH="$appdir/usr/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
 export QT_PLUGIN_PATH="$appdir/usr/plugins"
 export QT_QPA_PLATFORM_PLUGIN_PATH="$appdir/usr/plugins/platforms"
 
+usage() {
+	cat <<'USAGE'
+Usage: Tipsy.AppImage [--play|--settings] [--no-integrate] [arguments...]
+
+  --play          Launch the official Roblox client and skip the Tipsy menu
+  --settings      Open the Tipsy setup and settings window
+  --no-integrate  Do not write user desktop entries for dock/taskbar pinning
+
+A Roblox website or protocol URI (roblox-player:, roblox://, or
+https://www.roblox.com/games/...) launches the official client with that
+experience. Running with no mode flag plays if a client is installed, and
+opens settings so first-run setup can complete otherwise.
+USAGE
+}
+
+quote_desktop_exec() {
+	printf '"%s"' "$(printf '%s' "$1" | sed 's/\\/\\\\/g; s/"/\\"/g')"
+}
+
+# Set by integrate_pin_entries before install_pin_entry runs.
+pin_icon=
+
+install_pin_entry() {
+	source_desktop=$1
+	destination=$2
+	exec_args=$3
+	quoted_image=$(quote_desktop_exec "$APPIMAGE")
+	in_action=
+	while IFS= read -r line || [ -n "$line" ]; do
+		case "$line" in
+			'[Desktop Entry]'*)
+				in_action=
+				printf '%s\n' "$line"
+				;;
+			'[Desktop Action Settings]'*)
+				in_action=settings
+				printf '%s\n' "$line"
+				;;
+			'['*)
+				in_action=
+				printf '%s\n' "$line"
+				;;
+			Exec=*)
+				args=$exec_args
+				if [ "$in_action" = settings ]; then
+					args='--settings %u'
+				fi
+				printf 'Exec=%s %s\n' "$quoted_image" "$args"
+				;;
+			Icon=*)
+				if [ -n "$pin_icon" ]; then
+					printf 'Icon=%s\n' "$pin_icon"
+				else
+					printf '%s\n' "$line"
+				fi
+				;;
+			NoDisplay=*)
+				;;
+			*)
+				printf '%s\n' "$line"
+				;;
+		esac
+	done <"$source_desktop" >"$destination"
+	chmod 0644 "$destination"
+}
+
+install_pin_icons() {
+	data_home=$1
+	src=$2
+	[ -f "$src" ] || return 1
+	for size in 256 512; do
+		dir="${data_home}/icons/hicolor/${size}x${size}/apps"
+		mkdir -p -- "$dir"
+		cp -- "$src" "$dir/io.github.tipsy_linux.Tipsy.png"
+		chmod 0644 "$dir/io.github.tipsy_linux.Tipsy.png"
+	done
+	printf '%s' "${data_home}/icons/hicolor/256x256/apps/io.github.tipsy_linux.Tipsy.png"
+}
+
+desktop_exec_is_appimage() {
+	quoted=$(quote_desktop_exec "$APPIMAGE")
+	while IFS= read -r line || [ -n "$line" ]; do
+		case "$line" in
+			Exec="$quoted"|Exec="$quoted"\ *|Exec=$APPIMAGE|Exec=$APPIMAGE\ *)
+				return 0
+				;;
+		esac
+	done <"$1"
+	return 1
+}
+
+ensure_nodisplay() {
+	desktop=$1
+	tmp=$desktop.tipsy-tmp
+	in_entry=
+	have=
+	while IFS= read -r line || [ -n "$line" ]; do
+		case "$line" in
+			'[Desktop Entry]'*)
+				in_entry=1
+				printf '%s\n' "$line"
+				;;
+			'['*)
+				if [ "$in_entry" = 1 ] && [ -z "$have" ]; then
+					printf 'NoDisplay=true\n'
+					have=1
+				fi
+				in_entry=
+				printf '%s\n' "$line"
+				;;
+			NoDisplay=*)
+				if [ "$in_entry" = 1 ]; then
+					printf 'NoDisplay=true\n'
+					have=1
+				else
+					printf '%s\n' "$line"
+				fi
+				;;
+			*)
+				printf '%s\n' "$line"
+				;;
+		esac
+	done <"$desktop" >"$tmp"
+	if [ "$in_entry" = 1 ] && [ -z "$have" ]; then
+		printf 'NoDisplay=true\n' >>"$tmp"
+	fi
+	mv -- "$tmp" "$desktop"
+	chmod 0644 "$desktop"
+}
+
+# AppImage Manager writes a second Play row for the same $APPIMAGE. Hide that
+# copy. Ours stays visible so GIO/Firefox protocol choosers can offer it.
+hide_foreign_play_pins() {
+	apps_dir=$1
+	for dest in "$apps_dir"/*.desktop; do
+		[ -f "$dest" ] || continue
+		case "$(basename -- "$dest")" in
+			io.github.tipsy_linux.Tipsy.Play.desktop|io.github.tipsy_linux.Tipsy.Settings.desktop)
+				continue
+				;;
+		esac
+		if desktop_exec_is_appimage "$dest"; then
+			ensure_nodisplay "$dest"
+		fi
+	done
+}
+
+integrate_pin_entries() {
+	[ -n "${APPIMAGE:-}" ] || return 0
+	case "$APPIMAGE" in
+		*["$(printf '\n\r')"]*)
+			return 0
+			;;
+	esac
+	if [ -n "${XDG_DATA_HOME:-}" ]; then
+		data_home=$XDG_DATA_HOME
+	else
+		data_home="${HOME}/.local/share"
+	fi
+	apps_dir="${data_home}/applications"
+	mkdir -p -- "$apps_dir"
+	pin_icon=
+	if [ -f "$appdir/tipsy.png" ]; then
+		pin_icon=$(install_pin_icons "$data_home" "$appdir/tipsy.png")
+	fi
+	install_pin_entry \
+		"$appdir/usr/share/applications/io.github.tipsy_linux.Tipsy.Play.desktop" \
+		"$apps_dir/io.github.tipsy_linux.Tipsy.Play.desktop" \
+		"--play %u"
+	install_pin_entry \
+		"$appdir/usr/share/applications/io.github.tipsy_linux.Tipsy.Settings.desktop" \
+		"$apps_dir/io.github.tipsy_linux.Tipsy.Settings.desktop" \
+		"--settings %u"
+	hide_foreign_play_pins "$apps_dir"
+	if command -v update-desktop-database >/dev/null 2>&1; then
+		update-desktop-database "$apps_dir" >/dev/null 2>&1 || true
+	fi
+	if command -v xdg-mime >/dev/null 2>&1; then
+		xdg-mime default io.github.tipsy_linux.Tipsy.Play.desktop x-scheme-handler/roblox-player >/dev/null 2>&1 || true
+		xdg-mime default io.github.tipsy_linux.Tipsy.Play.desktop x-scheme-handler/roblox >/dev/null 2>&1 || true
+	fi
+}
+
+runtime_is_ready() {
+	if [ -n "${XDG_DATA_HOME:-}" ]; then
+		data_home=$XDG_DATA_HOME
+	else
+		data_home="${HOME}/.local/share"
+	fi
+	[ -d "${data_home}/tipsy/runtime/lib/x86_64" ]
+}
+
+mode=
+integrate=1
+invoked=$(basename -- "${ARGV0:-}")
+case "$invoked" in
+	*Settings*|*settings*)
+		mode=settings
+		;;
+	*)
+		mode=play
+		;;
+esac
+
+while [ $# -gt 0 ]; do
+	case "$1" in
+		-h|--help)
+			usage
+			exit 0
+			;;
+		--play)
+			mode=play
+			shift
+			;;
+		--settings)
+			mode=settings
+			shift
+			;;
+		launch)
+			mode=play
+			shift
+			;;
+		--no-integrate)
+			integrate=0
+			shift
+			;;
+		--)
+			shift
+			break
+			;;
+		*)
+			case "$1" in
+				roblox-player:*|roblox:*|https://www.roblox.com/*|https://web.roblox.com/*|https://roblox.com/*)
+					mode=play
+					;;
+			esac
+			break
+			;;
+	esac
+done
+
+if [ "$integrate" -eq 1 ]; then
+	(integrate_pin_entries) || true
+fi
+
+if [ "$mode" = settings ]; then
+	exec "$appdir/usr/bin/tipsy-gui" "$@"
+fi
+
+if runtime_is_ready; then
+	exec "$appdir/usr/bin/tipsy" launch "$@"
+fi
+
 exec "$appdir/usr/bin/tipsy-gui" "$@"

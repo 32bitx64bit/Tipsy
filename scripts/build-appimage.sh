@@ -6,10 +6,11 @@ set -euo pipefail
 usage() {
 	cat >&2 <<USAGE
 usage: $0 --appdir DIRECTORY --version VERSION --tool APPIMAGETOOL \\
-  --tool-sha256 SHA256 [--output FILE]
+  --tool-sha256 SHA256 [--runtime-file FILE --runtime-sha256 SHA256] [--output FILE]
 
 The appimagetool binary is never downloaded. Supply a pinned local binary and
-its independently verified SHA-256 digest.
+its independently verified SHA-256 digest. If the tool would otherwise fetch an
+AppImage type-2 runtime, also pass a pinned local --runtime-file.
 USAGE
 	exit 2
 }
@@ -23,6 +24,8 @@ appdir=
 version=
 tool=
 tool_sha256=
+runtime_file=
+runtime_sha256=
 output=
 while [[ $# -gt 0 ]]; do
 	case "$1" in
@@ -30,6 +33,8 @@ while [[ $# -gt 0 ]]; do
 		--version) [[ $# -ge 2 ]] || usage; version=$2; shift 2 ;;
 		--tool) [[ $# -ge 2 ]] || usage; tool=$2; shift 2 ;;
 		--tool-sha256) [[ $# -ge 2 ]] || usage; tool_sha256=$2; shift 2 ;;
+		--runtime-file) [[ $# -ge 2 ]] || usage; runtime_file=$2; shift 2 ;;
+		--runtime-sha256) [[ $# -ge 2 ]] || usage; runtime_sha256=$2; shift 2 ;;
 		--output) [[ $# -ge 2 ]] || usage; output=$2; shift 2 ;;
 		-h|--help) usage ;;
 		*) usage ;;
@@ -45,6 +50,17 @@ actual_sha256=$(sha256sum "$tool")
 actual_sha256=${actual_sha256%% *}
 [[ "${actual_sha256,,}" == "${tool_sha256,,}" ]] || fail 'appimagetool SHA-256 mismatch'
 
+runtime_args=()
+if [[ -n "$runtime_file" || -n "$runtime_sha256" ]]; then
+	[[ -n "$runtime_file" && -n "$runtime_sha256" ]] || fail 'runtime file and SHA-256 must be supplied together'
+	[[ -f "$runtime_file" && -s "$runtime_file" ]] || fail 'AppImage runtime is not a non-empty regular file'
+	[[ "$runtime_sha256" =~ ^[0-9a-fA-F]{64}$ ]] || fail 'runtime SHA-256 must contain exactly 64 hexadecimal characters'
+	actual_runtime=$(sha256sum "$runtime_file")
+	actual_runtime=${actual_runtime%% *}
+	[[ "${actual_runtime,,}" == "${runtime_sha256,,}" ]] || fail 'AppImage runtime SHA-256 mismatch'
+	runtime_args=(--runtime-file "$runtime_file")
+fi
+
 repo=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 "$repo/scripts/check-release-tree.sh" "$appdir"
 
@@ -59,7 +75,11 @@ if [[ -z "$source_date_epoch" ]]; then
 fi
 [[ "$source_date_epoch" =~ ^[0-9]+$ ]] || fail 'SOURCE_DATE_EPOCH is missing or invalid'
 
-ARCH=x86_64 VERSION="$version" SOURCE_DATE_EPOCH="$source_date_epoch" "$tool" "$appdir" "$output"
+# The pinned tool is typically itself an AppImage. Prefer extract-and-run so a
+# missing FUSE mount does not look like a Tipsy packaging failure.
+export APPIMAGE_EXTRACT_AND_RUN=1
+ARCH=x86_64 VERSION="$version" SOURCE_DATE_EPOCH="$source_date_epoch" \
+	"$tool" "${runtime_args[@]}" "$appdir" "$output"
 [[ -s "$output" ]] || fail 'appimagetool did not produce an artifact'
 chmod 0755 "$output"
 printf 'AppImage: %s\n' "$output"
