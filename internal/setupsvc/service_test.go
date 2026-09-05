@@ -83,6 +83,10 @@ func TestValidateReportRejectsPackageABIAndSignature(t *testing.T) {
 		{"signature", func(r *apk.Report) { r.Packages[0].Signing.CryptographicallyValid = false }, ErrInvalidSignature},
 		{"signer", func(r *apk.Report) { r.Packages[0].Signing.VerifiedCertSHA256 = []string{"bbbb"} }, ErrUntrustedSigner},
 		{"split", func(r *apk.Report) { r.Packages[0].SplitName = "config.arm64_v8a" }, ErrUnsupportedSplit},
+		{"store", func(r *apk.Report) {
+			r.Merged.PackageName = "com.uptodown"
+			r.Packages[0].PackageName = "com.uptodown"
+		}, ErrWrongPackage},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -92,6 +96,17 @@ func TestValidateReportRejectsPackageABIAndSignature(t *testing.T) {
 				t.Fatalf("kind=%q err=%v want=%q", ErrorKindOf(err), err, tc.kind)
 			}
 		})
+	}
+}
+
+func TestValidateReportRejectsUptodownInstaller(t *testing.T) {
+	const cert = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	r := validReport(cert)
+	r.Merged.PackageName = "com.uptodown"
+	r.Packages[0].PackageName = "com.uptodown"
+	err := ValidateReport(r, testTrust(cert))
+	if ErrorKindOf(err) != ErrWrongPackage || !strings.Contains(err.Error(), "installer") {
+		t.Fatalf("err=%v", err)
 	}
 }
 

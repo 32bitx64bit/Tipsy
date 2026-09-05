@@ -295,6 +295,9 @@ func ValidateReport(rep *apk.Report, policy TrustPolicy) error {
 		return setupError(ErrInvalidArchive, "validate package", "package metadata is incomplete", nil)
 	}
 	if rep.Merged.PackageName != policy.PackageName {
+		if isStoreInstallerPackage(rep.Merged.PackageName) {
+			return setupError(ErrWrongPackage, "validate package", storeInstallerDetail, nil)
+		}
 		return setupError(ErrWrongPackage, "validate package", "the selected package is not the official Roblox client", nil)
 	}
 	allowedSplits := make(map[string]bool, len(policy.SupportedSplits))
@@ -310,6 +313,9 @@ func ValidateReport(rep *apk.Report, policy TrustPolicy) error {
 	var signerSet string
 	for _, p := range rep.Packages {
 		if !p.ManifestOK || p.PackageName != policy.PackageName {
+			if isStoreInstallerPackage(p.PackageName) {
+				return setupError(ErrWrongPackage, "validate package", storeInstallerDetail, nil)
+			}
 			return setupError(ErrWrongPackage, "validate package", "every APK must declare package com.roblox.client", nil)
 		}
 		if p.Debuggable {
