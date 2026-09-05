@@ -5,6 +5,7 @@ package logging
 
 import (
 	"bytes"
+	"io"
 	"log/slog"
 	"strings"
 	"testing"
@@ -161,6 +162,32 @@ func TestCategoryFilter(t *testing.T) {
 	}
 }
 
+func TestLoggerReusesTaggedInstance(t *testing.T) {
+	var buf bytes.Buffer
+	t.Setenv("TIPSY_LOG", "all")
+	t.Setenv("TIPSY_LOG_LEVEL", "info")
+	initWithWriter(&buf)
+
+	a := Logger(CatJNI)
+	b := Logger(CatJNI)
+	if a != b {
+		t.Fatal("Logger should reuse the tagged instance for one slog default")
+	}
+	if Logger(CatX11) == a {
+		t.Fatal("distinct categories must not share a tagged logger")
+	}
+
+	initWithWriter(&buf)
+	c := Logger(CatJNI)
+	if c == a {
+		t.Fatal("Logger must not keep a logger bound to a replaced slog default")
+	}
+	c.Info("jni-reuse")
+	if !strings.Contains(buf.String(), "jni-reuse") {
+		t.Fatalf("cached logger after Init wrote nothing: %s", buf.String())
+	}
+}
+
 func TestParseLevel(t *testing.T) {
 	t.Parallel()
 	if parseLevel("debug") != slog.LevelDebug {
@@ -191,5 +218,28 @@ func TestParseCategories(t *testing.T) {
 		if _, ok := cats[c]; !ok {
 			t.Fatalf("missing %s", c)
 		}
+	}
+}
+
+func TestDebugEnabledFollowsLevel(t *testing.T) {
+	t.Setenv("TIPSY_LOG", "all")
+	t.Setenv("TIPSY_LOG_LEVEL", "info")
+	initWithWriter(io.Discard)
+	if DebugEnabled() {
+		t.Fatal("info must not enable Android debug")
+	}
+	t.Setenv("TIPSY_LOG_LEVEL", "debug")
+	initWithWriter(io.Discard)
+	if !DebugEnabled() {
+		t.Fatal("debug level must enable Android debug")
+	}
+}
+
+func TestDebugEnabledHonorsAndroidCategory(t *testing.T) {
+	t.Setenv("TIPSY_LOG", "graphics")
+	t.Setenv("TIPSY_LOG_LEVEL", "debug")
+	initWithWriter(io.Discard)
+	if DebugEnabled() {
+		t.Fatal("android category filtered: DebugEnabled must be false")
 	}
 }

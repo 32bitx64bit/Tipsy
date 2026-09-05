@@ -10,6 +10,7 @@ import (
 	"os"
 	"strings"
 	"sync"
+	"sync/atomic"
 )
 
 type Category string
@@ -43,6 +44,48 @@ var knownCategories = map[Category]struct{}{
 
 var initMu sync.Mutex
 
+var debugEnabled atomic.Bool
+var lastDebugDefault atomic.Pointer[slog.Logger]
+var debugListener atomic.Value // func(bool)
+
+// DebugEnabled reports whether Android/slog Debug records are accepted.
+// Updated from Init and when Logger sees a replaced slog default.
+func DebugEnabled() bool {
+	return debugEnabled.Load()
+}
+
+// SetDebugChangeListener is invoked whenever DebugEnabled changes and once
+// with the current value. The android package uses this to publish a C-visible
+// flag so liblog can skip VERBOSE/DEBUG without a Go call.
+func SetDebugChangeListener(fn func(bool)) {
+	debugListener.Store(fn)
+	if fn != nil {
+		fn(debugEnabled.Load())
+	}
+}
+
+// RefreshDebugEnabled recomputes DebugEnabled from the current slog default's
+// Android-category Debug gate. Tests that replace slog.Default() should call
+// this (or Logger) so the C skip flag stays aligned.
+func RefreshDebugEnabled() {
+	refreshDebugEnabled()
+}
+
+func refreshDebugEnabled() {
+	def := slog.Default()
+	enabled := def.With(categoryKey, string(CatAndroid)).Enabled(context.Background(), slog.LevelDebug)
+	lastDebugDefault.Store(def)
+	prev := debugEnabled.Swap(enabled)
+	if prev == enabled {
+		return
+	}
+	if v := debugListener.Load(); v != nil {
+		if fn, ok := v.(func(bool)); ok && fn != nil {
+			fn(enabled)
+		}
+	}
+}
+
 // Init reads TIPSY_LOG (comma categories or "all") and TIPSY_LOG_LEVEL.
 func Init() {
 	initWithWriter(os.Stderr)
@@ -67,11 +110,35 @@ func initWithWriter(w io.Writer) {
 		cats:  cats,
 	}
 	slog.SetDefault(slog.New(h))
+	refreshDebugEnabled()
 }
 
+type cachedLogger struct {
+	def *slog.Logger
+	log *slog.Logger
+}
+
+var loggerCache sync.Map // Category -> *cachedLogger
+
 // Logger returns a slog.Logger tagged with the given category.
+// The tagged logger is reused for the current slog default so hot paths
+// do not allocate a With() wrapper on every call. Tests that replace
+// slog.Default() still get a fresh logger because the default pointer is
+// part of the cache key.
 func Logger(cat Category) *slog.Logger {
-	return slog.Default().With(categoryKey, string(cat))
+	def := slog.Default()
+	if lastDebugDefault.Load() != def {
+		refreshDebugEnabled()
+	}
+	if v, ok := loggerCache.Load(cat); ok {
+		c := v.(*cachedLogger)
+		if c.def == def {
+			return c.log
+		}
+	}
+	l := def.With(categoryKey, string(cat))
+	loggerCache.Store(cat, &cachedLogger{def: def, log: l})
+	return l
 }
 
 func parseLevel(s string) slog.Level {
