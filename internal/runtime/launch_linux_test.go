@@ -9,6 +9,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"math"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -61,6 +62,187 @@ func TestInputDispatchInterval(t *testing.T) {
 	case <-ch:
 		t.Fatal("InputReady must start empty")
 	default:
+	}
+}
+
+type recordingFocusedTextOverlay struct {
+	frames []x11.FocusedTextSnapshot
+	err    error
+}
+
+func (r *recordingFocusedTextOverlay) Update(frame x11.FocusedTextSnapshot) error {
+	r.frames = append(r.frames, frame)
+	return r.err
+}
+
+func TestFocusedTextOverlaySyncCopiesOnlyForChangeOrActiveRepaint(t *testing.T) {
+	sink := &recordingFocusedTextOverlay{}
+	version := uint64(7)
+	snapshotCalls := 0
+	sync := &focusedTextOverlaySync{
+		sink:    sink,
+		version: func() uint64 { return version },
+		snapshot: func() jni.RbxTextOverlaySnapshot {
+			snapshotCalls++
+			return jni.RbxTextOverlaySnapshot{
+				Version: 7, Active: true, Configured: true, Text: "tipsyok",
+				SelectionStartUTF16: 7, SelectionEndUTF16: 7,
+				Density: 1, X: 4, Y: 5, Width: 120, Height: 30, FontSize: 16,
+				TextColor: 0xff123456, TextInputType: 6, CursorVisible: true,
+				IncludeFontPadding: true,
+			}
+		},
+	}
+	now := time.Unix(100, 0)
+	updated, err := sync.refresh(now)
+	if err != nil || !updated || snapshotCalls != 1 || len(sink.frames) != 1 {
+		t.Fatalf("first refresh updated=%v calls=%d frames=%d err=%v", updated, snapshotCalls, len(sink.frames), err)
+	}
+	got := sink.frames[0]
+	if got.Version != 7 || got.Text != "tipsyok" || got.CursorUTF16 != 7 || got.Density != 1 ||
+		got.X != 4 || got.TextColor != 0xff123456 || got.FontFile != filepath.Join("fonts", "SourceSansPro-Regular.ttf") ||
+		got.LetterSpacing != 0 ||
+		got.TextInputType != 6 || !got.CursorVisible || !got.IncludeFontPadding ||
+		math.Abs(float64(got.FontSize-12.72)) > 0.0001 {
+		t.Fatalf("frame mismatch: %+v", got)
+	}
+	updated, err = sync.refresh(now.Add(100 * time.Millisecond))
+	if err != nil || updated || snapshotCalls != 1 {
+		t.Fatalf("unchanged refresh copied content: updated=%v calls=%d err=%v", updated, snapshotCalls, err)
+	}
+	updated, err = sync.refresh(now.Add(focusedTextOverlayRepaint))
+	if err != nil || !updated || snapshotCalls != 2 {
+		t.Fatalf("active repaint updated=%v calls=%d err=%v", updated, snapshotCalls, err)
+	}
+}
+
+func TestFocusedTextFontResolverMirrorsAPKMappingAndFallback(t *testing.T) {
+	assets := t.TempDir()
+	mappingDir := filepath.Join(assets, "android", "fonts")
+	if err := os.MkdirAll(mappingDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	const mapping = `[
+		{"enum":16,"font":"SourceSansPro-Semibold.ttf","fromRbxFontRatio":0.7955449483},
+		{"enum":99,"font":"../outside.ttf","fromRbxFontRatio":1},
+		{"enum":100,"font":"invalid.ttf","fromRbxFontRatio":0}
+	]`
+	if err := os.WriteFile(filepath.Join(mappingDir, "font-mappings.json"), []byte(mapping), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	mappedFontDir := filepath.Join(assets, "content", "fonts")
+	if err := os.MkdirAll(mappedFontDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(mappedFontDir, "SourceSansPro-Semibold.ttf"), []byte("font fixture"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	resolver := newFocusedTextFontResolver(assets)
+	mapped := resolver.resolve(16)
+	if mapped.file != filepath.Join(assets, "content", "fonts", "SourceSansPro-Semibold.ttf") ||
+		math.Abs(float64(mapped.ratio-0.7955449483)) > 0.000001 || mapped.letterSpacingEm != 0 {
+		t.Fatalf("mapped font contract = %+v", mapped)
+	}
+	sink := &recordingFocusedTextOverlay{}
+	sync := &focusedTextOverlaySync{
+		sink: sink, version: func() uint64 { return 1 }, fonts: resolver,
+		snapshot: func() jni.RbxTextOverlaySnapshot {
+			return jni.RbxTextOverlaySnapshot{
+				Version: 1, Active: true, Configured: true,
+				Density: 2, Width: 100, Height: 30, FontSize: 20, Font: 16,
+			}
+		},
+	}
+	if updated, err := sync.refresh(time.Unix(250, 0)); err != nil || !updated {
+		t.Fatalf("mapped font refresh updated=%v err=%v", updated, err)
+	}
+	frame := sink.frames[0]
+	if frame.FontFile != mapped.file || math.Abs(float64(frame.FontSize-31.821798)) > 0.0001 {
+		t.Fatalf("mapped density/font size = file=%q size=%v", frame.FontFile, frame.FontSize)
+	}
+	for _, tc := range []struct {
+		font    int32
+		file    string
+		spacing float32
+	}{
+		{font: 4, file: "SourceSansPro-Bold.ttf", spacing: 0.04},
+		{font: 5, file: "SourceSansPro-Light.ttf"},
+		{font: 99, file: "SourceSansPro-Regular.ttf"},
+		{font: 100, file: "SourceSansPro-Regular.ttf"},
+	} {
+		got := resolver.resolve(tc.font)
+		if got.file != filepath.Join(assets, "fonts", tc.file) || got.ratio != 0.795 || got.letterSpacingEm != tc.spacing {
+			t.Fatalf("fallback font %d contract = %+v", tc.font, got)
+		}
+	}
+}
+
+func TestFocusedTextOverlayKeepsAPKPixelsAcrossWindowModes(t *testing.T) {
+	for i, viewport := range []struct {
+		name          string
+		width, height int32
+	}{
+		{name: "1280x720", width: 1280, height: 720},
+		{name: "resized", width: 1600, height: 900},
+		{name: "fullscreen", width: 2560, height: 1440},
+	} {
+		t.Run(viewport.name, func(t *testing.T) {
+			sink := &recordingFocusedTextOverlay{}
+			version := uint64(i + 1)
+			sync := &focusedTextOverlaySync{
+				sink: sink, version: func() uint64 { return version },
+				fonts: focusedTextFontResolver{assetsDir: "/apk-assets"},
+				snapshot: func() jni.RbxTextOverlaySnapshot {
+					return jni.RbxTextOverlaySnapshot{
+						Version: version, Active: true, Configured: true,
+						Density: 1, ViewportWidthPx: viewport.width, ViewportHeightPx: viewport.height,
+						X: 10, Y: 20, Width: 300, Height: 31, FontSize: 17.5,
+						Font: 4, XAlignment: 1, YAlignment: 2,
+						PaddingLeftPx: 0, PaddingTopPx: 0, PaddingRightPx: 0, PaddingBottomPx: 0,
+						CursorVisible: true, IncludeFontPadding: true,
+					}
+				},
+			}
+			if updated, err := sync.refresh(time.Unix(300, 0)); err != nil || !updated {
+				t.Fatalf("refresh updated=%v err=%v", updated, err)
+			}
+			got := sink.frames[0]
+			if got.X != 10 || got.Y != 20 || got.Width != 300 || got.Height != 31 ||
+				got.XAlignment != 1 || got.YAlignment != 2 || got.Density != 1 ||
+				math.Abs(float64(got.FontSize-13.9125)) > 0.0001 {
+				t.Fatalf("pixel/font contract at %dx%d = %+v", viewport.width, viewport.height, got)
+			}
+		})
+	}
+}
+
+func TestFocusedTextOverlaySyncHidesOnGenuineInactiveVersion(t *testing.T) {
+	sink := &recordingFocusedTextOverlay{}
+	version := uint64(1)
+	active := true
+	sync := &focusedTextOverlaySync{
+		sink:    sink,
+		version: func() uint64 { return version },
+		snapshot: func() jni.RbxTextOverlaySnapshot {
+			return jni.RbxTextOverlaySnapshot{Version: version, Active: active, Configured: active, Text: "tipsyok"}
+		},
+	}
+	now := time.Unix(200, 0)
+	if updated, err := sync.refresh(now); err != nil || !updated {
+		t.Fatalf("show refresh updated=%v err=%v", updated, err)
+	}
+	active = false
+	version++
+	if updated, err := sync.refresh(now.Add(time.Millisecond)); err != nil || !updated {
+		t.Fatalf("hide refresh updated=%v err=%v", updated, err)
+	}
+	if got := sink.frames[len(sink.frames)-1]; got.Active || got.Text != "" {
+		t.Fatalf("inactive frame retained content: %+v", got)
+	}
+	calls := len(sink.frames)
+	if updated, err := sync.refresh(now.Add(time.Second)); err != nil || updated || len(sink.frames) != calls {
+		t.Fatalf("inactive steady state repainted: updated=%v frames=%d err=%v", updated, len(sink.frames), err)
 	}
 }
 

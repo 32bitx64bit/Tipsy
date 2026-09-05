@@ -71,7 +71,9 @@ required_commands=(go gcc pkg-config qmake6 patchelf ldd readelf file install sh
 for command_name in "${required_commands[@]}"; do
 	command -v "$command_name" >/dev/null 2>&1 || fail "required command is missing: $command_name"
 done
-pkg-config --exists Qt6Widgets Qt6Gui Qt6Core || fail 'Qt 6 Widgets development files are missing'
+required_pkg_modules=(Qt6Widgets Qt6Gui Qt6Core x11 xext pangocairo pangoft2 cairo-xlib)
+pkg-config --exists "${required_pkg_modules[@]}" || \
+	fail 'Qt 6, X11/Xext, or Pango/Cairo development files are missing'
 [[ $(go env GOOS) == linux ]] || fail 'the active Go toolchain is not targeting Linux'
 
 qt_plugins=$(qmake6 -query QT_INSTALL_PLUGINS)
@@ -126,6 +128,33 @@ install -m 0644 "$repo/tipsy.png" "$appdir/usr/share/icons/hicolor/512x512/apps/
 install -m 0644 "$repo/share/applications/io.github.tipsy_linux.Tipsy.Play.desktop" "$appdir/io.github.tipsy_linux.Tipsy.Play.desktop"
 install -m 0644 "$repo/share/applications/io.github.tipsy_linux.Tipsy.Play.desktop" "$appdir/usr/share/applications/io.github.tipsy_linux.Tipsy.Play.desktop"
 install -m 0644 "$repo/share/applications/io.github.tipsy_linux.Tipsy.Settings.desktop" "$appdir/usr/share/applications/io.github.tipsy_linux.Tipsy.Settings.desktop"
+
+# appimagetool injects X-AppImage-Version into the AppDir-root desktop after
+# the payload manifest is sealed. Write the same key first so an extracted
+# wrap still matches usr/share/tipsy/manifest.sha256.
+inject_appimage_version() {
+	local desktop=$1
+	local tmp
+	tmp=$(mktemp)
+	awk -v ver="$version" '
+		$0 == "[Desktop Entry]" { in_entry=1; print; next }
+		in_entry && /^\[/ {
+			if (!seen) print "X-AppImage-Version=" ver
+			in_entry=0
+			seen=1
+			print
+			next
+		}
+		in_entry && /^X-AppImage-Version=/ { next }
+		{ print }
+		END {
+			if (in_entry && !seen) print "X-AppImage-Version=" ver
+		}
+	' "$desktop" > "$tmp"
+	install -m 0644 "$tmp" "$desktop"
+	rm -f -- "$tmp"
+}
+inject_appimage_version "$appdir/io.github.tipsy_linux.Tipsy.Play.desktop"
 install -m 0644 "$repo/share/metainfo/io.github.tipsy_linux.Tipsy.metainfo.xml" "$appdir/usr/share/metainfo/io.github.tipsy_linux.Tipsy.metainfo.xml"
 install -m 0644 "$repo/LICENSE" "$appdir/usr/share/licenses/tipsy/LICENSE"
 install -m 0644 "$repo/NOTICE" "$appdir/usr/share/licenses/tipsy/NOTICE"

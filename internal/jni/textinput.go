@@ -9,6 +9,19 @@ package jni
 #cgo CFLAGS: -I${SRCDIR}/../../native
 #include "jni_bridge.h"
 
+// NativeTextBoxInfo's full constructor carries five float arguments. Keep
+// their union reads local to this APK-specific adapter instead of widening the
+// generic JNI bridge API merely for one model object.
+static float tipsy_text_jvalue_f_at(const jvalue *args, int i) {
+	return args != NULL && i >= 0 ? args[i].f : 0.0f;
+}
+
+static void tipsy_text_jvalue_set_f_at(jvalue *args, int i, float value) {
+	if (args != NULL && i >= 0) {
+		args[i].f = value;
+	}
+}
+
 // Typed callers for the APK's RbxKeyboard/EditText JNI bridge. All declared
 // arguments use integer registers, but keeping the signature here prevents a
 // future call-site from confusing the textbox J handle with the jclass slot.
@@ -85,6 +98,8 @@ static int tipsy_rbx_rec_sync_sequence_get(void) { return tipsy_rbx_rec_sync_seq
 import "C"
 
 import (
+	"fmt"
+	"math"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -146,17 +161,19 @@ const (
 	setStateSig                  = "(Lcom/google/androidgamesdk/gametextinput/State;)V"
 	setSoftKeyboardActiveSig     = "(ZI)V"
 	restartInputSig              = "()V"
+	nativeTextBoxInfoClass       = "com/roblox/engine/jni/model/NativeTextBoxInfo"
+	nativeTextBoxInfoSig         = "(FFFFFZIIIIIIZZZ)V"
+	nativeTextBoxInfoCopySig     = "(Lcom/roblox/engine/jni/model/NativeTextBoxInfo;)V"
 )
 
 // keyboardState records the engine's keyboard announcements verbatim: how
 // many show/hide requests arrived and the safe aggregates of the most recent
-// show (handle, flag, and the two payload LENGTHS). The [B bytes and the
-// NativeTextBoxInfo fields can carry user text, so they are never read,
-// stored, or logged — only their lengths cross into Tipsy. The Z flag's
-// exact meaning (secure entry vs multiline vs other) is not established
-// from any DEX Java body available to Tipsy, so it is recorded as an opaque
-// boolean, never named. Nothing here fabricates visibility, focuses a
-// field. The same genuine show announcement starts the private RbxKeyboard
+// show (handle, flag, initial-text length, information presence, and raw
+// non-content ARGB/alpha). The [B bytes can carry user text, so their content
+// is never logged. NativeTextBoxInfo's layout/style fields are retained only
+// for the focused Android-view equivalent below. The Z flag's exact meaning
+// is recorded as an opaque boolean. Nothing here fabricates visibility or
+// focus. The same genuine show announcement starts the private RbxKeyboard
 // editor session below; it is the only gate through which X11 committed text
 // can reach the named engine callbacks.
 var keyboardState struct {
@@ -174,8 +191,56 @@ var keyboardState struct {
 // affects desktop editing behavior. The APK's RbxKeyboard reads these fields
 // when showKeyboard's boolean is true. They never contain user text.
 type rbxTextBoxConfig struct {
+	configured         bool
+	density            float32
+	viewportWidthPx    int32
+	viewportHeightPx   int32
+	x                  float32
+	y                  float32
+	width              float32
+	height             float32
+	fontSize           float32
+	textColor          uint32
+	font               int32
+	textInputType      int32
+	xAlignment         int32
+	yAlignment         int32
+	returnKeyType      int32
 	manualFocusRelease bool
 	multiline          bool
+	textWrapped        bool
+	editable           bool
+}
+
+// RbxTextOverlaySnapshot is the transient, read-only state an Android
+// RbxKeyboard EditText would paint above Roblox while its textbox owns focus.
+// Text can contain sensitive user input: consumers must draw it immediately
+// and must never log, persist, inspect, or retain it. Inactive snapshots never
+// expose text. Geometry is already converted to final Android View pixels by
+// multiplying NativeTextBoxInfo values by DisplayMetrics.density and applying
+// DEX float-to-int truncation; consumers must not scale it again. FontSize is
+// still the raw float because RbxKeyboard separately applies density and its
+// APK font ratio. Selection is currently collapsed and expressed in Java
+// UTF-16 code units, matching EditText.
+type RbxTextOverlaySnapshot struct {
+	Version                           uint64
+	Active, Configured                bool
+	Text                              string
+	SelectionStartUTF16               int
+	SelectionEndUTF16                 int
+	Density                           float32
+	ViewportWidthPx                   int32
+	ViewportHeightPx                  int32
+	X, Y, Width, Height, FontSize     float32
+	TextColor                         uint32 // Android ARGB.
+	Font, TextInputType               int32
+	XAlignment, YAlignment            int32
+	ReturnKeyType                     int32
+	PaddingLeftPx, PaddingTopPx       int32
+	PaddingRightPx, PaddingBottomPx   int32
+	CursorVisible, IncludeFontPadding bool
+	Editable, Multiline               bool
+	TextWrapped, ManualFocusRelease   bool
 }
 
 // RobloxTextNativeCaller runs one named JNI export with eight integer/pointer
@@ -188,30 +253,35 @@ type RobloxTextNativeCaller func(fn, a0, a1, a2, a3, a4, a5, a6, a7 uintptr) int
 // RbxKeyboard EditText. The engine owns focus and supplies the textbox handle
 // plus UTF-8 initial text through showKeyboard. X11 supplies genuine committed
 // UTF-8. The adapter retains content only for the lifetime of that focused
-// textbox and never exposes or logs it.
+// textbox and exposes it only through the transient overlay snapshot; it is
+// never logged or retained after hide/teardown.
 var rbxTextEditor struct {
-	mu                 sync.Mutex
-	active             bool
-	handle             int64
-	text               []rune
-	cursor             int // rune index; JNI calls convert to Java UTF-16 units
-	manualFocusRelease bool
-	multiline          bool
-	editCount          uint64
-	returnCount        uint64
+	mu                     sync.Mutex
+	active                 bool
+	handle                 int64
+	text                   []rune
+	cursor                 int // rune index; JNI calls convert to Java UTF-16 units
+	config                 rbxTextBoxConfig
+	session                uint64
+	propertyRefreshPending bool
+	editCount              uint64
+	returnCount            uint64
 }
+
+var rbxTextOverlayVersion uint64
 
 // rbxTextTarget is the exact named JNI surface called by the APK's
 // RbxKeyboard. Runtime wires it after JNI_OnLoad; until then editor input is
 // rejected honestly. No engine pointer or callback identity is invented.
 var rbxTextTarget struct {
-	mu       sync.RWMutex
-	env      *Env
-	class    uintptr
-	passFn   uintptr
-	returnFn uintptr
-	syncFn   uintptr
-	call     RobloxTextNativeCaller
+	mu        sync.RWMutex
+	env       *Env
+	class     uintptr
+	passFn    uintptr
+	returnFn  uintptr
+	syncFn    uintptr
+	getInfoFn uintptr
+	call      RobloxTextNativeCaller
 }
 
 var rbxTextDelivered struct {
@@ -221,20 +291,38 @@ var rbxTextDelivered struct {
 	dropped uint64
 }
 
-// SetRobloxTextInputTarget wires the three APK-proven RbxKeyboard exports.
-// nativePassText is required for a ready target; the editor-action/selection/
-// focus helpers are optional and fail honestly if an APK omits them.
-func SetRobloxTextInputTarget(env *Env, class, passFn, returnFn, syncFn uintptr, call RobloxTextNativeCaller) bool {
+// RbxTextInfoRefreshDiagnostics is content-free evidence for the APK's
+// propertyChanged -> nativeGetTextBoxInfo boundary. Requests are coalesced;
+// none of these counters reveal editor text or field identity.
+type RbxTextInfoRefreshDiagnostics struct {
+	Requested, Attempted, Applied uint64
+	MissingTarget, NullResult     uint64
+	StaleSession                  uint64
+}
+
+var rbxTextInfoRefresh struct {
+	requested, attempted, applied uint64
+	missingTarget, nullResult     uint64
+	staleSession                  uint64
+}
+
+// SetRobloxTextInputTarget wires the APK-proven RbxKeyboard exports.
+// nativePassText is required for a ready typing target; editor action,
+// selection, and the property-refresh info getter are optional and fail
+// honestly if an APK omits them.
+func SetRobloxTextInputTarget(env *Env, class, passFn, returnFn, syncFn, getInfoFn uintptr, call RobloxTextNativeCaller) bool {
 	rbxTextTarget.mu.Lock()
 	rbxTextTarget.env = env
 	rbxTextTarget.class = class
 	rbxTextTarget.passFn = passFn
 	rbxTextTarget.returnFn = returnFn
 	rbxTextTarget.syncFn = syncFn
+	rbxTextTarget.getInfoFn = getInfoFn
 	rbxTextTarget.call = call
 	ready := env != nil && env.Raw() != 0 && class != 0 && passFn != 0
 	rbxTextTarget.mu.Unlock()
-	logging.Logger(logging.CatJNI).Info("[jni] text delivery path", "ready", ready)
+	logging.Logger(logging.CatJNI).Info("[jni] text delivery path",
+		"ready", ready, "textInfoReady", env != nil && env.Raw() != 0 && class != 0 && getInfoFn != 0 && call != nil)
 	return ready
 }
 
@@ -247,6 +335,7 @@ func ClearRobloxTextInputTarget() {
 	rbxTextTarget.passFn = 0
 	rbxTextTarget.returnFn = 0
 	rbxTextTarget.syncFn = 0
+	rbxTextTarget.getInfoFn = 0
 	rbxTextTarget.call = nil
 	rbxTextTarget.mu.Unlock()
 	wipeRbxTextEditor()
@@ -275,6 +364,7 @@ func (vm *VM) dispatchTextInput(o *Object, class, name, sig string, args *C.jval
 		}
 		configure := jvalueIAt(args, 1) != 0
 		initial, infoPresent, config := keyboardPayload(vm, args)
+		configured := configure && infoPresent != 0
 		initLen := len([]byte(initial))
 		keyboardState.mu.Lock()
 		keyboardState.showCount++
@@ -289,8 +379,11 @@ func (vm *VM) dispatchTextInput(o *Object, class, name, sig string, args *C.jval
 			"handle", handle,
 			"flag", configure,
 			"initialLen", initLen,
-			"info", infoPresent)
-		beginRbxTextEditor(handle, initial, configure, config)
+			"info", infoPresent,
+			"configured", configured,
+			"textColorARGB", fmt.Sprintf("0x%08x", config.textColor),
+			"textAlpha", config.textColor>>24)
+		beginRbxTextEditor(handle, initial, configured, config)
 		vm.noteTextFocus(true)
 	} else {
 		keyboardState.mu.Lock()
@@ -311,8 +404,9 @@ func (vm *VM) dispatchTextInput(o *Object, class, name, sig string, args *C.jval
 // keyboardPayload decodes exactly what the APK's RbxKeyboard does: slot 2 is
 // a UTF-8 byte[] used as the EditText's initial value and slot 3 is one
 // NativeTextBoxInfo object (not an array). Content is copied into the private
-// focused editor and never logged or exposed. Invalid UTF-8 follows Java's
-// String(byte[], UTF_8) behavior by replacing malformed input.
+// focused editor and exposed only through its transient render snapshot; it is
+// never logged. Invalid UTF-8 follows Java's String(byte[], UTF_8) behavior by
+// replacing malformed input.
 func keyboardPayload(vm *VM, args *C.jvalue) (initial string, infoPresent int, config rbxTextBoxConfig) {
 	if vm == nil || args == nil {
 		return "", 0, config
@@ -323,13 +417,46 @@ func keyboardPayload(vm *VM, args *C.jvalue) (initial string, infoPresent int, c
 	if o := vm.objects[initID]; o != nil {
 		initial = strings.ToValidUTF8(string(o.bytes), "\uFFFD")
 	}
-	if o := vm.objects[infoID]; o != nil {
+	if o := vm.objects[infoID]; o != nil && o.class != nil && o.class.name == nativeTextBoxInfoClass {
 		infoPresent = 1
-		config.manualFocusRelease, _ = o.fields["manualFocusRelease"].(bool)
-		config.multiline, _ = o.fields["multiline"].(bool)
+		config = nativeTextBoxConfigLocked(vm, o)
 	}
 	vm.mu.Unlock()
 	return initial, infoPresent, config
+}
+
+// nativeTextBoxConfigLocked reads only non-content fields from the exact Java
+// model object. The caller owns vm.mu. Both showKeyboard and the named
+// nativeGetTextBoxInfo property refresh use this one mapping.
+func nativeTextBoxConfigLocked(vm *VM, o *Object) rbxTextBoxConfig {
+	var config rbxTextBoxConfig
+	if vm == nil || o == nil || o.class == nil || o.class.name != nativeTextBoxInfoClass {
+		return config
+	}
+	// fi/a.g() is exactly DisplayMetrics.density. Tipsy publishes density 1
+	// through the same VM and PlatformParams contract; retain it here so the
+	// Android View transform remains explicit at the render boundary.
+	config.density = 1
+	config.viewportWidthPx = vm.dispW
+	config.viewportHeightPx = vm.dispH
+	config.x, _ = o.fields["x"].(float32)
+	config.y, _ = o.fields["y"].(float32)
+	config.width, _ = o.fields["width"].(float32)
+	config.height, _ = o.fields["height"].(float32)
+	config.fontSize, _ = o.fields["fontSize"].(float32)
+	if v, ok := o.fields["textColor"].(int32); ok {
+		config.textColor = uint32(v)
+	}
+	config.font, _ = o.fields["font"].(int32)
+	config.textInputType, _ = o.fields["textInputType"].(int32)
+	config.xAlignment, _ = o.fields["xAlignment"].(int32)
+	config.yAlignment, _ = o.fields["yAlignment"].(int32)
+	config.returnKeyType, _ = o.fields["returnKeyType"].(int32)
+	config.manualFocusRelease, _ = o.fields["manualFocusRelease"].(bool)
+	config.multiline, _ = o.fields["multiline"].(bool)
+	config.textWrapped, _ = o.fields["textWrapped"].(bool)
+	config.editable, _ = o.fields["editable"].(bool)
+	return config
 }
 
 // TextInputKeyboardState reports the keyboard announcements received from
@@ -356,10 +483,15 @@ func beginRbxTextEditor(handle int64, initial string, configure bool, config rbx
 	rbxTextEditor.handle = handle
 	rbxTextEditor.text = runes
 	rbxTextEditor.cursor = len(runes)
+	rbxTextEditor.session++
+	rbxTextEditor.propertyRefreshPending = false
 	if configure {
-		rbxTextEditor.manualFocusRelease = config.manualFocusRelease
-		rbxTextEditor.multiline = config.multiline
+		config.configured = true
+		rbxTextEditor.config = config
+	} else {
+		rbxTextEditor.config = rbxTextBoxConfig{}
 	}
+	atomic.AddUint64(&rbxTextOverlayVersion, 1)
 	rbxTextEditor.mu.Unlock()
 }
 
@@ -372,8 +504,214 @@ func wipeRbxTextEditor() {
 	rbxTextEditor.handle = 0
 	rbxTextEditor.text = nil
 	rbxTextEditor.cursor = 0
-	rbxTextEditor.manualFocusRelease = false
-	rbxTextEditor.multiline = false
+	rbxTextEditor.config = rbxTextBoxConfig{}
+	rbxTextEditor.session++
+	rbxTextEditor.propertyRefreshPending = false
+	atomic.AddUint64(&rbxTextOverlayVersion, 1)
+	rbxTextEditor.mu.Unlock()
+}
+
+// RbxTextOverlayVersion is a cheap invalidation generation for an external
+// host overlay. It changes only at genuine editor/view boundaries; polling it
+// does not copy or expose text.
+func RbxTextOverlayVersion() uint64 {
+	return atomic.LoadUint64(&rbxTextOverlayVersion)
+}
+
+// CurrentRbxTextOverlay returns one immutable copy for immediate rendering.
+// Callers must treat Text as sensitive and discard it after paint. The mutex
+// makes this safe from the X11 thread while JNI callbacks execute elsewhere.
+func CurrentRbxTextOverlay() RbxTextOverlaySnapshot {
+	rbxTextEditor.mu.Lock()
+	defer rbxTextEditor.mu.Unlock()
+	version := atomic.LoadUint64(&rbxTextOverlayVersion)
+	if !rbxTextEditor.active || rbxTextEditor.handle == 0 {
+		return RbxTextOverlaySnapshot{Version: version}
+	}
+	c := rbxTextEditor.config
+	pos := utf16Cursor(rbxTextEditor.text, rbxTextEditor.cursor)
+	return RbxTextOverlaySnapshot{
+		Version: version, Active: true, Configured: c.configured,
+		Text:                string(rbxTextEditor.text),
+		SelectionStartUTF16: pos, SelectionEndUTF16: pos,
+		Density: c.density, ViewportWidthPx: c.viewportWidthPx, ViewportHeightPx: c.viewportHeightPx,
+		X: androidViewPixel(c.x, c.density), Y: androidViewPixel(c.y, c.density),
+		Width: androidViewPixel(c.width, c.density), Height: androidViewPixel(c.height, c.density),
+		FontSize:  c.fontSize,
+		TextColor: c.textColor, Font: c.font, TextInputType: c.textInputType,
+		XAlignment: c.xAlignment, YAlignment: c.yAlignment,
+		ReturnKeyType: c.returnKeyType, Editable: c.editable,
+		// activity_game.xml gives RbxKeyboard a transparent ColorDrawable and
+		// no padding attributes. Android therefore contributes zero content
+		// insets; the parent Roblox field remains responsible for decoration.
+		PaddingLeftPx: 0, PaddingTopPx: 0, PaddingRightPx: 0, PaddingBottomPx: 0,
+		CursorVisible: c.editable,
+		// android.widget.TextView defaults includeFontPadding to true, and
+		// neither activity_game.xml nor RbxKeyboard changes it.
+		IncludeFontPadding: true,
+		Multiline:          c.multiline, TextWrapped: c.textWrapped,
+		ManualFocusRelease: c.manualFocusRelease,
+	}
+}
+
+// RefreshRbxTextOverlayInfo performs the delayed half of the APK's
+// onLuaTextBoxPropertyChanged UI-thread work. The callback itself only marks a
+// coalesced request; Runtime invokes this function after that callback has
+// returned, so the named nativeGetTextBoxInfo export runs on the existing
+// dedicated native Main thread without re-entering its engine caller.
+//
+// A returned local NativeTextBoxInfo reference is copied into non-content
+// platform state and released immediately. A hide/refocus while the call is in
+// flight rejects the stale result by both session generation and handle. Null
+// and missing-target results consume one request and fail closed: there is no
+// retry loop and no fabricated/default geometry.
+func RefreshRbxTextOverlayInfo() bool {
+	rbxTextEditor.mu.Lock()
+	if !rbxTextEditor.active || rbxTextEditor.handle == 0 || !rbxTextEditor.propertyRefreshPending {
+		rbxTextEditor.mu.Unlock()
+		return false
+	}
+	session := rbxTextEditor.session
+	handle := rbxTextEditor.handle
+	rbxTextEditor.propertyRefreshPending = false
+	rbxTextEditor.mu.Unlock()
+
+	rbxTextTarget.mu.RLock()
+	env := rbxTextTarget.env
+	class := rbxTextTarget.class
+	getInfoFn := rbxTextTarget.getInfoFn
+	call := rbxTextTarget.call
+	rbxTextTarget.mu.RUnlock()
+	if env == nil || env.vm == nil || env.Raw() == 0 || class == 0 || getInfoFn == 0 || call == nil {
+		atomic.AddUint64(&rbxTextInfoRefresh.missingTarget, 1)
+		return false
+	}
+
+	atomic.AddUint64(&rbxTextInfoRefresh.attempted, 1)
+	result := uintptr(call(getInfoFn, env.Raw(), class, 0, 0, 0, 0, 0, 0))
+	if result == 0 {
+		atomic.AddUint64(&rbxTextInfoRefresh.nullResult, 1)
+		return false
+	}
+	id := jobjectToID(result)
+	vm := env.vm
+	vm.mu.Lock()
+	o := vm.objects[id]
+	valid := o != nil && o.class != nil && o.class.name == nativeTextBoxInfoClass
+	config := nativeTextBoxConfigLocked(vm, o)
+	vm.mu.Unlock()
+	// JNI returns a local reference to the Java caller. Tipsy has copied all
+	// needed non-content fields, so release it before publishing the snapshot.
+	vm.deleteLocal(id)
+	if !valid {
+		atomic.AddUint64(&rbxTextInfoRefresh.nullResult, 1)
+		return false
+	}
+	config.configured = true
+
+	rbxTextEditor.mu.Lock()
+	if !rbxTextEditor.active || rbxTextEditor.session != session || rbxTextEditor.handle != handle {
+		rbxTextEditor.mu.Unlock()
+		atomic.AddUint64(&rbxTextInfoRefresh.staleSession, 1)
+		return false
+	}
+	wasConfigured := rbxTextEditor.config.configured
+	rbxTextEditor.config = config
+	atomic.AddUint64(&rbxTextOverlayVersion, 1)
+	rbxTextEditor.mu.Unlock()
+	atomic.AddUint64(&rbxTextInfoRefresh.applied, 1)
+	if !wasConfigured {
+		logging.Logger(logging.CatJNI).Info("[jni] text box info refreshed",
+			"configured", true,
+			"textColorARGB", fmt.Sprintf("0x%08x", config.textColor),
+			"textAlpha", config.textColor>>24,
+			"geometryValid", finitePositiveFloat(config.width) && finitePositiveFloat(config.height))
+	}
+	return true
+}
+
+func finitePositiveFloat(value float32) bool {
+	f := float64(value)
+	return !math.IsNaN(f) && !math.IsInf(f, 0) && value > 0
+}
+
+func RbxTextInfoRefreshStats() RbxTextInfoRefreshDiagnostics {
+	return RbxTextInfoRefreshDiagnostics{
+		Requested:     atomic.LoadUint64(&rbxTextInfoRefresh.requested),
+		Attempted:     atomic.LoadUint64(&rbxTextInfoRefresh.attempted),
+		Applied:       atomic.LoadUint64(&rbxTextInfoRefresh.applied),
+		MissingTarget: atomic.LoadUint64(&rbxTextInfoRefresh.missingTarget),
+		NullResult:    atomic.LoadUint64(&rbxTextInfoRefresh.nullResult),
+		StaleSession:  atomic.LoadUint64(&rbxTextInfoRefresh.staleSession),
+	}
+}
+
+// androidViewPixel mirrors DEX float-to-int after multiplying a
+// NativeTextBoxInfo coordinate by DisplayMetrics.density. Java truncates
+// finite values toward zero and saturates overflows; it maps NaN to zero.
+// The float return preserves the existing renderer interface while making
+// every geometry value an integer pixel before it crosses packages.
+func androidViewPixel(value, density float32) float32 {
+	v := value * density
+	if math.IsNaN(float64(v)) {
+		return 0
+	}
+	if v >= float32(math.MaxInt32) {
+		return float32(math.MaxInt32)
+	}
+	if v <= float32(math.MinInt32) {
+		return float32(math.MinInt32)
+	}
+	return float32(int32(v))
+}
+
+// SetRbxTextOverlayViewport tracks the current Android surface dimensions.
+// The APK does not proportionally rescale NativeTextBoxInfo geometry on a
+// window resize; this metadata instead lets the renderer clip against the
+// exact current viewport while waiting for a genuine property update.
+func SetRbxTextOverlayViewport(width, height int, density float32) {
+	if width <= 0 || height <= 0 || math.IsNaN(float64(density)) || math.IsInf(float64(density), 0) || density <= 0 {
+		return
+	}
+	rbxTextEditor.mu.Lock()
+	changed := rbxTextEditor.config.viewportWidthPx != int32(width) ||
+		rbxTextEditor.config.viewportHeightPx != int32(height) ||
+		rbxTextEditor.config.density != density
+	rbxTextEditor.config.viewportWidthPx = int32(width)
+	rbxTextEditor.config.viewportHeightPx = int32(height)
+	rbxTextEditor.config.density = density
+	if changed && rbxTextEditor.active {
+		atomic.AddUint64(&rbxTextOverlayVersion, 1)
+	}
+	rbxTextEditor.mu.Unlock()
+}
+
+// applyLuaTextBoxChanged mirrors the APK's engine-to-Java callback: its
+// RbxKeyboard compares the current EditText, then setText(value) and moves the
+// selection to value.length(). We retain that result only while a genuine
+// showKeyboard session is active. No content is logged.
+func applyLuaTextBoxChanged(value string) bool {
+	rbxTextEditor.mu.Lock()
+	defer rbxTextEditor.mu.Unlock()
+	if !rbxTextEditor.active || rbxTextEditor.handle == 0 || string(rbxTextEditor.text) == value {
+		return false
+	}
+	for i := range rbxTextEditor.text {
+		rbxTextEditor.text[i] = 0
+	}
+	rbxTextEditor.text = []rune(value)
+	rbxTextEditor.cursor = len(rbxTextEditor.text)
+	atomic.AddUint64(&rbxTextOverlayVersion, 1)
+	return true
+}
+
+func markLuaTextBoxPropertyChanged() {
+	rbxTextEditor.mu.Lock()
+	if rbxTextEditor.active && rbxTextEditor.handle != 0 {
+		rbxTextEditor.propertyRefreshPending = true
+		atomic.AddUint64(&rbxTextInfoRefresh.requested, 1)
+	}
+	atomic.AddUint64(&rbxTextOverlayVersion, 1)
 	rbxTextEditor.mu.Unlock()
 }
 
@@ -423,6 +761,7 @@ func DispatchRobloxTextCommit(committed string) bool {
 	handle := rbxTextEditor.handle
 	full := string(text)
 	pos := utf16Cursor(text, rbxTextEditor.cursor)
+	atomic.AddUint64(&rbxTextOverlayVersion, 1)
 	rbxTextEditor.mu.Unlock()
 
 	if !sendRbxText(handle, full, false, pos) {
@@ -494,7 +833,10 @@ func DispatchRobloxTextKey(keyCode int32, pressed bool) bool {
 			selectionChanged = true
 		}
 	case 66, 160: // Enter / numpad Enter
-		if rbxTextEditor.multiline {
+		// RbxKeyboard ORs TYPE_TEXT_FLAG_MULTI_LINE when either native flag is
+		// set. TextWrapped therefore has the same editing/newline behavior as
+		// Multiline even when its raw multiline field is false.
+		if rbxTextEditor.config.multiline || rbxTextEditor.config.textWrapped {
 			i := rbxTextEditor.cursor
 			rbxTextEditor.text = append(rbxTextEditor.text, 0)
 			copy(rbxTextEditor.text[i+1:], rbxTextEditor.text[i:])
@@ -506,7 +848,7 @@ func DispatchRobloxTextKey(keyCode int32, pressed bool) bool {
 		}
 	}
 	handle := rbxTextEditor.handle
-	manual := rbxTextEditor.manualFocusRelease
+	manual := rbxTextEditor.config.manualFocusRelease
 	full := string(rbxTextEditor.text)
 	pos := utf16Cursor(rbxTextEditor.text, rbxTextEditor.cursor)
 	if submit && !manual {
@@ -517,6 +859,12 @@ func DispatchRobloxTextKey(keyCode int32, pressed bool) bool {
 		rbxTextEditor.handle = 0
 		rbxTextEditor.text = nil
 		rbxTextEditor.cursor = 0
+		rbxTextEditor.config = rbxTextBoxConfig{}
+		rbxTextEditor.session++
+		rbxTextEditor.propertyRefreshPending = false
+	}
+	if changed || selectionChanged || (submit && !manual) {
+		atomic.AddUint64(&rbxTextOverlayVersion, 1)
 	}
 	rbxTextEditor.mu.Unlock()
 
@@ -855,7 +1203,56 @@ func resetTextInputConnectionForTest() {
 	atomic.StoreUint64(&rbxTextDelivered.returns, 0)
 	atomic.StoreUint64(&rbxTextDelivered.sync, 0)
 	atomic.StoreUint64(&rbxTextDelivered.dropped, 0)
+	atomic.StoreUint64(&rbxTextInfoRefresh.requested, 0)
+	atomic.StoreUint64(&rbxTextInfoRefresh.attempted, 0)
+	atomic.StoreUint64(&rbxTextInfoRefresh.applied, 0)
+	atomic.StoreUint64(&rbxTextInfoRefresh.missingTarget, 0)
+	atomic.StoreUint64(&rbxTextInfoRefresh.nullResult, 0)
+	atomic.StoreUint64(&rbxTextInfoRefresh.staleSession, 0)
+	atomic.StoreUint64(&rbxTextOverlayVersion, 0)
 	C.tipsy_rbx_rec_reset()
+}
+
+// seedNativeTextBoxInfoConstructor executes the field-only behavior of the
+// exact APK model constructors that Roblox calls through NewObjectA. Generic
+// Java constructor execution remains out of scope; this narrow model is the
+// layout/style carrier required by the real RbxKeyboard overlay.
+func seedNativeTextBoxInfoConstructor(vm *VM, obj C.jobject, sig string, args *C.jvalue) {
+	if vm == nil || uintptr(obj) == 0 || args == nil {
+		return
+	}
+	id := jobjectToID(uintptr(obj))
+	vm.mu.Lock()
+	defer vm.mu.Unlock()
+	dst := vm.objects[id]
+	if dst == nil {
+		return
+	}
+	switch sig {
+	case nativeTextBoxInfoSig:
+		dst.fields["x"] = float32(C.tipsy_text_jvalue_f_at(args, 0))
+		dst.fields["y"] = float32(C.tipsy_text_jvalue_f_at(args, 1))
+		dst.fields["width"] = float32(C.tipsy_text_jvalue_f_at(args, 2))
+		dst.fields["height"] = float32(C.tipsy_text_jvalue_f_at(args, 3))
+		dst.fields["fontSize"] = float32(C.tipsy_text_jvalue_f_at(args, 4))
+		dst.fields["multiline"] = jvalueIAt(args, 5) != 0
+		dst.fields["xAlignment"] = jvalueIAt(args, 6)
+		dst.fields["yAlignment"] = jvalueIAt(args, 7)
+		dst.fields["textColor"] = jvalueIAt(args, 8)
+		dst.fields["font"] = jvalueIAt(args, 9)
+		dst.fields["textInputType"] = jvalueIAt(args, 10)
+		dst.fields["returnKeyType"] = jvalueIAt(args, 11)
+		dst.fields["manualFocusRelease"] = jvalueIAt(args, 12) != 0
+		dst.fields["textWrapped"] = jvalueIAt(args, 13) != 0
+		dst.fields["editable"] = jvalueIAt(args, 14) != 0
+	case nativeTextBoxInfoCopySig:
+		srcID := jobjectToID(uintptr(C.tipsy_jvalue_l_at(args, 0)))
+		if src := vm.objects[srcID]; src != nil {
+			for k, v := range src.fields {
+				dst.fields[k] = v
+			}
+		}
+	}
 }
 
 // testPackKeyboardArgs packs the four showKeyboard argument slots for tests
@@ -867,6 +1264,26 @@ func testPackKeyboardArgs(handle int64, flag int32, initID, boxesID int64) *C.jv
 	C.tipsy_jvalue_set_i(&sl[1], C.jint(flag))
 	C.tipsy_jvalue_set_l(&sl[2], idToJobject(initID))
 	C.tipsy_jvalue_set_l(&sl[3], idToJobject(boxesID))
+	return &sl[0]
+}
+
+func testPackNativeTextBoxInfoArgs(x, y, width, height, fontSize float32, multiline bool,
+	xAlignment, yAlignment int32, textColor uint32, font, textInputType, returnKeyType int32,
+	manualFocusRelease, textWrapped, editable bool) *C.jvalue {
+	sl := make([]C.jvalue, 15)
+	for i, v := range []float32{x, y, width, height, fontSize} {
+		C.tipsy_text_jvalue_set_f_at(&sl[0], C.int(i), C.float(v))
+	}
+	boolInt := func(v bool) int32 {
+		if v {
+			return 1
+		}
+		return 0
+	}
+	for i, v := range []int32{boolInt(multiline), xAlignment, yAlignment, int32(textColor), font,
+		textInputType, returnKeyType, boolInt(manualFocusRelease), boolInt(textWrapped), boolInt(editable)} {
+		C.tipsy_jvalue_set_i(&sl[5+i], C.jint(v))
+	}
 	return &sl[0]
 }
 

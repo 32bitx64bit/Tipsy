@@ -313,6 +313,11 @@ func GoJNI_AllocObject(env *C.JNIEnv, clazz C.jclass) C.jobject {
 //export GoJNI_NewObjectA
 func GoJNI_NewObjectA(env *C.JNIEnv, clazz C.jclass, methodID C.jmethodID, args *C.jvalue) C.jobject {
 	obj := GoJNI_AllocObject(env, clazz)
+	if vm := vmFromEnv(unsafe.Pointer(env)); vm != nil {
+		if info, ok := lookupMethod(methodID); ok && info.class == nativeTextBoxInfoClass && info.name == "<init>" {
+			seedNativeTextBoxInfoConstructor(vm, obj, info.sig, args)
+		}
+	}
 	var out C.jvalue
 	GoJNI_CallA(env, obj, clazz, methodID, args, 0, 'V', &out)
 	return obj

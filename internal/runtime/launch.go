@@ -395,6 +395,7 @@ const (
 	nativePassTextSig       = "(JLjava/lang/String;ZI)V"
 	nativeReturnPressedSym  = "Java_com_roblox_engine_jni_NativeGLInterface_nativeReturnPressedFromOnScreenKeyboard"
 	syncTextboxSelectionSym = "Java_com_roblox_engine_jni_NativeGLInterface_syncTextboxTextAndCursorPosition2"
+	nativeGetTextBoxInfoSym = "Java_com_roblox_engine_jni_NativeGLInterface_nativeGetTextBoxInfo"
 	lsmSingletonVA          = 0x74d74f0
 
 	appCmdInitWindow         = 1
@@ -536,6 +537,11 @@ func Launch(ctx context.Context, opt LaunchOptions) error {
 	}
 	defer win.StopBackgroundPump()
 	defer presenter.stop()
+	focusedTextOverlay, err := x11.NewFocusedTextOverlay(win)
+	if err != nil {
+		return fmt.Errorf("focused text overlay: %w", err)
+	}
+	defer focusedTextOverlay.Close()
 
 	android.NewResolver(android.Config{AssetsDir: assets, APKPath: filepath.Join(dir, "apk", "base.apk"), Width: int32(opt.Width), Height: int32(opt.Height)})
 	aw := android.NewWindow(opt.Width, opt.Height, xidHandle{xid: win.XID()})
@@ -549,6 +555,7 @@ func Launch(ctx context.Context, opt LaunchOptions) error {
 	vm.SetAppVersion(ver)
 	logging.Logger(logging.CatRuntime).Info("installed client", "version", ver)
 	vm.SetDisplaySize(opt.Width, opt.Height)
+	jni.SetRbxTextOverlayViewport(opt.Width, opt.Height, 1)
 	if mmW, mmH := jni.X11DisplayPhysicalSizeMM(win.Display()); mmW > 0 && mmH > 0 {
 		vm.SetDisplayPhysicalSizeMM(mmW, mmH)
 	}
@@ -607,6 +614,37 @@ func Launch(ctx context.Context, opt LaunchOptions) error {
 		refreshPublication.version = 0
 	}
 	resize := session.resize
+	focusedTextSync := newFocusedTextOverlaySync(focusedTextOverlay, assets)
+	textOverlayTicker := time.NewTicker(focusedTextOverlayPollInterval)
+	defer textOverlayTicker.Stop()
+	textOverlayErrorLogged := false
+	var textOverlayDiagnosticsVersion uint64
+	refreshFocusedText := func(now time.Time) {
+		updated, err := focusedTextSync.refresh(now)
+		if err != nil && !textOverlayErrorLogged {
+			// Text and field identity never enter this diagnostic. Continue the
+			// client honestly; a later version/repaint retries the host View.
+			logging.Logger(logging.CatX11).Error("focused text overlay unavailable", "err", err)
+			textOverlayErrorLogged = true
+		} else if updated && err == nil {
+			textOverlayErrorLogged = false
+			if focusedTextSync.active && focusedTextSync.seen != textOverlayDiagnosticsVersion {
+				diag := focusedTextOverlay.Diagnostics()
+				// Aggregate ink booleans and raw Android color are safe to log;
+				// editor content and glyph identities never enter diagnostics.
+				logging.Logger(logging.CatX11).Info("focused text overlay paint",
+					"mapped", diag.Mapped,
+					"usesARGB", diag.UsesARGB,
+					"textColorARGB", fmt.Sprintf("0x%08x", diag.TextColorARGB),
+					"textAlpha", diag.TextAlpha,
+					"glyphMask", diag.GlyphMaskPixels > 0,
+					"brightGlyphInk", diag.BrightGlyphPixels > 0,
+					"caretMask", diag.CaretMaskPixels > 0)
+				textOverlayDiagnosticsVersion = focusedTextSync.seen
+			}
+		}
+	}
+	refreshFocusedText(time.Now())
 	defer jni.ClearRobloxDirectInputTarget()
 	defer jni.ClearRobloxDirectKeyTarget()
 	defer jni.ClearRobloxTextInputTarget()
@@ -666,13 +704,19 @@ func Launch(ctx context.Context, opt LaunchOptions) error {
 			s := jni.InputDeliveryStats()
 			d := jni.RobloxDirectInputStats()
 			textPass, textReturn, textSync, textDrop := jni.RbxTextDeliveryStats()
+			textInfo := jni.RbxTextInfoRefreshStats()
 			logging.Logger(logging.CatRuntime).Info("input delivery",
 				"path", jni.PointerInputPath().String(),
 				"focus", s.FocusDelivered, "gameActivityKeys", s.KeyDelivered, "gameActivityPointers", s.PointerDelivered,
 				"gameActivityConsumed", s.KeyConsumed+s.PointerConsumed, "gameActivityDropped", s.Dropped,
 				"directKeys", d.KeyDelivered, "directButtons", d.ButtonDelivered, "directMoves", d.MoveDelivered, "directWheels", d.WheelDelivered, "directDropped", d.Dropped,
 				"pointerLockQueries", d.LockQueries, "pointerLockTrue", d.LockTrue,
-				"textPass", textPass, "textReturn", textReturn, "textSync", textSync, "textDropped", textDrop)
+				"textPass", textPass, "textReturn", textReturn, "textSync", textSync, "textDropped", textDrop,
+				"textInfoRequested", textInfo.Requested, "textInfoAttempted", textInfo.Attempted,
+				"textInfoApplied", textInfo.Applied, "textInfoMissing", textInfo.MissingTarget,
+				"textInfoNull", textInfo.NullResult, "textInfoStale", textInfo.StaleSession)
+		case now := <-textOverlayTicker.C:
+			refreshFocusedText(now)
 		case <-win.InputReady():
 			if err := win.Pump(); err != nil {
 				if err == x11.ErrClosed {
@@ -690,6 +734,10 @@ func Launch(ctx context.Context, opt LaunchOptions) error {
 			// is the same dedup as before, now on the wake path rather than 4ms.
 			w, h := win.Size()
 			resize.observe(w, h)
+			// XIM commits and editor-navigation keys mutate the focused snapshot
+			// while Pump notifies subscribers. Paint that version in the same
+			// launch-loop turn rather than waiting for the bounded poll fallback.
+			refreshFocusedText(time.Now())
 		}
 	}
 }
@@ -806,6 +854,7 @@ func wireRobloxTextInput(mod *loader.Module, env *jni.Env) {
 	passFn, passErr := mod.Lookup(nativePassTextSym)
 	returnFn, returnErr := mod.Lookup(nativeReturnPressedSym)
 	syncFn, syncErr := mod.Lookup(syncTextboxSelectionSym)
+	getInfoFn, getInfoErr := mod.Lookup(nativeGetTextBoxInfoSym)
 	for _, missing := range []struct {
 		sym string
 		err error
@@ -813,13 +862,14 @@ func wireRobloxTextInput(mod *loader.Module, env *jni.Env) {
 		{nativePassTextSym, passErr},
 		{nativeReturnPressedSym, returnErr},
 		{syncTextboxSelectionSym, syncErr},
+		{nativeGetTextBoxInfoSym, getInfoErr},
 	} {
 		if missing.err != nil {
 			logging.Logger(logging.CatJNI).Info("[jni] missing text input export", "sym", missing.sym, "err", missing.err)
 		}
 	}
 	class := env.FindClass("com/roblox/engine/jni/NativeGLInterface")
-	jni.SetRobloxTextInputTarget(env, class, passFn, returnFn, syncFn, loader.CallP8)
+	jni.SetRobloxTextInputTarget(env, class, passFn, returnFn, syncFn, getInfoFn, loader.CallP8)
 }
 
 func dispatchGameActivityLifecycle(ctx context.Context, vm *jni.VM, mod *loader.Module, env *jni.Env, activity, handle uintptr, files, cache, preferences string, width, height int, currentRefreshHz float32, supportedRefreshHz []float32, aw *android.Window, req rbxuri.Request) *gameActivitySession {
@@ -923,7 +973,13 @@ type engineResizeSink struct {
 
 func (s *engineResizeSink) resizeBuffers(width, height int) error { return s.aw.Resize(width, height) }
 
-func (s *engineResizeSink) setDisplaySize(width, height int) { s.vm.SetDisplaySize(width, height) }
+func (s *engineResizeSink) setDisplaySize(width, height int) {
+	s.vm.SetDisplaySize(width, height)
+	// DisplayMetrics.density remains 1 in the desktop Android contract. Keep
+	// the transient editor's clipping metadata in lockstep with that same
+	// surface resize; NativeTextBoxInfo bounds themselves are not rescaled.
+	jni.SetRbxTextOverlayViewport(width, height, 1)
+}
 
 func (s *engineResizeSink) postAppCmd(cmd byte) { postAndroidAppCmd(s.handle, cmd) }
 

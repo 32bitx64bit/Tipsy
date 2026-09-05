@@ -687,6 +687,65 @@ func TestDirectKeyRepeatABI(t *testing.T) {
 	}
 }
 
+// Slash down is Roblox's chat-open gesture. The native down can
+// synchronously focus RbxKeyboard, but that focus transition must not steal
+// the matching repeat/up from the native listener. Otherwise the engine keeps
+// slash held and a later physical slash can be ignored.
+func TestSlashGestureKeepsInitialListenerAcrossEditorFocus(t *testing.T) {
+	selectKeyboardPath(t, "direct")
+	resetTextInputConnectionForTest()
+	t.Cleanup(resetTextInputConnectionForTest)
+	vm, err := NewVM()
+	if err != nil {
+		t.Fatal(err)
+	}
+	wireRecordingDirectKeyTarget(t, vm.Env().Raw(), 88)
+	before := RobloxDirectInputStats().KeyDelivered
+
+	slash := x11.InputEvent{Kind: x11.InputKey, KeyPressed: true, KeyCode: 76, ScanCode: 61}
+	handleX11InputEvent(slash)
+	if got := testDirectRecKeyInt(0); got != 1 {
+		t.Fatalf("slash initial edge down=%d, want 1", got)
+	}
+	if got := testDirectRecKeyInt(1); got != 53 {
+		t.Fatalf("slash scan=%d, want evdev KEY_SLASH=53", got)
+	}
+	if got := testDirectRecKeyInt(2); got != 76 {
+		t.Fatalf("slash Android keycode=%d, want AKEYCODE_SLASH=76", got)
+	}
+
+	// Model the exact re-entrant transition caused by Roblox handling slash:
+	// its direct key callback calls showKeyboard before X11 later supplies the
+	// repeated down and physical release.
+	vm.dispatch(jnull(), nativeGLClass, "showKeyboard", showKeyboardSig,
+		testPackKeyboardArgs(101, 1, 0, 0))
+	slash.RepeatCount = 1
+	handleX11InputEvent(slash)
+	if got := testDirectRecKeyInt(3); got != 1 {
+		t.Fatalf("slash repeat flag=%d, want 1", got)
+	}
+	slash.KeyPressed = false
+	slash.RepeatCount = 0
+	handleX11InputEvent(slash)
+	if got := testDirectRecKeyInt(0); got != 0 {
+		t.Fatalf("slash final edge down=%d, want 0", got)
+	}
+	if delta := RobloxDirectInputStats().KeyDelivered - before; delta != 3 {
+		t.Fatalf("native slash callbacks=%d, want down/repeat/up", delta)
+	}
+
+	// A key whose initial down occurs while the editor is already focused
+	// remains editor-owned, so ordinary chat text does not leak to gameplay.
+	before = RobloxDirectInputStats().KeyDelivered
+	slash.KeyPressed = true
+	handleX11InputEvent(slash)
+	slash.KeyPressed = false
+	handleX11InputEvent(slash)
+	if delta := RobloxDirectInputStats().KeyDelivered - before; delta != 0 {
+		t.Fatalf("focused-editor slash leaked %d native callbacks", delta)
+	}
+}
+
 func TestKeyRepeatPreservesTextEditor(t *testing.T) {
 	selectKeyboardPath(t, "direct")
 	vm, err := NewVM()

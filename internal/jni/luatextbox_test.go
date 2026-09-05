@@ -22,7 +22,7 @@ func luaTextBoxString(t *testing.T, vm *VM, s string) int64 {
 // TestLuaTextBoxChangedBothClasses drives the exact production dispatch path
 // for the String twin on both classes (verified-Called in
 // /tmp/tipsy-direct-retest.log 20:38:26): handled, counted, length-only
-// record, log line emitted, nothing fabricated or acted on.
+// record, log line emitted, and no fabricated focus or commit.
 func TestLuaTextBoxChangedBothClasses(t *testing.T) {
 	vm, err := NewVM()
 	if err != nil {
@@ -149,9 +149,67 @@ func TestLuaTextBoxPropertyChangedBothClasses(t *testing.T) {
 	}
 }
 
+// TestLuaTextBoxCallbacksRefreshFocusedOverlay pins the actual APK UI-thread
+// effects: changed(String) setText(value)+setSelection(value.length), while
+// propertyChanged invalidates the view even without a content delta. Payload
+// content is never logged and is discarded when focus ends.
+func TestLuaTextBoxCallbacksRefreshFocusedOverlay(t *testing.T) {
+	vm, err := NewVM()
+	if err != nil {
+		t.Fatal(err)
+	}
+	buf := captureLogs(t)
+	resetTextInputConnectionForTest()
+	t.Cleanup(resetTextInputConnectionForTest)
+
+	initID, infoID := keyboardTestObjects(t, vm, nil, 1)
+	vm.dispatch(jnull(), nativeGLClass, "showKeyboard", showKeyboardSig,
+		testPackKeyboardArgs(55, 1, initID, infoID))
+	before := RbxTextOverlayVersion()
+
+	const sentinel = "view😀"
+	sid := luaTextBoxString(t, vm, sentinel)
+	if _, handled := vm.dispatch(jnull(), nativeHelperClass,
+		luaTextBoxChangedHelper, luaTextBoxChangedSig,
+		testPackObjectArg(sid)); !handled {
+		t.Fatal("changed callback not handled")
+	}
+	s := CurrentRbxTextOverlay()
+	if !s.Active || s.Text != sentinel || s.SelectionStartUTF16 != 6 || s.SelectionEndUTF16 != 6 {
+		t.Fatalf("changed snapshot = active=%v len=%d selection=%d/%d",
+			s.Active, len([]rune(s.Text)), s.SelectionStartUTF16, s.SelectionEndUTF16)
+	}
+	if s.Version <= before {
+		t.Fatalf("changed version = %d, want > %d", s.Version, before)
+	}
+	if strings.Contains(buf.String(), sentinel) {
+		t.Fatalf("changed callback leaked content: %s", buf.String())
+	}
+
+	stable := RbxTextOverlayVersion()
+	vm.dispatch(jnull(), nativeGLClass, luaTextBoxChangedCallback,
+		luaTextBoxChangedSig, testPackObjectArg(sid))
+	if got := RbxTextOverlayVersion(); got != stable {
+		t.Fatalf("equal setText invalidated version = %d, want unchanged %d", got, stable)
+	}
+	vm.dispatch(jnull(), nativeGLClass, luaTextBoxPropertyCallback,
+		luaTextBoxPropertyChangedSig, nil)
+	if got := RbxTextOverlayVersion(); got <= stable {
+		t.Fatalf("property callback version = %d, want > %d", got, stable)
+	}
+
+	vm.dispatch(jnull(), nativeGLClass, "hideKeyboard", hideKeyboardSig, nil)
+	vm.dispatch(jnull(), nativeGLClass, luaTextBoxChangedCallback,
+		luaTextBoxChangedSig, testPackObjectArg(sid))
+	hidden := CurrentRbxTextOverlay()
+	if hidden.Active || hidden.Text != "" {
+		t.Fatalf("inactive callback retained content: active=%v len=%d", hidden.Active, len(hidden.Text))
+	}
+}
+
 // TestLuaTextBoxNeverLogsTextContent is the privacy boundary: a String twin
 // carrying a secret marker appears in the log only as a length, never as
-// content, and no accessor exposes content.
+// content, and the content-free diagnostic accessor exposes only its length.
 func TestLuaTextBoxNeverLogsTextContent(t *testing.T) {
 	vm, err := NewVM()
 	if err != nil {

@@ -104,11 +104,363 @@ func wireRecordingRbxTextTarget(t *testing.T, vm *VM) {
 	env := vm.Env()
 	if !SetRobloxTextInputTarget(env,
 		env.FindClass("com/roblox/engine/jni/NativeGLInterface"),
-		testRbxRecordPassFn(), testRbxRecordReturnFn(), testRbxRecordSyncFn(), nil) {
+		testRbxRecordPassFn(), testRbxRecordReturnFn(), testRbxRecordSyncFn(), 0, nil) {
 		t.Fatal("recording RbxKeyboard text target not ready")
 	}
 	t.Cleanup(resetTextInputConnectionForTest)
 	t.Cleanup(ClearRobloxTextInputTarget)
+}
+
+// TestRbxTextOverlaySnapshotCapturesAPKConfig drives the exact
+// NativeTextBoxInfo constructor plus a genuine showKeyboard session. The
+// render-facing snapshot is transient, complete, uses UTF-16 selection, and
+// is wiped on hide.
+func TestRbxTextOverlaySnapshotCapturesAPKConfig(t *testing.T) {
+	vm, err := NewVM()
+	if err != nil {
+		t.Fatal(err)
+	}
+	buf := captureLogs(t)
+	resetTextInputConnectionForTest()
+	t.Cleanup(resetTextInputConnectionForTest)
+	vm.SetDisplaySize(1280, 720)
+
+	const sentinel = "safe😀"
+	vm.mu.Lock()
+	info := vm.newObjectLocked(vm.ensureClassLocked(nativeTextBoxInfoClass))
+	vm.mu.Unlock()
+	infoID := info.id
+	seedNativeTextBoxInfoConstructor(vm, idToJobject(infoID), nativeTextBoxInfoSig,
+		testPackNativeTextBoxInfoArgs(
+			12.5, 24.5, 320, 44, 18, false,
+			2, 1, 0xffaabbcc, 4, 5, 2, true, false, true))
+	initID, _ := keyboardTestObjects(t, vm, []byte(sentinel), 0)
+	if _, handled := vm.dispatch(jnull(), nativeGLClass, "showKeyboard", showKeyboardSig,
+		testPackKeyboardArgs(77, 1, initID, infoID)); !handled {
+		t.Fatal("showKeyboard not handled")
+	}
+	s := CurrentRbxTextOverlay()
+	if !s.Active || !s.Configured || s.Text != sentinel || s.Version == 0 {
+		t.Fatalf("overlay state = active=%v configured=%v len=%d version=%d",
+			s.Active, s.Configured, len([]rune(s.Text)), s.Version)
+	}
+	if s.SelectionStartUTF16 != 6 || s.SelectionEndUTF16 != 6 {
+		t.Fatalf("UTF-16 selection = %d/%d, want 6/6",
+			s.SelectionStartUTF16, s.SelectionEndUTF16)
+	}
+	if s.Density != 1 || s.ViewportWidthPx != 1280 || s.ViewportHeightPx != 720 {
+		t.Fatalf("display contract = density=%v viewport=%dx%d", s.Density, s.ViewportWidthPx, s.ViewportHeightPx)
+	}
+	if s.X != 12 || s.Y != 24 || s.Width != 320 || s.Height != 44 || s.FontSize != 18 {
+		t.Fatalf("geometry = %v,%v %vx%v fontSize=%v", s.X, s.Y, s.Width, s.Height, s.FontSize)
+	}
+	if s.TextColor != 0xffaabbcc || s.Font != 4 || s.TextInputType != 5 ||
+		s.XAlignment != 2 || s.YAlignment != 1 || s.ReturnKeyType != 2 {
+		t.Fatalf("style = color=%#x font=%d input=%d align=%d/%d return=%d",
+			s.TextColor, s.Font, s.TextInputType, s.XAlignment, s.YAlignment, s.ReturnKeyType)
+	}
+	if !s.Editable || s.Multiline || s.TextWrapped || !s.ManualFocusRelease {
+		t.Fatalf("flags = editable=%v multiline=%v wrapped=%v manual=%v",
+			s.Editable, s.Multiline, s.TextWrapped, s.ManualFocusRelease)
+	}
+	if !s.CursorVisible || !s.IncludeFontPadding || s.PaddingLeftPx != 0 || s.PaddingTopPx != 0 ||
+		s.PaddingRightPx != 0 || s.PaddingBottomPx != 0 {
+		t.Fatalf("view defaults = cursor=%v includeFontPadding=%v padding=%d/%d/%d/%d",
+			s.CursorVisible, s.IncludeFontPadding,
+			s.PaddingLeftPx, s.PaddingTopPx, s.PaddingRightPx, s.PaddingBottomPx)
+	}
+	out := buf.String()
+	if !strings.Contains(out, "textColorARGB=0xffaabbcc") || !strings.Contains(out, "textAlpha=255") {
+		t.Fatalf("show diagnostic lost raw Android color: %s", out)
+	}
+	if strings.Contains(out, sentinel) {
+		t.Fatalf("show diagnostic leaked sentinel content: %s", out)
+	}
+
+	beforeHide := RbxTextOverlayVersion()
+	vm.dispatch(jnull(), nativeGLClass, "hideKeyboard", hideKeyboardSig, nil)
+	hidden := CurrentRbxTextOverlay()
+	if hidden.Active || hidden.Text != "" || hidden.Version <= beforeHide {
+		t.Fatalf("hidden overlay = active=%v textLen=%d version=%d before=%d",
+			hidden.Active, len(hidden.Text), hidden.Version, beforeHide)
+	}
+}
+
+func TestRbxTextOverlayGeometryMatchesAndroidAcrossViewportChanges(t *testing.T) {
+	vm, err := NewVM()
+	if err != nil {
+		t.Fatal(err)
+	}
+	resetTextInputConnectionForTest()
+	t.Cleanup(resetTextInputConnectionForTest)
+	for _, size := range []struct {
+		name          string
+		width, height int
+	}{
+		{name: "initial-1280x720", width: 1280, height: 720},
+		{name: "resized-1600x900", width: 1600, height: 900},
+		{name: "fullscreen-2560x1440", width: 2560, height: 1440},
+	} {
+		t.Run(size.name, func(t *testing.T) {
+			vm.SetDisplaySize(size.width, size.height)
+			vm.mu.Lock()
+			info := vm.newObjectLocked(vm.ensureClassLocked(nativeTextBoxInfoClass))
+			vm.mu.Unlock()
+			seedNativeTextBoxInfoConstructor(vm, idToJobject(info.id), nativeTextBoxInfoSig,
+				testPackNativeTextBoxInfoArgs(
+					10.875, 20.625, 300.99, 31.99, 17.5, false,
+					0, 0, 0xffffffff, 0, 0, 0, false, false, true))
+			initID, _ := keyboardTestObjects(t, vm, nil, 0)
+			vm.dispatch(jnull(), nativeGLClass, "showKeyboard", showKeyboardSig,
+				testPackKeyboardArgs(91, 1, initID, info.id))
+			s := CurrentRbxTextOverlay()
+			if s.ViewportWidthPx != int32(size.width) || s.ViewportHeightPx != int32(size.height) ||
+				s.Density != 1 || s.X != 10 || s.Y != 20 || s.Width != 300 || s.Height != 31 {
+				t.Fatalf("snapshot viewport=%dx%d density=%v geometry=%v,%v %vx%v",
+					s.ViewportWidthPx, s.ViewportHeightPx, s.Density, s.X, s.Y, s.Width, s.Height)
+			}
+			vm.dispatch(jnull(), nativeGLClass, "hideKeyboard", hideKeyboardSig, nil)
+		})
+	}
+
+	for _, tc := range []struct {
+		value, density, want float32
+	}{
+		{value: 12.9, density: 1, want: 12},
+		{value: 12.9, density: 2, want: 25},
+		{value: -1.9, density: 1, want: -1},
+	} {
+		if got := androidViewPixel(tc.value, tc.density); got != tc.want {
+			t.Fatalf("androidViewPixel(%v,%v)=%v want %v", tc.value, tc.density, got, tc.want)
+		}
+	}
+}
+
+func TestRbxTextOverlayViewportUpdateInvalidatesWithoutScaling(t *testing.T) {
+	vm, err := NewVM()
+	if err != nil {
+		t.Fatal(err)
+	}
+	resetTextInputConnectionForTest()
+	t.Cleanup(resetTextInputConnectionForTest)
+	vm.SetDisplaySize(1280, 720)
+	vm.mu.Lock()
+	info := vm.newObjectLocked(vm.ensureClassLocked(nativeTextBoxInfoClass))
+	vm.mu.Unlock()
+	seedNativeTextBoxInfoConstructor(vm, idToJobject(info.id), nativeTextBoxInfoSig,
+		testPackNativeTextBoxInfoArgs(
+			10.875, 20.625, 300.99, 31.99, 17.5, false,
+			0, 0, 0xffffffff, 0, 0, 0, false, false, true))
+	initID, _ := keyboardTestObjects(t, vm, nil, 0)
+	vm.dispatch(jnull(), nativeGLClass, "showKeyboard", showKeyboardSig,
+		testPackKeyboardArgs(92, 1, initID, info.id))
+	before := CurrentRbxTextOverlay()
+	SetRbxTextOverlayViewport(2560, 1440, 1)
+	after := CurrentRbxTextOverlay()
+	if after.Version <= before.Version || after.ViewportWidthPx != 2560 || after.ViewportHeightPx != 1440 {
+		t.Fatalf("updated viewport=%dx%d version=%d before=%d",
+			after.ViewportWidthPx, after.ViewportHeightPx, after.Version, before.Version)
+	}
+	if after.X != before.X || after.Y != before.Y || after.Width != before.Width || after.Height != before.Height {
+		t.Fatalf("resize rescaled View pixels: before=%v,%v %vx%v after=%v,%v %vx%v",
+			before.X, before.Y, before.Width, before.Height,
+			after.X, after.Y, after.Width, after.Height)
+	}
+}
+
+func TestRbxTextBoxInfoRefreshRunsAfterCallbackAndReleasesLocalRef(t *testing.T) {
+	vm, err := NewVM()
+	if err != nil {
+		t.Fatal(err)
+	}
+	buf := captureLogs(t)
+	resetTextInputConnectionForTest()
+	t.Cleanup(resetTextInputConnectionForTest)
+	t.Cleanup(ClearRobloxTextInputTarget)
+	vm.SetDisplaySize(1280, 720)
+	vm.mu.Lock()
+	info := vm.newObjectLocked(vm.ensureClassLocked(nativeTextBoxInfoClass))
+	vm.mu.Unlock()
+	seedNativeTextBoxInfoConstructor(vm, idToJobject(info.id), nativeTextBoxInfoSig,
+		testPackNativeTextBoxInfoArgs(
+			40.9, 50.9, 420.9, 38.9, 20, false,
+			1, 1, 0xffddeeff, 16, 0, 0, false, false, true))
+	const sentinel = "safe-secret"
+	initID, _ := keyboardTestObjects(t, vm, []byte(sentinel), 0)
+	// Exact DEX behavior: Z=false still focuses/shows the EditText but skips
+	// applying the show payload's NativeTextBoxInfo.
+	vm.dispatch(jnull(), nativeGLClass, "showKeyboard", showKeyboardSig,
+		testPackKeyboardArgs(201, 0, initID, info.id))
+	if before := CurrentRbxTextOverlay(); !before.Active || before.Configured {
+		t.Fatalf("pre-property state = active=%v configured=%v", before.Active, before.Configured)
+	}
+
+	getterCalls := 0
+	const getterFn = uintptr(0x1234)
+	env := vm.Env()
+	if !SetRobloxTextInputTarget(env, env.FindClass("com/roblox/engine/jni/NativeGLInterface"),
+		testRbxRecordPassFn(), 0, 0, getterFn,
+		func(fn, a0, a1, a2, a3, a4, a5, a6, a7 uintptr) int64 {
+			getterCalls++
+			if fn != getterFn || a0 != env.Raw() || a1 == 0 {
+				t.Fatalf("getter ABI = fn=%#x env=%#x class=%#x", fn, a0, a1)
+			}
+			return info.id
+		}) {
+		t.Fatal("text target not ready")
+	}
+	vm.dispatch(jnull(), nativeGLClass, luaTextBoxPropertyCallback,
+		luaTextBoxPropertyChangedSig, nil)
+	if getterCalls != 0 {
+		t.Fatal("property callback re-entered native getter")
+	}
+	if stats := RbxTextInfoRefreshStats(); stats.Requested != 1 || stats.Attempted != 0 {
+		t.Fatalf("post-callback refresh stats = %+v", stats)
+	}
+
+	if !RefreshRbxTextOverlayInfo() || getterCalls != 1 {
+		t.Fatalf("delayed refresh = applied=%v calls=%d", CurrentRbxTextOverlay().Configured, getterCalls)
+	}
+	got := CurrentRbxTextOverlay()
+	if !got.Configured || got.X != 40 || got.Y != 50 || got.Width != 420 || got.Height != 38 ||
+		got.FontSize != 20 || got.TextColor != 0xffddeeff || got.Font != 16 ||
+		got.XAlignment != 1 || got.YAlignment != 1 {
+		t.Fatalf("refreshed non-content contract = %+v", got)
+	}
+	if vm.get(info.id) != nil {
+		t.Fatal("nativeGetTextBoxInfo local reference survived field copy")
+	}
+	if RefreshRbxTextOverlayInfo() || getterCalls != 1 {
+		t.Fatalf("consumed request retried: calls=%d", getterCalls)
+	}
+	stats := RbxTextInfoRefreshStats()
+	if stats.Requested != 1 || stats.Attempted != 1 || stats.Applied != 1 ||
+		stats.MissingTarget != 0 || stats.NullResult != 0 || stats.StaleSession != 0 {
+		t.Fatalf("refresh stats = %+v", stats)
+	}
+	if out := buf.String(); !strings.Contains(out, "text box info refreshed") ||
+		!strings.Contains(out, "textColorARGB=0xffddeeff") || strings.Contains(out, sentinel) {
+		t.Fatalf("refresh diagnostic = %s", out)
+	}
+}
+
+func TestRbxTextBoxInfoRefreshRejectsStaleFocusSession(t *testing.T) {
+	vm, err := NewVM()
+	if err != nil {
+		t.Fatal(err)
+	}
+	resetTextInputConnectionForTest()
+	t.Cleanup(resetTextInputConnectionForTest)
+	t.Cleanup(ClearRobloxTextInputTarget)
+	vm.mu.Lock()
+	info := vm.newObjectLocked(vm.ensureClassLocked(nativeTextBoxInfoClass))
+	vm.mu.Unlock()
+	seedNativeTextBoxInfoConstructor(vm, idToJobject(info.id), nativeTextBoxInfoSig,
+		testPackNativeTextBoxInfoArgs(
+			10, 20, 300, 40, 18, false,
+			0, 0, 0xffffffff, 0, 0, 0, false, false, true))
+	beginRbxTextEditor(301, "", false, rbxTextBoxConfig{})
+	markLuaTextBoxPropertyChanged()
+
+	env := vm.Env()
+	const getterFn = uintptr(0x5678)
+	SetRobloxTextInputTarget(env, env.FindClass("com/roblox/engine/jni/NativeGLInterface"),
+		testRbxRecordPassFn(), 0, 0, getterFn,
+		func(fn, a0, a1, a2, a3, a4, a5, a6, a7 uintptr) int64 {
+			// Simulate the engine changing focus while its getter is in flight.
+			// Even a recycled native handle cannot defeat the session generation.
+			beginRbxTextEditor(301, "", false, rbxTextBoxConfig{})
+			return info.id
+		})
+	if RefreshRbxTextOverlayInfo() {
+		t.Fatal("stale property result applied to a replacement focus session")
+	}
+	if got := CurrentRbxTextOverlay(); !got.Active || got.Configured {
+		t.Fatalf("replacement focus state = active=%v configured=%v", got.Active, got.Configured)
+	}
+	if vm.get(info.id) != nil {
+		t.Fatal("stale getter local reference was not released")
+	}
+	if stats := RbxTextInfoRefreshStats(); stats.Attempted != 1 || stats.Applied != 0 || stats.StaleSession != 1 {
+		t.Fatalf("stale refresh stats = %+v", stats)
+	}
+}
+
+func TestRbxTextBoxInfoRefreshMissingAndNullFailOnce(t *testing.T) {
+	for _, tc := range []struct {
+		name          string
+		getInfoFn     uintptr
+		withCaller    bool
+		wantAttempted uint64
+		wantMissing   uint64
+		wantNull      uint64
+	}{
+		{name: "missing-target", wantMissing: 1},
+		{name: "null-result", getInfoFn: 0x9abc, withCaller: true, wantAttempted: 1, wantNull: 1},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			vm, err := NewVM()
+			if err != nil {
+				t.Fatal(err)
+			}
+			resetTextInputConnectionForTest()
+			t.Cleanup(resetTextInputConnectionForTest)
+			t.Cleanup(ClearRobloxTextInputTarget)
+			beginRbxTextEditor(401, "", false, rbxTextBoxConfig{})
+			markLuaTextBoxPropertyChanged()
+			calls := 0
+			var caller RobloxTextNativeCaller
+			if tc.withCaller {
+				caller = func(fn, a0, a1, a2, a3, a4, a5, a6, a7 uintptr) int64 {
+					calls++
+					return 0
+				}
+			}
+			env := vm.Env()
+			SetRobloxTextInputTarget(env, env.FindClass("com/roblox/engine/jni/NativeGLInterface"),
+				testRbxRecordPassFn(), 0, 0, tc.getInfoFn, caller)
+			if RefreshRbxTextOverlayInfo() || RefreshRbxTextOverlayInfo() {
+				t.Fatal("missing/null getter fabricated a text-box configuration")
+			}
+			if calls > 1 {
+				t.Fatalf("failed refresh retried %d times", calls)
+			}
+			stats := RbxTextInfoRefreshStats()
+			if stats.Requested != 1 || stats.Attempted != tc.wantAttempted ||
+				stats.MissingTarget != tc.wantMissing || stats.NullResult != tc.wantNull || stats.Applied != 0 {
+				t.Fatalf("failed refresh stats = %+v", stats)
+			}
+		})
+	}
+}
+
+// TestNativeTextBoxInfoTextColorIsVerbatimARGB pins the current APK contract:
+// constructor integer slot 8 is Android packed ARGB and neither the full nor
+// copy constructor invents an alpha/default when the raw value is zero.
+func TestNativeTextBoxInfoTextColorIsVerbatimARGB(t *testing.T) {
+	vm, err := NewVM()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []uint32{0x00000000, 0x01020304, 0xffabcdef} {
+		vm.mu.Lock()
+		src := vm.newObjectLocked(vm.ensureClassLocked(nativeTextBoxInfoClass))
+		dst := vm.newObjectLocked(vm.ensureClassLocked(nativeTextBoxInfoClass))
+		vm.mu.Unlock()
+		seedNativeTextBoxInfoConstructor(vm, idToJobject(src.id), nativeTextBoxInfoSig,
+			testPackNativeTextBoxInfoArgs(
+				0, 0, 1, 1, 1, false,
+				0, 0, want, 0, 0, 0, false, false, true))
+		seedNativeTextBoxInfoConstructor(vm, idToJobject(dst.id), nativeTextBoxInfoCopySig,
+			testPackObjectArg(src.id))
+		vm.mu.RLock()
+		gotSource := uint32(src.fields["textColor"].(int32))
+		gotCopy := uint32(dst.fields["textColor"].(int32))
+		vm.mu.RUnlock()
+		if gotSource != want || gotCopy != want {
+			t.Fatalf("raw ARGB = source=%#08x copy=%#08x, want %#08x", gotSource, gotCopy, want)
+		}
+	}
 }
 
 // TestRbxKeyboardEditorCommitUTF16 drives the complete desktop adapter:
@@ -134,8 +486,14 @@ func TestRbxKeyboardEditorCommitUTF16(t *testing.T) {
 		t.Fatalf("seeded editor = active=%v handle=%d len=%d cursor=%d, want true/99/2/3", active, handle, textLen, cursor)
 	}
 
+	versionBefore := RbxTextOverlayVersion()
 	if !DispatchRobloxTextCommit("é") {
 		t.Fatal("committed UTF-8 was not delivered")
+	}
+	overlay := CurrentRbxTextOverlay()
+	if overlay.Version <= versionBefore || overlay.Text != secret+"é" || overlay.SelectionEndUTF16 != 4 {
+		t.Fatalf("immediate overlay = version=%d before=%d len=%d cursor=%d",
+			overlay.Version, versionBefore, len([]rune(overlay.Text)), overlay.SelectionEndUTF16)
 	}
 	if testRbxRecPassCount() != 1 || testRbxRecHandle() != 99 || testRbxRecSubmit() || testRbxRecCursor() != 4 {
 		t.Fatalf("pass ABI = count=%d handle=%d submit=%v cursor=%d, want 1/99/false/4",
@@ -194,6 +552,35 @@ func TestRbxKeyboardEditorNavigationAndSubmit(t *testing.T) {
 	}
 	if active, _, textLen, _, _, returns := RbxTextInputState(); active || textLen != 0 || returns != 1 {
 		t.Fatalf("post-submit editor = active=%v len=%d returns=%d, want false/0/1", active, textLen, returns)
+	}
+}
+
+func TestRbxKeyboardTextWrappedUsesAndroidMultilineGate(t *testing.T) {
+	vm, err := NewVM()
+	if err != nil {
+		t.Fatal(err)
+	}
+	captureLogs(t)
+	wireRecordingRbxTextTarget(t, vm)
+
+	const sentinel = "safe"
+	initID, infoID := keyboardTestObjects(t, vm, []byte(sentinel), 1)
+	vm.mu.Lock()
+	vm.objects[infoID].fields["multiline"] = false
+	vm.objects[infoID].fields["textWrapped"] = true
+	vm.mu.Unlock()
+	vm.dispatch(jnull(), nativeGLClass, "showKeyboard", showKeyboardSig,
+		testPackKeyboardArgs(102, 1, initID, infoID))
+
+	if !DispatchRobloxTextKey(66, true) {
+		t.Fatal("Enter was not consumed by wrapped editor")
+	}
+	if testRbxRecReturnCount() != 0 || testRbxRecPassCount() != 1 || testRbxRecSubmit() {
+		t.Fatalf("wrapped Enter ABI = returns=%d pass=%d submit=%v, want 0/1/false",
+			testRbxRecReturnCount(), testRbxRecPassCount(), testRbxRecSubmit())
+	}
+	if active, _, textLen, _, _, _ := RbxTextInputState(); !active || textLen != len([]rune(sentinel))+1 {
+		t.Fatalf("wrapped editor = active=%v len=%d", active, textLen)
 	}
 }
 

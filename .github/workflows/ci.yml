@@ -29,7 +29,7 @@ jobs:
       - name: Native headers
         run: |
           sudo apt-get update
-          sudo apt-get install -y gcc pkg-config libx11-dev libegl1-mesa-dev libgles2-mesa-dev libxrandr-dev libxtst-dev xvfb
+          sudo apt-get install -y gcc pkg-config libx11-dev libxext-dev libpango1.0-dev libegl1-mesa-dev libgles2-mesa-dev libxrandr-dev libxtst-dev xvfb
 
       - name: Vet
         run: go vet ./...
@@ -52,6 +52,6 @@ jobs:
       - name: Qt 6
         run: |
           sudo apt-get update
-          sudo apt-get install -y qt6-base-dev pkg-config g++
+          sudo apt-get install -y qt6-base-dev libxext-dev libpango1.0-dev pkg-config g++
       - name: Build GUI
         run: go build -o bin/tipsy-gui ./cmd/tipsy-gui

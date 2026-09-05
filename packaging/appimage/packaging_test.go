@@ -94,6 +94,61 @@ func TestDesktopEntriesAreDistinctPinTargets(t *testing.T) {
 	}
 }
 
+func TestAppDirBuilderPinsAppImageVersionBeforeManifest(t *testing.T) {
+	data, err := os.ReadFile(filepath.Join(repoRoot(t), "scripts", "build-appdir.sh"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(data)
+	for _, required := range []string{
+		"inject_appimage_version",
+		`print "X-AppImage-Version=" ver`,
+		`inject_appimage_version "$appdir/io.github.tipsy_linux.Tipsy.Play.desktop"`,
+		`manifest="$appdir/usr/share/tipsy/manifest.sha256"`,
+	} {
+		if !strings.Contains(text, required) {
+			t.Errorf("build-appdir.sh is missing %q", required)
+		}
+	}
+	injectAt := strings.Index(text, `inject_appimage_version "$appdir/io.github.tipsy_linux.Tipsy.Play.desktop"`)
+	manifestAt := strings.Index(text, `manifest="$appdir/usr/share/tipsy/manifest.sha256"`)
+	if injectAt < 0 || manifestAt < 0 || injectAt > manifestAt {
+		t.Fatal("X-AppImage-Version must be written before the payload manifest")
+	}
+}
+
+func TestAppDirBuilderRequiresFocusedTextNativeStack(t *testing.T) {
+	data, err := os.ReadFile(filepath.Join(repoRoot(t), "scripts", "build-appdir.sh"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(data)
+	for _, required := range []string{
+		"required_pkg_modules=(Qt6Widgets Qt6Gui Qt6Core x11 xext pangocairo pangoft2 cairo-xlib)",
+		`pkg-config --exists "${required_pkg_modules[@]}"`,
+		`queue+=("$library")`,
+		`copy_package_license "$library"`,
+	} {
+		if !strings.Contains(text, required) {
+			t.Errorf("build-appdir.sh is missing %q", required)
+		}
+	}
+	for _, hostLibrary := range []string{
+		"libpangocairo-1.0.so.*",
+		"libpango-1.0.so.*",
+		"libpangoft2-1.0.so.*",
+		"libcairo.so.*",
+		"libglib-2.0.so.*",
+		"libgobject-2.0.so.*",
+		"libfontconfig.so.*",
+		"libfreetype.so.*",
+	} {
+		if strings.Contains(text, hostLibrary) {
+			t.Errorf("focused-text runtime dependency must not be excluded as host-provided: %s", hostLibrary)
+		}
+	}
+}
+
 func TestAppImageBuilderRejectsUnpinnedTool(t *testing.T) {
 	repo := repoRoot(t)
 	appdir := t.TempDir()

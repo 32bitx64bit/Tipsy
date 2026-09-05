@@ -16,6 +16,7 @@ const (
 	xkLeft   = 0xff51
 	xkF11    = 0xffc8
 	xkA      = 0x61 // physical key plus committed text
+	xkSlash  = 0x2f // chat-open physical key plus committed text
 	button1  = 1
 	button3  = 3
 	button4  = 4
@@ -240,6 +241,38 @@ func TestPrintableKeyDeliveredAsPhysicalKey(t *testing.T) {
 	ev = c.next(t, w)
 	if ev.Kind != InputKey || ev.KeyPressed || ev.KeyCode != 29 || ev.ScanCode <= 8 {
 		t.Fatalf("event = %+v, want physical A release without duplicate text", ev)
+	}
+	if got := InputDroppedKeys(); got != dropsBefore {
+		t.Fatalf("InputDroppedKeys = %d, want unchanged %d", got, dropsBefore)
+	}
+}
+
+func TestSlashDeliveredAsPhysicalKeyAndText(t *testing.T) {
+	w := openInputWindow(t)
+	c := collectInput(t)
+	requireProbe(t)
+	c.clearAndSettle(t, w)
+	dropsBefore := InputDroppedKeys()
+
+	if err := x11probe.Key(w.XID(), xkSlash, true); err != nil {
+		t.Fatalf("probe slash: %v", err)
+	}
+	if err := x11probe.Key(w.XID(), xkSlash, false); err != nil {
+		t.Fatalf("probe slash release: %v", err)
+	}
+	drainPump(w, t)
+
+	ev := c.next(t, w)
+	if ev.Kind != InputKey || !ev.KeyPressed || ev.KeyCode != 76 || ev.ScanCode <= 8 {
+		t.Fatalf("event = %+v, want physical slash (Android 76, raw X11 code > 8)", ev)
+	}
+	ev = c.next(t, w)
+	if ev.Kind != InputText || ev.Text != "/" {
+		t.Fatalf("event = kind=%d text=%q, want committed slash", ev.Kind, ev.Text)
+	}
+	ev = c.next(t, w)
+	if ev.Kind != InputKey || ev.KeyPressed || ev.KeyCode != 76 || ev.ScanCode <= 8 {
+		t.Fatalf("event = %+v, want physical slash release", ev)
 	}
 	if got := InputDroppedKeys(); got != dropsBefore {
 		t.Fatalf("InputDroppedKeys = %d, want unchanged %d", got, dropsBefore)

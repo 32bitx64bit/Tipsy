@@ -744,6 +744,103 @@ func bindX11InputBridge() {
 	x11.OnInput(handleX11InputEvent)
 }
 
+// A physical key gesture must keep the listener that received its initial
+// down. In particular, nativePassKeyEvent for slash can synchronously make
+// Roblox focus its RbxKeyboard editor. Re-evaluating editor focus on the
+// matching up would then swallow that up, leaving the native listener with a
+// permanently held slash and making later chat-open presses unreliable.
+//
+// The raw core-X11 keycode is the stable per-physical-key identity. X11 owns
+// the [0,255] range, and its repeat bridge already guarantees one initial
+// down, zero or more repeated downs, and one release (including focus-loss
+// releases). We retain only the selected route, never key text.
+type x11KeyGestureOwner uint8
+
+const (
+	x11KeyOwnerNone x11KeyGestureOwner = iota
+	x11KeyOwnerEditor
+	x11KeyOwnerGameActivity
+	x11KeyOwnerDirect
+	x11KeyOwnerBoth
+)
+
+var x11KeyGestures struct {
+	sync.Mutex
+	owners [256]x11KeyGestureOwner
+}
+
+func x11KeyGestureSlot(scanCode int32) (int, bool) {
+	if scanCode < 0 || scanCode >= int32(len(x11KeyGestures.owners)) {
+		return 0, false
+	}
+	return int(scanCode), true
+}
+
+func rememberedX11KeyOwner(scanCode int32) (x11KeyGestureOwner, bool) {
+	slot, ok := x11KeyGestureSlot(scanCode)
+	if !ok {
+		return x11KeyOwnerNone, false
+	}
+	x11KeyGestures.Lock()
+	owner := x11KeyGestures.owners[slot]
+	x11KeyGestures.Unlock()
+	return owner, owner != x11KeyOwnerNone
+}
+
+func rememberX11KeyOwner(scanCode int32, owner x11KeyGestureOwner) {
+	slot, ok := x11KeyGestureSlot(scanCode)
+	if !ok {
+		return
+	}
+	x11KeyGestures.Lock()
+	x11KeyGestures.owners[slot] = owner
+	x11KeyGestures.Unlock()
+}
+
+func takeX11KeyOwner(scanCode int32) (x11KeyGestureOwner, bool) {
+	slot, ok := x11KeyGestureSlot(scanCode)
+	if !ok {
+		return x11KeyOwnerNone, false
+	}
+	x11KeyGestures.Lock()
+	owner := x11KeyGestures.owners[slot]
+	x11KeyGestures.owners[slot] = x11KeyOwnerNone
+	x11KeyGestures.Unlock()
+	return owner, owner != x11KeyOwnerNone
+}
+
+func selectedX11SurfaceKeyOwner() x11KeyGestureOwner {
+	switch keyboardDeliveryPath() {
+	case KeyboardPathGameActivity:
+		return x11KeyOwnerGameActivity
+	case KeyboardPathBoth:
+		return x11KeyOwnerBoth
+	default:
+		return x11KeyOwnerDirect
+	}
+}
+
+func dispatchX11KeyToOwner(owner x11KeyGestureOwner, ev x11.InputEvent) {
+	switch owner {
+	case x11KeyOwnerEditor:
+		// The release still belongs to the editor even if Enter or an engine
+		// hideKeyboard call deactivated it after the down. Never leak an
+		// unmatched release to a SurfaceView listener that saw no down.
+		DispatchRobloxTextKey(ev.KeyCode, ev.KeyPressed)
+	case x11KeyOwnerGameActivity:
+		if ev.KeyCode > 0 {
+			dispatchGameActivityKey(ev.KeyCode, ev.ScanCode, ev.KeyPressed, ev.RepeatCount)
+		}
+	case x11KeyOwnerDirect:
+		dispatchRobloxDirectKey(ev.ScanCode, ev.KeyCode, ev.KeyPressed, ev.RepeatCount)
+	case x11KeyOwnerBoth:
+		if ev.KeyCode > 0 {
+			dispatchGameActivityKey(ev.KeyCode, ev.ScanCode, ev.KeyPressed, ev.RepeatCount)
+		}
+		dispatchRobloxDirectKey(ev.ScanCode, ev.KeyCode, ev.KeyPressed, ev.RepeatCount)
+	}
+}
+
 // handleX11InputEvent is the x11→GameActivity conversion for one captured
 // real X11 event. Split from bindX11InputBridge so tests can drive the
 // production mapping directly (X→x, Y→y must stay distinct end to end;
@@ -761,6 +858,20 @@ func handleX11InputEvent(ev x11.InputEvent) {
 		}
 		DispatchGameActivityFocus(ev.FocusGained)
 	case x11.InputKey:
+		// Repeat downs and the final up stay on the listener selected by the
+		// initial physical down. A non-repeat down always starts/replaces a
+		// gesture, recovering honestly if an earlier release was lost.
+		if ev.KeyPressed && ev.RepeatCount > 0 {
+			if owner, ok := rememberedX11KeyOwner(ev.ScanCode); ok {
+				dispatchX11KeyToOwner(owner, ev)
+				return
+			}
+		} else if !ev.KeyPressed {
+			if owner, ok := takeX11KeyOwner(ev.ScanCode); ok {
+				dispatchX11KeyToOwner(owner, ev)
+				return
+			}
+		}
 		// A genuine engine showKeyboard call transfers focus to the APK's
 		// RbxKeyboard editor. Preserve X11's physical edge as its own event,
 		// but give that focused editor first refusal so Backspace/arrows/Enter
@@ -768,18 +879,21 @@ func handleX11InputEvent(ev x11.InputEvent) {
 		// With no engine-owned textbox session, the existing physical path is
 		// byte-for-byte unchanged.
 		if DispatchRobloxTextKey(ev.KeyCode, ev.KeyPressed) {
+			if ev.KeyPressed {
+				rememberX11KeyOwner(ev.ScanCode, x11KeyOwnerEditor)
+			}
 			return
 		}
-		path := keyboardDeliveryPath()
+		owner := selectedX11SurfaceKeyOwner()
+		if ev.KeyPressed {
+			// Store before the native call: slash down may synchronously invoke
+			// showKeyboard and change editor focus before this call returns.
+			rememberX11KeyOwner(ev.ScanCode, owner)
+		}
 		// The supplied APK's final Roblox listener calls the direct key
 		// native. GameActivity remains a control path; `both` is solely a
 		// diagnostic to distinguish target wiring from listener selection.
-		if (path == KeyboardPathGameActivity || path == KeyboardPathBoth) && ev.KeyCode > 0 {
-			dispatchGameActivityKey(ev.KeyCode, ev.ScanCode, ev.KeyPressed, ev.RepeatCount)
-		}
-		if path == KeyboardPathDirect || path == KeyboardPathBoth {
-			dispatchRobloxDirectKey(ev.ScanCode, ev.KeyCode, ev.KeyPressed, ev.RepeatCount)
-		}
+		dispatchX11KeyToOwner(owner, ev)
 	case x11.InputText:
 		// InputText is UTF-8 committed by X11/XIM, not reconstructed from a
 		// physical keycode. Dispatch rejects it unless Roblox itself opened a

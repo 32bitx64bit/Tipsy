@@ -30,11 +30,12 @@ import (
 // launch) and the NativeHelper pair lazily at call time, then Calls all
 // four during real Lua-textbox activity (/tmp/tipsy-direct-retest.log
 // 20:38:26 — one stub-dispatch each, verified-Called). The String twin can
-// carry user text, so only its LENGTH crosses into Tipsy — bytes are never
-// read, stored, or logged (same privacy shape as §85/§87). Nothing here
-// fabricates visibility, focuses a field, moves State counts, or feeds the
-// commit route: receiving and recording the engine's announcement is the
-// complete behavior, and the commit path stays dormant by construction.
+// carry user text, so only its LENGTH reaches logs or diagnostics. The APK
+// posts these callbacks to its Android UI thread: the String twin
+// resynchronizes the visible RbxKeyboard EditText and moves selection to the
+// end, while the property twin invalidates its NativeTextBoxInfo layout.
+// Tipsy mirrors that transient view-state effect; it never fabricates focus,
+// moves State counts, or feeds the commit route.
 const (
 	luaTextBoxChangedSig         = "(Ljava/lang/String;)V"
 	luaTextBoxPropertyChangedSig = "()V"
@@ -72,7 +73,8 @@ func (vm *VM) dispatchLuaTextBox(o *Object, class, name, sig string, args *C.jva
 		return jnull(), false
 	}
 	if isChanged {
-		textLen := luaTextBoxStringLen(vm, args)
+		value, textLen := luaTextBoxPayload(vm, args)
+		applyLuaTextBoxChanged(value)
 		luaTextBoxState.mu.Lock()
 		luaTextBoxState.changedCount++
 		luaTextBoxState.lastChangedLen = textLen
@@ -84,6 +86,7 @@ func (vm *VM) dispatchLuaTextBox(o *Object, class, name, sig string, args *C.jva
 			"count", n,
 			"textLen", textLen)
 	} else {
+		markLuaTextBoxPropertyChanged()
 		luaTextBoxState.mu.Lock()
 		luaTextBoxState.propertyCount++
 		luaTextBoxState.lastPropertyClass = class
@@ -99,18 +102,20 @@ func (vm *VM) dispatchLuaTextBox(o *Object, class, name, sig string, args *C.jva
 	return jnull(), true
 }
 
-// luaTextBoxStringLen reports the length of the String-twin payload slot
-// without reading a single payload byte. An absent slot or unknown object
-// reads as 0, never a fabricated value. Only the string header length is
-// observed — content never crosses into Tipsy.
-func luaTextBoxStringLen(vm *VM, args *C.jvalue) int {
+// luaTextBoxPayload copies the String twin only into the private focused
+// editor, matching Android TextView.setText. The payload is never logged or
+// exposed through LuaTextBoxState; an absent slot reads as empty.
+func luaTextBoxPayload(vm *VM, args *C.jvalue) (string, int) {
 	if vm == nil || args == nil {
-		return 0
+		return "", 0
 	}
-	if o := vm.get(jobjectToID(uintptr(C.tipsy_jvalue_l_at(args, 0)))); o != nil {
-		return len(o.str)
+	id := jobjectToID(uintptr(C.tipsy_jvalue_l_at(args, 0)))
+	vm.mu.RLock()
+	defer vm.mu.RUnlock()
+	if o := vm.objects[id]; o != nil {
+		return o.str, len(o.str)
 	}
-	return 0
+	return "", 0
 }
 
 // LuaTextBoxState reports the Lua-textbox announcements received from the
