@@ -75,7 +75,7 @@ unsigned long probe_query_focus(void) {
 	return (unsigned long)focus;
 }
 
-int probe_key(unsigned long xid, unsigned long keysym, int pressed) {
+int probe_key(unsigned long xid, unsigned long keysym, int pressed, unsigned long timestamp) {
 	if (probe_dpy == NULL) return -1;
 	KeyCode kc = XKeysymToKeycode(probe_dpy, (KeySym)keysym);
 	if (kc == 0) return -2;
@@ -86,13 +86,40 @@ int probe_key(unsigned long xid, unsigned long keysym, int pressed) {
 	ev.xkey.window = (Window)xid;
 	ev.xkey.root = RootWindow(probe_dpy, DefaultScreen(probe_dpy));
 	ev.xkey.subwindow = 0;
-	ev.xkey.time = CurrentTime;
+	ev.xkey.time = timestamp;
 	ev.xkey.x = ev.xkey.y = 1;
 	ev.xkey.x_root = ev.xkey.y_root = 1;
 	ev.xkey.keycode = kc;
 	ev.xkey.state = 0;
 	ev.xkey.same_screen = True;
 	return probe_send(&ev, pressed ? KeyPressMask : KeyReleaseMask);
+}
+
+// Tests call this on the window connection before starting its pump.
+int probe_detectable_repeat(uintptr_t display, int enabled) {
+	Bool supported = False;
+	Bool state = XkbSetDetectableAutoRepeat((Display *)display, enabled, &supported);
+	return supported && state == enabled ? 0 : -1;
+}
+
+int probe_repeat_rate(unsigned int delay, unsigned int interval) {
+	if (probe_dpy == NULL) return -1;
+	if (!XkbSetAutoRepeatRate(probe_dpy, XkbUseCoreKbd, delay, interval)) return -1;
+	XAutoRepeatOn(probe_dpy);
+	XSync(probe_dpy, False);
+	return 0;
+}
+
+int probe_real_key(unsigned long keysym, int pressed) {
+	if (probe_dpy == NULL) return -1;
+	KeyCode code = XKeysymToKeycode(probe_dpy, (KeySym)keysym);
+	if (code == 0 || !XTestFakeKeyEvent(probe_dpy, code, pressed, CurrentTime)) return -1;
+	XSync(probe_dpy, False);
+	return 0;
+}
+
+void probe_sync(void) {
+	if (probe_dpy != NULL) XSync(probe_dpy, False);
 }
 
 int probe_button(unsigned long xid, int x, int y, unsigned int button, int pressed) {
@@ -178,6 +205,37 @@ void probe_ungrab_pointer(void) {
 	if (probe_dpy == NULL) return;
 	XUngrabPointer(probe_dpy, CurrentTime);
 	XSync(probe_dpy, False);
+}
+
+int probe_move(unsigned long xid, int x, int y) {
+	if (probe_dpy == NULL) return -1;
+	XMoveWindow(probe_dpy, (Window)xid, x, y);
+	XSync(probe_dpy, False);
+	return 0;
+}
+
+// Emit a real output-property RandR notification on an isolated test server.
+// No mode or connected-output state is changed. Creation and deletion both
+// notify clients that selected RROutputPropertyNotifyMask on the root.
+int probe_randr_output_property(void) {
+	if (probe_dpy == NULL) return -1;
+	int event_base, error_base;
+	if (!XRRQueryExtension(probe_dpy, &event_base, &error_base)) return -2;
+	XRRScreenResources *res = XRRGetScreenResourcesCurrent(probe_dpy,
+		DefaultRootWindow(probe_dpy));
+	if (res == NULL) return -2;
+	if (res->noutput == 0) {
+		XRRFreeScreenResources(res);
+		return -2;
+	}
+	Atom prop = XInternAtom(probe_dpy, "_TIPSY_TEST_REFRESH_INVALIDATION", False);
+	unsigned char value = 1;
+	XRRChangeOutputProperty(probe_dpy, res->outputs[0], prop, XA_INTEGER,
+		8, PropModeReplace, &value, 1);
+	XRRDeleteOutputProperty(probe_dpy, res->outputs[0], prop);
+	XRRFreeScreenResources(res);
+	XSync(probe_dpy, False);
+	return 0;
 }
 
 int probe_resize(unsigned long xid, unsigned int width, unsigned int height) {
@@ -368,6 +426,11 @@ func QueryFocus() uintptr {
 
 // Key sends a synthetic key press/release for keysym.
 func Key(xid uintptr, keysym uint64, pressed bool) error {
+	return KeyAt(xid, keysym, pressed, 0)
+}
+
+// KeyAt sends an event with an explicit server timestamp for legacy repeat tests.
+func KeyAt(xid uintptr, keysym uint64, pressed bool, timestamp uint32) error {
 	if err := mustOpen(); err != nil {
 		return err
 	}
@@ -375,7 +438,7 @@ func Key(xid uintptr, keysym uint64, pressed bool) error {
 	if pressed {
 		p = 1
 	}
-	rc := C.probe_key(C.ulong(xid), C.ulong(keysym), p)
+	rc := C.probe_key(C.ulong(xid), C.ulong(keysym), p, C.ulong(timestamp))
 	if rc == -2 {
 		return errors.New("x11probe: keysym not in server keymap")
 	}
@@ -550,3 +613,69 @@ func WaitFullscreen(xid uintptr, enabled bool, timeout time.Duration) bool {
 	}
 	return Fullscreen(xid) == enabled
 }
+
+// Move asks X11 to move the client window and emit ConfigureNotify.
+func Move(xid uintptr, x, y int) error {
+	if err := mustOpen(); err != nil {
+		return err
+	}
+	if C.probe_move(C.ulong(xid), C.int(x), C.int(y)) != 0 {
+		return ErrProbe
+	}
+	return nil
+}
+
+// RandROutputProperty emits a real RandR output-property notification. Only
+// call on a private test display: this briefly creates and deletes a test
+// property on an output, without changing the output mode or connection.
+func RandROutputProperty() error {
+	if err := mustOpen(); err != nil {
+		return err
+	}
+	if C.probe_randr_output_property() != 0 {
+		return ErrProbe
+	}
+	return nil
+}
+
+// DetectableRepeat changes only the given client connection. Its pump must be stopped.
+func DetectableRepeat(display uintptr, enabled bool) error {
+	flag := C.int(0)
+	if enabled {
+		flag = 1
+	}
+	if C.probe_detectable_repeat(C.uintptr_t(display), flag) != 0 {
+		return ErrProbe
+	}
+	return nil
+}
+
+// RepeatRate changes the server's repeat settings. Use only on a private test server.
+func RepeatRate(delay, interval uint32) error {
+	if err := mustOpen(); err != nil {
+		return err
+	}
+	if C.probe_repeat_rate(C.uint(delay), C.uint(interval)) != 0 {
+		return ErrProbe
+	}
+	return nil
+}
+
+// RealKey injects a physical transition through XTest; the server generates repeats.
+// Use only on a private test server and always release a pressed key.
+func RealKey(keysym uint64, pressed bool) error {
+	if err := mustOpen(); err != nil {
+		return err
+	}
+	flag := C.int(0)
+	if pressed {
+		flag = 1
+	}
+	if C.probe_real_key(C.ulong(keysym), flag) != 0 {
+		return ErrProbe
+	}
+	return nil
+}
+
+// Sync waits for the server to process all preceding probe requests.
+func Sync() { C.probe_sync() }

@@ -472,6 +472,9 @@ func drainInputReady(w *Window) {
 	for {
 		select {
 		case <-w.InputReady():
+			// Consuming the token also needs Pump's C-side acknowledgement;
+			// otherwise the next background event remains coalesced away.
+			_ = w.Pump()
 		default:
 			return
 		}
@@ -503,7 +506,7 @@ func ensureDisplay(t *testing.T) {
 	startXvfb(t)
 }
 
-func startXvfb(t *testing.T) {
+func startXvfb(t *testing.T, extraArgs ...string) {
 	t.Helper()
 	xvfb, err := exec.LookPath("Xvfb")
 	if err != nil {
@@ -515,15 +518,28 @@ func startXvfb(t *testing.T) {
 		t.Skipf("DISPLAY unset; no free Xvfb display: %v", err)
 	}
 	display := ":" + strconv.Itoa(n)
-	cmd := exec.Command(xvfb, display, "-screen", "0", "128x128x24", "-nolisten", "tcp")
+	args := append([]string{display, "-screen", "0", "1280x720x24", "-nolisten", "tcp"}, extraArgs...)
+	cmd := exec.Command(xvfb, args...)
 	cmd.Stdout = io.Discard
 	cmd.Stderr = io.Discard
 	if err := cmd.Start(); err != nil {
 		t.Skipf("Xvfb start failed: %v", err)
 	}
 	t.Cleanup(func() {
-		_ = cmd.Process.Kill()
-		_, _ = cmd.Process.Wait()
+		// Let Xvfb remove its socket/lock. SIGKILL alone leaves stale
+		// display locks and eventually turns repeated suites into skips.
+		_ = cmd.Process.Signal(os.Interrupt)
+		done := make(chan struct{})
+		go func() {
+			_, _ = cmd.Process.Wait()
+			close(done)
+		}()
+		select {
+		case <-done:
+		case <-time.After(time.Second):
+			_ = cmd.Process.Kill()
+			<-done
+		}
 	})
 	t.Setenv("DISPLAY", display)
 
@@ -541,13 +557,290 @@ func startXvfb(t *testing.T) {
 
 func unusedDisplay() (int, error) {
 	pid := os.Getpid()
-	for i := 0; i < 40; i++ {
-		n := 80 + (pid+i)%40
+	for i := 0; i < 920; i++ {
+		n := 80 + (pid+i)%920
 		lock := fmt.Sprintf("/tmp/.X%d-lock", n)
 		if _, err := os.Stat(lock); err == nil {
 			continue
 		}
 		return n, nil
 	}
-	return 0, errors.New("no free display in :80-:119")
+	return 0, errors.New("no free display in :80-:999")
+}
+
+func TestRefreshVersionInvalidation(t *testing.T) {
+	for _, background := range []bool{false, true} {
+		t.Run(fmt.Sprintf("background=%t", background), func(t *testing.T) {
+			// Output-property injection must never touch the user's desktop.
+			startXvfb(t)
+			requireProbe(t)
+			w, err := Open("refresh invalidation", 32, 32)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer w.Close()
+			if background {
+				if err := w.StartBackgroundPump(); err != nil {
+					t.Fatal(err)
+				}
+			}
+			for _, change := range []struct {
+				name string
+				fn   func() error
+			}{
+				{"move", func() error { return x11probe.Move(w.XID(), 20, 30) }},
+				{"resize", func() error { return x11probe.Resize(w.XID(), 48, 48) }},
+				{"randr", x11probe.RandROutputProperty},
+			} {
+				if err := w.Pump(); err != nil {
+					t.Fatal(err)
+				}
+				drainInputReady(w)
+				before := w.RefreshVersion()
+				if before == 0 {
+					t.Fatal("open window has no refresh version")
+				}
+				if err := change.fn(); err != nil {
+					t.Fatalf("%s: %v", change.name, err)
+				}
+				deadline := time.After(time.Second)
+				for w.RefreshVersion() == before {
+					if background {
+						select {
+						case <-w.InputReady():
+						case <-deadline:
+							t.Fatalf("%s did not wake/invalidate the background reader", change.name)
+						}
+					}
+					if err := w.Pump(); err != nil {
+						t.Fatal(err)
+					}
+					select {
+					case <-deadline:
+						t.Fatalf("%s did not invalidate refresh", change.name)
+					default:
+					}
+				}
+			}
+			if err := w.Close(); err != nil {
+				t.Fatal(err)
+			}
+			if w.RefreshVersion() != 0 || (*Window)(nil).RefreshVersion() != 0 {
+				t.Fatal("closed/nil window has a refresh version")
+			}
+		})
+	}
+}
+
+func TestRefreshVersionStableWithoutRandR(t *testing.T) {
+	startXvfb(t, "-extension", "RANDR")
+	requireProbe(t)
+	w, err := Open("refresh without RandR", 32, 32)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer w.Close()
+	if w.randrEventBase != 0 {
+		t.Fatal("test server unexpectedly has RandR")
+	}
+	if err := x11probe.Move(w.XID(), 25, 25); err != nil {
+		t.Fatal(err)
+	}
+	before := w.RefreshVersion()
+	if err := w.Pump(); err != nil {
+		t.Fatal(err)
+	}
+	if w.RefreshVersion() == before {
+		t.Fatal("move must invalidate even without RandR")
+	}
+	stable := w.RefreshVersion()
+	for i := 0; i < 50; i++ {
+		if err := w.Pump(); err != nil {
+			t.Fatal(err)
+		}
+		if got := w.RefreshVersion(); got != stable {
+			t.Fatalf("unchanged window version=%d, want %d", got, stable)
+		}
+	}
+}
+
+func TestWakeEventPumpDuringStop(t *testing.T) {
+	startXvfb(t)
+	w, err := Open("refresh wake teardown", 32, 32)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer w.Close()
+	for i := 0; i < 20; i++ {
+		if err := w.StartBackgroundPump(); err != nil {
+			t.Fatal(err)
+		}
+		started, done := make(chan struct{}), make(chan struct{})
+		go func() {
+			close(started)
+			for j := 0; j < 1000; j++ {
+				WakeEventPump()
+			}
+			close(done)
+		}()
+		<-started
+		if err := w.StopBackgroundPump(); err != nil {
+			t.Fatal(err)
+		}
+		select {
+		case <-done:
+		case <-time.After(time.Second):
+			t.Fatal("refresh wake blocked during pump teardown")
+		}
+	}
+}
+
+// Real server autorepeat must produce one physical down, repeated downs and
+// one physical up, with committed text preserved on every down. Exercise both
+// XKB detectable repeat and the server's legacy release/press representation.
+func TestKeyRepeatRealHold(t *testing.T) {
+	for _, detectable := range []bool{true, false} {
+		t.Run(fmt.Sprintf("detectable=%t", detectable), func(t *testing.T) {
+			startXvfb(t) // XTest and repeat settings must never touch a desktop.
+			requireProbe(t)
+			w := openInputWindow(t)
+			c := collectInput(t)
+			if err := x11probe.DetectableRepeat(w.Display(), detectable); err != nil {
+				t.Fatal(err)
+			}
+			if err := x11probe.RepeatRate(100, 30); err != nil {
+				t.Fatal(err)
+			}
+			if err := x11probe.SetFocus(w.XID()); err != nil {
+				t.Fatal(err)
+			}
+			c.clearAndSettle(t, w)
+			if err := w.StartBackgroundPump(); err != nil {
+				t.Fatal(err)
+			}
+			const key = uint64('w')
+			if err := x11probe.RealKey(key, true); err != nil {
+				t.Fatal(err)
+			}
+			defer x11probe.RealKey(key, false)
+			down, up, texts := 0, 0, 0
+			released := false
+			deadline := time.Now().Add(2 * time.Second)
+			for time.Now().Before(deadline) {
+				ev := c.next(t, w)
+				switch ev.Kind {
+				case InputKey:
+					if ev.KeyCode != 51 || ev.ScanCode != 25 {
+						t.Fatalf("W translation = %+v", ev)
+					}
+					if ev.KeyPressed {
+						if ev.RepeatCount != int32(down) {
+							t.Fatalf("down %d repeat=%d", down, ev.RepeatCount)
+						}
+						down++
+						if down == 4 {
+							if err := x11probe.RealKey(key, false); err != nil {
+								t.Fatal(err)
+							}
+							released = true
+						}
+					} else {
+						up++
+						if !released || ev.RepeatCount != 0 {
+							t.Fatalf("synthetic release escaped before real release: %+v", ev)
+						}
+					}
+				case InputText:
+					if ev.Text != "w" {
+						t.Fatal("repeated text was changed")
+					}
+					texts++
+				}
+				if up == 1 {
+					break
+				}
+			}
+			if down < 4 || up != 1 || texts != down {
+				t.Fatalf("down/up/text = %d/%d/%d", down, up, texts)
+			}
+		})
+	}
+}
+
+func TestKeyRepeatLegacyPairsAndFocusRelease(t *testing.T) {
+	startXvfb(t)
+	requireProbe(t)
+	w := openInputWindow(t)
+	c := collectInput(t)
+	c.clearAndSettle(t, w)
+	key := func(sym uint64, down bool, at uint32) {
+		t.Helper()
+		if err := x11probe.KeyAt(w.XID(), sym, down, at); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// Equal-time adjacent pairs are repeats. Different-time pairs remain
+	// genuine releases/new presses, even when drained in the same batch.
+	key('w', true, 100)
+	key('w', false, 200)
+	key('w', true, 200)
+	key('w', false, 300)
+	key('w', true, 301)
+	key(0xffe1, true, 302) // Shift stays independent from W.
+	if err := x11probe.Focus(w.XID(), false); err != nil {
+		t.Fatal(err)
+	}
+	key('w', false, 400) // focus already released both: no duplicate up
+	key(0xffe1, false, 401)
+	if err := x11probe.Focus(w.XID(), true); err != nil {
+		t.Fatal(err)
+	}
+	key('w', true, 500)
+	key('w', false, 600)
+	x11probe.Sync()
+	if err := w.Pump(); err != nil {
+		t.Fatal(err)
+	}
+	var keys []InputEvent
+	texts, beforeFocusReleases := 0, 0
+	focusLost := false
+	for len(c.ch) > 0 {
+		ev := <-c.ch
+		switch ev.Kind {
+		case InputKey:
+			keys = append(keys, ev)
+			if !focusLost && !ev.KeyPressed {
+				beforeFocusReleases++
+			}
+		case InputText:
+			texts++
+		case InputFocus:
+			if !ev.FocusGained {
+				focusLost = true
+				if beforeFocusReleases != 3 {
+					t.Fatalf("releases before focus loss = %d, want W + held W/Shift", beforeFocusReleases)
+				}
+			}
+		}
+	}
+	want := []struct {
+		code    int32
+		down    bool
+		repeats int32
+	}{
+		{51, true, 0}, {51, true, 1}, {51, false, 0}, {51, true, 0}, {59, true, 0},
+		{51, false, 0}, {59, false, 0}, {51, true, 0}, {51, false, 0},
+	}
+	if len(keys) != len(want) {
+		t.Fatalf("key count=%d, want %d: %+v", len(keys), len(want), keys)
+	}
+	for i, expected := range want {
+		got := keys[i]
+		if got.KeyCode != expected.code || got.KeyPressed != expected.down || got.RepeatCount != expected.repeats {
+			t.Fatalf("key %d=%+v want %+v", i, got, expected)
+		}
+	}
+	if texts != 4 || !focusLost {
+		t.Fatalf("text count=%d, focusLost=%t", texts, focusLost)
+	}
 }

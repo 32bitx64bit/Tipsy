@@ -117,6 +117,7 @@ type InputEvent struct {
 	KeyPressed     bool    // InputKey
 	KeyCode        int32   // Android keycode; 0 = unmapped (dropped)
 	ScanCode       int32   // raw X11 keycode (InputKey), 0 otherwise
+	RepeatCount    int32   // InputKey: 0 for physical down/up, >0 for repeated down
 	Text           string  // committed UTF-8 (InputText); never log
 	PointerAction  int32   // PointerDown/Up/Move
 	Button         int32   // 1 left, 3 right (InputPointer down/up)

@@ -755,3 +755,45 @@ func TestPointerDeviceMouseIdentity(t *testing.T) {
 		t.Fatalf("right button dropped in mouse mode: delta = %d, want 2", got-deliveredBefore)
 	}
 }
+
+func TestKeyRepeatGestureTimesAndGetter(t *testing.T) {
+	vm := inputTestVM(t, map[string]uintptr{
+		methodLogName(gameActivityClass, "onKeyDownNative", "(JLandroid/view/KeyEvent;)Z"): testRecordKeyFn(),
+		methodLogName(gameActivityClass, "onKeyUpNative", "(JLandroid/view/KeyEvent;)Z"):   testRecordKeyFn(),
+	})
+	SetGameActivityInputTarget(vm.Env().Raw(), 42, 77)
+	var first int64
+	for i, edge := range []struct {
+		code, scan int32
+		down       bool
+		repeat     int32
+	}{
+		{51, 25, true, 0}, {59, 50, true, 0}, {51, 25, true, 1}, {59, 50, false, 0}, {51, 25, true, 2}, {51, 25, false, 0},
+	} {
+		if !dispatchGameActivityKey(edge.code, edge.scan, edge.down, edge.repeat) {
+			t.Fatal("dispatch failed")
+		}
+		id := int64(testRec4(3))
+		o := vm.get(id)
+		dt := o.fields["downTime"].(int64)
+		at := o.fields["eventTime"].(int64)
+		if i == 0 {
+			first = dt
+		}
+		if edge.code == 51 && dt != first {
+			t.Fatalf("edge %d reset held W downTime %d to %d", i, first, dt)
+		}
+		if at < dt {
+			t.Fatalf("eventTime=%d before downTime=%d", at, dt)
+		}
+		if got, _ := testEventGetter(vm, id, keyEventClass, "getRepeatCount", "()I", -1); int32(got) != edge.repeat {
+			t.Fatalf("repeat getter=%d, want %d", got, edge.repeat)
+		}
+		time.Sleep(2 * time.Millisecond)
+	}
+	// Deterministic clock checks catch a zero downTime and independent keys
+	// without relying on the resolution of the real event clock.
+	if keyGestureTime(0, 51, true, 0) != 0 || keyGestureTime(5, 59, true, 0) != 5 || keyGestureTime(10, 51, true, 1) != 0 || keyGestureTime(15, 59, false, 0) != 5 || keyGestureTime(20, 51, false, 0) != 0 || keyGestureTime(25, 51, true, 0) != 25 || keyGestureTime(30, 51, false, 0) != 25 {
+		t.Fatal("interleaved key clocks violated Android gesture semantics")
+	}
+}

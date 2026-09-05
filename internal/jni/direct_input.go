@@ -708,10 +708,13 @@ func x11KeycodeToEvdev(x11Keycode int32) (int32, bool) {
 // `x11Keycode` is the real core-X11 keycode, converted once to an evdev scan
 // code. `androidKeycode` remains the X11 layer's complete keysym-to-Android
 // translation. They must never be substituted for one another: only the
-// first uses the evdev vocabulary. X11's current bridge carries no repeat
-// count, so real press/release edges honestly pass repeat=false rather than
-// inventing an Android repeat value.
+// first uses the evdev vocabulary. This entry point represents a physical
+// edge; the X11 event dispatcher also carries the observed repeat count.
 func DispatchRobloxDirectKey(x11Keycode, androidKeycode int32, pressed bool) bool {
+	return dispatchRobloxDirectKey(x11Keycode, androidKeycode, pressed, 0)
+}
+
+func dispatchRobloxDirectKey(x11Keycode, androidKeycode int32, pressed bool, repeatCount int32) bool {
 	if androidKeycode <= 0 {
 		dropDirectEvent("key: no Android keycode")
 		return false
@@ -732,8 +735,12 @@ func DispatchRobloxDirectKey(x11Keycode, androidKeycode int32, pressed bool) boo
 	if pressed {
 		down = 1
 	}
+	repeat := C.uchar(0)
+	if pressed && repeatCount > 0 {
+		repeat = 1
+	}
 	C.tipsy_direct_key_event(unsafe.Pointer(directKeyTarget.fn), C.uintptr_t(directKeyTarget.env), C.uintptr_t(directKeyTarget.class),
-		down, C.int(scanCode), C.int(androidKeycode), 0)
+		down, C.int(scanCode), C.int(androidKeycode), repeat)
 	atomic.AddUint64(&directInputStats.KeyDelivered, 1)
 	return true
 }

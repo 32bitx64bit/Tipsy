@@ -661,3 +661,69 @@ func TestDirectInputDropsWithoutCompleteTarget(t *testing.T) {
 		t.Fatalf("direct drop delta = %d, want 1", got)
 	}
 }
+
+func TestDirectKeyRepeatABI(t *testing.T) {
+	selectKeyboardPath(t, "direct")
+	vm := inputTestVM(t, nil)
+	wireRecordingDirectKeyTarget(t, vm.Env().Raw(), 88)
+	before := RobloxDirectInputStats().KeyDelivered
+	for _, code := range []struct{ scan, android int32 }{{25, 51}, {22, 67}, {113, 21}, {50, 59}} {
+		for i, edge := range []struct {
+			down        bool
+			count, flag int32
+		}{{true, 0, 0}, {true, 1, 1}, {true, 2, 1}, {false, 0, 0}} {
+			handleX11InputEvent(x11.InputEvent{Kind: x11.InputKey, ScanCode: code.scan, KeyCode: code.android, KeyPressed: edge.down, RepeatCount: edge.count})
+			wantDown := int32(0)
+			if edge.down {
+				wantDown = 1
+			}
+			if testDirectRecKeyInt(0) != wantDown || testDirectRecKeyInt(1) != code.scan-8 || testDirectRecKeyInt(2) != code.android || testDirectRecKeyInt(3) != edge.flag {
+				t.Fatalf("key %d edge %d native ABI: down=%d scan=%d key=%d repeat=%d", code.android, i, testDirectRecKeyInt(0), testDirectRecKeyInt(1), testDirectRecKeyInt(2), testDirectRecKeyInt(3))
+			}
+		}
+	}
+	if delta := RobloxDirectInputStats().KeyDelivered - before; delta != 16 {
+		t.Fatalf("callbacks=%d, want every repeated down retained", delta)
+	}
+}
+
+func TestKeyRepeatPreservesTextEditor(t *testing.T) {
+	selectKeyboardPath(t, "direct")
+	vm, err := NewVM()
+	if err != nil {
+		t.Fatal(err)
+	}
+	captureLogs(t)
+	wireRecordingRbxTextTarget(t, vm)
+	wireRecordingDirectKeyTarget(t, vm.Env().Raw(), 88)
+	initID, infoID := keyboardTestObjects(t, vm, []byte(""), 1)
+	vm.dispatch(jnull(), nativeGLClass, "showKeyboard", showKeyboardSig, testPackKeyboardArgs(101, 1, initID, infoID))
+	// Each XIM commit remains intact, including supplementary runes.
+	for i := 0; i < 3; i++ {
+		handleX11InputEvent(x11.InputEvent{Kind: x11.InputText, Text: "😀"})
+	}
+	if got, _ := vm.Env().GetStringUTFChars(testRbxRecText()); got != "😀😀😀" {
+		t.Fatal("repeated committed text missing")
+	}
+	before := RobloxDirectInputStats().KeyDelivered
+	for i := int32(0); i < 2; i++ {
+		handleX11InputEvent(x11.InputEvent{Kind: x11.InputKey, KeyPressed: true, KeyCode: 21, ScanCode: 113, RepeatCount: i})
+	}
+	if testRbxRecCursor() != 2 {
+		t.Fatalf("repeated left cursor=%d, want 2", testRbxRecCursor())
+	}
+	handleX11InputEvent(x11.InputEvent{Kind: x11.InputKey, KeyCode: 21, ScanCode: 113})
+	for i := int32(0); i < 2; i++ {
+		handleX11InputEvent(x11.InputEvent{Kind: x11.InputKey, KeyPressed: true, KeyCode: 22, ScanCode: 114, RepeatCount: i})
+	}
+	for i := int32(0); i < 2; i++ {
+		handleX11InputEvent(x11.InputEvent{Kind: x11.InputKey, KeyPressed: true, KeyCode: 67, ScanCode: 22, RepeatCount: i})
+	}
+	handleX11InputEvent(x11.InputEvent{Kind: x11.InputKey, KeyCode: 67, ScanCode: 22})
+	if got, _ := vm.Env().GetStringUTFChars(testRbxRecText()); got != "😀" {
+		t.Fatal("repeated Backspace did not remove two complete runes")
+	}
+	if RobloxDirectInputStats().KeyDelivered != before {
+		t.Fatal("editor navigation escaped to gameplay listener")
+	}
+}

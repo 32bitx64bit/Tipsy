@@ -502,11 +502,9 @@ func DispatchGameActivityFocus(gained bool) bool {
 // measured data, never synthesized.
 var gestureClock struct {
 	mu          sync.Mutex
-	pointerOpen bool  // an ACTION_DOWN is pending its ACTION_UP
-	pointerDown int64 // downTime of the open pointer gesture
-	keyOpen     bool  // a key ACTION_DOWN is pending its ACTION_UP
-	keyDown     int64 // downTime of the open key gesture
-	keyCode     int32 // Android keycode the open key gesture belongs to
+	pointerOpen bool            // an ACTION_DOWN is pending its ACTION_UP
+	pointerDown int64           // downTime of the open pointer gesture
+	keys        map[int32]int64 // downTime for each held Android key
 }
 
 func pointerGestureStart(now int64) int64 {
@@ -543,25 +541,25 @@ func pointerGestureOpen() bool {
 	return gestureClock.pointerOpen
 }
 
-func keyGestureStart(now int64, keyCode int32) int64 {
+// Each held key owns its original downTime, including repeated downs and
+// interleaved modifiers/movement keys. A stray release self-anchors.
+func keyGestureTime(now int64, keyCode int32, pressed bool, repeatCount int32) int64 {
 	gestureClock.mu.Lock()
 	defer gestureClock.mu.Unlock()
-	gestureClock.keyOpen = true
-	gestureClock.keyDown = now
-	gestureClock.keyCode = keyCode
-	return now
-}
-
-// keyGestureDownTime returns the matching key-down's downTime for a key
-// release; a release with no open matching gesture self-anchors.
-func keyGestureDownTime(now int64, keyCode int32) int64 {
-	gestureClock.mu.Lock()
-	defer gestureClock.mu.Unlock()
-	if gestureClock.keyOpen && gestureClock.keyCode == keyCode {
-		dt := gestureClock.keyDown
-		gestureClock.keyOpen = false
-		gestureClock.keyCode = 0
-		return dt
+	down, held := gestureClock.keys[keyCode]
+	if pressed {
+		if repeatCount > 0 && held {
+			return down
+		}
+		if gestureClock.keys == nil {
+			gestureClock.keys = make(map[int32]int64)
+		}
+		gestureClock.keys[keyCode] = now
+		return now
+	}
+	delete(gestureClock.keys, keyCode)
+	if held {
+		return down
 	}
 	return now
 }
@@ -573,6 +571,10 @@ func keyGestureDownTime(now int64, keyCode int32) int64 {
 // raw X11 keycode (closest honest hardware code). The returned bool is
 // the engine's consumption verdict (false also when not wired).
 func DispatchGameActivityKey(keyCode int32, scanCode int32, pressed bool) bool {
+	return dispatchGameActivityKey(keyCode, scanCode, pressed, 0)
+}
+
+func dispatchGameActivityKey(keyCode int32, scanCode int32, pressed bool, repeatCount int32) bool {
 	if keyCode <= 0 {
 		return false
 	}
@@ -596,14 +598,13 @@ func DispatchGameActivityKey(keyCode int32, scanCode int32, pressed bool) bool {
 		return false
 	}
 	now := monotimeMillis()
-	var down int64
-	if pressed {
-		down = keyGestureStart(now, keyCode)
-	} else {
-		down = keyGestureDownTime(now, keyCode)
+	if !pressed || repeatCount < 0 {
+		repeatCount = 0
 	}
+	down := keyGestureTime(now, keyCode, pressed, repeatCount)
 	vm.mu.Lock()
 	ev := vm.newKeyEventLocked(keyCode, pressed, down, now, scanCode)
+	ev.fields["repeatCount"] = repeatCount
 	obj := idToJobject(ev.id)
 	vm.mu.Unlock()
 	consumed := C.tipsy_input_call_bool4(unsafe.Pointer(fn), C.uintptr_t(env), C.uintptr_t(activity), C.uintptr_t(handle), C.uintptr_t(obj)) != 0
@@ -774,10 +775,10 @@ func handleX11InputEvent(ev x11.InputEvent) {
 		// native. GameActivity remains a control path; `both` is solely a
 		// diagnostic to distinguish target wiring from listener selection.
 		if (path == KeyboardPathGameActivity || path == KeyboardPathBoth) && ev.KeyCode > 0 {
-			DispatchGameActivityKey(ev.KeyCode, ev.ScanCode, ev.KeyPressed)
+			dispatchGameActivityKey(ev.KeyCode, ev.ScanCode, ev.KeyPressed, ev.RepeatCount)
 		}
 		if path == KeyboardPathDirect || path == KeyboardPathBoth {
-			DispatchRobloxDirectKey(ev.ScanCode, ev.KeyCode, ev.KeyPressed)
+			dispatchRobloxDirectKey(ev.ScanCode, ev.KeyCode, ev.KeyPressed, ev.RepeatCount)
 		}
 	case x11.InputText:
 		// InputText is UTF-8 committed by X11/XIM, not reconstructed from a

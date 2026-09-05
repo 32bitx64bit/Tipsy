@@ -35,6 +35,9 @@ static int tipsy_x_inited;
 static XIM tipsy_xim;
 static XIC tipsy_xic;
 static int tipsy_f11_down;
+// X11 core keycodes are bytes. Preserve the first physical down across XKB
+// repeat presses; -1 means focus loss already released the key to Android.
+static struct { int down; int repeats; int android_code; } tipsy_keys[256];
 
 // Input event capture. kinds: 0 focus, 1 key, 2 pointer, 3 resize, 4 text.
 // focus: a = 1 gained / 0 lost.
@@ -73,6 +76,7 @@ struct tipsy_input_ev {
 	long c;
 	float x;
 	float y;
+	int repeat_count;
 	int text_len;
 	char text[TIPSY_INPUT_TEXT_BYTES];
 };
@@ -140,7 +144,7 @@ struct tipsy_pointer_capture {
 
 static struct tipsy_pointer_capture tipsy_capture;
 
-static void tipsy_input_push(int kind, int a, long b, long c, float x, float y) {
+static void tipsy_input_push_repeat(int kind, int a, long b, long c, float x, float y, int repeats) {
 	pthread_mutex_lock(&tipsy_input_mu);
 	int was_empty = (tipsy_input_head == tipsy_input_tail);
 	// Captured relative motion must sum every delta; replacing it would lose
@@ -189,12 +193,28 @@ static void tipsy_input_push(int kind, int a, long b, long c, float x, float y) 
 	tipsy_input_ring[tipsy_input_head].c = c;
 	tipsy_input_ring[tipsy_input_head].x = x;
 	tipsy_input_ring[tipsy_input_head].y = y;
+	tipsy_input_ring[tipsy_input_head].repeat_count = repeats;
 	tipsy_input_ring[tipsy_input_head].text_len = 0;
 	tipsy_input_head = next;
 	pthread_mutex_unlock(&tipsy_input_mu);
 	if (was_empty || kind == TIPSY_INPUT_CLOSE || kind == TIPSY_INPUT_RESIZE) {
 		tipsy_wake_go();
 	}
+}
+
+static void tipsy_input_push(int kind, int a, long b, long c, float x, float y) {
+	tipsy_input_push_repeat(kind, a, b, c, x, y, 0);
+}
+
+static void tipsy_release_keys(void) {
+	for (int code = 0; code < 256; ++code) {
+		if (tipsy_keys[code].down == 1) {
+			tipsy_input_push(TIPSY_INPUT_KEY, 0, tipsy_keys[code].android_code, code, 0, 0);
+			tipsy_keys[code].down = -1;
+			tipsy_keys[code].repeats = 0;
+		}
+	}
+	tipsy_f11_down = 0;
 }
 
 static int tipsy_clamp_coord(int value, int extent) {
@@ -693,6 +713,7 @@ int tipsy_x11_open(const char *title, int width, int height,
 	tipsy_x_error_code = 0;
 	tipsy_x_io_error = 0;
 	tipsy_f11_down = 0;
+	memset(tipsy_keys, 0, sizeof(tipsy_keys));
 	memset(&tipsy_capture, 0, sizeof(tipsy_capture));
 
 	Display *dpy = XOpenDisplay(NULL);
@@ -872,6 +893,30 @@ int tipsy_x11_pump(uintptr_t dpy_ptr, unsigned long xid, unsigned long wm_delete
 	while (XPending(dpy) > 0) {
 		XEvent ev;
 		XNextEvent(dpy, &ev);
+		if (randr_event_base != 0 &&
+			(ev.type == randr_event_base + RRScreenChangeNotify ||
+			 ev.type == randr_event_base + RRNotify)) {
+			if (ev.type == randr_event_base + RRScreenChangeNotify) {
+				XRRUpdateConfiguration(&ev);
+			}
+			atomic_fetch_add_explicit(&tipsy_refresh_version, 1, memory_order_relaxed);
+			tipsy_wake_go();
+			continue;
+		}
+		// Legacy X11 autorepeat emits an adjacent release/press with identical
+		// keycode and server timestamp. Consume only the synthetic release,
+		// before XIM sees it. Also support sources that send legacy pairs even
+		// when this connection has detectable repeat enabled. CurrentTime=0
+		// is a request sentinel, not a server event timestamp.
+		if (ev.type == KeyRelease && ev.xkey.window == win &&
+			ev.xkey.time != CurrentTime && XEventsQueued(dpy, QueuedAfterReading) > 0) {
+			XEvent next;
+			XPeekEvent(dpy, &next);
+			if (next.type == KeyPress && next.xkey.window == ev.xkey.window &&
+				next.xkey.keycode == ev.xkey.keycode && next.xkey.time == ev.xkey.time) {
+				continue;
+			}
+		}
 		Bool filtered = XFilterEvent(&ev, win);
 		switch (ev.type) {
 		case Expose:
@@ -880,6 +925,7 @@ int tipsy_x11_pump(uintptr_t dpy_ptr, unsigned long xid, unsigned long wm_delete
 		case FocusOut:
 			if (ev.xfocus.window == win) {
 				if (ev.type == FocusOut) {
+					tipsy_release_keys();
 					tipsy_pointer_unlock(dpy, win, 1, 1);
 				} else {
 					tipsy_capture.failed_status = 0;
@@ -911,10 +957,29 @@ int tipsy_x11_pump(uintptr_t dpy_ptr, unsigned long xid, unsigned long wm_delete
 					}
 					break;
 				}
-				tipsy_input_push(TIPSY_INPUT_KEY,
-					ev.type == KeyPress ? 1 : 0,
-					tipsy_android_keycode(ks),
-					(long)ev.xkey.keycode, 0, 0);
+				unsigned int code = ev.xkey.keycode;
+				if (code >= 256) break;
+				int android_code = tipsy_android_keycode(ks);
+				int repeats = 0;
+				if (ev.type == KeyPress) {
+					if (tipsy_keys[code].down == 1) {
+						if (tipsy_keys[code].repeats < INT32_MAX) ++tipsy_keys[code].repeats;
+						repeats = tipsy_keys[code].repeats;
+						android_code = tipsy_keys[code].android_code;
+					} else {
+						tipsy_keys[code].down = 1;
+						tipsy_keys[code].repeats = 0;
+						tipsy_keys[code].android_code = android_code;
+					}
+				} else {
+					int was_down = tipsy_keys[code].down;
+					tipsy_keys[code].down = 0;
+					tipsy_keys[code].repeats = 0;
+					if (was_down == -1) break; // already released on focus loss
+					if (was_down == 1) android_code = tipsy_keys[code].android_code;
+				}
+				tipsy_input_push_repeat(TIPSY_INPUT_KEY,
+					ev.type == KeyPress ? 1 : 0, android_code, (long)code, 0, 0, repeats);
 				if (ev.type == KeyPress && !filtered) {
 					char text[TIPSY_INPUT_TEXT_BYTES];
 					KeySym text_ks = NoSymbol;
@@ -1040,6 +1105,7 @@ int tipsy_x11_pump(uintptr_t dpy_ptr, unsigned long xid, unsigned long wm_delete
 			break;
 		case ConfigureNotify:
 			if (ev.xconfigure.window == win) {
+				atomic_fetch_add_explicit(&tipsy_refresh_version, 1, memory_order_relaxed);
 				if (tipsy_capture.active) {
 					int ax = tipsy_clamp_coord(tipsy_capture.anchor_x, ev.xconfigure.width);
 					int ay = tipsy_clamp_coord(tipsy_capture.anchor_y, ev.xconfigure.height);
@@ -1088,6 +1154,11 @@ int tipsy_x11_pump(uintptr_t dpy_ptr, unsigned long xid, unsigned long wm_delete
 			}
 			break;
 		case MapNotify:
+		case ReparentNotify:
+			if (ev.xany.window == win) {
+				atomic_fetch_add_explicit(&tipsy_refresh_version, 1, memory_order_relaxed);
+				tipsy_wake_go();
+			}
 			break;
 		default:
 			break;
@@ -1532,7 +1603,7 @@ func (w *Window) drainInputLocked() ([]InputEvent, bool) {
 				inputDrops++
 				inputMu.Unlock()
 			}
-			evs = append(evs, InputEvent{Kind: InputKey, KeyPressed: r.a != 0, KeyCode: int32(r.b), ScanCode: int32(r.c)})
+			evs = append(evs, InputEvent{Kind: InputKey, KeyPressed: r.a != 0, KeyCode: int32(r.b), ScanCode: int32(r.c), RepeatCount: int32(r.repeat_count)})
 		case C.TIPSY_INPUT_POINTER:
 			action, relative := decodePointerRingAction(int32(r.a))
 			ev := InputEvent{Kind: InputPointer, PointerAction: action, Button: int32(r.b), X: float32(r.x), Y: float32(r.y), Relative: relative}
