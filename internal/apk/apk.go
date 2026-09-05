@@ -367,7 +367,7 @@ func collectDir(dir string) ([]*apkSource, error) {
 		}
 		ext := strings.ToLower(filepath.Ext(path))
 		switch ext {
-		case ".apk", ".apkm", ".xapk", ".zip":
+		case ".apk", ".apkm", ".xapk", ".apks", ".zip":
 			srcs, err := collectFile(path)
 			if err != nil {
 				apkLog().Debug("skip unreadable package in directory", "path", path, "err", err)
@@ -388,12 +388,56 @@ func collectFile(path string) ([]*apkSource, error) {
 	case ".zip":
 		return openNestedContainer(path, false)
 	default:
+		if ext == ".apk" {
+			bundle, err := apkLooksLikeBundle(path)
+			if err != nil {
+				return nil, err
+			}
+			if bundle {
+				return openNestedContainer(path, true)
+			}
+		}
 		src, err := openFileSource(path)
 		if err != nil {
 			return nil, err
 		}
 		return []*apkSource{src}, nil
 	}
+}
+
+func apkLooksLikeBundle(path string) (bool, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return false, err
+	}
+	defer f.Close()
+	st, err := f.Stat()
+	if err != nil {
+		return false, err
+	}
+	zr, err := zip.NewReader(f, st.Size())
+	if err != nil {
+		return false, err
+	}
+	return zipLooksLikeBundle(zr), nil
+}
+
+func zipLooksLikeBundle(zr *zip.Reader) bool {
+	hasManifest := false
+	hasNested := false
+	for _, zf := range zr.File {
+		name := filepath.ToSlash(zf.Name)
+		if name == "AndroidManifest.xml" {
+			hasManifest = true
+		}
+		if strings.HasSuffix(strings.ToLower(name), ".apk") && !zf.FileInfo().IsDir() {
+			hasNested = true
+		}
+		if hasManifest && hasNested {
+			break
+		}
+	}
+	return hasNested && !hasManifest
 }
 
 func openFileSource(path string) (*apkSource, error) {

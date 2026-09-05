@@ -200,6 +200,25 @@ func TestInspectSplits(t *testing.T) {
 	}
 }
 
+func TestInspectAPKNamedBundleWithoutRootManifest(t *testing.T) {
+	dir := t.TempDir()
+	baseBytes := zipBytes(t, inspectFiles(t, "com.example.tipsy", "1.2.3", 42, "", []byte("base-lib")))
+	splitBytes := zipBytes(t, inspectFiles(t, "com.example.tipsy", "1.2.3", 42, "config.x86_64", []byte("split-lib")))
+	container := filepath.Join(dir, "roblox.apk")
+	writeZipFile(t, container, map[string][]byte{
+		"com.roblox.client.apk": baseBytes,
+		"config.x86_64.apk":     splitBytes,
+	})
+
+	rep, err := Inspect(context.Background(), []string{container})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rep.Packages) != 2 {
+		t.Fatalf("nested packages=%d", len(rep.Packages))
+	}
+}
+
 func TestInspectNestedZip(t *testing.T) {
 	dir := t.TempDir()
 	baseBytes := zipBytes(t, inspectFiles(t, "com.example.tipsy", "1.2.3", 42, "", []byte("base-lib")))
