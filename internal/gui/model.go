@@ -259,7 +259,7 @@ type Service interface {
 	// callback is invoked exactly once after startup has completed far enough
 	// for the client window to own the desktop surface. Implementations must not
 	// report started merely because a worker goroutine was created.
-	Launch(context.Context, func()) error
+	Launch(context.Context, LaunchRequest, func()) error
 	LoadSettings(context.Context) (Settings, error)
 	RendererOptions(context.Context) []RendererOption
 	ApplySettings(context.Context, Settings) (ApplyResult, error)
@@ -587,6 +587,10 @@ type LaunchView struct {
 	Started bool
 }
 
+type LaunchRequest struct {
+	URI string
+}
+
 type LaunchModel struct {
 	mu      sync.RWMutex
 	service Service
@@ -599,6 +603,10 @@ func NewLaunchModel(service Service) *LaunchModel {
 }
 
 func (m *LaunchModel) Start(ctx context.Context) error {
+	return m.StartRequest(ctx, LaunchRequest{})
+}
+
+func (m *LaunchModel) StartRequest(ctx context.Context, req LaunchRequest) error {
 	m.mu.Lock()
 	if m.service == nil {
 		m.mu.Unlock()
@@ -621,7 +629,7 @@ func (m *LaunchModel) Start(ctx context.Context) error {
 			}
 			m.view = LaunchView{State: LaunchRunning, Started: true}
 		}
-		err := m.service.Launch(ctx, started)
+		err := m.service.Launch(ctx, req, started)
 		m.mu.Lock()
 		wasStarted := m.view.Started
 		if err != nil && !errors.Is(err, context.Canceled) {

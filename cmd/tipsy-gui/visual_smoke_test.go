@@ -61,6 +61,12 @@ func TestOffscreenVisualProof(t *testing.T) {
 	if win.settingsVSync == nil || win.settingsVSync.IsChecked() || win.settingsVSync.AccessibleName() != "VSync" {
 		t.Fatalf("VSync control did not render unchecked and accessible: %#v", win.settingsVSync)
 	}
+	if win.settingsDisplay == nil || win.settingsDisplay.AccessibleName() != "Default monitor" || win.settingsDisplay.CurrentIndex() != 0 {
+		t.Fatalf("default monitor control did not render on the main monitor: %#v", win.settingsDisplay)
+	}
+	if got := win.settingsDisplay.CurrentText(); got != "Main monitor (default)" {
+		t.Fatalf("default monitor text=%q", got)
+	}
 	if got := win.settingsVSync.Text(); got != vsyncToggleText(false) {
 		t.Fatalf("unchecked VSync state text=%q, want %q", got, vsyncToggleText(false))
 	}
@@ -224,6 +230,53 @@ func TestOffscreenVisualProof(t *testing.T) {
 	app.Delete()
 }
 
+func TestPlayModeSkipsLauncherWhenInstalled(t *testing.T) {
+	t.Setenv("QT_QPA_PLATFORM", "offscreen")
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(t.TempDir(), "config"))
+	t.Setenv("XDG_DATA_HOME", filepath.Join(t.TempDir(), "data"))
+	t.Setenv("XDG_CACHE_HOME", filepath.Join(t.TempDir(), "cache"))
+	t.Setenv("XDG_STATE_HOME", filepath.Join(t.TempDir(), "state"))
+	t.Setenv("TIPSY_ICON_PATH", filepath.Join("..", "..", "tipsy.png"))
+
+	app := qt.NewQApplication([]string{"tipsy-gui-play-mode"})
+	qt.QApplication_SetStyleWithStyle("Fusion")
+	app.SetStyleSheet(appStyleSheet)
+
+	service := visualService{
+		launchEntered: make(chan struct{}),
+		launchReady:   make(chan struct{}),
+		launchDone:    make(chan struct{}),
+	}
+	win := newMainWindow(service, brandIcon())
+	win.startInMode(guiModePlay, "")
+	qt.QCoreApplication_ProcessEvents()
+
+	select {
+	case <-service.launchEntered:
+	case <-time.After(time.Second):
+		t.Fatal("play mode did not start the client")
+	}
+	if win.win.IsVisible() {
+		t.Fatal("play mode showed the settings window before launching")
+	}
+	close(service.launchReady)
+	waitForLaunchState(t, win.launch, guimodel.LaunchRunning)
+	win.refreshLaunchState()
+	if win.win.IsVisible() {
+		t.Fatal("play mode showed the settings window after the client started")
+	}
+	close(service.launchDone)
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	if err := win.launch.Wait(ctx); err != nil {
+		t.Fatal(err)
+	}
+
+	win.win.Close()
+	win.win.Delete()
+	app.Delete()
+}
+
 type visualService struct {
 	launchEntered chan struct{}
 	launchReady   chan struct{}
@@ -256,7 +309,7 @@ func (visualService) Install(context.Context, guimodel.InstallRequest, func(guim
 	return nil
 }
 
-func (s visualService) Launch(_ context.Context, started func()) error {
+func (s visualService) Launch(_ context.Context, _ guimodel.LaunchRequest, started func()) error {
 	if s.launchEntered != nil {
 		close(s.launchEntered)
 	}

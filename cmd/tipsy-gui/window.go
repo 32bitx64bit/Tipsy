@@ -10,7 +10,7 @@ import (
 	"github.com/tipsy-linux/tipsy/internal/version"
 )
 
-const apkFileFilter = "Android packages (*.apk *.apkm *.xapk *.zip);;APK files (*.apk);;All files (*)"
+const apkFileFilter = "Android packages (*.apk *.apkm *.xapk *.apks *.zip);;APK files (*.apk);;All files (*)"
 
 type mainWindow struct {
 	win      *qt.QMainWindow
@@ -27,26 +27,29 @@ type mainWindow struct {
 	setupLoadErr error
 	settingsErr  error
 
-	playButton        *qt.QPushButton
-	playState         *qt.QLabel
-	installBadge      *qt.QLabel
-	installVersion    *qt.QLabel
-	installDetail     *qt.QLabel
-	installPageBadge  *qt.QLabel
-	installPageVer    *qt.QLabel
-	installPageDetail *qt.QLabel
-	settingsRenderer  *qt.QComboBox
-	settingsFPSMode   *qt.QComboBox
-	settingsFPS       *qt.QSpinBox
-	settingsVSync     *qt.QCheckBox
-	settingsApply     *qt.QPushButton
-	settingsReset     *qt.QPushButton
-	settingsHint      *qt.QLabel
-	doctorSummary     *qt.QLabel
-	doctorDetails     *qt.QPlainTextEdit
-	settingsProfile   *qt.QLabel
-	pageEntry         []*qt.QWidget
-	wizardScrolls     map[*qt.QWizardPage]*qt.QScrollArea
+	playButton          *qt.QPushButton
+	playState           *qt.QLabel
+	installBadge        *qt.QLabel
+	installVersion      *qt.QLabel
+	installDetail       *qt.QLabel
+	installPageBadge    *qt.QLabel
+	installPageVer      *qt.QLabel
+	installPageDetail   *qt.QLabel
+	settingsRenderer    *qt.QComboBox
+	settingsFPSMode     *qt.QComboBox
+	settingsFPS         *qt.QSpinBox
+	settingsVSync       *qt.QCheckBox
+	settingsDisplay     *qt.QComboBox
+	settingsDisplayKeys []string
+	settingsSyncing     bool
+	settingsApply       *qt.QPushButton
+	settingsReset       *qt.QPushButton
+	settingsHint        *qt.QLabel
+	doctorSummary       *qt.QLabel
+	doctorDetails       *qt.QPlainTextEdit
+	settingsProfile     *qt.QLabel
+	pageEntry           []*qt.QWidget
+	wizardScrolls       map[*qt.QWizardPage]*qt.QScrollArea
 
 	lastLaunchState guimodel.LaunchState
 	launchTimer     *qt.QTimer
@@ -65,7 +68,7 @@ func newMainWindow(service guimodel.Service, icon *qt.QIcon) *mainWindow {
 	w.settingsErr = w.settings.Load(context.Background())
 
 	w.win = qt.NewQMainWindow2()
-	w.win.SetWindowTitle("Tipsy")
+	w.win.SetWindowTitle("Tipsy - Settings")
 	w.win.SetWindowIcon(icon)
 	w.win.Resize(1080, 720)
 	w.win.SetMinimumSize2(780, 560)
@@ -85,7 +88,27 @@ func newMainWindow(service guimodel.Service, icon *qt.QIcon) *mainWindow {
 }
 
 func (w *mainWindow) Show() {
+	placeWidgetOnDisplay(w.win.QWidget, configuredDisplay(w))
 	w.win.Show()
+}
+
+func (w *mainWindow) startInMode(mode, uri string) {
+	if (mode == guiModePlay || uri != "") && !w.FirstRun() {
+		qt.QGuiApplication_SetQuitOnLastWindowClosed(false)
+		if err := w.launch.StartRequest(context.Background(), guimodel.LaunchRequest{URI: uri}); err != nil {
+			qt.QGuiApplication_SetQuitOnLastWindowClosed(true)
+			w.Show()
+			qt.QMessageBox_Warning(w.win.QWidget, "Could not launch Roblox", err.Error())
+			return
+		}
+		w.lastLaunchState = guimodel.LaunchStarting
+		w.refreshLaunchState()
+		return
+	}
+	w.Show()
+	if w.FirstRun() {
+		w.ShowSetupWizard(true)
+	}
 }
 
 func (w *mainWindow) FirstRun() bool {
@@ -132,7 +155,7 @@ func (w *mainWindow) buildShell() {
 	}{
 		{"Home", "Play Roblox and see installation status"},
 		{"Installation", "Install, update, or repair Roblox"},
-		{"Settings", "Renderer, frame-rate, and VSync settings"},
+		{"Settings", "Renderer, frame-rate, VSync, and default-monitor settings"},
 		{"Diagnostics", "System readiness, paths, and logs"},
 	} {
 		button := qt.NewQPushButton3(item.text)
@@ -303,6 +326,7 @@ func (w *mainWindow) refreshLaunchState() {
 	}
 	if view.State == guimodel.LaunchFailed && w.lastLaunchState != guimodel.LaunchFailed {
 		if w.launcherHidden {
+			placeWidgetOnDisplay(w.win.QWidget, configuredDisplay(w))
 			w.win.Show()
 			w.launcherHidden = false
 			qt.QGuiApplication_SetQuitOnLastWindowClosed(true)
@@ -321,7 +345,7 @@ func (w *mainWindow) refreshSettingsProfile() {
 		return
 	}
 	profile := w.settings.View().Saved
-	w.settingsProfile.SetText(rendererDisplay(profile.Renderer) + " · " + fpsDisplay(profile) + " · " + vsyncDisplay(profile))
+	w.settingsProfile.SetText(rendererDisplay(profile.Renderer) + " · " + fpsDisplay(profile) + " · " + vsyncDisplay(profile) + " · " + displayTargetDisplay(profile))
 }
 
 func showAboutMessage(parent *qt.QWidget) {

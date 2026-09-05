@@ -1,0 +1,20 @@
+[Desktop Entry]
+Type=Application
+Version=1.0
+Name=Tipsy - Play
+GenericName=Roblox
+Comment=Launch Roblox directly, skipping the Tipsy menu
+Exec=tipsy launch %u
+Icon=tipsy
+Terminal=false
+Categories=Game;
+Keywords=Roblox;Game;Linux;Launcher;Play;
+MimeType=x-scheme-handler/roblox;x-scheme-handler/roblox-player;
+StartupNotify=true
+StartupWMClass=roblox
+Actions=Settings;
+
+[Desktop Action Settings]
+Name=Tipsy - Settings
+Icon=tipsy
+Exec=tipsy-gui

@@ -24,17 +24,52 @@ func TestBrandIconIsRealHighResolutionPNG(t *testing.T) {
 	}
 }
 
-func TestDesktopEntryTargetsGUIAndThemeIcon(t *testing.T) {
-	path := filepath.Join("..", "..", "share", "applications", "io.github.tipsy_linux.Tipsy.desktop")
-	data, err := os.ReadFile(path)
-	if err != nil {
-		t.Fatal(err)
+func TestDesktopEntriesTargetPlayAndSettings(t *testing.T) {
+	cases := []struct {
+		name  string
+		file  string
+		lines []string
+	}{
+		{
+			name: "play",
+			file: "io.github.tipsy_linux.Tipsy.Play.desktop",
+			lines: []string{
+				"Name=Tipsy - Play\n",
+				"Exec=tipsy launch %u\n",
+				"Icon=tipsy\n",
+				"Terminal=false\n",
+				"MimeType=x-scheme-handler/roblox;x-scheme-handler/roblox-player;\n",
+				"StartupWMClass=roblox\n",
+			},
+		},
+		{
+			name: "settings",
+			file: "io.github.tipsy_linux.Tipsy.Settings.desktop",
+			lines: []string{
+				"Name=Tipsy - Settings\n",
+				"Exec=tipsy-gui %u\n",
+				"Icon=tipsy\n",
+				"Terminal=false\n",
+				"MimeType=x-scheme-handler/roblox;x-scheme-handler/roblox-player;\n",
+				"StartupWMClass=tipsy-gui\n",
+				"Categories=Game;\n",
+			},
+		},
 	}
-	text := string(data)
-	for _, line := range []string{"Type=Application", "Exec=tipsy-gui", "Icon=tipsy", "Terminal=false"} {
-		if !strings.Contains(text, line+"\n") {
-			t.Errorf("desktop entry missing %q", line)
-		}
+	for _, test := range cases {
+		t.Run(test.name, func(t *testing.T) {
+			path := filepath.Join("..", "..", "share", "applications", test.file)
+			data, err := os.ReadFile(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			text := string(data)
+			for _, line := range test.lines {
+				if !strings.Contains(text, line) {
+					t.Errorf("desktop entry missing %q", strings.TrimSuffix(line, "\n"))
+				}
+			}
+		})
 	}
 }
 

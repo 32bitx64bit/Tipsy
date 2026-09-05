@@ -271,10 +271,14 @@ func testMainSurface(t *testing.T, win *mainWindow, service *acceptanceService) 
 	if focused := qt.QApplication_FocusWidget(); focused == nil || focused.AccessibleName() != "VSync" {
 		t.Fatalf("Settings page Tab focus=%q, want VSync", focused.AccessibleName())
 	}
+	sendTab(t)
+	if focused := qt.QApplication_FocusWidget(); focused == nil || focused.AccessibleName() != "Default monitor" {
+		t.Fatalf("Settings page Tab focus=%q, want Default monitor", focused.AccessibleName())
+	}
 
 	win.selectPage(2)
-	if win.settingsApply.IsEnabled() || win.settingsRenderer.CurrentText() != "Auto (recommended)" || win.settingsVSync.IsChecked() {
-		t.Fatal("settings did not start clean on Auto with VSync off and Apply disabled")
+	if win.settingsApply.IsEnabled() || win.settingsRenderer.CurrentText() != "Auto (recommended)" || win.settingsVSync.IsChecked() || win.settingsDisplay.CurrentText() != "Main monitor (default)" {
+		t.Fatal("settings did not start clean on Auto with VSync off, main monitor, and Apply disabled")
 	}
 	model := win.settingsRenderer.Model()
 	for row, wantEnabled := range []bool{true, true, false} {
@@ -300,7 +304,7 @@ func testMainSurface(t *testing.T, win *mainWindow, service *acceptanceService) 
 	if settings, err := service.LoadSettings(context.Background()); err != nil || !settings.VSync || settings.FPSMode != guimodel.FPSLimited {
 		t.Fatalf("VSync did not round-trip independently through Apply: settings=%+v err=%v", settings, err)
 	}
-	if got := win.settingsProfile.Text(); got != "OpenGL · 240 FPS · VSync on" {
+	if got := win.settingsProfile.Text(); got != "OpenGL · 240 FPS · VSync on · Main monitor" {
 		t.Fatalf("Home profile did not refresh after Apply: %q", got)
 	}
 	captureMainPageAtSizes(t, win, 2, "settings-limited")
@@ -309,7 +313,7 @@ func testMainSurface(t *testing.T, win *mainWindow, service *acceptanceService) 
 	if win.settingsVSync.IsChecked() {
 		t.Fatal("Reset defaults left VSync enabled")
 	}
-	if got := win.settingsProfile.Text(); got != "Auto renderer · Automatic FPS · VSync off" {
+	if got := win.settingsProfile.Text(); got != "Auto renderer · Automatic FPS · VSync off · Main monitor" {
 		t.Fatalf("Home profile did not refresh after Reset: %q", got)
 	}
 	win.settingsFPSMode.SetCurrentIndex(2)
@@ -557,7 +561,7 @@ func (s *acceptanceService) Install(ctx context.Context, request guimodel.Instal
 	}
 }
 
-func (s *acceptanceService) Launch(_ context.Context, acknowledge func()) error {
+func (s *acceptanceService) Launch(_ context.Context, _ guimodel.LaunchRequest, acknowledge func()) error {
 	s.mu.Lock()
 	s.launchCount++
 	started, ready, done := s.launchStarted, s.launchReady, s.launchDone

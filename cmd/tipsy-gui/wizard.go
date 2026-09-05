@@ -26,6 +26,7 @@ func (w *mainWindow) ShowSetupWizard(firstRun bool) {
 	wizard.SetButtonText(qt.QWizard__FinishButton, "Open Tipsy")
 	wizard.Resize(900, 610)
 	wizard.SetMinimumSize2(720, 520)
+	placeWidgetOnDisplay(wizard.QWidget, configuredDisplay(w))
 	wizard.SetPixmap(qt.QWizard__LogoPixmap, w.icon.Pixmap2(64, 64))
 	sidebar := w.buildWizardSide(firstRun)
 	wizard.SetSideWidget(sidebar.widget)
@@ -341,7 +342,7 @@ func (w *mainWindow) buildSourceWizardPage() (*qt.QWizardPage, *qt.QRadioButton,
 	selected.Hide()
 	layout.AddWidget(selected.QWidget)
 
-	security := qt.NewQLabel3("Tipsy does not call an unofficial source ‘trusted.’ Automatic setup is enabled only when the backend can identify and verify a configured lawful provider.")
+	security := qt.NewQLabel3(automaticExplanation(automaticAvailability))
 	security.SetWordWrap(true)
 	setObjectName(security.QObject, "noticeInfo")
 	layout.AddWidget(security.QWidget)

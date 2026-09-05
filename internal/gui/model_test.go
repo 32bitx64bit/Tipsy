@@ -25,6 +25,7 @@ type fakeService struct {
 	installCalls   []InstallRequest
 	applyCalls     []Settings
 	launches       int
+	launchReq      LaunchRequest
 	launchErr      error
 	launchStarted  bool
 	launchDone     chan struct{}
@@ -55,9 +56,10 @@ func (f *fakeService) Install(ctx context.Context, req InstallRequest, progress 
 	}
 	return err
 }
-func (f *fakeService) Launch(_ context.Context, started func()) error {
+func (f *fakeService) Launch(_ context.Context, req LaunchRequest, started func()) error {
 	f.mu.Lock()
 	f.launches++
+	f.launchReq = req
 	acknowledge, done, err := f.launchStarted, f.launchDone, f.launchErr
 	f.mu.Unlock()
 	if acknowledge {
@@ -333,6 +335,22 @@ func TestLaunchModelAcknowledgesStartThenRecordsCleanExit(t *testing.T) {
 	}
 	if fake.launches != 1 || model.View().State != LaunchExited || !model.View().Started {
 		t.Fatalf("launches=%d view=%+v", fake.launches, model.View())
+	}
+}
+
+func TestLaunchModelForwardsWebsiteURI(t *testing.T) {
+	fake := &fakeService{settings: DefaultSettings(), launchStarted: true}
+	model := NewLaunchModel(fake)
+	if err := model.StartRequest(context.Background(), LaunchRequest{URI: "roblox://experiences/start?placeId=1818"}); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	if err := model.Wait(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if fake.launchReq.URI != "roblox://experiences/start?placeId=1818" {
+		t.Fatalf("launch URI=%q", fake.launchReq.URI)
 	}
 }
 

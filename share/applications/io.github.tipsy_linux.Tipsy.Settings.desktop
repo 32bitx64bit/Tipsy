@@ -1,0 +1,14 @@
+[Desktop Entry]
+Type=Application
+Version=1.0
+Name=Tipsy - Settings
+GenericName=Tipsy settings
+Comment=Open the Tipsy setup and settings menu
+Exec=tipsy-gui %u
+Icon=tipsy
+Terminal=false
+Categories=Game;
+Keywords=Roblox;Game;Linux;Launcher;Settings;Setup;
+MimeType=x-scheme-handler/roblox;x-scheme-handler/roblox-player;
+StartupNotify=true
+StartupWMClass=tipsy-gui

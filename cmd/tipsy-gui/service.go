@@ -9,6 +9,7 @@ import (
 	"github.com/tipsy-linux/tipsy/internal/clientsettings"
 	"github.com/tipsy-linux/tipsy/internal/diagnostics"
 	guimodel "github.com/tipsy-linux/tipsy/internal/gui"
+	"github.com/tipsy-linux/tipsy/internal/rbxuri"
 	tipsyruntime "github.com/tipsy-linux/tipsy/internal/runtime"
 	"github.com/tipsy-linux/tipsy/internal/setupsvc"
 )
@@ -45,8 +46,8 @@ func (s *productionService) Snapshot(ctx context.Context) (guimodel.InstallSnaps
 
 func (s *productionService) AutomaticAvailability(ctx context.Context) guimodel.AutomaticAvailability {
 	availability := s.installer.AutomaticAvailability(ctx)
-	explanation := ""
-	if availability.LegalURL != "" {
+	explanation := availability.Explanation
+	if explanation == "" && availability.LegalURL != "" {
 		explanation = "Source policy: " + availability.LegalURL
 	}
 	return guimodel.AutomaticAvailability{Available: availability.Available, SourceName: availability.Name, Explanation: explanation, Reason: availability.Reason}
@@ -67,8 +68,12 @@ func (s *productionService) Install(ctx context.Context, request guimodel.Instal
 	return nil
 }
 
-func (s *productionService) Launch(ctx context.Context, started func()) error {
-	return tipsyruntime.Launch(ctx, tipsyruntime.LaunchOptions{Started: started})
+func (s *productionService) Launch(ctx context.Context, req guimodel.LaunchRequest, started func()) error {
+	launchReq, err := rbxuri.Parse(req.URI)
+	if err != nil {
+		return err
+	}
+	return tipsyruntime.Launch(ctx, tipsyruntime.LaunchOptions{Started: started, Request: launchReq})
 }
 
 func (s *productionService) LoadSettings(ctx context.Context) (guimodel.Settings, error) {
@@ -143,7 +148,7 @@ func (s *productionService) Doctor(ctx context.Context) (guimodel.DoctorSummary,
 }
 
 func guiSettings(settings clientsettings.Settings) guimodel.Settings {
-	result := guimodel.Settings{Renderer: guimodel.Renderer(settings.Renderer), FPSMode: guimodel.FPSMode(settings.FrameRate.Mode), FrameRate: settings.FrameRate.Limit, VSync: settings.VSync}
+	result := guimodel.Settings{Renderer: guimodel.Renderer(settings.Renderer), FPSMode: guimodel.FPSMode(settings.FrameRate.Mode), FrameRate: settings.FrameRate.Limit, VSync: settings.VSync, Display: guimodel.NormalizeDisplay(settings.Display)}
 	if result.Renderer == "" {
 		result.Renderer = guimodel.RendererAuto
 	}
@@ -161,6 +166,7 @@ func backendSettings(settings guimodel.Settings) clientsettings.Settings {
 	return clientsettings.Settings{
 		Renderer: clientsettings.Renderer(settings.Renderer),
 		VSync:    settings.VSync,
+		Display:  clientsettings.NormalizeDisplay(settings.Display),
 		FrameRate: clientsettings.FrameRate{
 			Mode:  clientsettings.FrameRateMode(settings.FPSMode),
 			Limit: limit,
@@ -232,6 +238,10 @@ func phasePercent(progress setupsvc.InstallProgress) int {
 func friendlySetupError(err error) error {
 	switch setupsvc.ErrorKindOf(err) {
 	case setupsvc.ErrWrongPackage:
+		var typed *setupsvc.Error
+		if errors.As(err, &typed) && strings.Contains(strings.ToLower(typed.Detail), "installer") {
+			return fmt.Errorf("%s", typed.Detail)
+		}
 		return fmt.Errorf("this is not an official Roblox client package: %w", err)
 	case setupsvc.ErrMissingX8664:
 		return fmt.Errorf("this package does not contain the required x86-64 client: %w", err)

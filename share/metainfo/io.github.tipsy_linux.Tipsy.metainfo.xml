@@ -8,14 +8,18 @@
   <developer id="io.github.tipsy-linux">
     <name>Tipsy contributors</name>
   </developer>
-  <description>
+	<description>
     <p>Tipsy is a Linux compatibility runtime and Qt 6 desktop application for a user-provided official Roblox Android x86-64 client.</p>
-    <p>Roblox is not included. Tipsy does not collect Roblox credentials.</p>
+    <p>The package installs two launchers: Tipsy - Play starts the official client directly, and Tipsy - Settings opens the setup and configuration window. Play also handles roblox: and roblox-player: website launch URIs. Roblox is not included. Tipsy does not collect Roblox credentials.</p>
   </description>
-  <launchable type="desktop-id">io.github.tipsy_linux.Tipsy.desktop</launchable>
+  <launchable type="desktop-id">io.github.tipsy_linux.Tipsy.Play.desktop</launchable>
+  <launchable type="desktop-id">io.github.tipsy_linux.Tipsy.Settings.desktop</launchable>
   <url type="homepage">https://github.com/tipsy-linux/tipsy</url>
   <provides>
+    <binary>tipsy</binary>
     <binary>tipsy-gui</binary>
+    <mediatype>x-scheme-handler/roblox</mediatype>
+    <mediatype>x-scheme-handler/roblox-player</mediatype>
   </provides>
   <categories>
     <category>Game</category>

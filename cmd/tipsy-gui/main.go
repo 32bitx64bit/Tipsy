@@ -17,12 +17,14 @@ import (
 func main() {
 	logging.Init()
 
-	app := qt.NewQApplication(os.Args)
+	mode, uri, qtArgs := splitGUIArgs(os.Args)
+	app := qt.NewQApplication(qtArgs)
 	qt.QCoreApplication_SetOrganizationName("tipsy-linux")
 	qt.QCoreApplication_SetOrganizationDomain("tipsy-linux.github.io")
 	qt.QCoreApplication_SetApplicationName("tipsy-gui")
 	qt.QCoreApplication_SetApplicationVersion(version.String())
-	qt.QGuiApplication_SetApplicationDisplayName("Tipsy")
+	qt.QGuiApplication_SetApplicationDisplayName("Tipsy - Settings")
+	qt.QGuiApplication_SetDesktopFileName("io.github.tipsy_linux.Tipsy.Settings")
 	qt.QGuiApplication_SetQuitOnLastWindowClosed(true)
 	qt.QApplication_SetStyleWithStyle("Fusion")
 	app.SetStyleSheet(appStyleSheet)
@@ -31,9 +33,6 @@ func main() {
 	qt.QGuiApplication_SetWindowIcon(icon)
 
 	win := newMainWindow(newProductionService(), icon)
-	win.Show()
-	if win.FirstRun() {
-		win.ShowSetupWizard(true)
-	}
+	win.startInMode(mode, uri)
 	qt.QApplication_Exec()
 }
