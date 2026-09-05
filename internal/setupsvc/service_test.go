@@ -271,7 +271,10 @@ func TestHTTPSBundleSourceCancellationCleansPartialFile(t *testing.T) {
 
 func TestInstallStagesThenAtomicallyReplacesRuntime(t *testing.T) {
 	root := t.TempDir()
-	input := writeTestZIP(t, filepath.Join(root, "base.apk"), map[string][]byte{"payload": []byte("new")})
+	input := writeTestZIP(t, filepath.Join(root, "base.apk"), map[string][]byte{
+		"AndroidManifest.xml":     []byte("manifest"),
+		"lib/x86_64/libroblox.so": []byte("native"),
+	})
 	runtimeDir := filepath.Join(root, "data", "runtime")
 	if err := os.MkdirAll(runtimeDir, 0o700); err != nil {
 		t.Fatal(err)
@@ -329,7 +332,10 @@ func TestInstallStagesThenAtomicallyReplacesRuntime(t *testing.T) {
 
 func TestInstallFailureAndCancellationLeaveRuntimeUntouched(t *testing.T) {
 	root := t.TempDir()
-	input := writeTestZIP(t, filepath.Join(root, "base.apk"), map[string][]byte{"payload": []byte("new")})
+	input := writeTestZIP(t, filepath.Join(root, "base.apk"), map[string][]byte{
+		"AndroidManifest.xml":     []byte("manifest"),
+		"lib/x86_64/libroblox.so": []byte("native"),
+	})
 	runtimeDir := filepath.Join(root, "data", "runtime")
 	if err := os.MkdirAll(runtimeDir, 0o700); err != nil {
 		t.Fatal(err)

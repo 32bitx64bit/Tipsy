@@ -142,6 +142,12 @@ func (s *Service) Install(ctx context.Context, req InstallRequest, progress Prog
 		}
 	}
 
+	report(progress, PhaseValidating, 0, 0, "Keeping official x86-64 Roblox package files")
+	selected, err = keepX86PackageFiles(selected, filepath.Join(stage, "filtered"), "validate package")
+	if err != nil {
+		return nil, err
+	}
+
 	report(progress, PhaseValidating, 0, 0, "Verifying Roblox package, architecture, splits, and signature")
 	rep, err := s.inspectFn()(ctx, selected)
 	if err != nil {
