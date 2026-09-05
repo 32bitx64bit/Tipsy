@@ -27,7 +27,7 @@ type Service struct {
 }
 
 func New() *Service {
-	return NewWithSource(&ADBSource{})
+	return NewWithSource(&APKPureSource{})
 }
 
 func NewWithSource(source Source) *Service {

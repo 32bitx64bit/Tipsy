@@ -43,10 +43,11 @@ type InstallProgress struct {
 type ProgressFunc func(InstallProgress)
 
 type SourceAvailability struct {
-	Available bool
-	Name      string
-	Reason    string
-	LegalURL  string
+	Available   bool
+	Name        string
+	Reason      string
+	LegalURL    string
+	Explanation string
 }
 
 type InstallSnapshot struct {
