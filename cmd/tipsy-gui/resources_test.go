@@ -44,7 +44,11 @@ func TestThemeUsesTipsyBrandPalette(t *testing.T) {
 			t.Errorf("theme missing brand color %s", color)
 		}
 	}
-	for _, selector := range []string{"QPushButton:focus", "QRadioButton:focus", "QRadioButton:checked", "QScrollBar:vertical", "QWidget#wizardPage"} {
+	for _, selector := range []string{
+		"QPushButton:focus", "QRadioButton:focus", "QRadioButton:checked", "QScrollBar:vertical", "QWidget#wizardPage",
+		"QCheckBox#vsyncToggle::indicator", "QCheckBox#vsyncToggle::indicator:checked", "QCheckBox#vsyncToggle:hover:enabled",
+		"QCheckBox#vsyncToggle:focus", "QCheckBox#vsyncToggle:disabled", "QCheckBox#vsyncToggle:disabled:focus",
+	} {
 		if !strings.Contains(appStyleSheet, selector) {
 			t.Errorf("theme missing interaction/layout selector %s", selector)
 		}

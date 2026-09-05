@@ -84,7 +84,7 @@ func (w *mainWindow) buildHomePage() *qt.QWidget {
 	settingsCard, settingsLayout := newVerticalCard("card")
 	settingsLayout.AddWidget(sectionLabel("Graphics profile").QWidget)
 	profile := w.settings.View().Draft
-	profileText := rendererDisplay(profile.Renderer) + " · " + fpsDisplay(profile)
+	profileText := rendererDisplay(profile.Renderer) + " · " + fpsDisplay(profile) + " · " + vsyncDisplay(profile)
 	w.settingsProfile = qt.NewQLabel3(profileText)
 	setObjectName(w.settingsProfile.QObject, "metricValueSmall")
 	w.settingsProfile.SetWordWrap(true)
@@ -95,7 +95,7 @@ func (w *mainWindow) buildHomePage() *qt.QWidget {
 	settingsLayout.AddWidget(note.QWidget)
 	openSettings := qt.NewQPushButton3("Open settings")
 	setObjectName(openSettings.QObject, "secondaryButton")
-	openSettings.SetAccessibleDescription("Open renderer and frame-rate settings")
+	openSettings.SetAccessibleDescription("Open renderer, frame-rate, and VSync settings")
 	openSettings.OnClicked(func() { w.selectPage(2) })
 	settingsLayout.AddWidget(openSettings.QWidget)
 	rowLayout.AddWidget2(settingsCard.QWidget, 0, 1)
@@ -211,8 +211,10 @@ func (w *mainWindow) buildSettingsPage() *qt.QWidget {
 	form.AddRow3("Renderer", w.settingsRenderer.QWidget)
 
 	w.settingsFPSMode = qt.NewQComboBox2()
-	w.settingsFPSMode.AddItems([]string{"Automatic (recommended)", "Limited", "Unlimited (experimental)"})
+	w.settingsFPSMode.AddItems([]string{"Automatic (recommended)", "Limited (30–240 FPS)", "Unlimited (experimental request)"})
 	w.settingsFPSMode.SetAccessibleName("Frame-rate mode")
+	w.settingsFPSMode.SetAccessibleDescription("Limited accepts 30 to 240 FPS. Unlimited sends an experimental uncapped request; actual FPS depends on the client, CPU, GPU, and driver, and no frame rate is guaranteed.")
+	w.settingsFPSMode.SetToolTip("Unlimited is an experimental uncapped request, not a guaranteed frame rate.")
 	w.settingsFPSMode.SetMaximumWidth(560)
 	form.AddRow3("Frame-rate mode", w.settingsFPSMode.QWidget)
 
@@ -225,9 +227,16 @@ func (w *mainWindow) buildSettingsPage() *qt.QWidget {
 	w.settingsFPS.SetToolTip("Set a finite client frame-rate limit from 30 to 240 FPS")
 	w.settingsFPS.SetMaximumWidth(240)
 	form.AddRow3("Limit", w.settingsFPS.QWidget)
+
+	w.settingsVSync = qt.NewQCheckBox3(vsyncToggleText(false))
+	setObjectName(w.settingsVSync.QObject, "vsyncToggle")
+	w.settingsVSync.SetAccessibleName("VSync")
+	w.settingsVSync.SetAccessibleDescription("Optional vertical synchronization; disabled by default. Disabling it can allow tearing and lets the independent frame-rate cap run above the monitor refresh rate.")
+	w.settingsVSync.SetToolTip("Disabled by default. Enable to synchronize presentation to the active monitor refresh rate; this is independent of the frame-rate cap.")
+	form.AddRow3("VSync", w.settingsVSync.QWidget)
 	cardLayout.AddLayout(form.QLayout)
 
-	w.settingsHint = qt.NewQLabel3("Roblox must be restarted before renderer or frame-rate changes take effect.")
+	w.settingsHint = qt.NewQLabel3("Roblox must be restarted before renderer, frame-rate, or VSync changes take effect.")
 	w.settingsHint.SetWordWrap(true)
 	setObjectName(w.settingsHint.QObject, "noticeInfo")
 	cardLayout.AddWidget(w.settingsHint.QWidget)
@@ -236,12 +245,12 @@ func (w *mainWindow) buildSettingsPage() *qt.QWidget {
 	actions.AddStretch()
 	w.settingsReset = qt.NewQPushButton3("Reset defaults")
 	setObjectName(w.settingsReset.QObject, "secondaryButton")
-	w.settingsReset.SetAccessibleDescription("Restore the safe automatic renderer and frame-rate defaults")
+	w.settingsReset.SetAccessibleDescription("Restore automatic renderer and frame-rate defaults with VSync disabled")
 	w.settingsReset.OnClicked(w.resetSettings)
 	actions.AddWidget(w.settingsReset.QWidget)
 	w.settingsApply = qt.NewQPushButton3("Apply changes")
 	setObjectName(w.settingsApply.QObject, "primaryButton")
-	w.settingsApply.SetAccessibleDescription("Save renderer and frame-rate settings")
+	w.settingsApply.SetAccessibleDescription("Save renderer, frame-rate, and VSync settings")
 	w.settingsApply.OnClicked(w.applySettings)
 	actions.AddWidget(w.settingsApply.QWidget)
 	cardLayout.AddLayout(actions.QLayout)
@@ -253,6 +262,7 @@ func (w *mainWindow) buildSettingsPage() *qt.QWidget {
 		w.settingsRenderer.SetEnabled(false)
 		w.settingsFPSMode.SetEnabled(false)
 		w.settingsFPS.SetEnabled(false)
+		w.settingsVSync.SetEnabled(false)
 		w.settingsApply.SetEnabled(false)
 		w.settingsReset.SetEnabled(false)
 	} else {
@@ -260,12 +270,16 @@ func (w *mainWindow) buildSettingsPage() *qt.QWidget {
 		w.settingsRenderer.OnCurrentIndexChanged(func(int) { w.settingsEdited() })
 		w.settingsFPSMode.OnCurrentIndexChanged(func(int) { w.settingsEdited() })
 		w.settingsFPS.OnValueChanged(func(int) { w.settingsEdited() })
+		w.settingsVSync.OnToggled(func(enabled bool) {
+			w.settingsVSync.SetText(vsyncToggleText(enabled))
+			w.settingsEdited()
+		})
 		w.updateSettingsControls()
 	}
 
 	limits, limitsLayout := newVerticalCard("subtleCard")
-	limitsLayout.AddWidget(sectionLabel("Renderer and frame-rate notes").QWidget)
-	limitsText := qt.NewQLabel3("<b>Auto</b> leaves Roblox's frame-rate choice alone. <b>Limited</b> supports 30–240 FPS. <b>Unlimited</b> is experimental: the client may still enforce 240 FPS, and higher rates can increase power use and instability.<br><br><b>Vulkan</b> is visible for future compatibility but disabled until Tipsy has a Vulkan bridge and a working host driver.")
+	limitsLayout.AddWidget(sectionLabel("Graphics and performance notes").QWidget)
+	limitsText := qt.NewQLabel3("<b>Auto</b> leaves Roblox's frame-rate choice alone. <b>Limited</b> supports 30–240 FPS. <b>Unlimited</b> sends an experimental uncapped request. Actual FPS depends on the client, CPU, GPU, and driver; no particular frame rate is guaranteed. Higher rates can increase power use and instability.<br><br><b>VSync</b> is disabled by default and is independent of the frame-rate cap. Enabling it synchronizes presentation to the active monitor refresh rate. Leaving it disabled permits above-refresh presentation but can cause visible tearing.<br><br><b>Vulkan</b> is visible for future compatibility but disabled until Tipsy has a Vulkan bridge and a working host driver.")
 	limitsText.SetTextFormat(qt.RichText)
 	limitsText.SetWordWrap(true)
 	setObjectName(limitsText.QObject, "mutedText")
@@ -299,6 +313,8 @@ func (w *mainWindow) bindSettings(settings guimodel.Settings) {
 	} else {
 		w.settingsFPS.SetValue(60)
 	}
+	w.settingsVSync.SetChecked(settings.VSync)
+	w.settingsVSync.SetText(vsyncToggleText(settings.VSync))
 }
 
 func (w *mainWindow) settingsEdited() {
@@ -318,7 +334,7 @@ func (w *mainWindow) settingsEdited() {
 	case 2:
 		fpsMode = guimodel.FPSUnlimited
 	}
-	w.settings.Edit(guimodel.Settings{Renderer: renderer, FPSMode: fpsMode, FrameRate: w.settingsFPS.Value()})
+	w.settings.Edit(guimodel.Settings{Renderer: renderer, FPSMode: fpsMode, FrameRate: w.settingsFPS.Value(), VSync: w.settingsVSync.IsChecked()})
 	w.updateSettingsControls()
 }
 
@@ -334,7 +350,7 @@ func (w *mainWindow) updateSettingsControls() {
 		}
 		setObjectName(w.settingsHint.QObject, "noticeWarning")
 	} else if view.Dirty && view.Draft.FPSMode == guimodel.FPSUnlimited {
-		w.settingsHint.SetText("Unlimited is experimental. Roblox may still cap at 240 FPS; expect higher power use and possible instability. Restart required.")
+		w.settingsHint.SetText("Unlimited sends an experimental uncapped request. Actual FPS depends on the client, CPU, GPU, and driver; no frame rate is guaranteed. Restart required.")
 		setObjectName(w.settingsHint.QObject, "noticeWarning")
 	} else if view.Dirty {
 		w.settingsHint.SetText("Changes are not saved yet. Applying them requires a Roblox restart.")
@@ -350,7 +366,7 @@ func (w *mainWindow) updateSettingsControls() {
 		w.settingsHint.SetText("Changes saved. Restart Roblox to apply them.")
 		setObjectName(w.settingsHint.QObject, "noticeSuccess")
 	} else {
-		w.settingsHint.SetText("Roblox must be restarted before renderer or frame-rate changes take effect.")
+		w.settingsHint.SetText("Roblox must be restarted before renderer, frame-rate, or VSync changes take effect.")
 		setObjectName(w.settingsHint.QObject, "noticeInfo")
 	}
 	refreshStyle(w.settingsHint.QWidget)
@@ -539,10 +555,24 @@ func fpsDisplay(settings guimodel.Settings) string {
 	case guimodel.FPSLimited:
 		return fmt.Sprintf("%d FPS", settings.FrameRate)
 	case guimodel.FPSUnlimited:
-		return "Unlimited FPS (experimental)"
+		return "Uncapped request (experimental)"
 	default:
 		return "Automatic FPS"
 	}
+}
+
+func vsyncDisplay(settings guimodel.Settings) string {
+	if settings.VSync {
+		return "VSync on"
+	}
+	return "VSync off"
+}
+
+func vsyncToggleText(enabled bool) string {
+	if enabled {
+		return "✓ VSync enabled — presentation follows the active monitor refresh rate"
+	}
+	return "VSync off — presentation is not synchronized to the monitor refresh rate"
 }
 
 func automaticExplanation(a guimodel.AutomaticAvailability) string {

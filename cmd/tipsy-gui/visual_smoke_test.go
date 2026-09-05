@@ -58,6 +58,15 @@ func TestOffscreenVisualProof(t *testing.T) {
 
 	win.selectPage(2)
 	qt.QCoreApplication_ProcessEvents()
+	if win.settingsVSync == nil || win.settingsVSync.IsChecked() || win.settingsVSync.AccessibleName() != "VSync" {
+		t.Fatalf("VSync control did not render unchecked and accessible: %#v", win.settingsVSync)
+	}
+	if got := win.settingsVSync.Text(); got != vsyncToggleText(false) {
+		t.Fatalf("unchecked VSync state text=%q, want %q", got, vsyncToggleText(false))
+	}
+	if description := win.settingsFPSMode.AccessibleDescription(); !strings.Contains(description, "experimental uncapped request") || !strings.Contains(description, "no frame rate is guaranteed") {
+		t.Fatalf("Unlimited accessibility copy is not honest: %q", description)
+	}
 	settingsPixmap := win.win.Grab()
 	if settingsPixmap.IsNull() || settingsPixmap.Width() != pixmap.Width() || settingsPixmap.Height() != pixmap.Height() {
 		t.Fatalf("settings page did not render at the window size: %dx%d", settingsPixmap.Width(), settingsPixmap.Height())
@@ -69,6 +78,78 @@ func TestOffscreenVisualProof(t *testing.T) {
 			t.Fatalf("save settings visual proof to %s", settingsPath)
 		}
 	}
+	win.settingsVSync.SetChecked(true)
+	qt.QCoreApplication_ProcessEvents()
+	if !win.settingsVSync.IsChecked() || win.settingsVSync.Text() != vsyncToggleText(true) {
+		t.Fatalf("checked VSync state is not unmistakable: checked=%v text=%q", win.settingsVSync.IsChecked(), win.settingsVSync.Text())
+	}
+	checkedSettings := win.win.Grab()
+	if checkedSettings.IsNull() {
+		t.Fatal("checked VSync settings page did not render")
+	}
+	if path := os.Getenv("TIPSY_GUI_SCREENSHOT"); path != "" {
+		ext := filepath.Ext(path)
+		checkedPath := strings.TrimSuffix(path, ext) + "-settings-vsync-on" + ext
+		if !checkedSettings.Save2(checkedPath, "PNG") {
+			t.Fatalf("save checked VSync visual proof to %s", checkedPath)
+		}
+	}
+	win.settingsVSync.SetChecked(false)
+	qt.QCoreApplication_ProcessEvents()
+	win.settingsVSync.SetFocusWithReason(qt.TabFocusReason)
+	qt.QCoreApplication_ProcessEvents()
+	if focused := qt.QApplication_FocusWidget(); focused == nil || focused.UnsafePointer() != win.settingsVSync.QWidget.UnsafePointer() {
+		t.Fatal("VSync checkbox did not retain keyboard-visible focus")
+	}
+	focusedSettings := win.win.Grab()
+	if focusedSettings.IsNull() {
+		t.Fatal("focused VSync settings page did not render")
+	}
+	if path := os.Getenv("TIPSY_GUI_SCREENSHOT"); path != "" {
+		ext := filepath.Ext(path)
+		focusedPath := strings.TrimSuffix(path, ext) + "-settings-vsync-focus" + ext
+		if !focusedSettings.Save2(focusedPath, "PNG") {
+			t.Fatalf("save focused VSync visual proof to %s", focusedPath)
+		}
+	}
+	win.settingsVSync.SetEnabled(false)
+	win.settingsRenderer.SetFocusWithReason(qt.TabFocusReason)
+	qt.QCoreApplication_ProcessEvents()
+	if win.settingsVSync.IsEnabled() {
+		t.Fatal("VSync checkbox did not enter disabled presentation state")
+	}
+	disabledSettings := win.win.Grab()
+	if disabledSettings.IsNull() {
+		t.Fatal("disabled VSync settings page did not render")
+	}
+	if path := os.Getenv("TIPSY_GUI_SCREENSHOT"); path != "" {
+		ext := filepath.Ext(path)
+		disabledPath := strings.TrimSuffix(path, ext) + "-settings-vsync-disabled" + ext
+		if !disabledSettings.Save2(disabledPath, "PNG") {
+			t.Fatalf("save disabled VSync visual proof to %s", disabledPath)
+		}
+	}
+	win.settingsVSync.SetEnabled(true)
+	qt.QCoreApplication_ProcessEvents()
+	win.win.Resize(780, 560)
+	win.settingsFPSMode.SetCurrentIndex(2)
+	qt.QCoreApplication_ProcessEvents()
+	if win.settingsFPS.IsEnabled() || !strings.Contains(win.settingsHint.Text(), "experimental uncapped request") || !strings.Contains(win.settingsHint.Text(), "no frame rate is guaranteed") {
+		t.Fatalf("Unlimited state copy=%q limitEnabled=%v", win.settingsHint.Text(), win.settingsFPS.IsEnabled())
+	}
+	compactSettings := win.win.Grab()
+	if compactSettings.IsNull() || !win.settingsVSync.IsVisible() {
+		t.Fatal("compact settings page did not keep the VSync control in the scrollable layout")
+	}
+	if path := os.Getenv("TIPSY_GUI_SCREENSHOT"); path != "" {
+		ext := filepath.Ext(path)
+		compactPath := strings.TrimSuffix(path, ext) + "-settings-compact" + ext
+		if !compactSettings.Save2(compactPath, "PNG") {
+			t.Fatalf("save compact settings visual proof to %s", compactPath)
+		}
+	}
+	win.win.Resize(1080, 720)
+	qt.QCoreApplication_ProcessEvents()
 
 	wizard := qt.NewQWizard(win.win.QWidget)
 	wizard.SetWizardStyle(qt.QWizard__ModernStyle)

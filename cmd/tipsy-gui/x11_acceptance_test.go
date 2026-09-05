@@ -267,10 +267,14 @@ func testMainSurface(t *testing.T, win *mainWindow, service *acceptanceService) 
 	if focused := qt.QApplication_FocusWidget(); focused == nil || focused.AccessibleName() != "Frame-rate mode" {
 		t.Fatalf("Settings page Tab focus=%q, want Frame-rate mode", focused.AccessibleName())
 	}
+	sendTab(t)
+	if focused := qt.QApplication_FocusWidget(); focused == nil || focused.AccessibleName() != "VSync" {
+		t.Fatalf("Settings page Tab focus=%q, want VSync", focused.AccessibleName())
+	}
 
 	win.selectPage(2)
-	if win.settingsApply.IsEnabled() || win.settingsRenderer.CurrentText() != "Auto (recommended)" {
-		t.Fatal("settings did not start clean on Auto with Apply disabled")
+	if win.settingsApply.IsEnabled() || win.settingsRenderer.CurrentText() != "Auto (recommended)" || win.settingsVSync.IsChecked() {
+		t.Fatal("settings did not start clean on Auto with VSync off and Apply disabled")
 	}
 	model := win.settingsRenderer.Model()
 	for row, wantEnabled := range []bool{true, true, false} {
@@ -283,6 +287,7 @@ func testMainSurface(t *testing.T, win *mainWindow, service *acceptanceService) 
 	win.settingsRenderer.SetCurrentIndex(1)
 	win.settingsFPSMode.SetCurrentIndex(1)
 	win.settingsFPS.SetValue(240)
+	win.settingsVSync.SetChecked(true)
 	win.settingsEdited()
 	if !win.settingsFPS.IsEnabled() || !win.settingsApply.IsEnabled() || !strings.Contains(win.settingsHint.Text(), "restart") {
 		t.Fatal("valid OpenGL/240 FPS edit did not enable Apply with restart notice")
@@ -292,19 +297,28 @@ func testMainSurface(t *testing.T, win *mainWindow, service *acceptanceService) 
 	if win.settingsApply.IsEnabled() || !strings.Contains(win.settingsHint.Text(), "saved by synthetic backend") || !strings.Contains(win.settingsHint.Text(), "Restart") {
 		t.Fatalf("Apply state/note incorrect: %q", win.settingsHint.Text())
 	}
-	if got := win.settingsProfile.Text(); got != "OpenGL · 240 FPS" {
+	if settings, err := service.LoadSettings(context.Background()); err != nil || !settings.VSync || settings.FPSMode != guimodel.FPSLimited {
+		t.Fatalf("VSync did not round-trip independently through Apply: settings=%+v err=%v", settings, err)
+	}
+	if got := win.settingsProfile.Text(); got != "OpenGL · 240 FPS · VSync on" {
 		t.Fatalf("Home profile did not refresh after Apply: %q", got)
 	}
 	captureMainPageAtSizes(t, win, 2, "settings-limited")
 	win.settingsReset.Click()
 	pumpEvents()
-	if got := win.settingsProfile.Text(); got != "Auto renderer · Automatic FPS" {
+	if win.settingsVSync.IsChecked() {
+		t.Fatal("Reset defaults left VSync enabled")
+	}
+	if got := win.settingsProfile.Text(); got != "Auto renderer · Automatic FPS · VSync off" {
 		t.Fatalf("Home profile did not refresh after Reset: %q", got)
 	}
 	win.settingsFPSMode.SetCurrentIndex(2)
 	win.settingsEdited()
-	if win.settingsFPS.IsEnabled() || !win.settingsApply.IsEnabled() || !strings.Contains(win.settingsHint.Text(), "Unlimited is experimental") {
-		t.Fatal("Unlimited mode did not expose experimental note and semantic disabled limit")
+	if win.settingsFPS.IsEnabled() || !win.settingsApply.IsEnabled() || !strings.Contains(win.settingsHint.Text(), "experimental uncapped request") || !strings.Contains(win.settingsHint.Text(), "no frame rate is guaranteed") {
+		t.Fatal("Unlimited mode did not expose honest experimental request copy and semantic disabled limit")
+	}
+	if got := fpsDisplay(win.settings.View().Draft); got != "Uncapped request (experimental)" {
+		t.Fatalf("Unlimited summary=%q", got)
 	}
 	win.settingsRenderer.SetCurrentIndex(2)
 	win.settingsEdited()

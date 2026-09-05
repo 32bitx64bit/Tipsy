@@ -141,6 +141,27 @@ QRadioButton:hover:enabled { background: #eaf2ff; }
 QRadioButton:focus { border-color: #126cf3; background: #eaf2ff; }
 QRadioButton:disabled { color: #8792a6; }
 QRadioButton:checked { color: #0f5bb8; background: #e8f1ff; border-color: #b9d4fa; font-weight: 700; }
+QCheckBox#vsyncToggle {
+  spacing: 10px; padding: 8px 10px; border: 2px solid transparent; border-radius: 8px;
+  background: #f7f9fd; color: #24324d; font-weight: 650;
+}
+QCheckBox#vsyncToggle:hover:enabled { background: #eaf2ff; border-color: #b9d4fa; }
+QCheckBox#vsyncToggle:focus { background: #e8f1ff; border-color: #126cf3; }
+QCheckBox#vsyncToggle:checked { background: #dcecff; color: #093d82; border-color: #75aef7; font-weight: 750; }
+QCheckBox#vsyncToggle:disabled { background: #edf1f6; color: #7b879c; border-color: #d8dee8; }
+QCheckBox#vsyncToggle:disabled:focus { border-color: #d8dee8; }
+QCheckBox#vsyncToggle::indicator {
+  width: 18px; height: 18px; border: 2px solid #52627b; border-radius: 4px; background: #ffffff;
+}
+QCheckBox#vsyncToggle::indicator:hover:enabled { border-color: #126cf3; background: #f5f9ff; }
+QCheckBox#vsyncToggle:focus::indicator { border-color: #092c65; }
+QCheckBox#vsyncToggle::indicator:checked {
+  border-color: #0a56c7; background: #126cf3;
+}
+QCheckBox#vsyncToggle::indicator:checked:hover:enabled { background: #0f5fd7; }
+QCheckBox#vsyncToggle::indicator:disabled { border-color: #aeb8c8; background: #e7ebf1; }
+QCheckBox#vsyncToggle::indicator:checked:disabled { border-color: #9aabc2; background: #a9c9f5; }
+QCheckBox#vsyncToggle:disabled:focus::indicator { border-color: #aeb8c8; }
 QProgressBar {
   min-height: 12px; border: 0; border-radius: 6px; background: #dfe6f1;
   text-align: center; color: transparent;

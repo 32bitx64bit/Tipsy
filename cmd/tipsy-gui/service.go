@@ -143,7 +143,7 @@ func (s *productionService) Doctor(ctx context.Context) (guimodel.DoctorSummary,
 }
 
 func guiSettings(settings clientsettings.Settings) guimodel.Settings {
-	result := guimodel.Settings{Renderer: guimodel.Renderer(settings.Renderer), FPSMode: guimodel.FPSMode(settings.FrameRate.Mode), FrameRate: settings.FrameRate.Limit}
+	result := guimodel.Settings{Renderer: guimodel.Renderer(settings.Renderer), FPSMode: guimodel.FPSMode(settings.FrameRate.Mode), FrameRate: settings.FrameRate.Limit, VSync: settings.VSync}
 	if result.Renderer == "" {
 		result.Renderer = guimodel.RendererAuto
 	}
@@ -160,6 +160,7 @@ func backendSettings(settings guimodel.Settings) clientsettings.Settings {
 	}
 	return clientsettings.Settings{
 		Renderer: clientsettings.Renderer(settings.Renderer),
+		VSync:    settings.VSync,
 		FrameRate: clientsettings.FrameRate{
 			Mode:  clientsettings.FrameRateMode(settings.FPSMode),
 			Limit: limit,
