@@ -410,7 +410,10 @@ func (vm *VM) dispatchCore(o *Object, obj C.jobject, class, name, sig string, ar
 	case "getFilesDir()Ljava/lang/String;":
 		return vm.internFilesDirString(), true
 	case "getAppVersion()Ljava/lang/String;":
-		return vm.internString(&vm.immortalAppVersion, "2.734.917"), true
+		vm.mu.RLock()
+		version := vm.appVersion
+		vm.mu.RUnlock()
+		return vm.internString(&vm.immortalAppVersion, version), true
 	case "getCacheDir()Ljava/io/File;":
 		return vm.internCacheDirFile(), true
 	case "getObbDir()Ljava/io/File;":
@@ -756,7 +759,7 @@ func (vm *VM) newDeviceStaticParams() C.jobject {
 	o := vm.newObjectLocked(cls)
 	o.fields["testDeviceName"] = ""
 	o.fields["appBuildVariant"] = "GooglePlay"
-	o.fields["appVersion"] = "2.734.917"
+	o.fields["appVersion"] = vm.appVersion
 	o.fields["cpu64Bit"] = true
 	o.fields["deviceName"] = "tipsy"
 	o.fields["deviceSku"] = "tipsy"

@@ -405,6 +405,9 @@ func Launch(ctx context.Context, opt LaunchOptions) error {
 		return fmt.Errorf("jni: %w", err)
 	}
 	vm.SetDirs(files, cache, obb, assets)
+	ver := installedVersionName(dir)
+	vm.SetAppVersion(ver)
+	logging.Logger(logging.CatRuntime).Info("installed client", "version", ver)
 	vm.SetDisplaySize(opt.Width, opt.Height)
 	if mmW, mmH := jni.X11DisplayPhysicalSizeMM(win.Display()); mmW > 0 && mmH > 0 {
 		vm.SetDisplayPhysicalSizeMM(mmW, mmH)
@@ -1215,7 +1218,7 @@ func setPlatformViewport(env *jni.Env, platform uintptr, width, height int) {
 func makeDeviceParams(env *jni.Env, width, height int) uintptr {
 	d := env.AllocObject(env.FindClass("com/roblox/engine/jni/model/DeviceParams"))
 	for k, v := range map[string]any{
-		"appBuildVariant": "GooglePlay", "appVersion": "2.734.917", "country": "US", "cpu64Bit": true,
+		"appBuildVariant": "GooglePlay", "appVersion": installedVersionName(RuntimeDir()), "country": "US", "cpu64Bit": true,
 		"deviceName": "tipsy", "deviceSku": "tipsy", "deviceTotalMemoryMB": int32(8192),
 		"displayPhysicalHeightPixels": int32(height), "displayPhysicalWidthPixels": int32(width),
 		"displayResolution": fmt.Sprintf("%dx%d", width, height), "isChrome": false, "isLowRamDevice": false,
@@ -1230,7 +1233,7 @@ func makeDeviceParams(env *jni.Env, width, height int) uintptr {
 func makeInitParams(env *jni.Env, activity, platform, device uintptr) uintptr {
 	p := env.AllocObject(env.FindClass("com/roblox/engine/jni/autovalue/InitParams"))
 	for k, v := range map[string]any{
-		"baseURL": "https://www.roblox.com", "buildVariant": "GooglePlay", "userAgent": "Roblox/2.734.917 (Linux; Android 8.0.0; tipsy)",
+		"baseURL": "https://www.roblox.com", "buildVariant": "GooglePlay", "userAgent": robloxUserAgent(installedVersionName(RuntimeDir())),
 		"deviceParams": device, "platformParams": platform, "isPotato": false, "isTablet": false, "isVrDevice": false, "vrContext": activity,
 	} {
 		env.PutField(p, k, v)

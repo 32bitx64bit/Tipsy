@@ -28,10 +28,11 @@ type VM struct {
 
 	pending int64 // throwable object id, 0 = none
 
-	filesDir  string
-	cacheDir  string
-	obbDir    string
-	assetsDir string
+	filesDir   string
+	cacheDir   string
+	obbDir     string
+	assetsDir  string
+	appVersion string
 	dispW     int32
 	dispH     int32
 	dispMmW   int32
@@ -130,6 +131,21 @@ func (vm *VM) NativeInterface() uintptr {
 // Handle is an alias for JavaVM().
 func (vm *VM) Handle() uintptr {
 	return vm.JavaVM()
+}
+
+// SetAppVersion sets the extracted APK versionName used by getAppVersion
+// and DeviceStaticParams.appVersion. Launch reads it from runtime/meta.json.
+func (vm *VM) SetAppVersion(version string) {
+	if vm == nil {
+		return
+	}
+	vm.mu.Lock()
+	defer vm.mu.Unlock()
+	if version == vm.appVersion {
+		return
+	}
+	vm.appVersion = version
+	vm.immortalAppVersion = nil
 }
 
 // SetDirs sets Android-style app directories used by getFilesDir / getCacheDir.

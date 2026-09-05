@@ -236,6 +236,7 @@ func TestGetDeviceStaticParams(t *testing.T) {
 	if env.FindClass("com/roblox/engine/jni/model/DeviceStaticParams") == 0 {
 		t.Fatal("DeviceStaticParams")
 	}
+	vm.SetAppVersion("2.736.1408")
 	gl := env.AllocObject(env.FindClass("com/roblox/engine/jni/NativeGLJavaInterface"))
 	v, ok := vm.dispatch(idToJobject(jobjectToID(gl)), "com/roblox/engine/jni/NativeGLJavaInterface", "getDeviceStaticParams", "()Lcom/roblox/engine/jni/model/DeviceStaticParams;", nil)
 	if !ok {
@@ -249,6 +250,9 @@ func TestGetDeviceStaticParams(t *testing.T) {
 	if o == nil || o.class == nil || o.class.name != "com/roblox/engine/jni/model/DeviceStaticParams" {
 		t.Fatalf("class=%v", o)
 	}
+	if o.fields["appVersion"] != "2.736.1408" {
+		t.Fatalf("appVersion=%v", o.fields["appVersion"])
+	}
 	if o.fields["osVersion"] != "26" {
 		t.Fatalf("osVersion=%v", o.fields["osVersion"])
 	}
@@ -260,6 +264,38 @@ func TestGetDeviceStaticParams(t *testing.T) {
 	}
 	if !isImplementedMethod("getDeviceStaticParams", "()Lcom/roblox/engine/jni/model/DeviceStaticParams;") {
 		t.Fatal("getDeviceStaticParams not in implementedMethods")
+	}
+}
+
+func TestGetAppVersionUsesSetAppVersion(t *testing.T) {
+	vm, err := NewVM()
+	if err != nil {
+		t.Fatal(err)
+	}
+	env := vm.Env()
+	vm.SetAppVersion("2.736.1408")
+	v, ok := vm.dispatch(jnull(), "android/content/Context", "getAppVersion", "()Ljava/lang/String;", nil)
+	if !ok {
+		t.Fatal("getAppVersion not handled")
+	}
+	got, err := env.GetStringUTFChars(uintptr(v))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != "2.736.1408" {
+		t.Fatalf("getAppVersion=%q", got)
+	}
+	vm.SetAppVersion("9.9.9")
+	v2, ok := vm.dispatch(jnull(), "android/content/Context", "getAppVersion", "()Ljava/lang/String;", nil)
+	if !ok {
+		t.Fatal("getAppVersion after change")
+	}
+	got, err = env.GetStringUTFChars(uintptr(v2))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != "9.9.9" {
+		t.Fatalf("getAppVersion after change=%q", got)
 	}
 }
 
