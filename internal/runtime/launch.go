@@ -336,6 +336,12 @@ func Launch(ctx context.Context, opt LaunchOptions) error {
 		return err
 	}
 	defer releaseClientLock()
+	// Ordinary Android apps cannot promote native work to a real-time policy.
+	// Establish that real kernel privilege limit before loading guest code or
+	// creating its threads; desktop RTPRIO allowances must not leak into it.
+	if err := initializeAndroidAppScheduling(); err != nil {
+		return err
+	}
 	storage, migration, err := prepareAppStorage(dir)
 	if err != nil {
 		return fmt.Errorf("persistent app storage: %w", err)
