@@ -178,7 +178,7 @@ func TestSetupCancel(t *testing.T) {
 }
 
 func TestSettingsBindingValidationApplyAndReset(t *testing.T) {
-	fake := &fakeService{settings: Settings{Renderer: RendererOpenGL, FPSMode: FPSLimited, FrameRate: 144, VSync: true}}
+	fake := &fakeService{settings: Settings{Renderer: RendererOpenGL, FPSMode: FPSLimited, FrameRate: 144, VSync: true, Display: DisplayPrimary}}
 	model := NewSettingsModel(fake)
 	if err := model.Load(context.Background()); err != nil {
 		t.Fatal(err)
@@ -186,7 +186,7 @@ func TestSettingsBindingValidationApplyAndReset(t *testing.T) {
 	if got := model.View().Draft; got != fake.settings {
 		t.Fatalf("loaded=%+v want=%+v", got, fake.settings)
 	}
-	view := model.Edit(Settings{Renderer: RendererOpenGL, FPSMode: FPSLimited, FrameRate: 240, VSync: true})
+	view := model.Edit(Settings{Renderer: RendererOpenGL, FPSMode: FPSLimited, FrameRate: 240, VSync: true, Display: DisplayPrimary})
 	if !view.Dirty || view.ValidationError != "" {
 		t.Fatalf("valid edit view: %+v", view)
 	}
@@ -215,6 +215,9 @@ func TestVSyncIsIndependentAndDefaultsOff(t *testing.T) {
 	if defaults.VSync {
 		t.Fatal("VSync defaulted on")
 	}
+	if defaults.Display != DisplayPrimary {
+		t.Fatalf("display defaulted to %q, want primary", defaults.Display)
+	}
 	fake := &fakeService{settings: defaults}
 	model := NewSettingsModel(fake)
 	if err := model.Load(context.Background()); err != nil {
@@ -232,6 +235,32 @@ func TestVSyncIsIndependentAndDefaultsOff(t *testing.T) {
 	reset, err := model.Reset(context.Background())
 	if err != nil || reset.VSync || model.View().Dirty || !model.View().RestartRequired {
 		t.Fatalf("VSync reset=%+v err=%v view=%+v", reset, err, model.View())
+	}
+}
+
+func TestDisplayPlacementDefaultsPrimaryAndEditsIndependently(t *testing.T) {
+	fake := &fakeService{settings: DefaultSettings()}
+	model := NewSettingsModel(fake)
+	if err := model.Load(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if got := model.View().Draft.Display; got != DisplayPrimary {
+		t.Fatalf("loaded display=%q", got)
+	}
+	view := model.Edit(Settings{Renderer: RendererAuto, FPSMode: FPSAuto, Display: DisplayPointer})
+	if !view.Dirty || view.ValidationError != "" || view.Draft.Display != DisplayPointer || view.Draft.VSync {
+		t.Fatalf("pointer edit view=%+v", view)
+	}
+	if _, err := model.Apply(context.Background()); err != nil || fake.applyCalls[0].Display != DisplayPointer {
+		t.Fatalf("pointer apply err=%v calls=%+v", err, fake.applyCalls)
+	}
+	view = model.Edit(Settings{Renderer: RendererAuto, FPSMode: FPSAuto, Display: "HDMI-0"})
+	if view.Draft.Display != "HDMI-0" || view.ValidationError != "" {
+		t.Fatalf("named output edit view=%+v", view)
+	}
+	view = model.Edit(Settings{Renderer: RendererAuto, FPSMode: FPSAuto, Display: "bad/name"})
+	if view.ValidationError == "" {
+		t.Fatal("path-like monitor name accepted")
 	}
 }
 

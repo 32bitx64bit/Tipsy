@@ -24,6 +24,10 @@ const (
 
 	MinFrameRate = 30
 	MaxFrameRate = 240
+
+	DisplayPrimary  = "primary"
+	DisplayPointer  = "pointer"
+	maxDisplayBytes = 128
 )
 
 type Settings struct {
@@ -31,6 +35,7 @@ type Settings struct {
 	FPSMode   FPSMode
 	FrameRate int
 	VSync     bool
+	Display   string
 }
 
 // RendererOption is a backend-provided capability. The GUI keeps every known
@@ -50,7 +55,7 @@ const (
 )
 
 func DefaultSettings() Settings {
-	return Settings{Renderer: RendererAuto, FPSMode: FPSAuto, VSync: false}
+	return Settings{Renderer: RendererAuto, FPSMode: FPSAuto, VSync: false, Display: DisplayPrimary}
 }
 
 func ValidateSettings(settings Settings, renderers []RendererOption) error {
@@ -68,6 +73,9 @@ func ValidateSettings(settings Settings, renderers []RendererOption) error {
 		}
 		return fmt.Errorf("%s is unavailable: %s", rendererName(settings.Renderer), reason)
 	}
+	if err := validateDisplay(settings.Display); err != nil {
+		return err
+	}
 	return validateFrameRate(settings)
 }
 
@@ -77,6 +85,9 @@ func validateSettingsShape(settings Settings) error {
 	case RendererAuto, RendererOpenGL, RendererVulkan:
 	default:
 		return fmt.Errorf("choose Auto, OpenGL, or Vulkan")
+	}
+	if err := validateDisplay(settings.Display); err != nil {
+		return err
 	}
 	return validateFrameRate(settings)
 }
@@ -92,6 +103,28 @@ func validateFrameRate(settings Settings) error {
 		return errors.New("choose Automatic, Limited, or Unlimited frame rate")
 	}
 	return nil
+}
+
+func validateDisplay(display string) error {
+	display = NormalizeDisplay(display)
+	if len(display) > maxDisplayBytes {
+		return fmt.Errorf("monitor name is too long")
+	}
+	if strings.ContainsAny(display, "/\\\x00") {
+		return fmt.Errorf("monitor name is invalid")
+	}
+	return nil
+}
+
+func NormalizeDisplay(display string) string {
+	if display == "" {
+		return DisplayPrimary
+	}
+	return display
+}
+
+func IsPointerDisplay(display string) bool {
+	return NormalizeDisplay(display) == DisplayPointer
 }
 
 func rendererOption(options []RendererOption, renderer Renderer) (RendererOption, bool) {
@@ -135,6 +168,7 @@ func normalizeSettings(settings Settings) Settings {
 	if settings.FPSMode != FPSLimited {
 		settings.FrameRate = 0
 	}
+	settings.Display = NormalizeDisplay(settings.Display)
 	return settings
 }
 
