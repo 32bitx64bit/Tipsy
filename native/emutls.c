@@ -32,14 +32,17 @@ static pthread_once_t g_once = PTHREAD_ONCE_INIT;
 static pthread_mutex_t g_mu = PTHREAD_MUTEX_INITIALIZER;
 static uintptr_t g_next_index;
 static uintptr_t g_roblox_bias;
+static uintptr_t g_jni_tls_vaddr;
 static void *g_jni_functions;
-
-/* libroblox.so thread_local JNINativeInterface* used by the 111 JNI thunks. */
-#define TIPSY_ROBLOX_JNI_TLS 0x6fd6120ul
 
 void tipsy_set_roblox_bias(uintptr_t bias)
 {
 	g_roblox_bias = bias;
+}
+
+void tipsy_set_roblox_jni_tls(uintptr_t file_vaddr)
+{
+	g_jni_tls_vaddr = file_vaddr;
 }
 
 void tipsy_set_jni_functions(void *functions)
@@ -50,7 +53,8 @@ void tipsy_set_jni_functions(void *functions)
 static int is_roblox_jni_tls(struct emutls_control *c)
 {
 	return c != NULL && c->size == sizeof(void *) && g_roblox_bias != 0 &&
-	       (uintptr_t)c - g_roblox_bias == TIPSY_ROBLOX_JNI_TLS;
+	       g_jni_tls_vaddr != 0 &&
+	       (uintptr_t)c - g_roblox_bias == g_jni_tls_vaddr;
 }
 
 static void pin_roblox_jni_tls(void *slot)
@@ -169,11 +173,11 @@ void *tipsy_emutls_get_address(void *control)
 		arr->slot[idx] = emutls_alloc_object(c);
 	}
 	/* Roblox GetEnv wraps JNIEnv by overwriting env->functions with a
-	 * 1864-byte shadow table (FindClass = 0x21b1132) and stores the
-	 * original JNINativeInterface* in this slot. If the wrap writes
-	 * NULL or the shadow table itself, call *[slot+0x30] either
-	 * SIGSEGVs at 0x30 or recurses until the 64 MiB stack dies.
-	 * Always republish our original table on get. */
+	 * shadow table and stores the original JNINativeInterface* in this
+	 * slot. If the wrap writes NULL or the shadow table itself,
+	 * call *[slot+0x30] (FindClass) either SIGSEGVs at 0x30 or
+	 * recurses until the 64 MiB stack dies. Always republish our
+	 * original table on get. */
 	if (is_roblox_jni_tls(c)) {
 		pin_roblox_jni_tls(arr->slot[idx]);
 	}
