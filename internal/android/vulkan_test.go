@@ -6,6 +6,7 @@
 package android
 
 import (
+	"sync"
 	"testing"
 	"time"
 )
@@ -181,5 +182,209 @@ func TestVulkanWSIBindRequiresDisplayAndWindow(t *testing.T) {
 	}
 	if err := BindVulkanWSI(1, 0); err == nil {
 		t.Fatal("zero xid bound")
+	}
+}
+
+func TestVulkanPresentTimingGatingAndResults(t *testing.T) {
+	cursor := SetVulkanPresentTiming(false)
+	t.Cleanup(func() {
+		SetVulkanPresentTiming(false)
+		SetVulkanPresentStats(true)
+		resetVulkanPresentStats()
+	})
+	SetVulkanPresentStats(true)
+	resetVulkanPresentStats()
+	testVulkanNotePresentResult(0, 1_000_000)
+	if got := VulkanPresentTimingSnapshot(cursor); got.Cursor != cursor || len(got.Samples) != 0 {
+		t.Fatalf("disabled timing recorded samples: %+v", got)
+	}
+	if got := VulkanPresentStats().SuccessfulPresents; got != 1 {
+		t.Fatalf("disabled timing changed existing counter: %d", got)
+	}
+
+	SetVulkanPresentStats(false)
+	if got := SetVulkanPresentTiming(true); got != cursor {
+		t.Fatalf("enable reset cursor: %d, want %d", got, cursor)
+	}
+	for _, result := range []int32{-3, -1000001004, 5, 1000001003} {
+		testVulkanNotePresentResult(result, 2_000_000)
+	}
+	if got := VulkanPresentTimingSnapshot(cursor); len(got.Samples) != 0 {
+		t.Fatalf("non-VK_SUCCESS result masqueraded as present: %+v", got)
+	}
+	testVulkanNotePresentResult(0, 3_000_000)
+	batch := VulkanPresentTimingSnapshot(cursor)
+	if len(batch.Samples) != 1 || batch.Samples[0].MonotonicNS != 3_000_000 || batch.Cursor != cursor+1 {
+		t.Fatalf("enabled timing = %+v", batch)
+	}
+	if got := VulkanPresentStats().SuccessfulPresents; got != 1 {
+		t.Fatalf("timing unexpectedly enabled ordinary counter: %d", got)
+	}
+	SetVulkanPresentTiming(false)
+	testVulkanNotePresentResult(0, 4_000_000)
+	if got := VulkanPresentTimingSnapshot(batch.Cursor); len(got.Samples) != 0 {
+		t.Fatalf("disabled timing appended samples: %+v", got)
+	}
+}
+
+func TestVulkanPresentTimingIntervalsAndLifetimeCursor(t *testing.T) {
+	SetVulkanPresentTiming(false)
+	cursor := SetVulkanPresentTiming(true)
+	t.Cleanup(func() { SetVulkanPresentTiming(false) })
+	want := []uint64{1_000_000_000, 1_004_000_000, 1_013_000_000}
+	for _, ns := range want {
+		testVulkanNotePresentResult(0, ns)
+	}
+	batch := VulkanPresentTimingSnapshot(cursor)
+	if len(batch.Samples) != len(want) || batch.Overwritten != 0 || batch.Cursor != cursor+3 {
+		t.Fatalf("timing batch = %+v", batch)
+	}
+	for i, sample := range batch.Samples {
+		if sample.Sequence != cursor+uint64(i)+1 || sample.MonotonicNS != want[i] {
+			t.Fatalf("sample %d = %+v", i, sample)
+		}
+	}
+	if gap := time.Duration(batch.Samples[2].MonotonicNS - batch.Samples[1].MonotonicNS); gap != 9*time.Millisecond {
+		t.Fatalf("long present interval = %v", gap)
+	}
+	batch.Samples[0].MonotonicNS = 9
+	if again := VulkanPresentTimingSnapshot(cursor); again.Samples[0].MonotonicNS != want[0] {
+		t.Fatal("snapshot exposed native ring storage")
+	}
+	if empty := VulkanPresentTimingSnapshot(batch.Cursor); len(empty.Samples) != 0 || empty.Cursor != batch.Cursor {
+		t.Fatalf("consumed cursor repeated samples: %+v", empty)
+	}
+	if future := VulkanPresentTimingSnapshot(batch.Cursor + 99); len(future.Samples) != 0 || future.Cursor != batch.Cursor+99 {
+		t.Fatalf("future cursor rewound: %+v", future)
+	}
+	SetVulkanPresentTiming(false)
+	resetVulkanPresentStats()
+	if next := SetVulkanPresentTiming(true); next != batch.Cursor {
+		t.Fatalf("counter reset or enable rewound timing cursor: %d", next)
+	}
+	testVulkanNotePresentSuccess() // The actual host CLOCK_MONOTONIC path.
+	next := VulkanPresentTimingSnapshot(batch.Cursor)
+	if len(next.Samples) != 1 || next.Samples[0].MonotonicNS == 0 || next.Cursor != batch.Cursor+1 {
+		t.Fatalf("real monotonic clock sample = %+v", next)
+	}
+}
+
+func TestVulkanPresentTimingReportsOverwrittenSamples(t *testing.T) {
+	SetVulkanPresentTiming(false)
+	cursor := SetVulkanPresentTiming(true)
+	t.Cleanup(func() { SetVulkanPresentTiming(false) })
+	const excess = 7
+	for i := 0; i < VulkanPresentTimingCapacity+excess; i++ {
+		testVulkanNotePresentResult(0, 1_000+uint64(i))
+	}
+	batch := VulkanPresentTimingSnapshot(cursor)
+	if batch.Overwritten != excess || len(batch.Samples) != VulkanPresentTimingCapacity {
+		t.Fatalf("ring overrun lost accounting: overwritten=%d count=%d", batch.Overwritten, len(batch.Samples))
+	}
+	for i, sample := range batch.Samples {
+		if sample.Sequence != cursor+excess+uint64(i)+1 || sample.MonotonicNS != 1_000+excess+uint64(i) {
+			t.Fatalf("wrapped sample %d = %+v", i, sample)
+		}
+	}
+	if next := VulkanPresentTimingSnapshot(batch.Cursor); len(next.Samples) != 0 || next.Overwritten != 0 {
+		t.Fatalf("overwritten samples repeated on consumed cursor: %+v", next)
+	}
+}
+
+func TestVulkanPresentTimingConcurrentSnapshot(t *testing.T) {
+	SetVulkanPresentTiming(false)
+	cursor := SetVulkanPresentTiming(true)
+	t.Cleanup(func() { SetVulkanPresentTiming(false) })
+	const writers, perWriter = 4, 5_000
+	var wg sync.WaitGroup
+	for writer := 0; writer < writers; writer++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for i := 0; i < perWriter; i++ {
+				testVulkanNotePresentResult(0, 1_000+uint64(i))
+			}
+		}()
+	}
+	done := make(chan struct{})
+	go func() { wg.Wait(); close(done) }()
+	t.Cleanup(func() { <-done })
+	var observed, overwritten uint64
+	finished := false
+	for {
+		batch := VulkanPresentTimingSnapshot(cursor)
+		for i, sample := range batch.Samples {
+			wantSequence := cursor + batch.Overwritten + uint64(i) + 1
+			if sample.Sequence != wantSequence || sample.MonotonicNS < 1_000 || sample.MonotonicNS >= 1_000+perWriter {
+				t.Fatalf("torn or discontinuous sample: %+v, want sequence %d", sample, wantSequence)
+			}
+		}
+		observed += uint64(len(batch.Samples))
+		overwritten += batch.Overwritten
+		cursor = batch.Cursor
+		if finished && len(batch.Samples) == 0 {
+			break
+		}
+		select {
+		case <-done:
+			finished = true
+		default:
+		}
+	}
+	if got := observed + overwritten; got != writers*perWriter {
+		t.Fatalf("concurrent snapshot lost samples: received=%d overwritten=%d total=%d", observed, overwritten, got)
+	}
+}
+
+func TestVulkanPresentTimingToggleWhileRecording(t *testing.T) {
+	SetVulkanPresentTiming(false)
+	start := SetVulkanPresentTiming(true)
+	t.Cleanup(func() { SetVulkanPresentTiming(false) })
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		for i := 0; i < 20_000; i++ {
+			testVulkanNotePresentResult(0, 2_000+uint64(i))
+		}
+	}()
+	t.Cleanup(func() { <-done })
+	last := start
+	for i := 0; i < 100; i++ {
+		stop := SetVulkanPresentTiming(false)
+		if stop < last {
+			t.Fatalf("disable rewound cursor: %d < %d", stop, last)
+		}
+		if still := SetVulkanPresentTiming(false); still != stop {
+			t.Fatalf("disabled in-flight recorder appended after stop: %d != %d", still, stop)
+		}
+		last = SetVulkanPresentTiming(true)
+		if last != stop {
+			t.Fatalf("re-enable unexpectedly changed sequence: %d != %d", last, stop)
+		}
+	}
+	<-done
+	end := SetVulkanPresentTiming(false)
+	batch := VulkanPresentTimingSnapshot(start)
+	if batch.Cursor != end || uint64(len(batch.Samples))+batch.Overwritten != end-start {
+		t.Fatalf("toggle/snapshot accounting mismatch: start=%d end=%d batch=%+v", start, end, batch)
+	}
+}
+
+func BenchmarkVulkanPresentTiming(b *testing.B) {
+	SetVulkanPresentStats(true)
+	b.Cleanup(func() { SetVulkanPresentTiming(false) })
+	for _, enabled := range []bool{false, true} {
+		name := "disabled"
+		if enabled {
+			name = "enabled"
+		}
+		b.Run(name, func(b *testing.B) {
+			SetVulkanPresentTiming(enabled)
+			b.ReportAllocs()
+			b.ResetTimer()
+			for i := 0; i < b.N; i++ {
+				testVulkanNotePresentSuccess()
+			}
+		})
 	}
 }

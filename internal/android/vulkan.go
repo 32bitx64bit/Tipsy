@@ -11,6 +11,10 @@ package android
 #include <stdlib.h>
 void *tipsy_dlopen(const char *filename, int flags);
 void *tipsy_dlsym(void *handle, const char *symbol);
+uint64_t tipsy_vk_set_present_timing(int enabled);
+uint32_t tipsy_vk_present_timing_snapshot(uint64_t after, uint64_t *out_ns,
+	uint32_t capacity, uint64_t *out_cursor, uint64_t *out_overwritten);
+void tipsy_test_vk_note_present_result(int32_t result, uint64_t now_ns);
 */
 import "C"
 
@@ -170,6 +174,66 @@ func VulkanPresentStats() VulkanPresentStatistics {
 	return stats
 }
 
+// VulkanPresentTimingCapacity is the fixed diagnostic history length. At
+// 240 presents/s this retains about 17 seconds between snapshot reads.
+const VulkanPresentTimingCapacity = 4096
+
+// VulkanPresentTimingSample is one VK_SUCCESS return from the existing
+// platform vkQueuePresentKHR adapter. MonotonicNS is host CLOCK_MONOTONIC;
+// it measures the wrapper's return boundary, not physical display scanout.
+// Sequence is append order. Concurrent queues may append out of timestamp
+// order, so readers must handle a non-increasing adjacent timestamp honestly.
+type VulkanPresentTimingSample struct {
+	Sequence    uint64
+	MonotonicNS uint64
+}
+
+// VulkanPresentTimingBatch contains retained samples newer than a cursor.
+// Overwritten explicitly counts samples lost before the oldest retained one;
+// consumers should not calculate an interval across that gap. Cursor is the
+// last returned sequence, or the supplied cursor if no newer sample exists.
+type VulkanPresentTimingBatch struct {
+	Cursor      uint64
+	Overwritten uint64
+	Samples     []VulkanPresentTimingSample
+}
+
+// SetVulkanPresentTiming enables opt-in monotonic present timestamps. It
+// returns the current cursor for starting a diagnostic capture. Enabling,
+// disabling, swapchain creation, and stats resets never rewind the cursor.
+// Disabled presents perform only a relaxed timing-enable load: no diagnostic
+// clock, mutex, allocation, or ring write. Existing counters are independent.
+func SetVulkanPresentTiming(enabled bool) uint64 {
+	v := C.int(0)
+	if enabled {
+		v = 1
+	}
+	return uint64(C.tipsy_vk_set_present_timing(v))
+}
+
+// VulkanPresentTimingSnapshot copies the bounded retained history after the
+// supplied lifetime cursor. It is safe while native presenters record, and
+// the returned Go slice owns its data. Use the returned Cursor for the next
+// call. Supplying a future cursor returns an empty batch without rewinding it.
+func VulkanPresentTimingSnapshot(after uint64) VulkanPresentTimingBatch {
+	var raw [VulkanPresentTimingCapacity]C.uint64_t
+	var cursor, overwritten C.uint64_t
+	n := int(C.tipsy_vk_present_timing_snapshot(C.uint64_t(after), &raw[0],
+		C.uint32_t(len(raw)), &cursor, &overwritten))
+	batch := VulkanPresentTimingBatch{Cursor: uint64(cursor), Overwritten: uint64(overwritten)}
+	if n == 0 {
+		return batch
+	}
+	batch.Samples = make([]VulkanPresentTimingSample, n)
+	first := batch.Cursor - uint64(n) + 1
+	for i := range batch.Samples {
+		batch.Samples[i] = VulkanPresentTimingSample{
+			Sequence: first + uint64(i), MonotonicNS: uint64(raw[i]),
+		}
+	}
+	return batch
+}
+
 func testVulkanProcIsWrapped(name string) bool {
 	cName := C.CString(name)
 	defer C.free(unsafe.Pointer(cName))
@@ -300,4 +364,8 @@ func vulkanVSyncEnabled() bool {
 
 func vulkanWSIBound() bool {
 	return C.tipsy_vk_wsi_bound() != 0
+}
+
+func testVulkanNotePresentResult(result int32, nowNS uint64) {
+	C.tipsy_test_vk_note_present_result(C.int32_t(result), C.uint64_t(nowNS))
 }

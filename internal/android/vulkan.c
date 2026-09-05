@@ -15,6 +15,7 @@
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 
 #include <X11/Xlib.h>
 #include <X11/Xlib-xcb.h>
@@ -153,6 +154,16 @@ static _Atomic uint64_t vk_successful_presents;
 static _Atomic uint64_t vk_first_present_ns;
 static _Atomic uint64_t vk_last_present_ns;
 
+// Opt-in platform diagnostics, entirely outside Roblox. The default path
+// reads only this relaxed flag/epoch: no clock, lock, allocation, or ring
+// writes. Odd epochs enable recording; changing the epoch invalidates a
+// recorder that was in flight across disable/re-enable.
+#define TIPSY_VK_PRESENT_TIMING_CAPACITY 4096u
+static _Atomic uint64_t vk_present_timing_epoch;
+static pthread_mutex_t vk_present_timing_mu = PTHREAD_MUTEX_INITIALIZER;
+static uint64_t vk_present_timing_sequence;
+static uint64_t vk_present_timing_ns[TIPSY_VK_PRESENT_TIMING_CAPACITY];
+
 static void *tipsy_vkGetInstanceProcAddr(TipsyVkInstance instance, const char *name);
 static void *tipsy_vkGetDeviceProcAddr(TipsyVkDevice device, const char *name);
 static TipsyVkResult tipsy_vkCreateInstance(const TipsyVkInstanceCreateInfo *pCreateInfo, const void *pAllocator, TipsyVkInstance *pInstance);
@@ -195,6 +206,90 @@ static void tipsy_vk_record_present(uint64_t now_ns)
 		atomic_store_explicit(&vk_last_present_ns, now_ns, memory_order_release);
 	}
 	atomic_fetch_add_explicit(&vk_successful_presents, 1, memory_order_relaxed);
+}
+
+static void tipsy_vk_record_present_timing(uint64_t test_ns)
+{
+	uint64_t epoch = atomic_load_explicit(&vk_present_timing_epoch, memory_order_relaxed);
+	if ((epoch & 1) == 0) {
+		return;
+	}
+	uint64_t now_ns = test_ns;
+	if (now_ns == 0) {
+		struct timespec ts;
+		// Capture before the snapshot mutex so a delayed diagnostic reader
+		// does not turn its lock hold into an apparent presentation gap.
+		// Host glibc uses the vDSO monotonic clock on the supported Linux host.
+		if (clock_gettime(CLOCK_MONOTONIC, &ts) != 0) {
+			return;
+		}
+		now_ns = (uint64_t)ts.tv_sec * 1000000000ull + (uint64_t)ts.tv_nsec;
+	}
+	pthread_mutex_lock(&vk_present_timing_mu);
+	if (atomic_load_explicit(&vk_present_timing_epoch, memory_order_relaxed) == epoch) {
+		uint64_t sequence = ++vk_present_timing_sequence;
+		vk_present_timing_ns[(sequence - 1) % TIPSY_VK_PRESENT_TIMING_CAPACITY] = now_ns;
+	}
+	pthread_mutex_unlock(&vk_present_timing_mu);
+}
+
+static void tipsy_vk_note_present_result(TipsyVkResult result, uint64_t test_ns)
+{
+	// Preserve the existing counter's exact result filtering independently
+	// of the new diagnostic. A failed call never becomes a timing sample.
+	if ((result == TIPSY_VK_SUCCESS || result == TIPSY_VK_INCOMPLETE) &&
+		atomic_load_explicit(&vk_present_stats_enabled, memory_order_relaxed)) {
+		tipsy_vk_record_present(0);
+	}
+	if (result == TIPSY_VK_SUCCESS) {
+		tipsy_vk_record_present_timing(test_ns);
+	}
+}
+
+uint64_t tipsy_vk_set_present_timing(int enabled)
+{
+	pthread_mutex_lock(&vk_present_timing_mu);
+	uint64_t epoch = atomic_load_explicit(&vk_present_timing_epoch, memory_order_relaxed);
+	if ((epoch & 1) != (uint64_t)(enabled != 0)) {
+		atomic_store_explicit(&vk_present_timing_epoch, epoch + 1, memory_order_relaxed);
+	}
+	uint64_t cursor = vk_present_timing_sequence;
+	pthread_mutex_unlock(&vk_present_timing_mu);
+	// Neither enable nor counter/swapchain resets clear this lifetime cursor.
+	return cursor;
+}
+
+uint32_t tipsy_vk_present_timing_snapshot(uint64_t after, uint64_t *out_ns,
+	uint32_t capacity, uint64_t *out_cursor, uint64_t *out_overwritten)
+{
+	*out_cursor = after;
+	*out_overwritten = 0;
+	if (out_ns == NULL || capacity == 0) {
+		return 0;
+	}
+	pthread_mutex_lock(&vk_present_timing_mu);
+	uint64_t end = vk_present_timing_sequence;
+	if (after >= end) {
+		pthread_mutex_unlock(&vk_present_timing_mu);
+		return 0;
+	}
+	uint64_t first = after + 1;
+	uint64_t oldest = end >= TIPSY_VK_PRESENT_TIMING_CAPACITY ?
+		end - TIPSY_VK_PRESENT_TIMING_CAPACITY + 1 : 1;
+	if (first < oldest) {
+		*out_overwritten = oldest - first;
+		first = oldest;
+	}
+	uint64_t count = end - first + 1;
+	if (count > capacity) {
+		count = capacity;
+	}
+	for (uint64_t i = 0; i < count; i++) {
+		out_ns[i] = vk_present_timing_ns[(first + i - 1) % TIPSY_VK_PRESENT_TIMING_CAPACITY];
+	}
+	*out_cursor = first + count - 1;
+	pthread_mutex_unlock(&vk_present_timing_mu);
+	return (uint32_t)count;
 }
 
 static void vk_scan_host_wsi(void)
@@ -714,10 +809,7 @@ static TipsyVkResult tipsy_vkQueuePresentKHR(TipsyVkQueue queue, const void *pPr
 		return TIPSY_VK_ERROR_INITIALIZATION_FAILED;
 	}
 	result = host_vkQueuePresentKHR(queue, pPresentInfo);
-	if ((result == TIPSY_VK_SUCCESS || result == TIPSY_VK_INCOMPLETE) &&
-		atomic_load_explicit(&vk_present_stats_enabled, memory_order_relaxed)) {
-		tipsy_vk_record_present(0);
-	}
+	tipsy_vk_note_present_result(result, 0);
 	return result;
 }
 
@@ -913,9 +1005,12 @@ void tipsy_test_vk_record_present(uint64_t now_ns)
 
 void tipsy_test_vk_note_present_success(void)
 {
-	if (atomic_load_explicit(&vk_present_stats_enabled, memory_order_relaxed)) {
-		tipsy_vk_record_present(0);
-	}
+	tipsy_vk_note_present_result(TIPSY_VK_SUCCESS, 0);
+}
+
+void tipsy_test_vk_note_present_result(int32_t result, uint64_t now_ns)
+{
+	tipsy_vk_note_present_result(result, now_ns);
 }
 
 int tipsy_test_vk_proc_is_wrapped(const char *name)
