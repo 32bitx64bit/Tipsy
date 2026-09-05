@@ -13,6 +13,7 @@ MimeType=x-scheme-handler/roblox;x-scheme-handler/roblox-player;
 StartupNotify=true
 StartupWMClass=roblox
 Actions=Settings;
+X-AppImage-Integrate=false
 
 [Desktop Action Settings]
 Name=Tipsy - Settings

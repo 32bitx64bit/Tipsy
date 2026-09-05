@@ -35,12 +35,13 @@ func TestAppRunUsesOnlyItsAppDir(t *testing.T) {
 		"--play",
 		"--settings",
 		"integrate_pin_entries",
+		"remove_foreign_launchers",
 	} {
 		if !strings.Contains(text, required) {
 			t.Errorf("AppRun is missing %q", required)
 		}
 	}
-	for _, forbidden := range []string{".tipsy-private", "libroblox.so", "/home/"} {
+	for _, forbidden := range []string{".tipsy-private", "libroblox.so", "/home/", "ensure_nodisplay", "hide_foreign_play_pins"} {
 		if strings.Contains(text, forbidden) {
 			t.Errorf("AppRun contains forbidden release coupling %q", forbidden)
 		}
@@ -75,12 +76,12 @@ func TestDesktopEntriesAreDistinctPinTargets(t *testing.T) {
 	}
 	playText := string(play)
 	settingsText := string(settings)
-	for _, required := range []string{"Name=Tipsy - Play", "Exec=tipsy launch %u", "StartupWMClass=roblox", "MimeType=x-scheme-handler/roblox;x-scheme-handler/roblox-player;"} {
+	for _, required := range []string{"Name=Tipsy - Play", "Exec=tipsy launch %u", "StartupWMClass=roblox", "MimeType=x-scheme-handler/roblox;x-scheme-handler/roblox-player;", "X-AppImage-Integrate=false"} {
 		if !strings.Contains(playText, required+"\n") {
 			t.Errorf("Play desktop entry missing %q", required)
 		}
 	}
-	for _, required := range []string{"Name=Tipsy - Settings", "Exec=tipsy-gui %u", "StartupWMClass=tipsy-gui", "Categories=Game;", "MimeType=x-scheme-handler/roblox;x-scheme-handler/roblox-player;"} {
+	for _, required := range []string{"Name=Tipsy - Settings", "Exec=tipsy-gui %u", "StartupWMClass=tipsy-gui", "Categories=Game;", "MimeType=x-scheme-handler/roblox;x-scheme-handler/roblox-player;", "X-AppImage-Integrate=false"} {
 		if !strings.Contains(settingsText, required+"\n") {
 			t.Errorf("Settings desktop entry missing %q", required)
 		}
@@ -337,6 +338,12 @@ func TestAppRunWritesPinEntries(t *testing.T) {
 	if strings.Contains(playText, "NoDisplay=true") {
 		t.Fatalf("solo Play pin should stay visible: %s", playText)
 	}
+	if !strings.Contains(playText, "X-AppImage-Integrate=false\n") {
+		t.Fatalf("Play pin dropped X-AppImage-Integrate=false: %s", playText)
+	}
+	if !strings.Contains(settingsText, "X-AppImage-Integrate=false\n") {
+		t.Fatalf("Settings pin dropped X-AppImage-Integrate=false: %s", settingsText)
+	}
 	if !strings.Contains(settingsText, "StartupWMClass=tipsy-gui\n") || !strings.Contains(settingsText, "Name=Tipsy - Settings\n") {
 		t.Fatalf("Settings pin entry is missing identity fields: %s", settingsText)
 	}
@@ -372,6 +379,13 @@ func TestAppRunKeepsPlayVisibleForProtocolHandlers(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(apps, "appimage_other.desktop"), []byte(other), 0o644); err != nil {
 		t.Fatal(err)
 	}
+	iconDir := filepath.Join(xdg, "icons", "hicolor", "256x256", "apps")
+	if err := os.MkdirAll(iconDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(iconDir, "appimage_tipsy_fake.png"), []byte("manager-icon\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
 	logPath := filepath.Join(t.TempDir(), "stub.log")
 	command := exec.Command(filepath.Join(appdir, "AppRun"), "--settings")
 	command.Dir = appdir
@@ -396,26 +410,98 @@ func TestAppRunKeepsPlayVisibleForProtocolHandlers(t *testing.T) {
 	if strings.Contains(string(settings), "NoDisplay=true") {
 		t.Fatalf("Settings pin was hidden: %s", settings)
 	}
-	foreign, err := os.ReadFile(filepath.Join(apps, "appimage_tipsy_fake.desktop"))
-	if err != nil {
-		t.Fatal(err)
+	if _, err := os.Stat(filepath.Join(apps, "appimage_tipsy_fake.desktop")); !os.IsNotExist(err) {
+		t.Fatalf("AppImage Manager Play duplicate should be deleted: %v", err)
 	}
-	if !strings.Contains(string(foreign), "NoDisplay=true\n") {
-		t.Fatalf("AppImage Manager Play duplicate should be hidden: %s", foreign)
+	if _, err := os.Stat(filepath.Join(iconDir, "appimage_tipsy_fake.png")); !os.IsNotExist(err) {
+		t.Fatalf("AppImage Manager icon should be deleted: %v", err)
 	}
 	otherText, err := os.ReadFile(filepath.Join(apps, "appimage_other.desktop"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if strings.Contains(string(otherText), "NoDisplay=true") {
-		t.Fatalf("unrelated AppImage launcher was hidden: %s", otherText)
+	if gotOther := string(otherText); gotOther != other {
+		t.Fatalf("unrelated AppImage launcher was changed: %s", gotOther)
 	}
 	if !strings.Contains(string(play), "MimeType=x-scheme-handler/roblox;x-scheme-handler/roblox-player;\n") {
 		t.Fatalf("Play pin lost URI handlers: %s", play)
 	}
+	if !strings.Contains(string(settings), "MimeType=x-scheme-handler/roblox;x-scheme-handler/roblox-player;\n") {
+		t.Fatalf("Settings pin lost URI handlers: %s", settings)
+	}
 	icon := filepath.Join(xdg, "icons", "hicolor", "256x256", "apps", "io.github.tipsy_linux.Tipsy.png")
 	if !strings.Contains(string(settings), "Icon="+icon+"\n") {
 		t.Fatalf("Settings pin Icon=%s", settings)
+	}
+}
+
+func TestAppRunRemovesLeftoverTipsyManagerPins(t *testing.T) {
+	appdir := fakeRunnableAppDir(t)
+	home := t.TempDir()
+	xdg := filepath.Join(home, ".local", "share")
+	apps := filepath.Join(xdg, "applications")
+	if err := os.MkdirAll(apps, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	current := filepath.Join(home, "Applications", "Tipsy-0.0.0-test10-x86_64.AppImage")
+	previous := filepath.Join(home, "Applications", "Tipsy-0.0.0-test8-x86_64.AppImage")
+	leftover := "[Desktop Entry]\nName=Tipsy - Play\nComment=Managed by AppImage Manager\nExec=" + previous + " launch %u\nIcon=appimage_tipsy_old\n"
+	if err := os.WriteFile(filepath.Join(apps, "appimage_tipsy_old.desktop"), []byte(leftover), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	other := "[Desktop Entry]\nName=Other\nComment=Managed by AppImage Manager\nExec=" + filepath.Join(home, "Applications", "Other.AppImage") + "\nIcon=appimage_other\n"
+	if err := os.WriteFile(filepath.Join(apps, "appimage_other.desktop"), []byte(other), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	iconDir := filepath.Join(xdg, "icons", "hicolor", "256x256", "apps")
+	if err := os.MkdirAll(iconDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(iconDir, "appimage_tipsy_old.png"), []byte("old-icon\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(iconDir, "appimage_other.png"), []byte("other-icon\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	logPath := filepath.Join(t.TempDir(), "stub.log")
+	command := exec.Command(filepath.Join(appdir, "AppRun"), "--settings")
+	command.Dir = appdir
+	command.Env = append(stubEnv(t, logPath, xdg),
+		"HOME="+home,
+		"APPIMAGE="+current,
+	)
+	if output, err := command.CombinedOutput(); err != nil {
+		t.Fatalf("integrate: %v\n%s", err, output)
+	}
+	if _, err := os.Stat(filepath.Join(apps, "appimage_tipsy_old.desktop")); !os.IsNotExist(err) {
+		t.Fatalf("leftover Tipsy Manager pin should be deleted: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(iconDir, "appimage_tipsy_old.png")); !os.IsNotExist(err) {
+		t.Fatalf("leftover Tipsy Manager icon should be deleted: %v", err)
+	}
+	gotOther, err := os.ReadFile(filepath.Join(apps, "appimage_other.desktop"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(gotOther) != other {
+		t.Fatalf("non-Tipsy AppImage launcher was changed: %s", gotOther)
+	}
+	if _, err := os.Stat(filepath.Join(iconDir, "appimage_other.png")); err != nil {
+		t.Fatalf("non-Tipsy AppImage icon was deleted: %v", err)
+	}
+	brand := filepath.Join(iconDir, "io.github.tipsy_linux.Tipsy.png")
+	if _, err := os.Stat(brand); err != nil {
+		t.Fatalf("brand icon: %v", err)
+	}
+	play, err := os.ReadFile(filepath.Join(apps, "io.github.tipsy_linux.Tipsy.Play.desktop"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(play), "NoDisplay=true") {
+		t.Fatalf("Play pin must stay visible: %s", play)
+	}
+	if !strings.Contains(string(play), `Exec="`+current+`" --play %u`+"\n") {
+		t.Fatalf("Play pin Exec is not the current AppImage: %s", play)
 	}
 }
 

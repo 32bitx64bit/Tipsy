@@ -12,3 +12,4 @@ Keywords=Roblox;Game;Linux;Launcher;Settings;Setup;
 MimeType=x-scheme-handler/roblox;x-scheme-handler/roblox-player;
 StartupNotify=true
 StartupWMClass=tipsy-gui
+X-AppImage-Integrate=false

@@ -40,6 +40,7 @@ func TestDesktopEntriesTargetPlayAndSettings(t *testing.T) {
 				"Terminal=false\n",
 				"MimeType=x-scheme-handler/roblox;x-scheme-handler/roblox-player;\n",
 				"StartupWMClass=roblox\n",
+				"X-AppImage-Integrate=false\n",
 			},
 		},
 		{
@@ -53,6 +54,7 @@ func TestDesktopEntriesTargetPlayAndSettings(t *testing.T) {
 				"MimeType=x-scheme-handler/roblox;x-scheme-handler/roblox-player;\n",
 				"StartupWMClass=tipsy-gui\n",
 				"Categories=Game;\n",
+				"X-AppImage-Integrate=false\n",
 			},
 		},
 	}
