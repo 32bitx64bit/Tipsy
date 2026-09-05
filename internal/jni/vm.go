@@ -8,6 +8,7 @@ package jni
 import (
 	"os"
 	"sync"
+	"sync/atomic"
 	"unsafe"
 )
 
@@ -15,7 +16,7 @@ const JNIVersion16 = 0x00010006
 
 // VM is a process-local JavaVM large enough for JNI_OnLoad.
 type VM struct {
-	mu sync.Mutex
+	mu sync.RWMutex
 
 	javaVM    unsafe.Pointer
 	envRaw    unsafe.Pointer
@@ -38,6 +39,21 @@ type VM struct {
 
 	natives  map[string]uintptr // class + "." + name + sig → fnPtr
 	monitors map[int64]*sync.Mutex
+
+	// localFrames tracks JNI local-ref membership for the pinned JNIEnv.
+	// frames[0] lives for the env; PushLocalFrame appends, PopLocalFrame pops.
+	localFrames []localFrame
+
+	// Immortal JNI objects reused across calls for stable Android paths and
+	// identity strings. Cleared when SetDirs changes the matching path.
+	immortalPackageName *Object
+	immortalAppVersion  *Object
+	immortalLocale      *Object
+	immortalFilesDir    *Object
+	immortalFilesDirStr *Object
+	immortalCacheDir    *Object
+	immortalObbDir      *Object
+	immortalServices    map[string]*Object
 }
 
 // Env is the JNIEnv bound to a VM.
@@ -46,31 +62,27 @@ type Env struct {
 	raw unsafe.Pointer
 }
 
-var (
-	globalMu sync.Mutex
-	globalVM *VM
-)
+var globalVM atomic.Pointer[VM]
 
 func vmFromEnv(_ unsafe.Pointer) *VM {
-	globalMu.Lock()
-	defer globalMu.Unlock()
-	return globalVM
+	return globalVM.Load()
 }
 
 // NewVM constructs a JNI 1.6 JavaVM with the seeded Android/GameActivity classes.
 func NewVM() (*VM, error) {
 	vm := &VM{
-		classes:   make(map[string]*Class),
-		objects:   make(map[int64]*Object),
-		nextID:    1,
-		filesDir:  os.TempDir(),
-		cacheDir:  os.TempDir(),
-		obbDir:    os.TempDir(),
-		assetsDir: "",
-		dispW:     1280,
-		dispH:     720,
-		natives:   make(map[string]uintptr),
-		monitors:  make(map[int64]*sync.Mutex),
+		classes:     make(map[string]*Class),
+		objects:     make(map[int64]*Object),
+		nextID:      1,
+		filesDir:    os.TempDir(),
+		cacheDir:    os.TempDir(),
+		obbDir:      os.TempDir(),
+		assetsDir:   "",
+		dispW:       1280,
+		dispH:       720,
+		natives:     make(map[string]uintptr),
+		monitors:    make(map[int64]*sync.Mutex),
+		localFrames: []localFrame{{refs: make(map[int64]int)}},
 	}
 	vm.seedClasses()
 
@@ -86,9 +98,7 @@ func NewVM() (*VM, error) {
 	// then events are counted as dropped, never synthesized.
 	bindX11InputBridge()
 
-	globalMu.Lock()
-	globalVM = vm
-	globalMu.Unlock()
+	globalVM.Store(vm)
 	return vm, nil
 }
 
@@ -129,14 +139,18 @@ func (vm *VM) SetDirs(files, cache, obb, assets string) {
 	}
 	vm.mu.Lock()
 	defer vm.mu.Unlock()
-	if files != "" {
+	if files != "" && files != vm.filesDir {
 		vm.filesDir = files
+		vm.immortalFilesDir = nil
+		vm.immortalFilesDirStr = nil
 	}
-	if cache != "" {
+	if cache != "" && cache != vm.cacheDir {
 		vm.cacheDir = cache
+		vm.immortalCacheDir = nil
 	}
-	if obb != "" {
+	if obb != "" && obb != vm.obbDir {
 		vm.obbDir = obb
+		vm.immortalObbDir = nil
 	}
 	if assets != "" {
 		vm.assetsDir = assets
@@ -179,14 +193,14 @@ func (vm *VM) SetDisplayPhysicalSizeMM(w, h int) {
 // the X-server-reported size when the launcher wired one, otherwise the
 // standard 96-DPI derivation from the pixel size.
 func (vm *VM) screenPhysicalSizeMM() (int32, int32) {
-	vm.mu.Lock()
+	vm.mu.RLock()
 	w, h := vm.dispMmW, vm.dispMmH
 	fallback := w <= 0 || h <= 0
 	if fallback {
 		w = vm.dispW
 		h = vm.dispH
 	}
-	vm.mu.Unlock()
+	vm.mu.RUnlock()
 	if fallback {
 		logf("[jni] getScreenPhysicalSizeInMillimeters: no X11 physical size; 96-DPI fallback")
 		return int32((int64(w)*254 + 480) / 960), int32((int64(h)*254 + 480) / 960)
@@ -234,7 +248,7 @@ func (vm *VM) NativeMethod(class, name, sig string) uintptr {
 	if vm == nil {
 		return 0
 	}
-	vm.mu.Lock()
-	defer vm.mu.Unlock()
+	vm.mu.RLock()
+	defer vm.mu.RUnlock()
 	return vm.natives[methodLogName(class, name, sig)]
 }

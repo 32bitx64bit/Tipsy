@@ -301,6 +301,33 @@ func TestBytesArrayRoundtrip(t *testing.T) {
 	}
 }
 
+func TestPrimitiveArrayLengthUsesElementsNotBackingBytes(t *testing.T) {
+	for _, tt := range []struct {
+		kind byte
+		size int
+	}{
+		{kind: 'Z', size: 1},
+		{kind: 'B', size: 1},
+		{kind: 'C', size: 2},
+		{kind: 'S', size: 2},
+		{kind: 'I', size: 4},
+		{kind: 'F', size: 4},
+		{kind: 'J', size: 8},
+		{kind: 'D', size: 8},
+	} {
+		t.Run(string(tt.kind), func(t *testing.T) {
+			const elements = 5
+			o := &Object{arrKind: int(tt.kind), bytes: make([]byte, elements*tt.size)}
+			if got := arrayLength(o); got != elements {
+				t.Fatalf("%c backing bytes=%d length=%d want %d elements", tt.kind, len(o.bytes), got, elements)
+			}
+		})
+	}
+	if got := arrayLength(&Object{elems: make([]int64, 3)}); got != 3 {
+		t.Fatalf("object array length=%d want 3", got)
+	}
+}
+
 func TestConnectivityManagerIsConnected(t *testing.T) {
 	vm, err := NewVM()
 	if err != nil {

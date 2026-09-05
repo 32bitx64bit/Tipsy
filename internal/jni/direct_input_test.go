@@ -28,7 +28,7 @@ func selectKeyboardPath(t *testing.T, value string) {
 func wireRecordingDirectTarget(t *testing.T, env, class uintptr) {
 	t.Helper()
 	testDirectRecReset()
-	if !SetRobloxDirectInputTarget(env, class, testDirectRecordButtonFn(), testDirectRecordMoveFn(), testDirectRecordWheelFn()) {
+	if !SetRobloxDirectInputTarget(env, class, testDirectRecordButtonFn(), testDirectRecordMoveFn(), testDirectRecordWheelFn(), testDirectRecordMouseLockedFn()) {
 		t.Fatal("recording direct target did not wire")
 	}
 	t.Cleanup(ClearRobloxDirectInputTarget)
@@ -41,6 +41,17 @@ func wireRecordingDirectKeyTarget(t *testing.T, env, class uintptr) {
 		t.Fatal("recording direct keyboard target did not wire")
 	}
 	t.Cleanup(ClearRobloxDirectKeyTarget)
+}
+
+func stubPointerLock(t *testing.T, fn func(bool) (bool, error)) {
+	t.Helper()
+	old := pointerLockSetter
+	pointerLockSetter = fn
+	rmbPointerFallback.Store(false)
+	t.Cleanup(func() {
+		pointerLockSetter = old
+		rmbPointerFallback.Store(false)
+	})
 }
 
 // TestDirectMouseButtonABI pins the exact public-static-native JNI ABI proven
@@ -111,6 +122,281 @@ func TestDirectMouseMoveABI(t *testing.T) {
 	}
 	if got := RobloxDirectInputStats().MoveDelivered - before.MoveDelivered; got != 1 {
 		t.Fatalf("direct move delivery delta = %d, want 1", got)
+	}
+}
+
+func TestDirectCapturedMouseMoveAccumulatesLogicalAndExplicitDelta(t *testing.T) {
+	wireRecordingDirectTarget(t, 0x1234, 0x5678)
+	if !DispatchRobloxDirectPointer(motionActionDown, 20, 22, 3) {
+		t.Fatal("secondary DOWN was not delivered")
+	}
+	if !DispatchRobloxDirectPointerDelta(20, 22, 43, -28) {
+		t.Fatal("captured move was not delivered")
+	}
+	if x, y := testDirectRecMoveFloat(0), testDirectRecMoveFloat(1); x != 63 || y != -6 {
+		t.Fatalf("captured absolute = (%v,%v), want accumulated logical (63,-6)", x, y)
+	}
+	if dx, dy := testDirectRecMoveFloat(2), testDirectRecMoveFloat(3); dx != 43 || dy != -28 {
+		t.Fatalf("captured delta = (%v,%v), want (43,-28)", dx, dy)
+	}
+	if !DispatchRobloxDirectPointerDelta(20, 22, -5, 4) {
+		t.Fatal("second captured move was not delivered")
+	}
+	if x, y := testDirectRecMoveFloat(0), testDirectRecMoveFloat(1); x != 58 || y != -2 {
+		t.Fatalf("second captured absolute = (%v,%v), want (58,-2)", x, y)
+	}
+	if !DispatchRobloxDirectPointer(motionActionUp, 20, 22, 3) {
+		t.Fatal("secondary UP was not delivered")
+	}
+	if !DispatchRobloxDirectPointer(motionActionMove, 25, 19, 0) {
+		t.Fatal("first post-release move was not delivered")
+	}
+	if dx, dy := testDirectRecMoveFloat(2), testDirectRecMoveFloat(3); dx != 5 || dy != -3 {
+		t.Fatalf("first post-release delta = (%v,%v), want (5,-3)", dx, dy)
+	}
+	if !DispatchRobloxDirectPointer(motionActionMove, 20, 22, 0) {
+		t.Fatal("second post-release move was not delivered")
+	}
+	if x, y := testDirectRecMoveFloat(0), testDirectRecMoveFloat(1); x != 20 || y != 22 {
+		t.Fatalf("second post-release absolute = (%v,%v), want release anchor (20,22)", x, y)
+	}
+	if dx, dy := testDirectRecMoveFloat(2), testDirectRecMoveFloat(3); dx != -5 || dy != 3 {
+		t.Fatalf("second post-release delta = (%v,%v), want (-5,3)", dx, dy)
+	}
+}
+
+func TestMainWindowMouseLockGetterABI(t *testing.T) {
+	wireRecordingDirectTarget(t, 0x1234, 0x5678)
+	before := RobloxDirectInputStats()
+	if locked, available := RobloxMainWindowMouseLocked(); locked || !available {
+		t.Fatalf("initial getter = locked %t, available %t; want false,true", locked, available)
+	}
+	testDirectRecSetMouseLocked(true)
+	if locked, available := RobloxMainWindowMouseLocked(); !locked || !available {
+		t.Fatalf("true getter = locked %t, available %t; want true,true", locked, available)
+	}
+	after := RobloxDirectInputStats()
+	if got := after.LockQueries - before.LockQueries; got != 2 {
+		t.Fatalf("lock query delta = %d, want 2", got)
+	}
+	if got := after.LockTrue - before.LockTrue; got != 1 {
+		t.Fatalf("true lock read delta = %d, want 1", got)
+	}
+}
+
+func TestDirectSecondaryEdgesPrecedeLockGetter(t *testing.T) {
+	selectPointerPath(t, "direct")
+	wireRecordingDirectTarget(t, 0x1234, 0x5678)
+	testDirectRecSetMouseLocked(true)
+	handleX11InputEvent(x11.InputEvent{
+		Kind: x11.InputPointer, PointerAction: x11.PointerDown, Button: 3, X: 20, Y: 22,
+	})
+	if buttonSeq, lockSeq := testDirectRecButtonSequence(), testDirectRecLockSequence(); buttonSeq == 0 || lockSeq == 0 || buttonSeq >= lockSeq {
+		t.Fatalf("secondary DOWN/getter order = button %d, getter %d; want button first", buttonSeq, lockSeq)
+	}
+
+	testDirectRecReset()
+	testDirectRecSetMouseLocked(false)
+	handleX11InputEvent(x11.InputEvent{
+		Kind: x11.InputPointer, PointerAction: x11.PointerUp, Button: 3, X: 20, Y: 22,
+	})
+	if buttonSeq, lockSeq := testDirectRecButtonSequence(), testDirectRecLockSequence(); buttonSeq == 0 || lockSeq == 0 || buttonSeq >= lockSeq {
+		t.Fatalf("secondary UP/getter order = button %d, getter %d; want button first", buttonSeq, lockSeq)
+	}
+}
+
+func TestGetterTrueCapturedMoveAccumulatesLogicalCoordinates(t *testing.T) {
+	selectPointerPath(t, "direct")
+	wireRecordingDirectTarget(t, 0x1234, 0x5678)
+	testDirectRecSetMouseLocked(true)
+	stubPointerLock(t, func(locked bool) (bool, error) {
+		return true, nil
+	})
+
+	handleX11InputEvent(x11.InputEvent{
+		Kind: x11.InputPointer, PointerAction: x11.PointerDown, Button: 3, X: 20, Y: 22,
+	})
+	handleX11InputEvent(x11.InputEvent{
+		Kind: x11.InputPointer, PointerAction: x11.PointerMove, Relative: true,
+		X: 20, Y: 22, DeltaX: 11, DeltaY: -7,
+	})
+	if x, y := testDirectRecMoveFloat(0), testDirectRecMoveFloat(1); x != 31 || y != 15 {
+		t.Fatalf("getter-true logical coordinate=(%v,%v), want (31,15)", x, y)
+	}
+	if dx, dy := testDirectRecMoveFloat(2), testDirectRecMoveFloat(3); dx != 11 || dy != -7 {
+		t.Fatalf("getter-true captured delta=(%v,%v), want (11,-7)", dx, dy)
+	}
+	handleX11InputEvent(x11.InputEvent{
+		Kind: x11.InputPointer, PointerAction: x11.PointerMove, Relative: true,
+		X: 20, Y: 22, DeltaX: -5, DeltaY: 4,
+	})
+	if x, y := testDirectRecMoveFloat(0), testDirectRecMoveFloat(1); x != 26 || y != 19 {
+		t.Fatalf("getter-true reversed logical coordinate=(%v,%v), want (26,19)", x, y)
+	}
+}
+
+func TestCapturedRelativeMotionDeliversWhenPointerActionIsDown(t *testing.T) {
+	// Production used to decode captured ring a=3 as PointerDown. Relative
+	// motion must still reach nativePassMouseMove rather than being dropped as
+	// an unsupported button while the host grab holds the cursor.
+	selectPointerPath(t, "direct")
+	wireRecordingDirectTarget(t, 0x1234, 0x5678)
+	testDirectRecSetMouseLocked(false)
+	stubPointerLock(t, func(locked bool) (bool, error) {
+		return true, nil
+	})
+
+	handleX11InputEvent(x11.InputEvent{
+		Kind: x11.InputPointer, PointerAction: x11.PointerDown, Button: 3, X: 20, Y: 22,
+	})
+	before := RobloxDirectInputStats()
+	handleX11InputEvent(x11.InputEvent{
+		Kind: x11.InputPointer, PointerAction: x11.PointerDown, Relative: true,
+		X: 20, Y: 22, DeltaX: 11, DeltaY: -7,
+	})
+	if got := RobloxDirectInputStats().MoveDelivered - before.MoveDelivered; got != 1 {
+		t.Fatalf("mislabelled captured move delivery delta=%d, want 1", got)
+	}
+	if x, y := testDirectRecMoveFloat(0), testDirectRecMoveFloat(1); x != 31 || y != 15 {
+		t.Fatalf("mislabelled captured logical=(%v,%v), want (31,15)", x, y)
+	}
+	if dx, dy := testDirectRecMoveFloat(2), testDirectRecMoveFloat(3); dx != 11 || dy != -7 {
+		t.Fatalf("mislabelled captured delta=(%v,%v), want (11,-7)", dx, dy)
+	}
+}
+
+func TestGetterFalseSecondaryDownUsesHeldRMBCapture(t *testing.T) {
+	selectPointerPath(t, "direct")
+	wireRecordingDirectTarget(t, 0x1234, 0x5678)
+	testDirectRecSetMouseLocked(false)
+	var calls []bool
+	stubPointerLock(t, func(locked bool) (bool, error) {
+		calls = append(calls, locked)
+		return true, nil
+	})
+
+	before := RobloxDirectInputStats()
+	handleX11InputEvent(x11.InputEvent{
+		Kind: x11.InputPointer, PointerAction: x11.PointerDown, Button: 3, X: 20, Y: 22,
+	})
+	if testDirectRecButtonPressed() != true || testDirectRecButtonIndex() != 1 {
+		t.Fatal("secondary DOWN was not delivered before the fallback grab")
+	}
+	if len(calls) != 1 || !calls[0] || !rmbPointerFallback.Load() {
+		t.Fatalf("fallback acquire calls=%v active=%t, want [true],true", calls, rmbPointerFallback.Load())
+	}
+
+	// The getter remains false, so this regression proves the successful
+	// held-RMB fallback retains the captured relative motion instead of
+	// immediately releasing it through the APK getter-false branch.
+	handleX11InputEvent(x11.InputEvent{
+		Kind: x11.InputPointer, PointerAction: x11.PointerMove, Relative: true,
+		X: 20, Y: 22, DeltaX: 11, DeltaY: -7,
+	})
+	if x, y := testDirectRecMoveFloat(0), testDirectRecMoveFloat(1); x != 31 || y != 15 {
+		t.Fatalf("fallback logical coordinate=(%v,%v), want (31,15)", x, y)
+	}
+	if dx, dy := testDirectRecMoveFloat(2), testDirectRecMoveFloat(3); dx != 11 || dy != -7 {
+		t.Fatalf("fallback captured delta=(%v,%v), want (11,-7)", dx, dy)
+	}
+	// A reverse delta advances the same virtual logical pair in the opposite
+	// direction. The actual pointer remains host-anchored throughout.
+	handleX11InputEvent(x11.InputEvent{
+		Kind: x11.InputPointer, PointerAction: x11.PointerMove, Relative: true,
+		X: 20, Y: 22, DeltaX: -5, DeltaY: 4,
+	})
+	if x, y := testDirectRecMoveFloat(0), testDirectRecMoveFloat(1); x != 26 || y != 19 {
+		t.Fatalf("reversed fallback logical coordinate=(%v,%v), want (26,19)", x, y)
+	}
+	if dx, dy := testDirectRecMoveFloat(2), testDirectRecMoveFloat(3); dx != -5 || dy != 4 {
+		t.Fatalf("reversed fallback delta=(%v,%v), want (-5,4)", dx, dy)
+	}
+
+	handleX11InputEvent(x11.InputEvent{
+		Kind: x11.InputPointer, PointerAction: x11.PointerUp, Button: 3, X: 20, Y: 22,
+	})
+	if len(calls) != 2 || !calls[0] || calls[1] || rmbPointerFallback.Load() {
+		t.Fatalf("fallback release calls=%v active=%t, want [true false],false", calls, rmbPointerFallback.Load())
+	}
+	if testDirectRecButtonPressed() {
+		t.Fatal("secondary UP was not delivered before fallback cleanup")
+	}
+	// The release restores the real X11 anchor. Neither the old virtual
+	// fallback origin nor stale recenter state may affect either following
+	// ordinary physical movement.
+	handleX11InputEvent(x11.InputEvent{
+		Kind: x11.InputPointer, PointerAction: x11.PointerMove, X: 15, Y: 18,
+	})
+	if x, y := testDirectRecMoveFloat(0), testDirectRecMoveFloat(1); x != 15 || y != 18 {
+		t.Fatalf("first post-release absolute=(%v,%v), want (15,18)", x, y)
+	}
+	if dx, dy := testDirectRecMoveFloat(2), testDirectRecMoveFloat(3); dx != -5 || dy != -4 {
+		t.Fatalf("first post-release delta=(%v,%v), want (-5,-4)", dx, dy)
+	}
+	handleX11InputEvent(x11.InputEvent{
+		Kind: x11.InputPointer, PointerAction: x11.PointerMove, X: 20, Y: 22,
+	})
+	if dx, dy := testDirectRecMoveFloat(2), testDirectRecMoveFloat(3); dx != 5 || dy != 4 {
+		t.Fatalf("second post-release delta=(%v,%v), want (5,4)", dx, dy)
+	}
+	if got := RobloxDirectInputStats().ButtonDelivered - before.ButtonDelivered; got != 2 {
+		t.Fatalf("secondary edge count=%d, want 2", got)
+	}
+}
+
+func TestGetterFalseFallbackFailureKeepsSecondaryEdges(t *testing.T) {
+	selectPointerPath(t, "direct")
+	wireRecordingDirectTarget(t, 0x1234, 0x5678)
+	testDirectRecSetMouseLocked(false)
+	var calls []bool
+	stubPointerLock(t, func(locked bool) (bool, error) {
+		calls = append(calls, locked)
+		if locked {
+			return false, x11.ErrPointerGrab
+		}
+		return false, nil
+	})
+
+	before := RobloxDirectInputStats()
+	handleX11InputEvent(x11.InputEvent{
+		Kind: x11.InputPointer, PointerAction: x11.PointerDown, Button: 3, X: 20, Y: 22,
+	})
+	if testDirectRecButtonPressed() != true || rmbPointerFallback.Load() {
+		t.Fatal("failed fallback swallowed the secondary DOWN or entered fallback state")
+	}
+	handleX11InputEvent(x11.InputEvent{
+		Kind: x11.InputPointer, PointerAction: x11.PointerUp, Button: 3, X: 20, Y: 22,
+	})
+	if testDirectRecButtonPressed() || rmbPointerFallback.Load() {
+		t.Fatal("failed fallback swallowed the secondary UP or retained fallback state")
+	}
+	if len(calls) != 2 || !calls[0] || calls[1] {
+		t.Fatalf("failed fallback calls=%v, want [true false]", calls)
+	}
+	if got := RobloxDirectInputStats().ButtonDelivered - before.ButtonDelivered; got != 2 {
+		t.Fatalf("secondary edge count=%d, want 2", got)
+	}
+}
+
+func TestGetterFalseFallbackFocusLossReleasesHostGrab(t *testing.T) {
+	selectPointerPath(t, "direct")
+	wireRecordingDirectTarget(t, 0x1234, 0x5678)
+	testDirectRecSetMouseLocked(false)
+	var calls []bool
+	stubPointerLock(t, func(locked bool) (bool, error) {
+		calls = append(calls, locked)
+		return true, nil
+	})
+
+	handleX11InputEvent(x11.InputEvent{
+		Kind: x11.InputPointer, PointerAction: x11.PointerDown, Button: 3, X: 20, Y: 22,
+	})
+	if !rmbPointerFallback.Load() {
+		t.Fatal("getter-false fallback was not active before focus loss")
+	}
+	handleX11InputEvent(x11.InputEvent{Kind: x11.InputFocus, FocusGained: false})
+	if len(calls) != 2 || !calls[0] || calls[1] || rmbPointerFallback.Load() {
+		t.Fatalf("focus-loss fallback calls=%v active=%t, want [true false],false", calls, rmbPointerFallback.Load())
 	}
 }
 

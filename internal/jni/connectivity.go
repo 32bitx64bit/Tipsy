@@ -152,10 +152,11 @@ func (vm *VM) seedConnectivity() {
 			return
 		}
 		o := vm.newObjectLocked(cls)
+		o.markImmortal()
 		o.str = name
 		o.fields["name"] = name
 		if cls.obj != nil {
-			cls.obj.fields[name] = o.id
+			vm.storeFieldObjLocked(cls.obj, name, o.id)
 		}
 	}
 	for _, st := range []string{"CONNECTING", "CONNECTED", "SUSPENDED", "DISCONNECTING", "DISCONNECTED", "UNKNOWN"} {
@@ -189,11 +190,11 @@ func (vm *VM) newNetworkInfoLocked(up bool) *Object {
 	o.fields["subtype"] = int32(0)
 	o.fields["subtypeName"] = ""
 	if up {
-		o.fields["state"] = jobjectToID(uintptr(vm.enumField("android/net/NetworkInfo$State", "CONNECTED")))
-		o.fields["detailedState"] = jobjectToID(uintptr(vm.enumField("android/net/NetworkInfo$DetailedState", "CONNECTED")))
+		vm.storeFieldObjLocked(o, "state", jobjectToID(uintptr(vm.enumField("android/net/NetworkInfo$State", "CONNECTED"))))
+		vm.storeFieldObjLocked(o, "detailedState", jobjectToID(uintptr(vm.enumField("android/net/NetworkInfo$DetailedState", "CONNECTED"))))
 	} else {
-		o.fields["state"] = jobjectToID(uintptr(vm.enumField("android/net/NetworkInfo$State", "DISCONNECTED")))
-		o.fields["detailedState"] = jobjectToID(uintptr(vm.enumField("android/net/NetworkInfo$DetailedState", "DISCONNECTED")))
+		vm.storeFieldObjLocked(o, "state", jobjectToID(uintptr(vm.enumField("android/net/NetworkInfo$State", "DISCONNECTED"))))
+		vm.storeFieldObjLocked(o, "detailedState", jobjectToID(uintptr(vm.enumField("android/net/NetworkInfo$DetailedState", "DISCONNECTED"))))
 	}
 	return o
 }
@@ -260,8 +261,23 @@ func (vm *VM) classNameFromArg(args *C.jvalue, i int) string {
 	return o.str
 }
 
+func connectivityIdentity(class, name, sig string) bool {
+	switch class {
+	case "android/net/ConnectivityManager",
+		"android/net/NetworkInfo",
+		"android/net/Network",
+		"android/net/NetworkCapabilities":
+		return true
+	}
+	// Context.getSystemService(Class) is answered here so the Class overload
+	// is not lost when the receiver is an Activity rather than a net type.
+	return name == "getSystemService" && sig == "(Ljava/lang/Class;)Ljava/lang/Object;"
+}
+
 func (vm *VM) dispatchConnectivity(o *Object, class, name, sig string, args *C.jvalue) (C.jobject, bool) {
-	_ = class
+	if !connectivityIdentity(class, name, sig) {
+		return jnull(), false
+	}
 	key := name + sig
 	switch key {
 	case "getActiveNetworkInfo()Landroid/net/NetworkInfo;":

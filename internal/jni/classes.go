@@ -124,11 +124,12 @@ func (vm *VM) seedClasses() {
 	// as a static field and sharing the class's official int field semantics.
 	if c := vm.classes["androidx/core/graphics/Insets"]; c != nil && c.obj != nil {
 		none := vm.newObjectLocked(c)
+		none.markImmortal()
 		none.fields["left"] = int32(0)
 		none.fields["top"] = int32(0)
 		none.fields["right"] = int32(0)
 		none.fields["bottom"] = int32(0)
-		c.obj.fields["NONE"] = none.id
+		vm.storeFieldObjLocked(c.obj, "NONE", none.id)
 	}
 
 	vm.seedConnectivity()
@@ -152,6 +153,7 @@ func (vm *VM) defineClass(name string, super *Class) *Class {
 	if classClass == nil && name == "java/lang/Class" {
 		o.class = cls
 	}
+	o.markImmortal()
 	cls.obj = o
 	vm.put(o)
 	vm.classes[name] = cls

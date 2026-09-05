@@ -69,6 +69,9 @@ func allocField(class, name, sig string, static bool) C.jfieldID {
 }
 
 func parseMethod(mid C.jmethodID) (class, name, sig string, static bool, ok bool) {
+	if info, hit := lookupMethod(mid); hit {
+		return info.class, info.name, info.sig, info.static, true
+	}
 	if jmethodNil(mid) {
 		return "", "", "", false, false
 	}
@@ -80,6 +83,9 @@ func parseMethod(mid C.jmethodID) (class, name, sig string, static bool, ok bool
 }
 
 func parseField(fid C.jfieldID) (class, name, sig string, static bool, ok bool) {
+	if info, hit := lookupField(fid); hit {
+		return info.class, info.name, info.sig, info.static, true
+	}
 	if jfieldNil(fid) {
 		return "", "", "", false, false
 	}

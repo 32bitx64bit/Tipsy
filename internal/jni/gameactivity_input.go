@@ -458,9 +458,7 @@ func inputTargetSnapshot() (env, activity, handle uintptr) {
 }
 
 func inputVM() *VM {
-	globalMu.Lock()
-	defer globalMu.Unlock()
-	return globalVM
+	return globalVM.Load()
 }
 
 func dropEvent(reason string) {
@@ -705,6 +703,19 @@ var pointerButtons struct {
 	state int32
 }
 
+// rmbPointerFallback is deliberately narrower than Roblox's native lock
+// getter. The APK remains authoritative when its getter is true. This state
+// exists only for the measured desktop hole where a real secondary DOWN leaves
+// that getter false: after the already-delivered edge, a successful host grab
+// supplies the relative stream for the duration of that held RMB gesture.
+// It is cleared before every ungrab path.
+var rmbPointerFallback atomic.Bool
+
+// pointerLockSetter is a test seam for the host boundary. Production never
+// replaces it; retaining the call behind this seam lets tests prove that a
+// rejected fallback preserves Roblox's button edges.
+var pointerLockSetter = x11.SetPointerLock
+
 func pointerButtonState(x11Button int32, down bool) int32 {
 	pointerButtons.mu.Lock()
 	defer pointerButtons.mu.Unlock()
@@ -739,6 +750,14 @@ func bindX11InputBridge() {
 func handleX11InputEvent(ev x11.InputEvent) {
 	switch ev.Kind {
 	case x11.InputFocus:
+		if !ev.FocusGained {
+			// Host focus loss always releases a grab, independently of a stale
+			// engine bit. The X11 bridge also synthesizes the one missing RMB-up
+			// edge when necessary before this focus event is drained.
+			rmbPointerFallback.Store(false)
+			ClearRobloxDirectPointerFallback()
+			_, _ = pointerLockSetter(false)
+		}
 		DispatchGameActivityFocus(ev.FocusGained)
 	case x11.InputKey:
 		// A genuine engine showKeyboard call transfers focus to the APK's
@@ -776,7 +795,88 @@ func handleX11InputEvent(ev x11.InputEvent) {
 			dispatchGameActivityX11Pointer(ev)
 		}
 		if path == PointerPathDirect || path == PointerPathBoth {
-			DispatchRobloxDirectPointer(ev.PointerAction, ev.X, ev.Y, ev.Button)
+			switch {
+			case ev.PointerAction == x11.PointerMove || ev.Relative:
+				// Captured relative motion is always a MOVE for the APK
+				// listener. The C ring uses a=3 for that path; decoding it as
+				// PointerDown would drop every camera delta as an unsupported
+				// button while the host grab still held the cursor.
+				locked, available := RobloxMainWindowMouseLocked()
+				if available && locked {
+					if rmbPointerFallback.Swap(false) {
+						ClearRobloxDirectPointerFallback()
+					}
+					if !ev.Relative {
+						// This is the official generic-listener order: observe the
+						// true getter, request capture, consume this transition move,
+						// then deliver later captured relative-axis events.
+						_, _ = pointerLockSetter(true)
+						return
+					}
+					DispatchRobloxDirectPointerDelta(ev.X, ev.Y, ev.DeltaX, ev.DeltaY)
+					return
+				}
+				if ev.Relative && rmbPointerFallback.Load() {
+					// The native getter was measured false after this held RMB
+					// began, but the host fallback has an acquired grab. Relative
+					// X11 movement is therefore real camera motion, not a stale
+					// generic event. Mirror the APK listener's cached logical
+					// coordinate: integrate axes 27/28 before the descriptor-exact
+					// native call, while preserving their exact dx/dy arguments.
+					DispatchRobloxDirectPointerFallbackDelta(ev.DeltaX, ev.DeltaY)
+					return
+				}
+				if ev.Relative {
+					// The APK's captured-pointer listener checks the getter before
+					// dispatch and releases/consumes the event when it turns false.
+					rmbPointerFallback.Store(false)
+					ClearRobloxDirectPointerFallback()
+					_, _ = pointerLockSetter(false)
+					return
+				}
+				DispatchRobloxDirectPointer(ev.PointerAction, ev.X, ev.Y, ev.Button)
+			case ev.PointerAction == x11.PointerDown && ev.Button == 3:
+				DispatchRobloxDirectPointer(ev.PointerAction, ev.X, ev.Y, ev.Button)
+				locked, available := RobloxMainWindowMouseLocked()
+				logging.Logger(logging.CatJNI).Info("[jni] pointer lock after secondary down",
+					"available", available, "locked", locked)
+				if available && locked {
+					rmbPointerFallback.Store(false)
+					_, _ = pointerLockSetter(true)
+				} else if available {
+					// The observed in-experience client leaves the exact lock getter
+					// false for ordinary RMB camera look. Deliver the edge first,
+					// then use one held-RMB host capture. A grab failure is only
+					// diagnostic: the already-delivered button edge remains live.
+					changed, err := pointerLockSetter(true)
+					if err == nil && changed {
+						BeginRobloxDirectPointerFallback(ev.X, ev.Y)
+						// Publish fallback only after its virtual origin is ready. The
+						// X11 bridge normally serializes this stream, but this ordering
+						// also makes a concurrent drain unable to see an active fallback
+						// with no logical accumulator.
+						rmbPointerFallback.Store(true)
+						logging.Logger(logging.CatJNI).Info("[jni] held-RMB pointer-lock fallback acquired")
+					}
+				}
+			case ev.PointerAction == x11.PointerUp && ev.Button == 3:
+				// Discard the virtual captured origin before seeding the ordinary
+				// direct dispatcher from this real anchored release. This makes the
+				// next two physical post-release motions start from actual X11
+				// coordinates, not an accumulated camera-look coordinate.
+				ClearRobloxDirectPointerFallback()
+				DispatchRobloxDirectPointer(ev.PointerAction, ev.X, ev.Y, ev.Button)
+				// Re-read after delivering the edge, matching the engine-owned
+				// handshake. Ordinary RMB camera look turns false and releases at
+				// the anchor; first-person/shift-lock remains captured.
+				locked, available := RobloxMainWindowMouseLocked()
+				rmbPointerFallback.Store(false)
+				if !available || !locked {
+					_, _ = pointerLockSetter(false)
+				}
+			default:
+				DispatchRobloxDirectPointer(ev.PointerAction, ev.X, ev.Y, ev.Button)
+			}
 		}
 	case x11.InputScroll:
 		// The final APK mouse listener sends ACTION_SCROLL only through the

@@ -129,7 +129,7 @@ func (e *Env) PutField(obj uintptr, name string, val any) {
 	}
 	switch t := val.(type) {
 	case uintptr:
-		o.fields[name] = jobjectToID(t)
+		e.vm.storeFieldObjLocked(o, name, jobjectToID(t))
 	default:
 		o.fields[name] = val
 	}

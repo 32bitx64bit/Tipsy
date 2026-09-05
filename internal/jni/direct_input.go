@@ -31,6 +31,12 @@ static void tipsy_direct_mouse_wheel(void *fn, uintptr_t env, uintptr_t cls,
 		(JNIEnv *)env, (jclass)cls, x, y, delta);
 }
 
+static unsigned char tipsy_direct_mouse_locked(void *fn, uintptr_t env,
+	uintptr_t cls) {
+	return ((jboolean (*)(JNIEnv *, jclass))fn)(
+		(JNIEnv *)env, (jclass)cls);
+}
+
 // Exact caller for the public static native method declared by the official
 // 2.734.917 classes2.dex NativeGLInterface:
 // nativePassKeyEvent(ZIIZ)V. The four declared arguments are entirely
@@ -53,9 +59,14 @@ static float tipsy_direct_rec_wheel_f[3];
 static uintptr_t tipsy_direct_rec_wheel_ids[2];
 static int tipsy_direct_rec_key_i[4];
 static uintptr_t tipsy_direct_rec_key_ids[2];
+static int tipsy_direct_rec_mouse_locked;
+static int tipsy_direct_rec_sequence;
+static int tipsy_direct_rec_button_sequence;
+static int tipsy_direct_rec_lock_sequence;
 
 static void tipsy_direct_record_button(JNIEnv *env, jclass cls, jfloat x,
 	jfloat y, jboolean pressed, jint button) {
+	tipsy_direct_rec_button_sequence = ++tipsy_direct_rec_sequence;
 	tipsy_direct_rec_button_ids[0] = (uintptr_t)env;
 	tipsy_direct_rec_button_ids[1] = (uintptr_t)cls;
 	tipsy_direct_rec_button_f[0] = x;
@@ -93,10 +104,18 @@ static void tipsy_direct_record_key(JNIEnv *env, jclass cls, jboolean down,
 	tipsy_direct_rec_key_i[3] = repeat;
 }
 
+static jboolean tipsy_direct_record_mouse_locked(JNIEnv *env, jclass cls) {
+	(void)env;
+	(void)cls;
+	tipsy_direct_rec_lock_sequence = ++tipsy_direct_rec_sequence;
+	return tipsy_direct_rec_mouse_locked ? 1 : 0;
+}
+
 static void *tipsy_direct_record_button_fn(void) { return (void *)tipsy_direct_record_button; }
 static void *tipsy_direct_record_move_fn(void) { return (void *)tipsy_direct_record_move; }
 static void *tipsy_direct_record_wheel_fn(void) { return (void *)tipsy_direct_record_wheel; }
 static void *tipsy_direct_record_key_fn(void) { return (void *)tipsy_direct_record_key; }
+static void *tipsy_direct_record_mouse_locked_fn(void) { return (void *)tipsy_direct_record_mouse_locked; }
 static uintptr_t tipsy_direct_rec_button_id(int i) { return tipsy_direct_rec_button_ids[i]; }
 static float tipsy_direct_rec_button_float(int i) { return tipsy_direct_rec_button_f[i]; }
 static int tipsy_direct_rec_button_bool(void) { return tipsy_direct_rec_button_pressed; }
@@ -107,6 +126,9 @@ static uintptr_t tipsy_direct_rec_wheel_id(int i) { return tipsy_direct_rec_whee
 static float tipsy_direct_rec_wheel_float(int i) { return tipsy_direct_rec_wheel_f[i]; }
 static uintptr_t tipsy_direct_rec_key_id(int i) { return tipsy_direct_rec_key_ids[i]; }
 static int tipsy_direct_rec_key_int(int i) { return tipsy_direct_rec_key_i[i]; }
+static int tipsy_direct_rec_button_sequence_value(void) { return tipsy_direct_rec_button_sequence; }
+static int tipsy_direct_rec_lock_sequence_value(void) { return tipsy_direct_rec_lock_sequence; }
+static void tipsy_direct_rec_set_mouse_locked(int locked) { tipsy_direct_rec_mouse_locked = locked; }
 static void tipsy_direct_rec_reset(void) {
 	for (int i = 0; i < 2; ++i) {
 		tipsy_direct_rec_button_f[i] = 0;
@@ -120,12 +142,17 @@ static void tipsy_direct_rec_reset(void) {
 	for (int i = 0; i < 2; ++i) tipsy_direct_rec_key_ids[i] = 0;
 	tipsy_direct_rec_button_pressed = 0;
 	tipsy_direct_rec_button_index = 0;
+	tipsy_direct_rec_mouse_locked = 0;
+	tipsy_direct_rec_sequence = 0;
+	tipsy_direct_rec_button_sequence = 0;
+	tipsy_direct_rec_lock_sequence = 0;
 }
 */
 import "C"
 
 import (
 	"fmt"
+	"math"
 	"os"
 	"strings"
 	"sync"
@@ -185,6 +212,8 @@ func PointerInputPath() PointerDeliveryPath { return pointerDeliveryPath() }
 func ResetPointerInputPath() {
 	pointerPath.Once = sync.Once{}
 	pointerPath.value = PointerPathDirect
+	rmbPointerFallback.Store(false)
+	ClearRobloxDirectPointerFallback()
 }
 
 // KeyboardDeliveryPath selects the event family for physical keyboard input.
@@ -262,25 +291,37 @@ var directInputTarget struct {
 	buttonFn    uintptr
 	moveFn      uintptr
 	wheelFn     uintptr
+	lockFn      uintptr
 	havePointer bool
 	lastX       float32
 	lastY       float32
+	// fallbackCaptured is only the host-held-RMB compatibility path. Getter-true
+	// capture uses DispatchRobloxDirectPointerDelta, which accumulates the same
+	// APK-style logical pair from lastX/lastY.
+	fallbackCaptured bool
+	fallbackX        float32
+	fallbackY        float32
 }
 
-// SetRobloxDirectInputTarget wires the three direct mouse methods used by the
-// official client listener: button, move, and vertical wheel. Exact DEX
-// descriptors are (FFZI)V, (FFFF)V, and (FFF)V respectively.
-func SetRobloxDirectInputTarget(env, class, buttonFn, moveFn, wheelFn uintptr) bool {
+// SetRobloxDirectInputTarget wires the direct mouse methods used by the
+// official client listener. Exact DEX descriptors are (FFZI)V, (FFFF)V,
+// (FFF)V, and ()Z respectively. The last method is the engine-owned lock
+// handshake; Tipsy never invents its state.
+func SetRobloxDirectInputTarget(env, class, buttonFn, moveFn, wheelFn, lockFn uintptr) bool {
 	directInputTarget.mu.Lock()
 	directInputTarget.env = env
 	directInputTarget.class = class
 	directInputTarget.buttonFn = buttonFn
 	directInputTarget.moveFn = moveFn
 	directInputTarget.wheelFn = wheelFn
+	directInputTarget.lockFn = lockFn
 	directInputTarget.havePointer = false
 	directInputTarget.lastX = 0
 	directInputTarget.lastY = 0
-	ready := env != 0 && class != 0 && buttonFn != 0 && moveFn != 0 && wheelFn != 0
+	directInputTarget.fallbackCaptured = false
+	directInputTarget.fallbackX = 0
+	directInputTarget.fallbackY = 0
+	ready := env != 0 && class != 0 && buttonFn != 0 && moveFn != 0 && wheelFn != 0 && lockFn != 0
 	directInputTarget.mu.Unlock()
 
 	logging.Logger(logging.CatJNI).Info("[jni] pointer delivery path",
@@ -289,6 +330,8 @@ func SetRobloxDirectInputTarget(env, class, buttonFn, moveFn, wheelFn uintptr) b
 		"mouseButton", fmt.Sprintf("%#x", buttonFn),
 		"mouseMove", fmt.Sprintf("%#x", moveFn),
 		"mouseWheel", fmt.Sprintf("%#x", wheelFn))
+	logging.Logger(logging.CatJNI).Info("[jni] pointer lock handshake",
+		"ready", lockFn != 0, "mouseLockedGetter", fmt.Sprintf("%#x", lockFn))
 	return ready
 }
 
@@ -300,9 +343,13 @@ func ClearRobloxDirectInputTarget() {
 	directInputTarget.buttonFn = 0
 	directInputTarget.moveFn = 0
 	directInputTarget.wheelFn = 0
+	directInputTarget.lockFn = 0
 	directInputTarget.havePointer = false
 	directInputTarget.lastX = 0
 	directInputTarget.lastY = 0
+	directInputTarget.fallbackCaptured = false
+	directInputTarget.fallbackX = 0
+	directInputTarget.fallbackY = 0
 	directInputTarget.mu.Unlock()
 }
 
@@ -354,6 +401,8 @@ type DirectInputStats struct {
 	WheelDelivered  uint64
 	KeyDelivered    uint64
 	Dropped         uint64
+	LockQueries     uint64
+	LockTrue        uint64
 }
 
 var directInputStats DirectInputStats
@@ -366,7 +415,29 @@ func RobloxDirectInputStats() DirectInputStats {
 		WheelDelivered:  atomic.LoadUint64(&directInputStats.WheelDelivered),
 		KeyDelivered:    atomic.LoadUint64(&directInputStats.KeyDelivered),
 		Dropped:         atomic.LoadUint64(&directInputStats.Dropped),
+		LockQueries:     atomic.LoadUint64(&directInputStats.LockQueries),
+		LockTrue:        atomic.LoadUint64(&directInputStats.LockTrue),
 	}
+}
+
+// RobloxMainWindowMouseLocked reads the exact APK-declared and exported
+// NativeInputInterface.nativeGetMainWindowIsMouseLockedCenter()Z handshake.
+// The official generic-motion listener requests View pointer capture only
+// after this getter becomes true, and its captured-pointer listener releases
+// capture when it becomes false.
+func RobloxMainWindowMouseLocked() (locked bool, available bool) {
+	directInputTarget.mu.RLock()
+	defer directInputTarget.mu.RUnlock()
+	if directInputTarget.env == 0 || directInputTarget.class == 0 || directInputTarget.lockFn == 0 {
+		return false, false
+	}
+	locked = C.tipsy_direct_mouse_locked(unsafe.Pointer(directInputTarget.lockFn),
+		C.uintptr_t(directInputTarget.env), C.uintptr_t(directInputTarget.class)) != 0
+	atomic.AddUint64(&directInputStats.LockQueries, 1)
+	if locked {
+		atomic.AddUint64(&directInputStats.LockTrue, 1)
+	}
+	return locked, true
 }
 
 // DispatchRobloxDirectScroll maps a core-X11 vertical wheel detent to the
@@ -482,6 +553,132 @@ func DispatchRobloxDirectPointer(action int32, x, y float32, x11Button int32) bo
 	}
 }
 
+// DispatchRobloxDirectPointerDelta delivers one captured-pointer move through
+// the APK's axis-27/28 path. The host cursor stays at the X11 grab anchor;
+// the engine call uses the official listener's cached logical pair, which
+// accumulates density-normalized relative axes before nativePassMouseMove.
+// Routing through the absolute-position differencer would report a zero delta
+// because recentering intentionally keeps the host x/y unchanged.
+func DispatchRobloxDirectPointerDelta(x, y, dx, dy float32) bool {
+	directInputTarget.mu.Lock()
+	env, class := directInputTarget.env, directInputTarget.class
+	moveFn := directInputTarget.moveFn
+	if env == 0 || class == 0 || moveFn == 0 {
+		directInputTarget.mu.Unlock()
+		dropDirectEvent("pointer: no captured-motion target wired")
+		return false
+	}
+	if math.IsNaN(float64(dx)) || math.IsNaN(float64(dy)) ||
+		math.IsInf(float64(dx), 0) || math.IsInf(float64(dy), 0) {
+		directInputTarget.mu.Unlock()
+		dropDirectEvent("pointer: non-finite captured delta")
+		return false
+	}
+	originX, originY := x, y
+	if directInputTarget.havePointer {
+		originX = directInputTarget.lastX
+		originY = directInputTarget.lastY
+	}
+	x = originX + dx
+	y = originY + dy
+	if math.IsInf(float64(x), 0) || math.IsInf(float64(y), 0) {
+		directInputTarget.mu.Unlock()
+		dropDirectEvent("pointer: captured logical coordinate overflow")
+		return false
+	}
+	directInputTarget.havePointer = true
+	directInputTarget.lastX = x
+	directInputTarget.lastY = y
+	directInputTarget.mu.Unlock()
+	C.tipsy_direct_mouse_move(unsafe.Pointer(moveFn), C.uintptr_t(env), C.uintptr_t(class),
+		C.float(x), C.float(y), C.float(dx), C.float(dy))
+	atomic.AddUint64(&directInputStats.MoveDelivered, 1)
+	return true
+}
+
+// BeginRobloxDirectPointerFallback starts the narrow host-captured fallback
+// used only when a real held secondary-button gesture has acquired an X11
+// grab while the APK's own lock getter is false. The official listener keeps a
+// cached logical pair and advances it from AXIS_RELATIVE_X/Y when its lock
+// branch permits. The fallback must do the same: a permanently anchored x/y
+// pair can make the engine discard otherwise-real deltas as no logical motion.
+//
+// The APK's cached pair is a logical pointer coordinate, not a View bounds
+// check: its captured listener accumulates the density-normalized axes without
+// clamping them back to the captured View. Tipsy presents density 1.0, and X11
+// supplies finite integer-pixel deltas, so retain that unbounded logical pair
+// rather than inventing an edge clamp or wrap that would reverse camera travel.
+func BeginRobloxDirectPointerFallback(x, y float32) {
+	directInputTarget.mu.Lock()
+	directInputTarget.fallbackCaptured = true
+	directInputTarget.fallbackX = x
+	directInputTarget.fallbackY = y
+	// Keep the ordinary direct dispatcher coherent if an edge arrives after
+	// host capture has already been acquired.
+	directInputTarget.havePointer = true
+	directInputTarget.lastX = x
+	directInputTarget.lastY = y
+	directInputTarget.mu.Unlock()
+}
+
+// ClearRobloxDirectPointerFallback discards a fallback-era virtual coordinate.
+// The caller follows an ordinary RMB release with DispatchRobloxDirectPointer,
+// which seeds the real anchored physical coordinate. Focus/teardown may lack
+// that final physical edge, so clearing also drops the old virtual origin and
+// makes the next normal absolute motion establish a fresh origin.
+func ClearRobloxDirectPointerFallback() {
+	directInputTarget.mu.Lock()
+	directInputTarget.fallbackCaptured = false
+	directInputTarget.fallbackX = 0
+	directInputTarget.fallbackY = 0
+	directInputTarget.havePointer = false
+	directInputTarget.lastX = 0
+	directInputTarget.lastY = 0
+	directInputTarget.mu.Unlock()
+}
+
+// DispatchRobloxDirectPointerFallbackDelta invokes the same descriptor-exact
+// native as captured pointer delivery, but with the evolving logical x/y pair
+// required by the measured getter-false RMB compatibility case. It deliberately
+// does not query or override the APK's getter; callers select it only after the
+// already-delivered RMB edge and a successful host fallback acquisition.
+func DispatchRobloxDirectPointerFallbackDelta(dx, dy float32) bool {
+	directInputTarget.mu.Lock()
+	env, class := directInputTarget.env, directInputTarget.class
+	moveFn := directInputTarget.moveFn
+	if env == 0 || class == 0 || moveFn == 0 || !directInputTarget.fallbackCaptured {
+		directInputTarget.mu.Unlock()
+		dropDirectEvent("pointer: no captured fallback target wired")
+		return false
+	}
+	// X11's relative producer uses integer event coordinates, so non-finite
+	// values cannot arise in production. Reject a corrupt synthetic/source
+	// value rather than poison the cached pair and later normal mouse deltas.
+	if math.IsNaN(float64(dx)) || math.IsNaN(float64(dy)) ||
+		math.IsInf(float64(dx), 0) || math.IsInf(float64(dy), 0) {
+		directInputTarget.mu.Unlock()
+		dropDirectEvent("pointer: non-finite captured fallback delta")
+		return false
+	}
+	x := directInputTarget.fallbackX + dx
+	y := directInputTarget.fallbackY + dy
+	if math.IsInf(float64(x), 0) || math.IsInf(float64(y), 0) {
+		directInputTarget.mu.Unlock()
+		dropDirectEvent("pointer: captured fallback logical coordinate overflow")
+		return false
+	}
+	directInputTarget.fallbackX = x
+	directInputTarget.fallbackY = y
+	directInputTarget.havePointer = true
+	directInputTarget.lastX = x
+	directInputTarget.lastY = y
+	directInputTarget.mu.Unlock()
+	C.tipsy_direct_mouse_move(unsafe.Pointer(moveFn), C.uintptr_t(env), C.uintptr_t(class),
+		C.float(x), C.float(y), C.float(dx), C.float(dy))
+	atomic.AddUint64(&directInputStats.MoveDelivered, 1)
+	return true
+}
+
 const (
 	// Xorg's installed evdev XKB keycodes are the Linux evdev scan codes plus
 	// eight: for example, <ESC>=9 while KEY_ESC=1 and <AD01>=24 while
@@ -546,6 +743,9 @@ func testDirectRecordButtonFn() uintptr { return uintptr(C.tipsy_direct_record_b
 func testDirectRecordMoveFn() uintptr   { return uintptr(C.tipsy_direct_record_move_fn()) }
 func testDirectRecordWheelFn() uintptr  { return uintptr(C.tipsy_direct_record_wheel_fn()) }
 func testDirectRecordKeyFn() uintptr    { return uintptr(C.tipsy_direct_record_key_fn()) }
+func testDirectRecordMouseLockedFn() uintptr {
+	return uintptr(C.tipsy_direct_record_mouse_locked_fn())
+}
 func testDirectRecButtonID(i int) uintptr {
 	return uintptr(C.tipsy_direct_rec_button_id(C.int(i)))
 }
@@ -571,3 +771,12 @@ func testDirectRecKeyID(i int) uintptr {
 }
 func testDirectRecKeyInt(i int) int32 { return int32(C.tipsy_direct_rec_key_int(C.int(i))) }
 func testDirectRecReset()             { C.tipsy_direct_rec_reset() }
+func testDirectRecSetMouseLocked(locked bool) {
+	value := C.int(0)
+	if locked {
+		value = 1
+	}
+	C.tipsy_direct_rec_set_mouse_locked(value)
+}
+func testDirectRecButtonSequence() int { return int(C.tipsy_direct_rec_button_sequence_value()) }
+func testDirectRecLockSequence() int   { return int(C.tipsy_direct_rec_lock_sequence_value()) }
