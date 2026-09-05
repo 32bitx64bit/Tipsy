@@ -39,6 +39,7 @@ type mainWindow struct {
 	settingsFPSMode     *qt.QComboBox
 	settingsFPS         *qt.QSpinBox
 	settingsVSync       *qt.QCheckBox
+	settingsLowTexture  *qt.QCheckBox
 	settingsDisplay     *qt.QComboBox
 	settingsDisplayKeys []string
 	settingsSyncing     bool
@@ -155,7 +156,7 @@ func (w *mainWindow) buildShell() {
 	}{
 		{"Home", "Play Roblox and see installation status"},
 		{"Installation", "Install, update, or repair Roblox"},
-		{"Settings", "Renderer, frame-rate, VSync, and default-monitor settings"},
+		{"Settings", "Renderer, frame-rate, VSync, texture quality, and default-monitor settings"},
 		{"Diagnostics", "System readiness, paths, and logs"},
 	} {
 		button := qt.NewQPushButton3(item.text)
@@ -345,7 +346,7 @@ func (w *mainWindow) refreshSettingsProfile() {
 		return
 	}
 	profile := w.settings.View().Saved
-	w.settingsProfile.SetText(rendererDisplay(profile.Renderer) + " · " + fpsDisplay(profile) + " · " + vsyncDisplay(profile) + " · " + displayTargetDisplay(profile))
+	w.settingsProfile.SetText(settingsProfileText(profile))
 }
 
 func showAboutMessage(parent *qt.QWidget) {

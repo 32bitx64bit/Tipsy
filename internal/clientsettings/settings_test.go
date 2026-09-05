@@ -84,6 +84,54 @@ func TestDefaultsAndRestartSurvival(t *testing.T) {
 	}
 }
 
+func TestLowTextureModeDefaultsOffAndEmitsAllowlistedOverrides(t *testing.T) {
+	s := testService(t)
+	writeXML(t, s, "-1")
+	if err := os.MkdirAll(filepath.Dir(s.Path), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	old := []byte(`{"renderer":"auto","frameRate":{"mode":"auto"}}`)
+	if err := os.WriteFile(s.Path, old, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := s.Load(context.Background())
+	if err != nil || got.LowTextureMode {
+		t.Fatalf("old config migration=%+v err=%v", got, err)
+	}
+	unchanged, err := os.ReadFile(s.Path)
+	if err != nil || !bytes.Equal(unchanged, old) {
+		t.Fatalf("load rewrote old config=%q err=%v", unchanged, err)
+	}
+
+	high, err := Overrides(got)
+	if err != nil || high[flagTextureQualityOverrideEnabled] != "True" || high[intTextureQualityOverride] != textureQualityHigh {
+		t.Fatalf("default high texture overrides=%v err=%v", high, err)
+	}
+
+	got.LowTextureMode = true
+	result, err := s.Apply(context.Background(), got)
+	if err != nil || !result.RestartRequired || !result.Settings.LowTextureMode {
+		t.Fatalf("enable low texture mode result=%+v err=%v", result, err)
+	}
+	reloaded, err := s.Load(context.Background())
+	if err != nil || !reloaded.LowTextureMode {
+		t.Fatalf("reloaded LowTextureMode=%+v err=%v", reloaded, err)
+	}
+	low, err := Overrides(reloaded)
+	if err != nil || low[flagTextureQualityOverrideEnabled] != "True" || low[intTextureQualityOverride] != textureQualityLow {
+		t.Fatalf("low texture overrides=%v err=%v", low, err)
+	}
+	reset, err := s.Reset(context.Background())
+	if err != nil || reset.LowTextureMode || reset != Default() {
+		t.Fatalf("reset LowTextureMode=%+v err=%v", reset, err)
+	}
+	restored, err := Overrides(reset)
+	if err != nil || restored[intTextureQualityOverride] != textureQualityHigh {
+		t.Fatalf("reset texture overrides=%v err=%v", restored, err)
+	}
+}
+
 func TestVSyncDefaultsOffAndMigratesExistingSettings(t *testing.T) {
 	s := testService(t)
 	writeXML(t, s, "-1")
@@ -280,6 +328,9 @@ func TestRendererOverridesAndVulkanAvailability(t *testing.T) {
 	if err != nil || got[flagPreferOpenGL] != "True" {
 		t.Fatalf("OpenGL overrides=%v err=%v", got, err)
 	}
+	if got[flagTextureQualityOverrideEnabled] != "True" || got[intTextureQualityOverride] != textureQualityHigh {
+		t.Fatalf("OpenGL high texture overrides=%v", got)
+	}
 	if got[flagGameBasicSettingsFramerateCap] != "True" ||
 		got[flagTaskSchedulerLimitFPS240] != "False" {
 		t.Fatalf("unlimited FPS overrides=%v", got)
@@ -304,6 +355,9 @@ func TestRendererOverridesAndVulkanAvailability(t *testing.T) {
 	if auto[flagGameBasicSettingsFramerateCap] != "True" {
 		t.Fatalf("auto overrides=%v", auto)
 	}
+	if auto[flagTextureQualityOverrideEnabled] != "True" || auto[intTextureQualityOverride] != textureQualityHigh {
+		t.Fatalf("default high texture overrides=%v", auto)
+	}
 	if _, ok := auto[intTaskSchedulerTargetFPS]; ok {
 		t.Fatalf("auto must preserve scheduler target ownership: %v", auto)
 	}
@@ -317,8 +371,16 @@ func TestRendererOverridesAndVulkanAvailability(t *testing.T) {
 	if _, ok := auto[flagPreferOpenGL]; ok {
 		t.Fatalf("auto must not emit PreferOpenGL: %v", auto)
 	}
-	if !caps.Vulkan.Available && len(auto) != 1 {
-		t.Fatalf("auto overrides=%v err=%v", auto, err)
+	wantAutoLen := 3 // framerate-cap gate + two texture-quality flags
+	if caps.Vulkan.Available {
+		wantAutoLen++
+	}
+	if len(auto) != wantAutoLen {
+		t.Fatalf("auto overrides=%v want %d keys err=%v", auto, wantAutoLen, err)
+	}
+	low, err := Overrides(Settings{Renderer: RendererAuto, FrameRate: FrameRate{Mode: FrameRateAuto}, LowTextureMode: true})
+	if err != nil || low[flagTextureQualityOverrideEnabled] != "True" || low[intTextureQualityOverride] != textureQualityLow {
+		t.Fatalf("low texture overrides=%v err=%v", low, err)
 	}
 	withVSync, err := Overrides(Settings{Renderer: RendererAuto, FrameRate: FrameRate{Mode: FrameRateUnlimited}, VSync: true})
 	if err != nil || withVSync[flagTaskSchedulerLimitFPS240] != "False" ||

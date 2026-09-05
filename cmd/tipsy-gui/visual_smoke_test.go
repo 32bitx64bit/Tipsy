@@ -61,6 +61,12 @@ func TestOffscreenVisualProof(t *testing.T) {
 	if win.settingsVSync == nil || win.settingsVSync.IsChecked() || win.settingsVSync.AccessibleName() != "VSync" {
 		t.Fatalf("VSync control did not render unchecked and accessible: %#v", win.settingsVSync)
 	}
+	if win.settingsLowTexture == nil || win.settingsLowTexture.IsChecked() || win.settingsLowTexture.AccessibleName() != "Low texture mode" {
+		t.Fatalf("Low texture mode control did not render unchecked and accessible: %#v", win.settingsLowTexture)
+	}
+	if description := win.settingsLowTexture.AccessibleDescription(); !strings.Contains(strings.ToLower(description), "memory") || !strings.Contains(description, "VRAM") {
+		t.Fatalf("Low texture mode accessibility copy is not honest: %q", description)
+	}
 	if win.settingsDisplay == nil || win.settingsDisplay.AccessibleName() != "Default monitor" || win.settingsDisplay.CurrentIndex() != 0 {
 		t.Fatalf("default monitor control did not render on the main monitor: %#v", win.settingsDisplay)
 	}
@@ -69,6 +75,9 @@ func TestOffscreenVisualProof(t *testing.T) {
 	}
 	if got := win.settingsVSync.Text(); got != vsyncToggleText(false) {
 		t.Fatalf("unchecked VSync state text=%q, want %q", got, vsyncToggleText(false))
+	}
+	if got := win.settingsLowTexture.Text(); got != lowTextureToggleText(false) {
+		t.Fatalf("unchecked low texture state text=%q, want %q", got, lowTextureToggleText(false))
 	}
 	if description := win.settingsFPSMode.AccessibleDescription(); !strings.Contains(description, "experimental uncapped request") || !strings.Contains(description, "no frame rate is guaranteed") {
 		t.Fatalf("Unlimited accessibility copy is not honest: %q", description)
@@ -144,8 +153,8 @@ func TestOffscreenVisualProof(t *testing.T) {
 		t.Fatalf("Unlimited state copy=%q limitEnabled=%v", win.settingsHint.Text(), win.settingsFPS.IsEnabled())
 	}
 	compactSettings := win.win.Grab()
-	if compactSettings.IsNull() || !win.settingsVSync.IsVisible() {
-		t.Fatal("compact settings page did not keep the VSync control in the scrollable layout")
+	if compactSettings.IsNull() || !win.settingsVSync.IsVisible() || !win.settingsLowTexture.IsVisible() {
+		t.Fatal("compact settings page did not keep the VSync and low-texture controls in the scrollable layout")
 	}
 	if path := os.Getenv("TIPSY_GUI_SCREENSHOT"); path != "" {
 		ext := filepath.Ext(path)

@@ -84,7 +84,7 @@ func (w *mainWindow) buildHomePage() *qt.QWidget {
 	settingsCard, settingsLayout := newVerticalCard("card")
 	settingsLayout.AddWidget(sectionLabel("Graphics profile").QWidget)
 	profile := w.settings.View().Draft
-	profileText := rendererDisplay(profile.Renderer) + " · " + fpsDisplay(profile) + " · " + vsyncDisplay(profile) + " · " + displayTargetDisplay(profile)
+	profileText := settingsProfileText(profile)
 	w.settingsProfile = qt.NewQLabel3(profileText)
 	setObjectName(w.settingsProfile.QObject, "metricValueSmall")
 	w.settingsProfile.SetWordWrap(true)
@@ -95,7 +95,7 @@ func (w *mainWindow) buildHomePage() *qt.QWidget {
 	settingsLayout.AddWidget(note.QWidget)
 	openSettings := qt.NewQPushButton3("Open settings")
 	setObjectName(openSettings.QObject, "secondaryButton")
-	openSettings.SetAccessibleDescription("Open renderer, frame-rate, VSync, and default-monitor settings")
+	openSettings.SetAccessibleDescription("Open renderer, frame-rate, VSync, texture quality, and default-monitor settings")
 	openSettings.OnClicked(func() { w.selectPage(2) })
 	settingsLayout.AddWidget(openSettings.QWidget)
 	rowLayout.AddWidget2(settingsCard.QWidget, 0, 1)
@@ -235,6 +235,13 @@ func (w *mainWindow) buildSettingsPage() *qt.QWidget {
 	w.settingsVSync.SetToolTip("Disabled by default. Enable to synchronize presentation to the active monitor refresh rate; this is independent of the frame-rate cap.")
 	form.AddRow3("VSync", w.settingsVSync.QWidget)
 
+	w.settingsLowTexture = qt.NewQCheckBox3(lowTextureToggleText(false))
+	setObjectName(w.settingsLowTexture.QObject, "vsyncToggle")
+	w.settingsLowTexture.SetAccessibleName("Low texture mode")
+	w.settingsLowTexture.SetAccessibleDescription("Uses lower-resolution textures to save memory and VRAM. Disabled by default so Roblox loads high-quality textures.")
+	w.settingsLowTexture.SetToolTip("Off by default (high-quality textures). Enable to use lower-resolution textures and save memory/VRAM. Changing this requires a Roblox restart.")
+	form.AddRow3("Low texture mode", w.settingsLowTexture.QWidget)
+
 	w.settingsDisplay = qt.NewQComboBox2()
 	w.settingsDisplay.SetAccessibleName("Default monitor")
 	w.settingsDisplay.SetAccessibleDescription("Choose the monitor Tipsy uses for the launcher and Roblox windows. Main monitor is the default. Follow mouse restores window-manager placement from the pointer.")
@@ -243,7 +250,7 @@ func (w *mainWindow) buildSettingsPage() *qt.QWidget {
 	form.AddRow3("Default monitor", w.settingsDisplay.QWidget)
 	cardLayout.AddLayout(form.QLayout)
 
-	w.settingsHint = qt.NewQLabel3("Roblox must be restarted before renderer, frame-rate, or VSync changes take effect. The default monitor applies to the next Tipsy or Roblox window.")
+	w.settingsHint = qt.NewQLabel3("Roblox must be restarted before renderer, frame-rate, VSync, or texture quality changes take effect. The default monitor applies to the next Tipsy or Roblox window.")
 	w.settingsHint.SetWordWrap(true)
 	setObjectName(w.settingsHint.QObject, "noticeInfo")
 	cardLayout.AddWidget(w.settingsHint.QWidget)
@@ -252,12 +259,12 @@ func (w *mainWindow) buildSettingsPage() *qt.QWidget {
 	actions.AddStretch()
 	w.settingsReset = qt.NewQPushButton3("Reset defaults")
 	setObjectName(w.settingsReset.QObject, "secondaryButton")
-	w.settingsReset.SetAccessibleDescription("Restore automatic renderer and frame-rate defaults with VSync disabled and windows on the main monitor")
+	w.settingsReset.SetAccessibleDescription("Restore automatic renderer and frame-rate defaults with VSync disabled, high-quality textures, and windows on the main monitor")
 	w.settingsReset.OnClicked(w.resetSettings)
 	actions.AddWidget(w.settingsReset.QWidget)
 	w.settingsApply = qt.NewQPushButton3("Apply changes")
 	setObjectName(w.settingsApply.QObject, "primaryButton")
-	w.settingsApply.SetAccessibleDescription("Save renderer, frame-rate, VSync, and default-monitor settings")
+	w.settingsApply.SetAccessibleDescription("Save renderer, frame-rate, VSync, texture quality, and default-monitor settings")
 	w.settingsApply.OnClicked(w.applySettings)
 	actions.AddWidget(w.settingsApply.QWidget)
 	cardLayout.AddLayout(actions.QLayout)
@@ -270,6 +277,7 @@ func (w *mainWindow) buildSettingsPage() *qt.QWidget {
 		w.settingsFPSMode.SetEnabled(false)
 		w.settingsFPS.SetEnabled(false)
 		w.settingsVSync.SetEnabled(false)
+		w.settingsLowTexture.SetEnabled(false)
 		w.settingsDisplay.SetEnabled(false)
 		w.settingsApply.SetEnabled(false)
 		w.settingsReset.SetEnabled(false)
@@ -283,13 +291,17 @@ func (w *mainWindow) buildSettingsPage() *qt.QWidget {
 			w.settingsVSync.SetText(vsyncToggleText(enabled))
 			w.settingsEdited()
 		})
+		w.settingsLowTexture.OnToggled(func(enabled bool) {
+			w.settingsLowTexture.SetText(lowTextureToggleText(enabled))
+			w.settingsEdited()
+		})
 		w.settingsDisplay.OnCurrentIndexChanged(func(int) { w.settingsEdited() })
 		w.updateSettingsControls()
 	}
 
 	limits, limitsLayout := newVerticalCard("subtleCard")
 	limitsLayout.AddWidget(sectionLabel("Graphics and performance notes").QWidget)
-	limitsText := qt.NewQLabel3("<b>Auto</b> leaves Roblox's frame-rate choice alone. <b>Limited</b> supports 30–240 FPS. <b>Unlimited</b> sends an experimental uncapped request. Actual FPS depends on the client, CPU, GPU, and driver; no particular frame rate is guaranteed. Higher rates can increase power use and instability.<br><br><b>VSync</b> is disabled by default and is independent of the frame-rate cap. Enabling it synchronizes presentation to the active monitor refresh rate. Leaving it disabled permits above-refresh presentation but can cause visible tearing.<br><br><b>Default monitor</b> pins the Tipsy launcher and Roblox windows to the current main display. Choose a named monitor to keep them there even if the desktop primary changes. <b>Follow mouse</b> restores the previous window-manager placement from the pointer.<br><br><b>Vulkan</b> is visible for future compatibility but disabled until Tipsy has a Vulkan bridge and a working host driver.")
+	limitsText := qt.NewQLabel3("<b>Auto</b> leaves Roblox's frame-rate choice alone. <b>Limited</b> supports 30–240 FPS. <b>Unlimited</b> sends an experimental uncapped request. Actual FPS depends on the client, CPU, GPU, and driver; no particular frame rate is guaranteed. Higher rates can increase power use and instability.<br><br><b>VSync</b> is disabled by default and is independent of the frame-rate cap. Enabling it synchronizes presentation to the active monitor refresh rate. Leaving it disabled permits above-refresh presentation but can cause visible tearing.<br><br><b>Low texture mode</b> is off by default so Roblox loads high-quality textures. Enable it to use lower-resolution textures and save memory/VRAM. Changing texture quality requires a Roblox restart.<br><br><b>Default monitor</b> pins the Tipsy launcher and Roblox windows to the current main display. Choose a named monitor to keep them there even if the desktop primary changes. <b>Follow mouse</b> restores the previous window-manager placement from the pointer.<br><br><b>Vulkan</b> is visible for future compatibility but disabled until Tipsy has a Vulkan bridge and a working host driver.")
 	limitsText.SetTextFormat(qt.RichText)
 	limitsText.SetWordWrap(true)
 	setObjectName(limitsText.QObject, "mutedText")
@@ -327,6 +339,8 @@ func (w *mainWindow) bindSettings(settings guimodel.Settings) {
 	}
 	w.settingsVSync.SetChecked(settings.VSync)
 	w.settingsVSync.SetText(vsyncToggleText(settings.VSync))
+	w.settingsLowTexture.SetChecked(settings.LowTextureMode)
+	w.settingsLowTexture.SetText(lowTextureToggleText(settings.LowTextureMode))
 	w.populateDisplayChoices(settings.Display)
 }
 
@@ -349,7 +363,7 @@ func (w *mainWindow) populateDisplayChoices(selected string) {
 }
 
 func (w *mainWindow) settingsEdited() {
-	if w.settingsRenderer == nil || w.settingsSyncing {
+	if w.settingsRenderer == nil || w.settingsVSync == nil || w.settingsLowTexture == nil || w.settingsSyncing {
 		return
 	}
 	renderer := guimodel.RendererAuto
@@ -371,7 +385,7 @@ func (w *mainWindow) settingsEdited() {
 			display = w.settingsDisplayKeys[idx]
 		}
 	}
-	w.settings.Edit(guimodel.Settings{Renderer: renderer, FPSMode: fpsMode, FrameRate: w.settingsFPS.Value(), VSync: w.settingsVSync.IsChecked(), Display: display})
+	w.settings.Edit(guimodel.Settings{Renderer: renderer, FPSMode: fpsMode, FrameRate: w.settingsFPS.Value(), VSync: w.settingsVSync.IsChecked(), LowTextureMode: w.settingsLowTexture.IsChecked(), Display: display})
 	w.updateSettingsControls()
 }
 
@@ -403,7 +417,7 @@ func (w *mainWindow) updateSettingsControls() {
 		w.settingsHint.SetText("Changes saved. Restart Roblox to apply them.")
 		setObjectName(w.settingsHint.QObject, "noticeSuccess")
 	} else {
-		w.settingsHint.SetText("Roblox must be restarted before renderer, frame-rate, or VSync changes take effect. The default monitor applies to the next Tipsy or Roblox window.")
+		w.settingsHint.SetText("Roblox must be restarted before renderer, frame-rate, VSync, or texture quality changes take effect. The default monitor applies to the next Tipsy or Roblox window.")
 		setObjectName(w.settingsHint.QObject, "noticeInfo")
 	}
 	refreshStyle(w.settingsHint.QWidget)
@@ -567,6 +581,10 @@ func (w *mainWindow) runDoctor() {
 	w.status.ShowMessage2("System checks complete.", 5000)
 }
 
+func settingsProfileText(settings guimodel.Settings) string {
+	return rendererDisplay(settings.Renderer) + " · " + fpsDisplay(settings) + " · " + vsyncDisplay(settings) + " · " + textureDisplay(settings) + " · " + displayTargetDisplay(settings)
+}
+
 func rendererDisplay(renderer guimodel.Renderer) string {
 	switch renderer {
 	case guimodel.RendererOpenGL:
@@ -612,6 +630,20 @@ func vsyncToggleText(enabled bool) string {
 		return "✓ VSync enabled — presentation follows the active monitor refresh rate"
 	}
 	return "VSync off — presentation is not synchronized to the monitor refresh rate"
+}
+
+func textureDisplay(settings guimodel.Settings) string {
+	if settings.LowTextureMode {
+		return "Low textures"
+	}
+	return "High textures"
+}
+
+func lowTextureToggleText(enabled bool) string {
+	if enabled {
+		return "✓ Low texture mode — lower-resolution textures to save memory and VRAM"
+	}
+	return "High-quality textures — default; uses more memory and VRAM"
 }
 
 func displayTargetDisplay(settings guimodel.Settings) string {

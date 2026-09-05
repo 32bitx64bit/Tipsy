@@ -38,6 +38,13 @@ const (
 	flagGameBasicSettingsFramerateCap = "FFlagGameBasicSettingsFramerateCap5"
 	flagTaskSchedulerLimitFPS240      = "FFlagTaskSchedulerLimitTargetFpsTo2402"
 	intTaskSchedulerTargetFPS         = "DFIntTaskSchedulerTargetFps"
+	// Official allowlisted ClientAppSettings keys. Android Roblox otherwise
+	// loads mobile-phone texture quality. 3 is high; 1 is the documented
+	// memory-saving low (not last-resort 0).
+	flagTextureQualityOverrideEnabled = "DFFlagTextureQualityOverrideEnabled"
+	intTextureQualityOverride         = "DFIntTextureQualityOverride"
+	textureQualityHigh                = "3"
+	textureQualityLow                 = "1"
 
 	maxSettingsBytes  = 64 << 10
 	maxRobloxXMLBytes = 4 << 20
@@ -113,6 +120,10 @@ type Settings struct {
 	Renderer  Renderer  `json:"renderer"`
 	FrameRate FrameRate `json:"frameRate"`
 	VSync     bool      `json:"vsync"`
+	// LowTextureMode requests Roblox's documented memory-saving texture
+	// quality (override 1). The zero value / missing JSON field is false, so
+	// existing configs and Default() emit high quality (override 3).
+	LowTextureMode bool `json:"lowTextureMode"`
 	// Display selects where Tipsy maps the launcher and Roblox windows.
 	// "primary" (default) pins them to the current main monitor, "pointer"
 	// restores window-manager mouse placement, and any other value is an
@@ -301,7 +312,7 @@ func (s *Service) applyLocked(ctx context.Context, wanted Settings) (ApplyResult
 		note = "Roblox has not created GlobalBasicSettings_13.xml yet; the choice is saved and will be applied on a later launch."
 	}
 
-	graphicsChanged := oldDoc.Renderer != wanted.Renderer || oldDoc.FrameRate != wanted.FrameRate || oldDoc.VSync != wanted.VSync
+	graphicsChanged := oldDoc.Renderer != wanted.Renderer || oldDoc.FrameRate != wanted.FrameRate || oldDoc.VSync != wanted.VSync || oldDoc.LowTextureMode != wanted.LowTextureMode
 	placementChanged := oldDoc.Display != wanted.Display
 	docChanged := oldDoc != newDoc
 	if xmlChanged {
@@ -349,18 +360,27 @@ func (s *Service) Reset(ctx context.Context) (Settings, error) {
 	return want, err
 }
 
-// Overrides converts renderer and FPS choices into Roblox ClientAppSettings
-// strings. The feature gate exposes the current client's official
-// GameBasicSettings frame-rate surface. Limited mode sets the current client's
-// legacy scheduler target; Unlimited opts out of the current 240 limiter and
-// keeps its high finite target in GlobalBasicSettings_13.xml. Automatic mode
-// deliberately leaves both controls under downloaded-policy/client ownership.
+// Overrides converts renderer, FPS, and texture-quality choices into Roblox
+// ClientAppSettings strings. The feature gate exposes the current client's
+// official GameBasicSettings frame-rate surface. Limited mode sets the current
+// client's legacy scheduler target; Unlimited opts out of the current 240
+// limiter and keeps its high finite target in GlobalBasicSettings_13.xml.
+// Automatic mode deliberately leaves both FPS controls under
+// downloaded-policy/client ownership. Texture quality is always overridden:
+// high (3) by default, or low (1) when LowTextureMode is on.
 func Overrides(s Settings) (map[string]any, error) {
 	s = normalized(s)
 	if err := s.Validate(); err != nil {
 		return nil, err
 	}
-	out := map[string]any{flagGameBasicSettingsFramerateCap: "True"}
+	out := map[string]any{
+		flagGameBasicSettingsFramerateCap: "True",
+		flagTextureQualityOverrideEnabled: "True",
+		intTextureQualityOverride:         textureQualityHigh,
+	}
+	if s.LowTextureMode {
+		out[intTextureQualityOverride] = textureQualityLow
+	}
 	switch s.Renderer {
 	case RendererOpenGL:
 		out[flagPreferOpenGL] = "True"

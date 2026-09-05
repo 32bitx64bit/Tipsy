@@ -23,6 +23,32 @@ func TestAutomaticExplanationSurfacesProviderVerification(t *testing.T) {
 	}
 }
 
+func TestLowTextureModeSettingsAdapterRoundTrip(t *testing.T) {
+	backend := clientsettings.Settings{
+		Renderer:       clientsettings.RendererOpenGL,
+		FrameRate:      clientsettings.FrameRate{Mode: clientsettings.FrameRateLimited, Limit: 144},
+		LowTextureMode: true,
+		Display:        clientsettings.DisplayPrimary,
+	}
+	gui := guiSettings(backend)
+	if !gui.LowTextureMode || gui.VSync || gui.Renderer != guimodel.RendererOpenGL || gui.FPSMode != guimodel.FPSLimited || gui.FrameRate != 144 {
+		t.Fatalf("backend to GUI settings=%+v", gui)
+	}
+	if got := backendSettings(gui); got != backend {
+		t.Fatalf("GUI round trip=%+v want=%+v", got, backend)
+	}
+}
+
+func TestLowTextureModeSettingsAdapterDefaultsOff(t *testing.T) {
+	gui := guiSettings(clientsettings.Default())
+	if gui.LowTextureMode {
+		t.Fatal("backend default rendered low texture mode")
+	}
+	if got := backendSettings(guimodel.DefaultSettings()); got.LowTextureMode {
+		t.Fatalf("GUI default persisted unexpected settings=%+v", got)
+	}
+}
+
 func TestVSyncSettingsAdapterRoundTrip(t *testing.T) {
 	backend := clientsettings.Settings{
 		Renderer:  clientsettings.RendererOpenGL,
@@ -44,7 +70,7 @@ func TestVSyncSettingsAdapterDefaultsOff(t *testing.T) {
 	if gui.VSync {
 		t.Fatal("backend default rendered VSync enabled")
 	}
-	if got := backendSettings(guimodel.DefaultSettings()); got.VSync || got.Display != clientsettings.DisplayPrimary {
+	if got := backendSettings(guimodel.DefaultSettings()); got.VSync || got.LowTextureMode || got.Display != clientsettings.DisplayPrimary {
 		t.Fatalf("GUI default persisted unexpected settings=%+v", got)
 	}
 }

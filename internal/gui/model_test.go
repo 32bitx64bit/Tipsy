@@ -212,10 +212,38 @@ func TestSettingsBindingValidationApplyAndReset(t *testing.T) {
 	}
 }
 
+func TestLowTextureModeDefaultsOffAndResetsToHighQuality(t *testing.T) {
+	defaults := DefaultSettings()
+	if defaults.LowTextureMode {
+		t.Fatal("LowTextureMode defaulted on")
+	}
+	fake := &fakeService{settings: defaults}
+	model := NewSettingsModel(fake)
+	if err := model.Load(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+
+	view := model.Edit(Settings{Renderer: RendererAuto, FPSMode: FPSAuto, LowTextureMode: true})
+	if !view.Dirty || view.ValidationError != "" || view.Draft.FPSMode != FPSAuto || view.Draft.VSync {
+		t.Fatalf("independent low-texture edit view=%+v", view)
+	}
+	result, err := model.Apply(context.Background())
+	if err != nil || !result.RestartRequired || len(fake.applyCalls) != 1 || !fake.applyCalls[0].LowTextureMode {
+		t.Fatalf("LowTextureMode apply result=%+v err=%v calls=%+v", result, err, fake.applyCalls)
+	}
+	reset, err := model.Reset(context.Background())
+	if err != nil || reset.LowTextureMode || model.View().Dirty || !model.View().RestartRequired {
+		t.Fatalf("LowTextureMode reset=%+v err=%v view=%+v", reset, err, model.View())
+	}
+}
+
 func TestVSyncIsIndependentAndDefaultsOff(t *testing.T) {
 	defaults := DefaultSettings()
 	if defaults.VSync {
 		t.Fatal("VSync defaulted on")
+	}
+	if defaults.LowTextureMode {
+		t.Fatal("LowTextureMode defaulted on")
 	}
 	if defaults.Display != DisplayPrimary {
 		t.Fatalf("display defaulted to %q, want primary", defaults.Display)
