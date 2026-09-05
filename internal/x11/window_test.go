@@ -63,6 +63,88 @@ func TestEmbeddedWindowIcon(t *testing.T) {
 	}
 }
 
+func TestOpenPlacesOnPrimaryAndLeavesPointerUnforced(t *testing.T) {
+	ensureDisplay(t)
+	requireProbe(t)
+	outputs, err := ListOutputs()
+	if err != nil || len(outputs) == 0 {
+		t.Fatalf("ListOutputs: %v %#v", err, outputs)
+	}
+	const width, height = 64, 48
+	wantX, wantY, force := ResolvePlacement(DisplayPrimary, width, height, outputs)
+	if !force {
+		t.Fatal("primary placement was not forced on a live display")
+	}
+
+	primary, err := OpenOnDisplay("placement-primary", width, height, DisplayPrimary)
+	if err != nil {
+		if errors.Is(err, ErrUnavailable) || errors.Is(err, ErrNoDisplay) {
+			t.Skip(err)
+		}
+		t.Fatalf("OpenOnDisplay primary: %v", err)
+	}
+	defer primary.Close()
+	target, ok := pickOutput(DisplayPrimary, outputs)
+	if !ok {
+		t.Fatal("no primary output")
+	}
+	x, y, err := waitRootOriginOnOutput(t, primary, target)
+	if err != nil {
+		t.Fatalf("primary origin: %v", err)
+	}
+	if x11probe.WindowManagerPresent() {
+		if x < target.X || y < target.Y || x >= target.X+target.Width || y >= target.Y+target.Height {
+			t.Fatalf("primary origin = (%d,%d) is outside %+v", x, y, target)
+		}
+	} else if x != wantX || y != wantY {
+		t.Fatalf("primary origin = (%d,%d), want (%d,%d) on %+v", x, y, wantX, wantY, outputs)
+	}
+
+	pointer, err := OpenOnDisplay("placement-pointer", width, height, DisplayPointer)
+	if err != nil {
+		t.Fatalf("OpenOnDisplay pointer: %v", err)
+	}
+	defer pointer.Close()
+	x, y, err = waitRootOrigin(t, pointer)
+	if err != nil {
+		t.Fatalf("pointer origin: %v", err)
+	}
+	if !x11probe.WindowManagerPresent() && (x != 0 || y != 0) {
+		t.Fatalf("pointer origin = (%d,%d), want unforced (0,0) on a bare X server", x, y)
+	}
+}
+
+func waitRootOrigin(t *testing.T, w *Window) (int, int, error) {
+	t.Helper()
+	return waitRootOriginOnOutput(t, w, Output{})
+}
+
+func waitRootOriginOnOutput(t *testing.T, w *Window, out Output) (int, int, error) {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Second)
+	var lastX, lastY int
+	var last error
+	have := false
+	for time.Now().Before(deadline) {
+		x, y, err := x11probe.WindowRootOrigin(w.XID())
+		if err != nil {
+			last = err
+			time.Sleep(20 * time.Millisecond)
+			continue
+		}
+		lastX, lastY, last, have = x, y, nil, true
+		if out.Width <= 0 || out.Height <= 0 ||
+			(x >= out.X && y >= out.Y && x < out.X+out.Width && y < out.Y+out.Height) {
+			return x, y, nil
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	if !have {
+		return 0, 0, last
+	}
+	return lastX, lastY, nil
+}
+
 func TestRobloxWindowBrandingProperties(t *testing.T) {
 	ensureDisplay(t)
 	requireProbe(t)

@@ -9,10 +9,14 @@
 package x11probe
 
 /*
-#cgo pkg-config: x11
+#cgo pkg-config: x11 xrandr xtst
 #include <X11/Xlib.h>
 #include <X11/Xatom.h>
 #include <X11/Xutil.h>
+#include <X11/XKBlib.h>
+#include <X11/extensions/XTest.h>
+#include <X11/extensions/Xrandr.h>
+#include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
@@ -143,6 +147,19 @@ int probe_query_pointer(unsigned long xid, int *out_x, int *out_y) {
 	unsigned int mask = 0;
 	if (!XQueryPointer(probe_dpy, (Window)xid, &root, &child,
 		&root_x, &root_y, &x, &y, &mask)) return -2;
+	if (out_x != NULL) *out_x = x;
+	if (out_y != NULL) *out_y = y;
+	return 0;
+}
+
+int probe_window_root_origin(unsigned long xid, int *out_x, int *out_y) {
+	if (probe_dpy == NULL) return -1;
+	Window child = 0;
+	int x = 0, y = 0;
+	if (!XTranslateCoordinates(probe_dpy, (Window)xid,
+		DefaultRootWindow(probe_dpy), 0, 0, &x, &y, &child)) {
+		return -2;
+	}
 	if (out_x != NULL) *out_x = x;
 	if (out_y != NULL) *out_y = y;
 	return 0;
@@ -415,6 +432,18 @@ func PointerPosition(xid uintptr) (x, y int, err error) {
 	}
 	var px, py C.int
 	if C.probe_query_pointer(C.ulong(xid), &px, &py) != 0 {
+		return 0, 0, ErrProbe
+	}
+	return int(px), int(py), nil
+}
+
+// WindowRootOrigin returns the window's top-left corner in root coordinates.
+func WindowRootOrigin(xid uintptr) (x, y int, err error) {
+	if err = mustOpen(); err != nil {
+		return 0, 0, err
+	}
+	var px, py C.int
+	if C.probe_window_root_origin(C.ulong(xid), &px, &py) != 0 {
 		return 0, 0, ErrProbe
 	}
 	return int(px), int(py), nil

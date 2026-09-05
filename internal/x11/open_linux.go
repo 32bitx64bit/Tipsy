@@ -6,22 +6,25 @@
 package x11
 
 /*
-#cgo pkg-config: x11
+#cgo pkg-config: x11 xrandr
 #cgo LDFLAGS: -lX11 -pthread
 #cgo CFLAGS: -D_GNU_SOURCE
 
 #include <X11/Xlib.h>
 #include <X11/Xatom.h>
 #include <X11/Xutil.h>
+#include <X11/XKBlib.h>
+#include <X11/extensions/Xrandr.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <locale.h>
 #include <poll.h>
 #include <pthread.h>
+#include <stdio.h>
+#include <string.h>
 #include <stdatomic.h>
 #include <stdint.h>
 #include <stdlib.h>
-#include <string.h>
 #include <unistd.h>
 
 extern void GoX11_Notify(void);
@@ -83,10 +86,22 @@ static pthread_mutex_t tipsy_input_mu = PTHREAD_MUTEX_INITIALIZER;
 static pthread_mutex_t tipsy_event_mu = PTHREAD_MUTEX_INITIALIZER;
 // Coalesced Go wakeup: one cgo notify while a token is already pending.
 static atomic_int tipsy_go_wake_pending;
+// Like the input ring, invalidation is process-wide: Tipsy owns one Roblox
+// window. A second test window can only cause a conservative extra query.
+static _Atomic uint64_t tipsy_refresh_version = 1;
+
+uint64_t tipsy_x11_refresh_version(void) {
+	return atomic_load_explicit(&tipsy_refresh_version, memory_order_relaxed);
+}
+
 // Write end of the background pump's wakeup pipe, or -1. Other Xlib
 // callers nudge it so poll() cannot miss events already read into Xlib's
 // queue as a side effect of a reply (grab, unmap, fullscreen).
 static int tipsy_pump_nudge_fd = -1;
+// A graphics query can nudge concurrently with pump teardown. Protect the
+// descriptor through the nonblocking write and close to prevent writing to
+// an unrelated descriptor if the OS reuses its number.
+static pthread_mutex_t tipsy_pump_wake_mu = PTHREAD_MUTEX_INITIALIZER;
 
 static void tipsy_wake_go(void) {
 	if (atomic_exchange(&tipsy_go_wake_pending, 1) != 0) {
@@ -99,13 +114,14 @@ void tipsy_x11_wake_ack(void) {
 	atomic_store(&tipsy_go_wake_pending, 0);
 }
 
-static void tipsy_nudge_pump(void) {
+void tipsy_nudge_pump(void) {
+	pthread_mutex_lock(&tipsy_pump_wake_mu);
 	int fd = tipsy_pump_nudge_fd;
-	if (fd < 0) {
-		return;
+	if (fd >= 0) {
+		char one = 1;
+		(void)write(fd, &one, 1);
 	}
-	char one = 1;
-	(void)write(fd, &one, 1);
+	pthread_mutex_unlock(&tipsy_pump_wake_mu);
 }
 
 struct tipsy_pointer_capture {
@@ -563,14 +579,116 @@ static int tipsy_x11_request_fullscreen(uintptr_t dpy_ptr, Window win, int enabl
 	return 0;
 }
 
+static void tipsy_x11_place_mapped(Display *dpy, Window win, int x, int y) {
+	XMoveWindow(dpy, win, x, y);
+	XEvent ev;
+	memset(&ev, 0, sizeof(ev));
+	ev.xclient.type = ClientMessage;
+	ev.xclient.display = dpy;
+	ev.xclient.window = win;
+	ev.xclient.message_type = XInternAtom(dpy, "_NET_MOVERESIZE_WINDOW", False);
+	ev.xclient.format = 32;
+	// NorthWest gravity, x and y present, application source.
+	ev.xclient.data.l[0] = NorthWestGravity | (1 << 8) | (1 << 9) | (1 << 12);
+	ev.xclient.data.l[1] = x;
+	ev.xclient.data.l[2] = y;
+	ev.xclient.data.l[3] = 0;
+	ev.xclient.data.l[4] = 0;
+	XSendEvent(dpy, DefaultRootWindow(dpy), False,
+		SubstructureRedirectMask | SubstructureNotifyMask, &ev);
+	XFlush(dpy);
+}
+
 static int tipsy_x11_toggle_fullscreen(Display *dpy, Window win) {
 	return tipsy_x11_request_fullscreen((uintptr_t)dpy, win,
 		!tipsy_x11_has_fullscreen(dpy, win));
 }
 
+typedef struct {
+	char name[128];
+	int x;
+	int y;
+	int width;
+	int height;
+	int primary;
+} tipsy_xrr_output;
+
+int tipsy_x11_list_outputs(tipsy_xrr_output *out, int max) {
+	if (out == NULL || max <= 0) {
+		return -1;
+	}
+	Display *dpy = XOpenDisplay(NULL);
+	if (dpy == NULL) {
+		return -1;
+	}
+	Window root = DefaultRootWindow(dpy);
+	int count = 0;
+	int event_base = 0, error_base = 0;
+	if (!XRRQueryExtension(dpy, &event_base, &error_base)) {
+		Screen *scr = DefaultScreenOfDisplay(dpy);
+		snprintf(out[0].name, sizeof(out[0].name), "screen");
+		out[0].x = 0;
+		out[0].y = 0;
+		out[0].width = WidthOfScreen(scr);
+		out[0].height = HeightOfScreen(scr);
+		out[0].primary = 1;
+		XCloseDisplay(dpy);
+		return 1;
+	}
+	XRRScreenResources *res = XRRGetScreenResourcesCurrent(dpy, root);
+	if (res == NULL) {
+		XCloseDisplay(dpy);
+		return 0;
+	}
+	RROutput primary = XRRGetOutputPrimary(dpy, root);
+	for (int i = 0; i < res->noutput && count < max; i++) {
+		XRROutputInfo *oi = XRRGetOutputInfo(dpy, res, res->outputs[i]);
+		if (oi == NULL) {
+			continue;
+		}
+		if (oi->connection != RR_Connected || oi->crtc == None) {
+			XRRFreeOutputInfo(oi);
+			continue;
+		}
+		XRRCrtcInfo *ci = XRRGetCrtcInfo(dpy, res, oi->crtc);
+		if (ci == NULL || ci->mode == None || ci->width == 0 || ci->height == 0) {
+			if (ci != NULL) {
+				XRRFreeCrtcInfo(ci);
+			}
+			XRRFreeOutputInfo(oi);
+			continue;
+		}
+		const char *name = oi->name != NULL ? oi->name : "output";
+		snprintf(out[count].name, sizeof(out[count].name), "%s", name);
+		out[count].x = ci->x;
+		out[count].y = ci->y;
+		out[count].width = (int)ci->width;
+		out[count].height = (int)ci->height;
+		out[count].primary = res->outputs[i] == primary ? 1 : 0;
+		count++;
+		XRRFreeCrtcInfo(ci);
+		XRRFreeOutputInfo(oi);
+	}
+	XRRFreeScreenResources(res);
+	if (count == 0) {
+		Screen *scr = DefaultScreenOfDisplay(dpy);
+		snprintf(out[0].name, sizeof(out[0].name), "screen");
+		out[0].x = 0;
+		out[0].y = 0;
+		out[0].width = WidthOfScreen(scr);
+		out[0].height = HeightOfScreen(scr);
+		out[0].primary = 1;
+		count = 1;
+	}
+	XCloseDisplay(dpy);
+	return count;
+}
+
 int tipsy_x11_open(const char *title, int width, int height,
+	int place_x, int place_y, int use_position,
 	const unsigned long *icon, int icon_len,
-	uintptr_t *out_dpy, unsigned long *out_xid, unsigned long *out_delete) {
+	uintptr_t *out_dpy, unsigned long *out_xid, unsigned long *out_delete,
+	int *out_randr_event_base) {
 	tipsy_x11_once();
 	tipsy_x_error_code = 0;
 	tipsy_x_io_error = 0;
@@ -582,10 +700,28 @@ int tipsy_x11_open(const char *title, int width, int height,
 		return -1;
 	}
 	XSetIOErrorExitHandler(dpy, tipsy_xioexit, NULL);
+	// Per-client XKB option: a held key produces repeated KeyPress events
+	// and one physical KeyRelease. Servers without it use the pair fallback
+	// in the pump; this does not change the desktop's autorepeat settings.
+	Bool repeat_supported = False;
+	XkbSetDetectableAutoRepeat(dpy, True, &repeat_supported);
 
 	int screen = DefaultScreen(dpy);
 	Window root = RootWindow(dpy, screen);
 	unsigned long black = BlackPixel(dpy, screen);
+	*out_randr_event_base = 0;
+	int randr_error_base = 0;
+	if (XRRQueryExtension(dpy, out_randr_event_base, &randr_error_base)) {
+		// Root events cover mode/rate changes, CRTC reassignment, hotplug,
+		// and output properties; ConfigureNotify below covers window moves.
+		int mask = RRScreenChangeNotifyMask | RRCrtcChangeNotifyMask |
+			RROutputChangeNotifyMask | RROutputPropertyNotifyMask;
+#ifdef RRResourceChangeNotifyMask
+		mask |= RRResourceChangeNotifyMask;
+#endif
+		XRRSelectInput(dpy, root, mask);
+	}
+	atomic_fetch_add_explicit(&tipsy_refresh_version, 1, memory_order_relaxed);
 
 	XSetWindowAttributes swa;
 	memset(&swa, 0, sizeof(swa));
@@ -596,8 +732,13 @@ int tipsy_x11_open(const char *title, int width, int height,
 		FocusChangeMask | KeyPressMask | KeyReleaseMask |
 		ButtonPressMask | ButtonReleaseMask | PointerMotionMask;
 
+	int create_x = 0, create_y = 0;
+	if (use_position) {
+		create_x = place_x;
+		create_y = place_y;
+	}
 	Window win = XCreateWindow(dpy, root,
-		0, 0, (unsigned)width, (unsigned)height, 0,
+		create_x, create_y, (unsigned)width, (unsigned)height, 0,
 		CopyFromParent, InputOutput, CopyFromParent,
 		CWBackPixel | CWBorderPixel | CWColormap | CWEventMask, &swa);
 	if (win == 0) {
@@ -632,6 +773,11 @@ int tipsy_x11_open(const char *title, int width, int height,
 		sh->height = height;
 		sh->min_width = 1;
 		sh->min_height = 1;
+		if (use_position) {
+			sh->flags |= USPosition | PPosition;
+			sh->x = create_x;
+			sh->y = create_y;
+		}
 		XSetWMNormalHints(dpy, win, sh);
 		XFree(sh);
 	}
@@ -652,6 +798,18 @@ int tipsy_x11_open(const char *title, int width, int height,
 	}
 
 	XMapWindow(dpy, win);
+	if (use_position) {
+		XEvent mapped;
+		memset(&mapped, 0, sizeof(mapped));
+		for (int i = 0; i < 50; i++) {
+			if (XCheckTypedWindowEvent(dpy, win, MapNotify, &mapped)) {
+				break;
+			}
+			XSync(dpy, False);
+			usleep(10000);
+		}
+		tipsy_x11_place_mapped(dpy, win, create_x, create_y);
+	}
 	// Take focus immediately (bare X servers have no WM to route it);
 	// failures (not yet viewable) are swallowed by the error handler.
 	XSetInputFocus(dpy, win, RevertToParent, CurrentTime);
@@ -703,7 +861,7 @@ void tipsy_x11_restore_cursor(uintptr_t dpy_ptr, unsigned long xid, unsigned lon
 }
 
 int tipsy_x11_pump(uintptr_t dpy_ptr, unsigned long xid, unsigned long wm_delete,
-	int *inout_w, int *inout_h, int *out_closed) {
+	int randr_event_base, int *inout_w, int *inout_h, int *out_closed) {
 	Display *dpy = (Display *)dpy_ptr;
 	if (dpy == NULL || tipsy_x_io_error) {
 		return -1;
@@ -948,6 +1106,7 @@ struct tipsy_pump {
 	uintptr_t dpy;
 	unsigned long xid;
 	unsigned long del;
+	int randr_event_base;
 	int w;
 	int h;
 	volatile int run;
@@ -1011,7 +1170,7 @@ static void *tipsy_pump_main(void *arg) {
 			break;
 		}
 		int closed = 0;
-		if (tipsy_x11_pump(p->dpy, p->xid, p->del, &p->w, &p->h, &closed) != 0 || closed) {
+		if (tipsy_x11_pump(p->dpy, p->xid, p->del, p->randr_event_base, &p->w, &p->h, &closed) != 0 || closed) {
 			p->closed = 1;
 			tipsy_wake_go();
 			break;
@@ -1021,7 +1180,7 @@ static void *tipsy_pump_main(void *arg) {
 }
 
 uintptr_t tipsy_x11_pump_thread_start(uintptr_t dpy, unsigned long xid,
-	unsigned long del, int w, int h) {
+	unsigned long del, int randr_event_base, int w, int h) {
 	struct tipsy_pump *p = (struct tipsy_pump *)calloc(1, sizeof(*p));
 	if (p == NULL) {
 		return 0;
@@ -1029,6 +1188,7 @@ uintptr_t tipsy_x11_pump_thread_start(uintptr_t dpy, unsigned long xid,
 	p->dpy = dpy;
 	p->xid = xid;
 	p->del = del;
+	p->randr_event_base = randr_event_base;
 	p->w = w;
 	p->h = h;
 	p->run = 1;
@@ -1051,11 +1211,15 @@ uintptr_t tipsy_x11_pump_thread_start(uintptr_t dpy, unsigned long xid,
 	}
 	p->wake_r = fds[0];
 	p->wake_w = fds[1];
+	pthread_mutex_lock(&tipsy_pump_wake_mu);
 	tipsy_pump_nudge_fd = p->wake_w;
+	pthread_mutex_unlock(&tipsy_pump_wake_mu);
 	if (pthread_create(&p->thr, NULL, tipsy_pump_main, p) != 0) {
+		pthread_mutex_lock(&tipsy_pump_wake_mu);
 		tipsy_pump_nudge_fd = -1;
 		close(p->wake_r);
 		close(p->wake_w);
+		pthread_mutex_unlock(&tipsy_pump_wake_mu);
 		free(p);
 		return 0;
 	}
@@ -1073,6 +1237,7 @@ void tipsy_x11_pump_thread_stop(uintptr_t ptr, int *out_w, int *out_h, int *out_
 		(void)write(p->wake_w, &one, 1);
 	}
 	pthread_join(p->thr, NULL);
+	pthread_mutex_lock(&tipsy_pump_wake_mu);
 	tipsy_pump_nudge_fd = -1;
 	if (p->wake_r >= 0) {
 		close(p->wake_r);
@@ -1080,6 +1245,7 @@ void tipsy_x11_pump_thread_stop(uintptr_t ptr, int *out_w, int *out_h, int *out_
 	if (p->wake_w >= 0) {
 		close(p->wake_w);
 	}
+	pthread_mutex_unlock(&tipsy_pump_wake_mu);
 	if (out_w != NULL) {
 		*out_w = p->w;
 	}
@@ -1139,17 +1305,56 @@ import (
 	"github.com/tipsy-linux/tipsy/internal/logging"
 )
 
+const maxListedOutputs = 32
+
 // TIPSYInputRingLen mirrors the C input ring capacity. The ring is
 // process-wide; Tipsy owns one Roblox window per process.
 const TIPSYInputRingLen = 256
 
+// ListOutputs reports connected XRandR outputs on the current DISPLAY.
+func ListOutputs() ([]Output, error) {
+	var raw [maxListedOutputs]C.tipsy_xrr_output
+	n := int(C.tipsy_x11_list_outputs(&raw[0], C.int(len(raw))))
+	if n < 0 {
+		return nil, fmt.Errorf("%w (DISPLAY=%q)", ErrNoDisplay, os.Getenv("DISPLAY"))
+	}
+	out := make([]Output, 0, n)
+	for i := 0; i < n; i++ {
+		out = append(out, Output{
+			Name:    C.GoString(&raw[i].name[0]),
+			X:       int(raw[i].x),
+			Y:       int(raw[i].y),
+			Width:   int(raw[i].width),
+			Height:  int(raw[i].height),
+			Primary: raw[i].primary != 0,
+		})
+	}
+	return out, nil
+}
+
 // Open creates a mapped InputOutput window on the native X11 display.
+// Placement is left to the window manager (typically the pointer) unless
+// OpenOnDisplay is used with a target monitor.
 func Open(title string, width, height int) (*Window, error) {
+	return OpenOnDisplay(title, width, height, DisplayPointer)
+}
+
+// OpenOnDisplay creates a mapped InputOutput window. display is "primary"
+// (default), "pointer" for window-manager mouse placement, or an output name.
+func OpenOnDisplay(title string, width, height int, display string) (*Window, error) {
 	if width < 1 || height < 1 {
 		return nil, ErrInvalidSize
 	}
 	if title == "Roblox" {
 		title = RobloxWindowTitle
+	}
+	placeX, placeY, usePosition := 0, 0, 0
+	outputs, err := ListOutputs()
+	if err == nil {
+		x, y, force := ResolvePlacement(display, width, height, outputs)
+		if force {
+			placeX, placeY, usePosition = x, y, 1
+		}
 	}
 	ctitle := C.CString(title)
 	defer C.free(unsafe.Pointer(ctitle))
@@ -1168,17 +1373,21 @@ func Open(title string, width, height int) (*Window, error) {
 
 	var dpy C.uintptr_t
 	var xid, del C.ulong
-	rc := C.tipsy_x11_open(ctitle, C.int(width), C.int(height), iconPtr, C.int(len(icon)), &dpy, &xid, &del)
+	var randrEventBase C.int
+	rc := C.tipsy_x11_open(ctitle, C.int(width), C.int(height),
+		C.int(placeX), C.int(placeY), C.int(usePosition),
+		iconPtr, C.int(len(icon)), &dpy, &xid, &del, &randrEventBase)
 	if rc != 0 || dpy == 0 || xid == 0 {
 		return nil, fmt.Errorf("%w (DISPLAY=%q)", ErrNoDisplay, os.Getenv("DISPLAY"))
 	}
 
 	w := &Window{
-		display:  uintptr(dpy),
-		xid:      uintptr(xid),
-		wmDelete: uintptr(del),
-		width:    width,
-		height:   height,
+		display:        uintptr(dpy),
+		xid:            uintptr(xid),
+		wmDelete:       uintptr(del),
+		randrEventBase: int(randrEventBase),
+		width:          width,
+		height:         height,
 	}
 	setActiveWindow(w)
 	// Roblox renders its own cursor. This transparent cursor is scoped to the
@@ -1189,7 +1398,9 @@ func Open(title string, width, height int) (*Window, error) {
 	}
 	_ = w.Pump()
 	logging.Logger(logging.CatX11).Info("opened X11 window",
-		"title", title, "width", w.width, "height", w.height, "xid", w.xid)
+		"title", title, "width", w.width, "height", w.height, "xid", w.xid,
+		"display", normalizeDisplay(display), "placeX", placeX, "placeY", placeY,
+		"forced", usePosition != 0)
 	return w, nil
 }
 
@@ -1271,7 +1482,7 @@ func (w *Window) Pump() error {
 	if w.pump == 0 {
 		cw := C.int(w.width)
 		ch := C.int(w.height)
-		rc := C.tipsy_x11_pump(C.uintptr_t(w.display), C.ulong(w.xid), C.ulong(w.wmDelete), &cw, &ch, &closed)
+		rc := C.tipsy_x11_pump(C.uintptr_t(w.display), C.ulong(w.xid), C.ulong(w.wmDelete), C.int(w.randrEventBase), &cw, &ch, &closed)
 		w.width = int(cw)
 		w.height = int(ch)
 		if rc != 0 {
@@ -1403,7 +1614,7 @@ func (w *Window) StartBackgroundPump() error {
 	if w.pump != 0 {
 		return nil
 	}
-	p := C.tipsy_x11_pump_thread_start(C.uintptr_t(w.display), C.ulong(w.xid), C.ulong(w.wmDelete), C.int(w.width), C.int(w.height))
+	p := C.tipsy_x11_pump_thread_start(C.uintptr_t(w.display), C.ulong(w.xid), C.ulong(w.wmDelete), C.int(w.randrEventBase), C.int(w.width), C.int(w.height))
 	if p == 0 {
 		return fmt.Errorf("x11: background pump thread")
 	}
@@ -1463,4 +1674,26 @@ func (w *Window) Close() error {
 	w.dismissed = true
 	w.pointerCaptured = false
 	return nil
+}
+
+// RefreshVersion changes after the event reader observes a client move/resize,
+// reparent/map, or RandR display-configuration event. Reading it performs no
+// X-server query. Call Pump first when no background event reader is running.
+// A zero version means the window is closed.
+func (w *Window) RefreshVersion() uint64 {
+	if w == nil {
+		return 0
+	}
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if w.closed || w.display == 0 {
+		return 0
+	}
+	return uint64(C.tipsy_x11_refresh_version())
+}
+
+// WakeEventPump wakes the event reader after another shared-display Xlib
+// caller may have buffered events while waiting for a server reply.
+func WakeEventPump() {
+	C.tipsy_nudge_pump()
 }

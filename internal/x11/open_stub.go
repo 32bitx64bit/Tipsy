@@ -7,10 +7,21 @@ package x11
 
 // Open reports that native X11 is unavailable on this build.
 func Open(title string, width, height int) (*Window, error) {
+	return OpenOnDisplay(title, width, height, DisplayPointer)
+}
+
+// OpenOnDisplay reports that native X11 is unavailable on this build.
+func OpenOnDisplay(title string, width, height int, display string) (*Window, error) {
 	_ = title
+	_ = display
 	if width < 1 || height < 1 {
 		return nil, ErrInvalidSize
 	}
+	return nil, ErrUnavailable
+}
+
+// ListOutputs reports that native X11 is unavailable on this build.
+func ListOutputs() ([]Output, error) {
 	return nil, ErrUnavailable
 }
 
@@ -76,3 +87,9 @@ func (w *Window) Close() error {
 	w.dismissed = true
 	return nil
 }
+
+// RefreshVersion is unavailable without native X11.
+func (w *Window) RefreshVersion() uint64 { return 0 }
+
+// WakeEventPump is a no-op without native X11.
+func WakeEventPump() {}

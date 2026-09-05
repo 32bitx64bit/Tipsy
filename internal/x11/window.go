@@ -36,6 +36,7 @@ type Window struct {
 	display         uintptr // Display*
 	xid             uintptr // X11 Window
 	wmDelete        uintptr // Atom WM_DELETE_WINDOW
+	randrEventBase  int     // RandR event range on this connection; 0 = absent
 	width           int
 	height          int
 	closed          bool
