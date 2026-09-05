@@ -25,8 +25,8 @@ type EGL struct {
 	context     uintptr   // EGLContext
 	x11Display  uintptr   // Xlib Display* (observation-only probes)
 	x11XID      uintptr   // X11 Window
-	refreshHz   float64   // active XRandR CRTC refresh at bind time; 0 = unknown
-	supportedHz []float32 // active XRandR output modes; immutable after bind
+	refreshHz   float64   // last usable active XRandR CRTC refresh; 0 = unknown
+	supportedHz []float32 // last usable active XRandR output modes
 	swap        uintptr   // C tipsy_swap* background thread, or 0
 }
 
@@ -35,7 +35,7 @@ type EGL struct {
 // usable mode rate. It is an observation for presentation policy, not an FPS
 // measurement.
 func (e *EGL) RefreshRateHz() float64 {
-	current, _ := e.refreshRateSnapshot()
+	current, _ := e.RefreshRatesHz()
 	return current
 }
 
@@ -44,11 +44,15 @@ func (e *EGL) RefreshRateHz() float64 {
 // The returned slice is a copy. An empty result means the X server did not
 // expose a usable mode list.
 func (e *EGL) SupportedRefreshRatesHz() []float32 {
-	_, supported := e.refreshRateSnapshot()
+	_, supported := e.RefreshRatesHz()
 	return supported
 }
 
-func (e *EGL) refreshRateSnapshot() (float64, []float32) {
+// RefreshRatesHz reports current and supported refresh rates from one XRandR
+// snapshot. Callers publishing both values should use this combined getter to
+// avoid repeating synchronous display queries. Retains the last usable values
+// after a transient query failure.
+func (e *EGL) RefreshRatesHz() (float64, []float32) {
 	if e == nil {
 		return 0, nil
 	}

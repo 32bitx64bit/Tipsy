@@ -79,16 +79,11 @@ static double tipsy_xrr_mode_refresh_rate(const XRRModeInfo *info) {
 }
 
 static int tipsy_x11_active_crtc(Display *dpy, Window xid,
-	XRRScreenResources *resources, Window root, RRCrtc *out_crtc,
-	RRMode *out_mode) {
-	XWindowAttributes wa;
-	memset(&wa, 0, sizeof(wa));
-	if (!XGetWindowAttributes(dpy, xid, &wa)) {
-		return 0;
-	}
+	XRRScreenResources *resources, const XWindowAttributes *wa,
+	Window root, RRCrtc *out_crtc, RRMode *out_mode) {
 	Window child = None;
 	int root_x = 0, root_y = 0;
-	if (!XTranslateCoordinates(dpy, xid, root, wa.width / 2, wa.height / 2,
+	if (!XTranslateCoordinates(dpy, xid, root, wa->width / 2, wa->height / 2,
 		&root_x, &root_y, &child)) {
 		return 0;
 	}
@@ -111,42 +106,20 @@ static int tipsy_x11_active_crtc(Display *dpy, Window xid,
 	return 0;
 }
 
-static double tipsy_x11_refresh_rate(uintptr_t xdisplay, unsigned long xid) {
+// Query current and supported modes from one resource/CRTC snapshot. In
+// particular, do not rediscover the window and active CRTC for each getter:
+// every XRRGet* call below is a synchronous X-server round trip.
+static int tipsy_x11_refresh_rates(uintptr_t xdisplay, unsigned long xid,
+	double *current, double *out, int capacity) {
 	Display *dpy = (Display *)xdisplay;
-	if (dpy == NULL || xid == 0) {
-		return 0.0;
-	}
-	XWindowAttributes wa;
-	memset(&wa, 0, sizeof(wa));
-	if (!XGetWindowAttributes(dpy, (Window)xid, &wa)) {
-		return 0.0;
-	}
-	Window root = RootWindowOfScreen(wa.screen);
-	XRRScreenResources *resources = XRRGetScreenResourcesCurrent(dpy, root);
-	if (resources == NULL) {
-		return 0.0;
-	}
-	RRCrtc active_crtc = None;
-	RRMode mode = None;
-	(void)tipsy_x11_active_crtc(dpy, (Window)xid, resources, root,
-		&active_crtc, &mode);
-	double hz = 0.0;
-	for (int i = 0; mode != None && i < resources->nmode; i++) {
-		XRRModeInfo *info = &resources->modes[i];
-		if (info->id != mode) {
-			continue;
-		}
-		hz = tipsy_xrr_mode_refresh_rate(info);
-		break;
-	}
-	XRRFreeScreenResources(resources);
-	return hz;
-}
-
-static int tipsy_x11_supported_refresh_rates(uintptr_t xdisplay,
-	unsigned long xid, double *out, int capacity) {
-	Display *dpy = (Display *)xdisplay;
+	*current = 0.0;
 	if (dpy == NULL || xid == 0 || out == NULL || capacity <= 0) {
+		return 0;
+	}
+	int event_base = 0, error_base = 0;
+	// Xlib caches extension availability on this connection. A server
+	// without RandR stays unknown without issuing unsupported requests.
+	if (!XRRQueryExtension(dpy, &event_base, &error_base)) {
 		return 0;
 	}
 	XWindowAttributes wa;
@@ -161,10 +134,16 @@ static int tipsy_x11_supported_refresh_rates(uintptr_t xdisplay,
 	}
 	RRCrtc active_crtc = None;
 	RRMode active_mode = None;
-	if (!tipsy_x11_active_crtc(dpy, (Window)xid, resources, root,
+	if (!tipsy_x11_active_crtc(dpy, (Window)xid, resources, &wa, root,
 		&active_crtc, &active_mode)) {
 		XRRFreeScreenResources(resources);
 		return 0;
+	}
+	for (int i = 0; i < resources->nmode; i++) {
+		if (resources->modes[i].id == active_mode) {
+			*current = tipsy_xrr_mode_refresh_rate(&resources->modes[i]);
+			break;
+		}
 	}
 	int count = 0;
 	for (int i = 0; i < resources->noutput && count < capacity; i++) {
@@ -525,10 +504,14 @@ func platformDisplayRefreshRates(xdisplay, xid uintptr) (float64, []float32) {
 	if xdisplay == 0 || xid == 0 {
 		return 0, nil
 	}
-	current := float64(C.tipsy_x11_refresh_rate(C.uintptr_t(xdisplay), C.ulong(xid)))
+	var nativeCurrent C.double
 	var nativeRates [64]C.double
-	nativeRateCount := int(C.tipsy_x11_supported_refresh_rates(
-		C.uintptr_t(xdisplay), C.ulong(xid), &nativeRates[0], C.int(len(nativeRates))))
+	nativeRateCount := int(C.tipsy_x11_refresh_rates(
+		C.uintptr_t(xdisplay), C.ulong(xid), &nativeCurrent, &nativeRates[0], C.int(len(nativeRates))))
+	// Replies can move input/RandR events from the connection socket into
+	// Xlib's queue. Wake the sole event reader even if the socket is now empty.
+	x11.WakeEventPump()
+	current := float64(nativeCurrent)
 	uniqueRates := make(map[int64]float64, nativeRateCount+1)
 	for i := 0; i < nativeRateCount; i++ {
 		hz := float64(nativeRates[i])

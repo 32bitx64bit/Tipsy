@@ -30,7 +30,10 @@ func TestRefreshRateSnapshot(t *testing.T) {
 	if got := e.RefreshRateHz(); got != 164.96 {
 		t.Fatalf("RefreshRateHz=%v", got)
 	}
-	rates := e.SupportedRefreshRatesHz()
+	current, rates := e.RefreshRatesHz()
+	if current != 164.96 {
+		t.Fatalf("combined current refresh=%v", current)
+	}
 	if len(rates) != 3 || rates[0] != 59.95 || rates[2] != 164.96 {
 		t.Fatalf("SupportedRefreshRatesHz=%v", rates)
 	}
@@ -165,7 +168,7 @@ func TestSwapThreadRetiresOnSecondPresenter(t *testing.T) {
 	t.Fatal("swap thread did not retire within 8s of a second presenter")
 }
 
-func ensureDisplay(t *testing.T) {
+func ensureDisplay(t *testing.T, extraArgs ...string) {
 	t.Helper()
 	if os.Getenv("DISPLAY") != "" {
 		return
@@ -179,15 +182,28 @@ func ensureDisplay(t *testing.T) {
 		t.Skipf("DISPLAY unset; no free Xvfb display: %v", err)
 	}
 	display := ":" + strconv.Itoa(n)
-	cmd := exec.Command(xvfb, display, "-screen", "0", "128x128x24", "-nolisten", "tcp")
+	args := append([]string{display, "-screen", "0", "128x128x24", "-nolisten", "tcp"}, extraArgs...)
+	cmd := exec.Command(xvfb, args...)
 	cmd.Stdout = io.Discard
 	cmd.Stderr = io.Discard
 	if err := cmd.Start(); err != nil {
 		t.Skipf("Xvfb start failed: %v", err)
 	}
 	t.Cleanup(func() {
-		_ = cmd.Process.Kill()
-		_, _ = cmd.Process.Wait()
+		// Let Xvfb remove its socket/lock. SIGKILL alone leaves stale
+		// display locks and eventually turns repeated suites into skips.
+		_ = cmd.Process.Signal(os.Interrupt)
+		done := make(chan struct{})
+		go func() {
+			_, _ = cmd.Process.Wait()
+			close(done)
+		}()
+		select {
+		case <-done:
+		case <-time.After(time.Second):
+			_ = cmd.Process.Kill()
+			<-done
+		}
 	})
 	t.Setenv("DISPLAY", display)
 
@@ -205,13 +221,29 @@ func ensureDisplay(t *testing.T) {
 
 func unusedDisplay() (int, error) {
 	pid := os.Getpid()
-	for i := 0; i < 40; i++ {
-		n := 80 + (pid+i)%40
+	for i := 0; i < 920; i++ {
+		n := 80 + (pid+i)%920
 		lock := fmt.Sprintf("/tmp/.X%d-lock", n)
 		if _, err := os.Stat(lock); err == nil {
 			continue
 		}
 		return n, nil
 	}
-	return 0, errors.New("no free display in :80-:119")
+	return 0, errors.New("no free display in :80-:999")
+}
+
+func TestWindowRefreshRatesWithoutRandR(t *testing.T) {
+	t.Setenv("DISPLAY", "")
+	ensureDisplay(t, "-extension", "RANDR")
+	w, err := x11.Open("refresh without RandR", 32, 32)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer w.Close()
+	for i := 0; i < 10; i++ {
+		current, supported := WindowRefreshRates(w.Display(), w.XID())
+		if current != 0 || len(supported) != 0 {
+			t.Fatalf("missing RandR returned invented rates: %v, %v", current, supported)
+		}
+	}
 }
