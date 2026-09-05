@@ -21,6 +21,9 @@ var (
 	ErrFullscreen = errors.New("x11: fullscreen request failed")
 	// ErrInvalidSize is returned when Open is given a non-positive size.
 	ErrInvalidSize = errors.New("x11: width and height must be positive")
+	// ErrPointerGrab is returned when the X server rejects a Roblox-requested
+	// window-scoped pointer lock. Button and motion delivery remains live.
+	ErrPointerGrab = errors.New("x11: pointer grab failed")
 )
 
 // RobloxWindowTitle is the desktop title of the official Roblox client when
@@ -29,17 +32,20 @@ const RobloxWindowTitle = "Roblox - Tipsy"
 
 // Window is a mapped native X11 InputOutput window.
 type Window struct {
-	mu        sync.Mutex
-	display   uintptr // Display*
-	xid       uintptr // X11 Window
-	wmDelete  uintptr // Atom WM_DELETE_WINDOW
-	width     int
-	height    int
-	closed    bool
-	dismissed bool
-	focused   bool
-	pump      uintptr // C tipsy_pump* background thread, or 0
-	cursor    uintptr // transparent X cursor owned by this client window, or 0
+	mu              sync.Mutex
+	display         uintptr // Display*
+	xid             uintptr // X11 Window
+	wmDelete        uintptr // Atom WM_DELETE_WINDOW
+	width           int
+	height          int
+	closed          bool
+	dismissed       bool
+	focused         bool
+	pump            uintptr // C tipsy_pump* background thread, or 0
+	cursor          uintptr // transparent X cursor owned by this client window, or 0
+	pointerCaptured bool
+	pointerAnchorX  int
+	pointerAnchorY  int
 }
 
 // InputKind classifies a captured window input event.
@@ -73,6 +79,10 @@ const (
 	// separates physical key edges from RbxKeyboard/EditText text changes.
 	// Consumers must never log Text: it may contain credentials.
 	InputText
+	// InputPointerCapture reports a host pointer-lock transition requested by
+	// Roblox's native lock getter. Capture failures carry CaptureStatus and do
+	// not replace or swallow the original button edge.
+	InputPointerCapture
 )
 
 // Pointer action values carried in InputEvent.PointerAction.
@@ -82,21 +92,42 @@ const (
 	PointerMove int32 = 2
 )
 
+// decodePointerRingAction maps the C input ring's pointer `a` field.
+// 0 is ButtonPress, 1 is ButtonRelease, 2 is ordinary absolute MotionNotify,
+// and 3 is captured relative motion while the host grab is active.
+func decodePointerRingAction(rawA int32) (action int32, relative bool) {
+	switch rawA {
+	case 1:
+		return PointerUp, false
+	case 2:
+		return PointerMove, false
+	case 3:
+		return PointerMove, true
+	default:
+		return PointerDown, false
+	}
+}
+
 // InputEvent is one captured real X11 input event, translated toward the
 // Android surface the engine expects.
 type InputEvent struct {
-	Kind          InputKind
-	FocusGained   bool    // InputFocus
-	KeyPressed    bool    // InputKey
-	KeyCode       int32   // Android keycode; 0 = unmapped (dropped)
-	ScanCode      int32   // raw X11 keycode (InputKey), 0 otherwise
-	Text          string  // committed UTF-8 (InputText); never log
-	PointerAction int32   // PointerDown/Up/Move
-	Button        int32   // 1 left, 3 right (InputPointer down/up)
-	X, Y          float32 // pointer position in window pixels
-	ScrollX       float32 // horizontal wheel detents (InputScroll)
-	ScrollY       float32 // vertical wheel detents (InputScroll)
-	Width, Height int     // new client dimensions (InputResize)
+	Kind           InputKind
+	FocusGained    bool    // InputFocus
+	KeyPressed     bool    // InputKey
+	KeyCode        int32   // Android keycode; 0 = unmapped (dropped)
+	ScanCode       int32   // raw X11 keycode (InputKey), 0 otherwise
+	Text           string  // committed UTF-8 (InputText); never log
+	PointerAction  int32   // PointerDown/Up/Move
+	Button         int32   // 1 left, 3 right (InputPointer down/up)
+	X, Y           float32 // pointer position in window pixels
+	ScrollX        float32 // horizontal wheel detents (InputScroll)
+	ScrollY        float32 // vertical wheel detents (InputScroll)
+	Width, Height  int     // new client dimensions (InputResize)
+	Relative       bool    // captured InputPointer move carries explicit deltas
+	DeltaX, DeltaY float32 // captured relative motion in window pixels
+	Captured       bool    // InputPointerCapture acquired/released state
+	CaptureFailed  bool    // InputPointerCapture grab failure
+	CaptureStatus  int32   // XGrabPointer status for a failed acquisition
 }
 
 var (
@@ -106,10 +137,48 @@ var (
 	inputDrops uint64 // keys with no Android physical mapping, counted not logged
 )
 
+var activeWindow struct {
+	sync.Mutex
+	w *Window
+}
+
+func setActiveWindow(w *Window) {
+	activeWindow.Lock()
+	activeWindow.w = w
+	activeWindow.Unlock()
+}
+
+func clearActiveWindow(w *Window) {
+	activeWindow.Lock()
+	if activeWindow.w == w {
+		activeWindow.w = nil
+	}
+	activeWindow.Unlock()
+}
+
+// SetPointerLock applies Roblox's current native mouse-lock request to the
+// sole client window. The X11 implementation grabs only that window and uses
+// the last secondary-button press (or last real pointer position for
+// first-person/shift-lock) as its stable anchor.
+func SetPointerLock(locked bool) (bool, error) {
+	activeWindow.Lock()
+	w := activeWindow.w
+	activeWindow.Unlock()
+	if w == nil {
+		return false, ErrClosed
+	}
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if w.closed || w.display == 0 || w.xid == 0 {
+		return false, ErrClosed
+	}
+	return setPointerLockLocked(w, locked)
+}
+
 // OnInput subscribes fn to captured input events of every open window.
 // Tipsy owns a single Roblox window per process. fn runs on the caller of
-// Pump (the runtime ticker) and must not block or re-enter Pump. The
-// returned cancel func removes the subscription.
+// Pump (the launch loop after InputReady) and must not block or re-enter
+// Pump. The returned cancel func removes the subscription.
 func OnInput(fn func(InputEvent)) (cancel func()) {
 	if fn == nil {
 		return func() {}
@@ -211,6 +280,18 @@ func (w *Window) CursorHidden() bool {
 	w.mu.Lock()
 	defer w.mu.Unlock()
 	return w.cursor != 0
+}
+
+// PointerCapture reports the current host capture state and stable window
+// anchor. It is intended for diagnostics and tests; Roblox's native getter is
+// the authority that changes this state.
+func (w *Window) PointerCapture() (captured bool, anchorX, anchorY int) {
+	if w == nil {
+		return false, 0, 0
+	}
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return w.pointerCaptured, w.pointerAnchorX, w.pointerAnchorY
 }
 
 // Dismiss immediately removes the client window from the desktop while its

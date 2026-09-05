@@ -16,6 +16,27 @@ import (
 	"github.com/tipsy-linux/tipsy/internal/x11/x11probe"
 )
 
+func TestDecodePointerRingAction(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		raw      int32
+		action   int32
+		relative bool
+	}{
+		{0, PointerDown, false},
+		{1, PointerUp, false},
+		{2, PointerMove, false},
+		{3, PointerMove, true},
+	}
+	for _, tc := range cases {
+		action, relative := decodePointerRingAction(tc.raw)
+		if action != tc.action || relative != tc.relative {
+			t.Fatalf("decodePointerRingAction(%d) = (%d,%t), want (%d,%t)",
+				tc.raw, action, relative, tc.action, tc.relative)
+		}
+	}
+}
+
 func TestSetFullscreenRejectsClosedWindow(t *testing.T) {
 	t.Parallel()
 	w := &Window{}
@@ -234,25 +255,162 @@ func TestBackgroundPumpPreservesWMDeleteForGoLoop(t *testing.T) {
 		t.Fatalf("Open: %v", err)
 	}
 	defer w.Close()
+	drainInputReady(w)
 	if err := w.StartBackgroundPump(); err != nil {
 		t.Fatalf("StartBackgroundPump: %v", err)
 	}
 	if err := x11probe.WMDelete(w.XID()); err != nil {
 		t.Fatalf("WM_DELETE_WINDOW: %v", err)
 	}
-	deadline := time.Now().Add(750 * time.Millisecond)
-	for time.Now().Before(deadline) {
-		if err := w.Pump(); errors.Is(err, ErrClosed) {
-			if x11probe.Viewable(w.XID()) {
-				t.Fatal("WM_DELETE acknowledged but the client window stayed viewable")
+	timer := time.NewTimer(750 * time.Millisecond)
+	defer timer.Stop()
+	for {
+		select {
+		case <-w.InputReady():
+			if err := w.Pump(); errors.Is(err, ErrClosed) {
+				if x11probe.Viewable(w.XID()) {
+					t.Fatal("WM_DELETE acknowledged but the client window stayed viewable")
+				}
+				return
+			} else if err != nil {
+				t.Fatalf("Pump: %v", err)
 			}
-			return
-		} else if err != nil {
-			t.Fatalf("Pump: %v", err)
+		case <-timer.C:
+			t.Fatal("background pump consumed WM_DELETE_WINDOW without notifying Go")
 		}
-		time.Sleep(10 * time.Millisecond)
 	}
-	t.Fatal("background pump consumed WM_DELETE_WINDOW without notifying Go")
+}
+
+func TestStopBackgroundPumpJoinsPromptly(t *testing.T) {
+	ensureDisplay(t)
+	w, err := Open("Tipsy pump join", 64, 64)
+	if err != nil {
+		if errors.Is(err, ErrUnavailable) || errors.Is(err, ErrNoDisplay) {
+			t.Skip(err)
+		}
+		t.Fatalf("Open: %v", err)
+	}
+	defer w.Close()
+	if err := w.StartBackgroundPump(); err != nil {
+		t.Fatalf("StartBackgroundPump: %v", err)
+	}
+	time.Sleep(20 * time.Millisecond)
+	start := time.Now()
+	if err := w.StopBackgroundPump(); err != nil && !errors.Is(err, ErrClosed) {
+		t.Fatalf("StopBackgroundPump: %v", err)
+	}
+	if elapsed := time.Since(start); elapsed > 200*time.Millisecond {
+		t.Fatalf("StopBackgroundPump took %s, want a prompt poll wakeup", elapsed)
+	}
+}
+
+func TestInputReadyWakesOnKeyWithBackgroundPump(t *testing.T) {
+	ensureDisplay(t)
+	requireProbe(t)
+	w, err := Open("Tipsy input wake", 64, 64)
+	if err != nil {
+		if errors.Is(err, ErrUnavailable) || errors.Is(err, ErrNoDisplay) {
+			t.Skip(err)
+		}
+		t.Fatalf("Open: %v", err)
+	}
+	defer w.Close()
+	c := collectInput(t)
+	if err := w.StartBackgroundPump(); err != nil {
+		t.Fatalf("StartBackgroundPump: %v", err)
+	}
+	defer w.StopBackgroundPump()
+	settleBackgroundInput(t, w, c)
+
+	if err := x11probe.Key(w.XID(), xkA, true); err != nil {
+		t.Fatalf("key press: %v", err)
+	}
+	if err := x11probe.Key(w.XID(), xkA, false); err != nil {
+		t.Fatalf("key release: %v", err)
+	}
+	select {
+	case <-w.InputReady():
+	case <-time.After(2 * time.Second):
+		t.Fatal("InputReady did not wake on key")
+	}
+	if err := w.Pump(); err != nil && !errors.Is(err, ErrClosed) {
+		t.Fatalf("Pump: %v", err)
+	}
+	ev := c.next(t, w)
+	if ev.Kind != InputKey || !ev.KeyPressed {
+		t.Fatalf("first event = %+v, want key press", ev)
+	}
+}
+
+func TestInputReadyCoalescesWhileGoIsBehind(t *testing.T) {
+	ensureDisplay(t)
+	requireProbe(t)
+	w, err := Open("Tipsy wake coalesce", 64, 64)
+	if err != nil {
+		if errors.Is(err, ErrUnavailable) || errors.Is(err, ErrNoDisplay) {
+			t.Skip(err)
+		}
+		t.Fatalf("Open: %v", err)
+	}
+	defer w.Close()
+	if err := w.StartBackgroundPump(); err != nil {
+		t.Fatalf("StartBackgroundPump: %v", err)
+	}
+	defer w.StopBackgroundPump()
+	settleBackgroundInput(t, w, nil)
+
+	if err := x11probe.Key(w.XID(), xkA, true); err != nil {
+		t.Fatalf("key press: %v", err)
+	}
+	select {
+	case <-w.InputReady():
+	case <-time.After(2 * time.Second):
+		t.Fatal("InputReady did not wake on first key")
+	}
+	if err := x11probe.Key(w.XID(), xkA, false); err != nil {
+		t.Fatalf("key release: %v", err)
+	}
+	if err := x11probe.Key(w.XID(), xkEscape, true); err != nil {
+		t.Fatalf("escape press: %v", err)
+	}
+	select {
+	case <-w.InputReady():
+		t.Fatal("second wake before Pump ack; coalescing failed")
+	case <-time.After(80 * time.Millisecond):
+	}
+	if err := w.Pump(); err != nil && !errors.Is(err, ErrClosed) {
+		t.Fatalf("Pump: %v", err)
+	}
+}
+
+func drainInputReady(w *Window) {
+	if w == nil {
+		return
+	}
+	for {
+		select {
+		case <-w.InputReady():
+		default:
+			return
+		}
+	}
+}
+
+func settleBackgroundInput(t *testing.T, w *Window, c *inputCollector) {
+	t.Helper()
+	deadline := time.Now().Add(200 * time.Millisecond)
+	for time.Now().Before(deadline) {
+		select {
+		case <-w.InputReady():
+			_ = w.Pump()
+		default:
+			time.Sleep(5 * time.Millisecond)
+		}
+	}
+	drainInputReady(w)
+	if c != nil {
+		c.clear()
+	}
 }
 
 func ensureDisplay(t *testing.T) {

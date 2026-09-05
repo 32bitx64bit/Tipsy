@@ -8,16 +8,23 @@ package x11
 /*
 #cgo pkg-config: x11
 #cgo LDFLAGS: -lX11 -pthread
+#cgo CFLAGS: -D_GNU_SOURCE
 
 #include <X11/Xlib.h>
 #include <X11/Xatom.h>
 #include <X11/Xutil.h>
+#include <errno.h>
+#include <fcntl.h>
 #include <locale.h>
+#include <poll.h>
 #include <pthread.h>
+#include <stdatomic.h>
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
+
+extern void GoX11_Notify(void);
 
 static int tipsy_x_error_code;
 static int tipsy_x_io_error;
@@ -36,6 +43,8 @@ static int tipsy_f11_down;
 //        moves arrive both with and without a pressed button. The direct
 //        Roblox mouse path needs both forms; it computes real deltas from
 //        this ordered stream.
+//        a = 3 is captured motion: x/y remain at the stable grab anchor and
+//        b/c carry real relative dx/dy. Adjacent captured moves sum deltas.
 // scroll: a = horizontal detents, b = vertical detents. Core X11 encodes
 //        wheel motion as Button4..7; only ButtonPress is one detent.
 // resize:  b = width, c = height. ConfigureNotify lives in this stream so
@@ -50,9 +59,9 @@ static int tipsy_f11_down;
 #define TIPSY_INPUT_RESIZE 4
 #define TIPSY_INPUT_TEXT 5
 #define TIPSY_INPUT_CLOSE 6
+#define TIPSY_INPUT_CAPTURE 7
 #define TIPSY_INPUT_RING 256
 #define TIPSY_INPUT_TEXT_BYTES 256
-#define TIPSY_X11_BACKGROUND_POLL_USEC 2000
 
 struct tipsy_input_ev {
 	int kind;
@@ -69,11 +78,70 @@ static struct tipsy_input_ev tipsy_input_ring[TIPSY_INPUT_RING];
 static int tipsy_input_head;
 static int tipsy_input_tail;
 static pthread_mutex_t tipsy_input_mu = PTHREAD_MUTEX_INITIALIZER;
+// Serializes X event consumption (the sole XPending/XNextEvent reader while
+// the background pump is running) with pointer-lock and other Xlib callers.
+static pthread_mutex_t tipsy_event_mu = PTHREAD_MUTEX_INITIALIZER;
+// Coalesced Go wakeup: one cgo notify while a token is already pending.
+static atomic_int tipsy_go_wake_pending;
+// Write end of the background pump's wakeup pipe, or -1. Other Xlib
+// callers nudge it so poll() cannot miss events already read into Xlib's
+// queue as a side effect of a reply (grab, unmap, fullscreen).
+static int tipsy_pump_nudge_fd = -1;
+
+static void tipsy_wake_go(void) {
+	if (atomic_exchange(&tipsy_go_wake_pending, 1) != 0) {
+		return;
+	}
+	GoX11_Notify();
+}
+
+void tipsy_x11_wake_ack(void) {
+	atomic_store(&tipsy_go_wake_pending, 0);
+}
+
+static void tipsy_nudge_pump(void) {
+	int fd = tipsy_pump_nudge_fd;
+	if (fd < 0) {
+		return;
+	}
+	char one = 1;
+	(void)write(fd, &one, 1);
+}
+
+struct tipsy_pointer_capture {
+	int active;
+	int right_down;
+	int have_last;
+	int anchor_x;
+	int anchor_y;
+	int last_x;
+	int last_y;
+	int ignore_warps;
+	int failed_status;
+	Display *dpy;
+	Window win;
+};
+
+static struct tipsy_pointer_capture tipsy_capture;
 
 static void tipsy_input_push(int kind, int a, long b, long c, float x, float y) {
 	pthread_mutex_lock(&tipsy_input_mu);
-	// Coalesce: a queued pending move is replaced by the newest move.
+	int was_empty = (tipsy_input_head == tipsy_input_tail);
+	// Captured relative motion must sum every delta; replacing it would lose
+	// camera travel when the engine drains more slowly than the X server.
 	int last = (tipsy_input_head - 1 + TIPSY_INPUT_RING) % TIPSY_INPUT_RING;
+	if (kind == TIPSY_INPUT_POINTER && a == 3 &&
+		tipsy_input_head != tipsy_input_tail &&
+		tipsy_input_ring[last].kind == TIPSY_INPUT_POINTER &&
+		tipsy_input_ring[last].a == 3) {
+		tipsy_input_ring[last].b += b;
+		tipsy_input_ring[last].c += c;
+		tipsy_input_ring[last].x = x;
+		tipsy_input_ring[last].y = y;
+		pthread_mutex_unlock(&tipsy_input_mu);
+		return;
+	}
+	// Ordinary absolute motion coalesces to its newest real position.
 	if (kind == TIPSY_INPUT_POINTER && a == 2 &&
 		tipsy_input_head != tipsy_input_tail &&
 		tipsy_input_ring[last].kind == TIPSY_INPUT_POINTER &&
@@ -108,6 +176,152 @@ static void tipsy_input_push(int kind, int a, long b, long c, float x, float y) 
 	tipsy_input_ring[tipsy_input_head].text_len = 0;
 	tipsy_input_head = next;
 	pthread_mutex_unlock(&tipsy_input_mu);
+	if (was_empty || kind == TIPSY_INPUT_CLOSE || kind == TIPSY_INPUT_RESIZE) {
+		tipsy_wake_go();
+	}
+}
+
+static int tipsy_clamp_coord(int value, int extent) {
+	if (extent <= 1) return 0;
+	if (value < 0) return 0;
+	if (value >= extent) return extent - 1;
+	return value;
+}
+
+static void tipsy_capture_event(int action, int status) {
+	tipsy_input_push(TIPSY_INPUT_CAPTURE, action, (long)status,
+		(long)tipsy_capture.win, (float)tipsy_capture.anchor_x,
+		(float)tipsy_capture.anchor_y);
+}
+
+// Recenter MotionNotify can land a pixel or two off the requested anchor
+// (compositor rounding, scaled buffers). Matching only the exact coordinate
+// lets that snap-back through as camera motion and cancels the look.
+static int tipsy_is_recenter_motion(int x, int y) {
+	int dx = x - tipsy_capture.anchor_x;
+	int dy = y - tipsy_capture.anchor_y;
+	if (dx < 0) dx = -dx;
+	if (dy < 0) dy = -dy;
+	return dx <= 2 && dy <= 2;
+}
+
+static void tipsy_warp_to_anchor(Display *dpy, Window win) {
+	Window root = 0, child = 0;
+	int root_x = 0, root_y = 0, x = 0, y = 0;
+	unsigned int mask = 0;
+	if (XQueryPointer(dpy, win, &root, &child, &root_x, &root_y,
+		&x, &y, &mask) && x == tipsy_capture.anchor_x &&
+		y == tipsy_capture.anchor_y) {
+		tipsy_capture.last_x = tipsy_capture.anchor_x;
+		tipsy_capture.last_y = tipsy_capture.anchor_y;
+		return;
+	}
+	XWarpPointer(dpy, None, win, 0, 0, 0, 0,
+		tipsy_capture.anchor_x, tipsy_capture.anchor_y);
+	tipsy_capture.ignore_warps = 1;
+	tipsy_capture.last_x = tipsy_capture.anchor_x;
+	tipsy_capture.last_y = tipsy_capture.anchor_y;
+}
+
+// End an acquired grab exactly once. A focus/close cancellation also emits
+// one secondary-button release when its physical release can no longer be
+// trusted to arrive, preventing a stuck Roblox button state.
+static int tipsy_pointer_unlock(Display *dpy, Window win, int notify,
+	int cancel_right_button) {
+	if (!tipsy_capture.active || tipsy_capture.dpy != dpy ||
+		tipsy_capture.win != win) {
+		if (cancel_right_button) tipsy_capture.right_down = 0;
+		return 0;
+	}
+	if (cancel_right_button && tipsy_capture.right_down) {
+		tipsy_input_push(TIPSY_INPUT_POINTER, 1, Button3, 0,
+			(float)tipsy_capture.anchor_x, (float)tipsy_capture.anchor_y);
+		tipsy_capture.right_down = 0;
+	}
+	// This warp precedes the ungrab on the same X connection, leaving the
+	// desktop pointer at the stable anchor after an ordinary RMB release.
+	tipsy_warp_to_anchor(dpy, win);
+	// A recenter queued while capture was active may not be read until after
+	// this release. It is no longer safe to suppress an anchor-coordinate
+	// MotionNotify once the grab has ended: that same coordinate can be the
+	// user's first or second real desktop movement. Any leftover recenter event
+	// is harmless as a normal zero-delta absolute move, whereas retaining the
+	// token silently drops a real move and desynchronizes the next delta.
+	tipsy_capture.ignore_warps = 0;
+	XUngrabPointer(dpy, CurrentTime);
+	tipsy_capture.active = 0;
+	if (notify) tipsy_capture_event(0, GrabSuccess);
+	return 1;
+}
+
+// Apply the state read from the APK-proven native getter. Return 1 for
+// acquired, 2 for released, 0 for unchanged, -1 for grab rejection, and -2
+// for a closed display.
+static int tipsy_x11_set_pointer_lock(uintptr_t dpy_ptr, unsigned long xid,
+	int locked, int *out_x, int *out_y, int *out_status) {
+	Display *dpy = (Display *)dpy_ptr;
+	Window win = (Window)xid;
+	if (dpy == NULL || win == 0 || tipsy_x_io_error) return -2;
+	pthread_mutex_lock(&tipsy_event_mu);
+	int result = 0;
+	if (!locked) {
+		tipsy_capture.failed_status = 0;
+		result = tipsy_pointer_unlock(dpy, win, 1, 0) ? 2 : 0;
+		goto done;
+	}
+	if (tipsy_capture.active) goto done;
+	if (tipsy_capture.failed_status != 0) goto done;
+	tipsy_capture.dpy = dpy;
+	tipsy_capture.win = win;
+
+	XWindowAttributes attr;
+	if (XGetWindowAttributes(dpy, win, &attr) == 0 || attr.map_state != IsViewable) {
+		tipsy_capture.failed_status = GrabNotViewable + 1;
+		if (out_status != NULL) *out_status = GrabNotViewable;
+		tipsy_capture_event(2, GrabNotViewable);
+		result = -1;
+		goto done;
+	}
+	int anchor_x = tipsy_capture.right_down ? tipsy_capture.anchor_x : tipsy_capture.last_x;
+	int anchor_y = tipsy_capture.right_down ? tipsy_capture.anchor_y : tipsy_capture.last_y;
+	if (!tipsy_capture.have_last) {
+		anchor_x = attr.width / 2;
+		anchor_y = attr.height / 2;
+	}
+	anchor_x = tipsy_clamp_coord(anchor_x, attr.width);
+	anchor_y = tipsy_clamp_coord(anchor_y, attr.height);
+	int status = XGrabPointer(dpy, win, False,
+		ButtonPressMask | ButtonReleaseMask | PointerMotionMask,
+		GrabModeAsync, GrabModeAsync, win, None, CurrentTime);
+	// XGrabPointer replaces an implicit or explicit grab already owned by this
+	// X client. AlreadyGrabbed therefore remains an honest competing-client
+	// failure and must not be treated as capture success.
+	if (status != GrabSuccess) {
+		tipsy_capture.failed_status = status + 1;
+		if (out_status != NULL) *out_status = status;
+		tipsy_capture_event(2, status);
+		result = -1;
+		goto done;
+	}
+	tipsy_capture.active = 1;
+	tipsy_capture.dpy = dpy;
+	tipsy_capture.win = win;
+	tipsy_capture.anchor_x = anchor_x;
+	tipsy_capture.anchor_y = anchor_y;
+	tipsy_capture.last_x = anchor_x;
+	tipsy_capture.last_y = anchor_y;
+	tipsy_capture.have_last = 1;
+	tipsy_warp_to_anchor(dpy, win);
+	tipsy_capture_event(1, GrabSuccess);
+	result = 1;
+
+done:
+	if (out_x != NULL) *out_x = tipsy_capture.anchor_x;
+	if (out_y != NULL) *out_y = tipsy_capture.anchor_y;
+	pthread_mutex_unlock(&tipsy_event_mu);
+	XFlush(dpy);
+	tipsy_nudge_pump();
+	return result;
 }
 
 static void tipsy_input_push_text(const char *text, int len) {
@@ -118,6 +332,7 @@ static void tipsy_input_push_text(const char *text, int len) {
 		len = TIPSY_INPUT_TEXT_BYTES;
 	}
 	pthread_mutex_lock(&tipsy_input_mu);
+	int was_empty = (tipsy_input_head == tipsy_input_tail);
 	int next = (tipsy_input_head + 1) % TIPSY_INPUT_RING;
 	if (next == tipsy_input_tail) {
 		tipsy_input_tail = (tipsy_input_tail + 1) % TIPSY_INPUT_RING;
@@ -129,6 +344,9 @@ static void tipsy_input_push_text(const char *text, int len) {
 	slot->text_len = len;
 	tipsy_input_head = next;
 	pthread_mutex_unlock(&tipsy_input_mu);
+	if (was_empty) {
+		tipsy_wake_go();
+	}
 }
 
 int tipsy_x11_input_drain(struct tipsy_input_ev *out, int max) {
@@ -341,6 +559,7 @@ static int tipsy_x11_request_fullscreen(uintptr_t dpy_ptr, Window win, int enabl
 		return -2;
 	}
 	XFlush(dpy);
+	tipsy_nudge_pump();
 	return 0;
 }
 
@@ -356,6 +575,7 @@ int tipsy_x11_open(const char *title, int width, int height,
 	tipsy_x_error_code = 0;
 	tipsy_x_io_error = 0;
 	tipsy_f11_down = 0;
+	memset(&tipsy_capture, 0, sizeof(tipsy_capture));
 
 	Display *dpy = XOpenDisplay(NULL);
 	if (dpy == NULL) {
@@ -490,6 +710,7 @@ int tipsy_x11_pump(uintptr_t dpy_ptr, unsigned long xid, unsigned long wm_delete
 	}
 	Window win = (Window)xid;
 	*out_closed = 0;
+	pthread_mutex_lock(&tipsy_event_mu);
 	while (XPending(dpy) > 0) {
 		XEvent ev;
 		XNextEvent(dpy, &ev);
@@ -500,6 +721,11 @@ int tipsy_x11_pump(uintptr_t dpy_ptr, unsigned long xid, unsigned long wm_delete
 		case FocusIn:
 		case FocusOut:
 			if (ev.xfocus.window == win) {
+				if (ev.type == FocusOut) {
+					tipsy_pointer_unlock(dpy, win, 1, 1);
+				} else {
+					tipsy_capture.failed_status = 0;
+				}
 				if (tipsy_xic != NULL) {
 					if (ev.type == FocusIn) {
 						XSetICFocus(tipsy_xic);
@@ -561,10 +787,32 @@ int tipsy_x11_pump(uintptr_t dpy_ptr, unsigned long xid, unsigned long wm_delete
 				break;
 			}
 			if (ev.xbutton.button == Button1 || ev.xbutton.button == Button3) {
+				float px = (float)ev.xbutton.x;
+				float py = (float)ev.xbutton.y;
+				if (tipsy_capture.active) {
+					px = (float)tipsy_capture.anchor_x;
+					py = (float)tipsy_capture.anchor_y;
+				}
+				if (ev.xbutton.button == Button3) {
+					// A focus/close cancellation already emitted the one matching
+					// release. Suppress a stale physical release after that edge.
+					if (ev.type == ButtonRelease && !tipsy_capture.right_down) {
+						break;
+					}
+					tipsy_capture.right_down = ev.type == ButtonPress;
+					if (ev.type == ButtonPress) {
+						tipsy_capture.anchor_x = ev.xbutton.x;
+						tipsy_capture.anchor_y = ev.xbutton.y;
+						tipsy_capture.failed_status = 0;
+					}
+				}
+				tipsy_capture.last_x = (int)px;
+				tipsy_capture.last_y = (int)py;
+				tipsy_capture.have_last = 1;
 				tipsy_input_push(TIPSY_INPUT_POINTER,
 					ev.type == ButtonPress ? 0 : 1,
 					(long)ev.xbutton.button, 0,
-					(float)ev.xbutton.x, (float)ev.xbutton.y);
+					px, py);
 			} else if (ev.type == ButtonPress &&
 				(ev.xbutton.button == Button4 || ev.xbutton.button == Button5 ||
 				 ev.xbutton.button == 6 || ev.xbutton.button == 7)) {
@@ -583,12 +831,66 @@ int tipsy_x11_pump(uintptr_t dpy_ptr, unsigned long xid, unsigned long wm_delete
 			// and button-held motion. Keep both: the direct Roblox listener is
 			// a mouse contract, not the older GameActivity touch contract.
 			if (ev.xmotion.window == win) {
-				tipsy_input_push(TIPSY_INPUT_POINTER, 2, 0, 0,
-					(float)ev.xmotion.x, (float)ev.xmotion.y);
+				if (tipsy_capture.active) {
+					// A captured event at the lock point is the host recenter,
+					// not camera travel. Matching only while ignore_warps > 0
+					// still let a later queued snap-back replace the physical
+					// coordinate and cancel the look (net zero dx/dy).
+					if (tipsy_is_recenter_motion(ev.xmotion.x, ev.xmotion.y)) {
+						if (tipsy_capture.ignore_warps > 0) {
+							tipsy_capture.ignore_warps--;
+						}
+						tipsy_capture.last_x = tipsy_capture.anchor_x;
+						tipsy_capture.last_y = tipsy_capture.anchor_y;
+						break;
+					}
+					int move_x = ev.xmotion.x;
+					int move_y = ev.xmotion.y;
+					XEvent newer;
+					while (XCheckTypedWindowEvent(dpy, win, MotionNotify, &newer)) {
+						if (tipsy_is_recenter_motion(newer.xmotion.x, newer.xmotion.y)) {
+							if (tipsy_capture.ignore_warps > 0) {
+								tipsy_capture.ignore_warps--;
+							}
+							continue;
+						}
+						move_x = newer.xmotion.x;
+						move_y = newer.xmotion.y;
+					}
+					if (tipsy_is_recenter_motion(move_x, move_y)) {
+						tipsy_capture.last_x = tipsy_capture.anchor_x;
+						tipsy_capture.last_y = tipsy_capture.anchor_y;
+						break;
+					}
+					int dx = move_x - tipsy_capture.last_x;
+					int dy = move_y - tipsy_capture.last_y;
+					if (dx != 0 || dy != 0) {
+						tipsy_input_push(TIPSY_INPUT_POINTER, 3,
+							(long)dx, (long)dy,
+							(float)tipsy_capture.anchor_x,
+							(float)tipsy_capture.anchor_y);
+						tipsy_warp_to_anchor(dpy, win);
+					}
+				} else {
+					tipsy_capture.last_x = ev.xmotion.x;
+					tipsy_capture.last_y = ev.xmotion.y;
+					tipsy_capture.have_last = 1;
+					tipsy_input_push(TIPSY_INPUT_POINTER, 2, 0, 0,
+						(float)ev.xmotion.x, (float)ev.xmotion.y);
+				}
 			}
 			break;
 		case ConfigureNotify:
 			if (ev.xconfigure.window == win) {
+				if (tipsy_capture.active) {
+					int ax = tipsy_clamp_coord(tipsy_capture.anchor_x, ev.xconfigure.width);
+					int ay = tipsy_clamp_coord(tipsy_capture.anchor_y, ev.xconfigure.height);
+					if (ax != tipsy_capture.anchor_x || ay != tipsy_capture.anchor_y) {
+						tipsy_capture.anchor_x = ax;
+						tipsy_capture.anchor_y = ay;
+						tipsy_warp_to_anchor(dpy, win);
+					}
+				}
 				if (inout_w != NULL) {
 					*inout_w = ev.xconfigure.width;
 				}
@@ -606,6 +908,7 @@ int tipsy_x11_pump(uintptr_t dpy_ptr, unsigned long xid, unsigned long wm_delete
 			if (ev.xclient.window == win &&
 				ev.xclient.message_type == XInternAtom(dpy, "WM_PROTOCOLS", False) &&
 				(Atom)ev.xclient.data.l[0] == (Atom)wm_delete) {
+				tipsy_pointer_unlock(dpy, win, 1, 1);
 				// The blocking-start background pump may be the Xlib caller that
 				// consumes this ClientMessage. Preserve the close edge in the
 				// shared ordered ring so the Go launch loop cannot miss it.
@@ -621,6 +924,7 @@ int tipsy_x11_pump(uintptr_t dpy_ptr, unsigned long xid, unsigned long wm_delete
 			break;
 		case DestroyNotify:
 			if (ev.xdestroywindow.window == win) {
+				tipsy_pointer_unlock(dpy, win, 1, 1);
 				tipsy_input_push(TIPSY_INPUT_CLOSE, 0, (long)win, 0, 0, 0);
 				*out_closed = 1;
 			}
@@ -632,7 +936,9 @@ int tipsy_x11_pump(uintptr_t dpy_ptr, unsigned long xid, unsigned long wm_delete
 		}
 	}
 	XFlush(dpy);
+	pthread_mutex_unlock(&tipsy_event_mu);
 	if (tipsy_x_io_error) {
+		tipsy_wake_go();
 		return -1;
 	}
 	return 0;
@@ -647,17 +953,69 @@ struct tipsy_pump {
 	volatile int run;
 	volatile int closed;
 	pthread_t thr;
+	int wake_r;
+	int wake_w;
 };
+
+// Block until the X connection has bytes, Xlib already has queued events, or
+// the stop/nudge pipe is readable. Returns 1 when the caller should pump,
+// 0 when the thread should exit, and -1 on I/O failure.
+static int tipsy_wait_x11(Display *dpy, int wake_fd) {
+	if (dpy == NULL || wake_fd < 0) {
+		return -1;
+	}
+	struct pollfd fds[2];
+	fds[0].fd = ConnectionNumber(dpy);
+	fds[0].events = POLLIN;
+	fds[1].fd = wake_fd;
+	fds[1].events = POLLIN;
+	for (;;) {
+		if (tipsy_x_io_error) {
+			return -1;
+		}
+		pthread_mutex_lock(&tipsy_event_mu);
+		int pending = !tipsy_x_io_error && XPending(dpy) > 0;
+		pthread_mutex_unlock(&tipsy_event_mu);
+		if (pending) {
+			return 1;
+		}
+		int n = poll(fds, 2, -1);
+		if (n < 0) {
+			if (errno == EINTR) {
+				continue;
+			}
+			return -1;
+		}
+		if (fds[1].revents & (POLLIN | POLLHUP | POLLERR | POLLNVAL)) {
+			char buf[8];
+			while (read(wake_fd, buf, sizeof buf) > 0) {
+			}
+			return 0;
+		}
+		if (fds[0].revents & (POLLHUP | POLLERR | POLLNVAL)) {
+			return -1;
+		}
+	}
+}
 
 static void *tipsy_pump_main(void *arg) {
 	struct tipsy_pump *p = (struct tipsy_pump *)arg;
 	while (p->run && !p->closed) {
+		int st = tipsy_wait_x11((Display *)p->dpy, p->wake_r);
+		if (!p->run) {
+			break;
+		}
+		if (st < 0 || tipsy_x_io_error) {
+			p->closed = 1;
+			tipsy_wake_go();
+			break;
+		}
 		int closed = 0;
 		if (tipsy_x11_pump(p->dpy, p->xid, p->del, &p->w, &p->h, &closed) != 0 || closed) {
 			p->closed = 1;
+			tipsy_wake_go();
 			break;
 		}
-		usleep(TIPSY_X11_BACKGROUND_POLL_USEC);
 	}
 	return NULL;
 }
@@ -674,7 +1032,30 @@ uintptr_t tipsy_x11_pump_thread_start(uintptr_t dpy, unsigned long xid,
 	p->w = w;
 	p->h = h;
 	p->run = 1;
+	p->wake_r = -1;
+	p->wake_w = -1;
+	int fds[2];
+	if (pipe(fds) != 0) {
+		free(p);
+		return 0;
+	}
+	for (int i = 0; i < 2; i++) {
+		int fl = fcntl(fds[i], F_GETFL, 0);
+		if (fl < 0 || fcntl(fds[i], F_SETFL, fl | O_NONBLOCK) < 0 ||
+			fcntl(fds[i], F_SETFD, FD_CLOEXEC) < 0) {
+			close(fds[0]);
+			close(fds[1]);
+			free(p);
+			return 0;
+		}
+	}
+	p->wake_r = fds[0];
+	p->wake_w = fds[1];
+	tipsy_pump_nudge_fd = p->wake_w;
 	if (pthread_create(&p->thr, NULL, tipsy_pump_main, p) != 0) {
+		tipsy_pump_nudge_fd = -1;
+		close(p->wake_r);
+		close(p->wake_w);
 		free(p);
 		return 0;
 	}
@@ -687,7 +1068,18 @@ void tipsy_x11_pump_thread_stop(uintptr_t ptr, int *out_w, int *out_h, int *out_
 		return;
 	}
 	p->run = 0;
+	if (p->wake_w >= 0) {
+		char one = 1;
+		(void)write(p->wake_w, &one, 1);
+	}
 	pthread_join(p->thr, NULL);
+	tipsy_pump_nudge_fd = -1;
+	if (p->wake_r >= 0) {
+		close(p->wake_r);
+	}
+	if (p->wake_w >= 0) {
+		close(p->wake_w);
+	}
 	if (out_w != NULL) {
 		*out_w = p->w;
 	}
@@ -705,6 +1097,8 @@ void tipsy_x11_close(uintptr_t dpy_ptr, unsigned long xid) {
 	if (dpy == NULL) {
 		return;
 	}
+	pthread_mutex_lock(&tipsy_event_mu);
+	tipsy_pointer_unlock(dpy, (Window)xid, 0, 0);
 	if (tipsy_xic != NULL) {
 		XDestroyIC(tipsy_xic);
 		tipsy_xic = NULL;
@@ -717,6 +1111,8 @@ void tipsy_x11_close(uintptr_t dpy_ptr, unsigned long xid) {
 		XDestroyWindow(dpy, (Window)xid);
 	}
 	XCloseDisplay(dpy);
+	memset(&tipsy_capture, 0, sizeof(tipsy_capture));
+	pthread_mutex_unlock(&tipsy_event_mu);
 }
 
 int tipsy_x11_unmap(uintptr_t dpy_ptr, unsigned long xid) {
@@ -724,8 +1120,12 @@ int tipsy_x11_unmap(uintptr_t dpy_ptr, unsigned long xid) {
 	if (dpy == NULL || xid == 0 || tipsy_x_io_error) {
 		return -1;
 	}
+	pthread_mutex_lock(&tipsy_event_mu);
+	tipsy_pointer_unlock(dpy, (Window)xid, 0, 0);
 	XUnmapWindow(dpy, (Window)xid);
 	XFlush(dpy);
+	pthread_mutex_unlock(&tipsy_event_mu);
+	tipsy_nudge_pump();
 	return tipsy_x_io_error ? -1 : 0;
 }
 */
@@ -780,6 +1180,7 @@ func Open(title string, width, height int) (*Window, error) {
 		width:    width,
 		height:   height,
 	}
+	setActiveWindow(w)
 	// Roblox renders its own cursor. This transparent cursor is scoped to the
 	// client window: leaving it returns to the host cursor automatically.
 	w.cursor = uintptr(C.tipsy_x11_hide_cursor(C.uintptr_t(w.display), C.ulong(w.xid)))
@@ -815,7 +1216,41 @@ func dismissLocked(w *Window) error {
 	return nil
 }
 
-// Pump processes pending X events without blocking.
+func setPointerLockLocked(w *Window, locked bool) (bool, error) {
+	value := C.int(0)
+	if locked {
+		value = 1
+	}
+	var anchorX, anchorY, status C.int
+	rc := int(C.tipsy_x11_set_pointer_lock(C.uintptr_t(w.display), C.ulong(w.xid),
+		value, &anchorX, &anchorY, &status))
+	switch rc {
+	case 1:
+		w.pointerCaptured = true
+		w.pointerAnchorX = int(anchorX)
+		w.pointerAnchorY = int(anchorY)
+		logging.Logger(logging.CatX11).Info("X11 pointer lock acquired",
+			"xid", w.xid, "anchorX", w.pointerAnchorX, "anchorY", w.pointerAnchorY)
+		return true, nil
+	case 2:
+		w.pointerCaptured = false
+		logging.Logger(logging.CatX11).Info("X11 pointer lock released", "xid", w.xid)
+		return true, nil
+	case -1:
+		logging.Logger(logging.CatX11).Error("X11 pointer lock rejected",
+			"xid", w.xid, "grabStatus", int(status))
+		return false, fmt.Errorf("%w (status=%d)", ErrPointerGrab, int(status))
+	case -2:
+		return false, ErrClosed
+	default:
+		return false, nil
+	}
+}
+
+// Pump drains the input ring into Go subscribers. While StartBackgroundPump
+// is running, the C thread is the only XPending/XNextEvent reader; Pump
+// does not call tipsy_x11_pump. Without a background pump (unit tests), Pump
+// still consumes X events itself so tests stay single-consumer.
 func (w *Window) Pump() error {
 	if w == nil {
 		return ErrClosed
@@ -825,22 +1260,25 @@ func (w *Window) Pump() error {
 		w.mu.Unlock()
 		return ErrClosed
 	}
+	C.tipsy_x11_wake_ack()
 	if C.tipsy_x11_io_error() != 0 {
 		w.closed = true
 		w.mu.Unlock()
 		return ErrClosed
 	}
 
-	cw := C.int(w.width)
-	ch := C.int(w.height)
 	var closed C.int
-	rc := C.tipsy_x11_pump(C.uintptr_t(w.display), C.ulong(w.xid), C.ulong(w.wmDelete), &cw, &ch, &closed)
-	w.width = int(cw)
-	w.height = int(ch)
-	if rc != 0 {
-		w.closed = true
-		w.mu.Unlock()
-		return ErrClosed
+	if w.pump == 0 {
+		cw := C.int(w.width)
+		ch := C.int(w.height)
+		rc := C.tipsy_x11_pump(C.uintptr_t(w.display), C.ulong(w.xid), C.ulong(w.wmDelete), &cw, &ch, &closed)
+		w.width = int(cw)
+		w.height = int(ch)
+		if rc != 0 {
+			w.closed = true
+			w.mu.Unlock()
+			return ErrClosed
+		}
 	}
 	evs, closeRequested := w.drainInputLocked()
 	if closed != 0 || closeRequested {
@@ -885,13 +1323,14 @@ func (w *Window) drainInputLocked() ([]InputEvent, bool) {
 			}
 			evs = append(evs, InputEvent{Kind: InputKey, KeyPressed: r.a != 0, KeyCode: int32(r.b), ScanCode: int32(r.c)})
 		case C.TIPSY_INPUT_POINTER:
-			action := PointerDown
-			if r.a == 1 {
-				action = PointerUp
-			} else if r.a == 2 {
-				action = PointerMove
+			action, relative := decodePointerRingAction(int32(r.a))
+			ev := InputEvent{Kind: InputPointer, PointerAction: action, Button: int32(r.b), X: float32(r.x), Y: float32(r.y), Relative: relative}
+			if relative {
+				ev.Button = 0
+				ev.DeltaX = float32(r.b)
+				ev.DeltaY = float32(r.c)
 			}
-			evs = append(evs, InputEvent{Kind: InputPointer, PointerAction: action, Button: int32(r.b), X: float32(r.x), Y: float32(r.y)})
+			evs = append(evs, ev)
 		case C.TIPSY_INPUT_SCROLL:
 			evs = append(evs, InputEvent{Kind: InputScroll, X: float32(r.x), Y: float32(r.y), ScrollX: float32(r.a), ScrollY: float32(r.b)})
 		case C.TIPSY_INPUT_RESIZE:
@@ -900,6 +1339,14 @@ func (w *Window) drainInputLocked() ([]InputEvent, bool) {
 				continue
 			}
 			w.width, w.height = width, height
+			if w.pointerCaptured {
+				if w.pointerAnchorX >= width {
+					w.pointerAnchorX = width - 1
+				}
+				if w.pointerAnchorY >= height {
+					w.pointerAnchorY = height - 1
+				}
+			}
 			evs = append(evs, InputEvent{Kind: InputResize, Width: width, Height: height})
 		case C.TIPSY_INPUT_TEXT:
 			n := int(r.text_len)
@@ -920,13 +1367,30 @@ func (w *Window) drainInputLocked() ([]InputEvent, bool) {
 			if uintptr(r.b) == w.xid {
 				closeRequested = true
 			}
+		case C.TIPSY_INPUT_CAPTURE:
+			if uintptr(r.c) != w.xid {
+				continue
+			}
+			ev := InputEvent{Kind: InputPointerCapture, X: float32(r.x), Y: float32(r.y)}
+			switch r.a {
+			case 1:
+				ev.Captured = true
+				w.pointerCaptured = true
+				w.pointerAnchorX, w.pointerAnchorY = int(r.x), int(r.y)
+			case 2:
+				ev.CaptureFailed = true
+				ev.CaptureStatus = int32(r.b)
+			default:
+				w.pointerCaptured = false
+			}
+			evs = append(evs, ev)
 		}
 	}
 	return evs, closeRequested
 }
 
-// StartBackgroundPump runs Pump on a C pthread so V2Start can block on
-// C Main while the window still drains X events. Do not Swap/EGL here.
+// StartBackgroundPump starts the exclusive C X-event reader so V2Start can
+// block on C Main while Go only drains the input ring. Do not Swap/EGL here.
 func (w *Window) StartBackgroundPump() error {
 	if w == nil {
 		return ErrClosed
@@ -979,6 +1443,7 @@ func (w *Window) Close() error {
 	if w == nil {
 		return nil
 	}
+	clearActiveWindow(w)
 	w.mu.Lock()
 	defer w.mu.Unlock()
 	_ = w.stopBackgroundPumpLocked()
@@ -996,5 +1461,6 @@ func (w *Window) Close() error {
 	w.xid = 0
 	w.closed = true
 	w.dismissed = true
+	w.pointerCaptured = false
 	return nil
 }

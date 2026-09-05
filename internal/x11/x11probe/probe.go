@@ -29,6 +29,7 @@ int probe_open(void) {
 
 void probe_close(void) {
 	if (probe_dpy != NULL) {
+		XUngrabPointer(probe_dpy, CurrentTime);
 		XCloseDisplay(probe_dpy);
 		probe_dpy = NULL;
 	}
@@ -58,7 +59,7 @@ int probe_focus(unsigned long xid, int gained) {
 int probe_set_focus(unsigned long xid) {
 	if (probe_dpy == NULL) return -1;
 	XSetInputFocus(probe_dpy, (Window)xid, RevertToParent, CurrentTime);
-	XFlush(probe_dpy);
+	XSync(probe_dpy, False);
 	return 0;
 }
 
@@ -126,6 +127,40 @@ int probe_motion(unsigned long xid, int x, int y, unsigned int state) {
 	ev.xmotion.is_hint = False;
 	ev.xmotion.same_screen = True;
 	return probe_send(&ev, PointerMotionMask);
+}
+
+int probe_warp_pointer(unsigned long xid, int x, int y) {
+	if (probe_dpy == NULL) return -1;
+	XWarpPointer(probe_dpy, None, (Window)xid, 0, 0, 0, 0, x, y);
+	XSync(probe_dpy, False);
+	return 0;
+}
+
+int probe_query_pointer(unsigned long xid, int *out_x, int *out_y) {
+	if (probe_dpy == NULL) return -1;
+	Window root = 0, child = 0;
+	int root_x = 0, root_y = 0, x = 0, y = 0;
+	unsigned int mask = 0;
+	if (!XQueryPointer(probe_dpy, (Window)xid, &root, &child,
+		&root_x, &root_y, &x, &y, &mask)) return -2;
+	if (out_x != NULL) *out_x = x;
+	if (out_y != NULL) *out_y = y;
+	return 0;
+}
+
+int probe_grab_pointer(unsigned long xid) {
+	if (probe_dpy == NULL) return -1;
+	int status = XGrabPointer(probe_dpy, (Window)xid, False,
+		ButtonPressMask | ButtonReleaseMask | PointerMotionMask,
+		GrabModeAsync, GrabModeAsync, (Window)xid, None, CurrentTime);
+	XSync(probe_dpy, False);
+	return status;
+}
+
+void probe_ungrab_pointer(void) {
+	if (probe_dpy == NULL) return;
+	XUngrabPointer(probe_dpy, CurrentTime);
+	XSync(probe_dpy, False);
 }
 
 int probe_resize(unsigned long xid, unsigned int width, unsigned int height) {
@@ -359,6 +394,46 @@ func Motion(xid uintptr, x, y int, state uint64) error {
 	}
 	return nil
 }
+
+// WarpPointer moves the real server pointer to window-relative coordinates.
+// Pointer-lock tests use it to exercise grab, relative delta, and recentering
+// behavior without reading or generating user input.
+func WarpPointer(xid uintptr, x, y int) error {
+	if err := mustOpen(); err != nil {
+		return err
+	}
+	if C.probe_warp_pointer(C.ulong(xid), C.int(x), C.int(y)) != 0 {
+		return ErrProbe
+	}
+	return nil
+}
+
+// PointerPosition returns the real server pointer in window coordinates.
+func PointerPosition(xid uintptr) (x, y int, err error) {
+	if err = mustOpen(); err != nil {
+		return 0, 0, err
+	}
+	var px, py C.int
+	if C.probe_query_pointer(C.ulong(xid), &px, &py) != 0 {
+		return 0, 0, ErrProbe
+	}
+	return int(px), int(py), nil
+}
+
+// GrabPointer acquires a competing grab from the probe connection. Tests use
+// it to verify that Tipsy reports grab rejection without swallowing edges.
+func GrabPointer(xid uintptr) error {
+	if err := mustOpen(); err != nil {
+		return err
+	}
+	if C.probe_grab_pointer(C.ulong(xid)) != 0 {
+		return ErrProbe
+	}
+	return nil
+}
+
+// UngrabPointer releases a probe-owned grab.
+func UngrabPointer() { C.probe_ungrab_pointer() }
 
 // Resize asks X11 to resize the client window. Tests use the resulting real
 // ConfigureNotify to assert resize/pointer ordering in the capture bridge.
