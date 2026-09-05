@@ -187,6 +187,17 @@ extern long tipsy_sysconf(int);
 extern int tipsy_fflush(void *);
 extern int tipsy_pthread_cond_wait(void *, void *);
 extern int tipsy_pthread_cond_timedwait(void *, void *, void *);
+extern int tipsy_pthread_mutex_lock(void *);
+extern int tipsy_pthread_mutex_trylock(void *);
+extern int tipsy_pthread_mutex_timedlock(void *, const void *);
+extern int tipsy_pthread_mutex_unlock(void *);
+extern int tipsy_pthread_cond_signal(void *);
+extern int tipsy_pthread_cond_broadcast(void *);
+extern int tipsy_pthread_setaffinity_np(uintptr_t, size_t, const void *);
+extern int tipsy_sched_yield(void);
+extern int tipsy_sched_getaffinity(int, size_t, void *);
+extern int tipsy_sched_setaffinity(int, size_t, const void *);
+extern int tipsy_nice(int);
 extern size_t tipsy_fwrite(const void *, size_t, size_t, void *);
 extern size_t tipsy_fread(void *, size_t, size_t, void *);
 extern size_t tipsy_fread_chk(void *, size_t, size_t, void *, size_t);
@@ -263,6 +274,17 @@ static const struct sym table[] = {
 	{ "libc.so", "sysconf", (void *)tipsy_sysconf },
 	{ "libc.so", "pthread_cond_wait", (void *)tipsy_pthread_cond_wait },
 	{ "libc.so", "pthread_cond_timedwait", (void *)tipsy_pthread_cond_timedwait },
+	{ "libc.so", "pthread_mutex_lock", (void *)tipsy_pthread_mutex_lock },
+	{ "libc.so", "pthread_mutex_trylock", (void *)tipsy_pthread_mutex_trylock },
+	{ "libc.so", "pthread_mutex_timedlock", (void *)tipsy_pthread_mutex_timedlock },
+	{ "libc.so", "pthread_mutex_unlock", (void *)tipsy_pthread_mutex_unlock },
+	{ "libc.so", "pthread_cond_signal", (void *)tipsy_pthread_cond_signal },
+	{ "libc.so", "pthread_cond_broadcast", (void *)tipsy_pthread_cond_broadcast },
+	{ "libc.so", "pthread_setaffinity_np", (void *)tipsy_pthread_setaffinity_np },
+	{ "libc.so", "sched_yield", (void *)tipsy_sched_yield },
+	{ "libc.so", "sched_getaffinity", (void *)tipsy_sched_getaffinity },
+	{ "libc.so", "sched_setaffinity", (void *)tipsy_sched_setaffinity },
+	{ "libc.so", "nice", (void *)tipsy_nice },
 	{ "libc.so", "fflush", (void *)tipsy_fflush },
 	{ "libc.so", "fwrite", (void *)tipsy_fwrite },
 	{ "libc.so", "fread", (void *)tipsy_fread },
@@ -421,6 +443,10 @@ void *tipsy_android_lookup(const char *lib, const char *name)
 	}
 	for (i = 0; i < sizeof table / sizeof table[0]; i++) {
 		if (strcmp(table[i].name, name) != 0) {
+			continue;
+		}
+		if (tipsy_bionic_sync_is_export(table[i].name) &&
+		    !tipsy_bionic_sync_enabled()) {
 			continue;
 		}
 		if (lib == NULL || lib[0] == '\0' || strcmp(table[i].lib, lib) == 0) {

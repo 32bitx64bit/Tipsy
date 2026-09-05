@@ -58,6 +58,10 @@ func Register(soname string, lookup LookupFunc) {
 
 // RegisterImage publishes a mmap'd Android ELF so dl_iterate_phdr can find
 // it (host glibc only knows dlopen'd objects). Needed for C++ unwind.
+// It also copies executable segment bounds for opt-in caller attribution.
+// Re-registering a load bias replaces its metadata and invalidates caches.
+// The mapping must stay live until UnregisterImage, and all guest use and
+// concurrent unwind walks must end before unregistering and unmapping it.
 func RegisterImage(loadBias uintptr, path string) {
 	if loadBias == 0 {
 		return
@@ -65,6 +69,12 @@ func RegisterImage(loadBias uintptr, path string) {
 	cs := C.CString(path)
 	C.tipsy_register_image(C.uintptr_t(loadBias), cs)
 	C.free(unsafe.Pointer(cs))
+}
+
+// UnregisterImage removes a mapped image before its owner unmaps it. A client
+// kept mapped for live engine workers must remain registered as well.
+func UnregisterImage(loadBias uintptr) {
+	C.tipsy_unregister_image(C.uintptr_t(loadBias))
 }
 
 func dlIterateCount() int {

@@ -12,6 +12,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <pthread.h>
+#include <stdatomic.h>
 
 extern void *GoAndroid_dlopen(char *filename, int flags);
 extern void *GoAndroid_dlsym(void *handle, char *symbol);
@@ -54,37 +55,134 @@ int tipsy_dladdr(const void *addr, Dl_info *info)
 
 #define TIPSY_MAX_IMAGES 16
 
+struct tipsy_code_range {
+	uintptr_t start;
+	uintptr_t end;
+};
+
 struct tipsy_image {
 	uintptr_t addr;
 	char name[256];
+	struct tipsy_code_range *code;
+	size_t ncode;
+	int module_class;
 };
 
 static struct tipsy_image g_images[TIPSY_MAX_IMAGES];
 static int g_nimages;
 static pthread_mutex_t g_image_mu = PTHREAD_MUTEX_INITIALIZER;
+static _Atomic uint64_t g_image_generation = 1;
 
 void tipsy_register_image(uintptr_t load_bias, const char *name)
 {
+	const Elf64_Ehdr *eh = (const Elf64_Ehdr *)load_bias;
+	const Elf64_Phdr *ph;
+	const char *base;
+	struct tipsy_image image = {0};
 	int i;
+	size_t p;
 
 	if (load_bias == 0) {
 		return;
 	}
+	/* The loader owns the mapping and must keep it live until unregister.
+	 * Copy executable PT_LOAD bounds once; diagnostic reads never dereference
+	 * guest memory, and must not mistake gaps/data for a caller module. */
+	if (memcmp(eh->e_ident, ELFMAG, SELFMAG) != 0 ||
+	    eh->e_ident[EI_CLASS] != ELFCLASS64 || eh->e_ident[EI_DATA] != ELFDATA2LSB ||
+	    eh->e_phentsize != sizeof(Elf64_Phdr) || eh->e_phoff > UINTPTR_MAX - load_bias) {
+		return;
+	}
+	image.addr = load_bias;
+	if (name != NULL) {
+		strncpy(image.name, name, sizeof(image.name) - 1);
+	}
+	base = name == NULL ? NULL : strrchr(name, '/');
+	base = base == NULL ? name : base + 1;
+	image.module_class = base == NULL || *base == '\0' ? TIPSY_BIONIC_SYNC_MODULE_UNKNOWN :
+		strcmp(base, "libroblox.so") == 0 ? TIPSY_BIONIC_SYNC_MODULE_ROBLOX : TIPSY_BIONIC_SYNC_MODULE_OTHER;
+	if (eh->e_phnum != 0) {
+		image.code = calloc(eh->e_phnum, sizeof(*image.code));
+	}
+	ph = (const Elf64_Phdr *)(load_bias + eh->e_phoff);
+	/* Diagnostic allocation failure must not prevent unwind registration. */
+	for (p = 0; image.code != NULL && p < eh->e_phnum; p++) {
+		uintptr_t start;
+		if (ph[p].p_type != PT_LOAD || !(ph[p].p_flags & PF_X) || ph[p].p_memsz == 0 ||
+		    ph[p].p_vaddr > UINTPTR_MAX - load_bias) {
+			continue;
+		}
+		start = load_bias + ph[p].p_vaddr;
+		if (ph[p].p_memsz > UINTPTR_MAX - start) {
+			continue;
+		}
+		image.code[image.ncode++] = (struct tipsy_code_range){start, start + ph[p].p_memsz};
+	}
 	pthread_mutex_lock(&g_image_mu);
 	for (i = 0; i < g_nimages; i++) {
 		if (g_images[i].addr == load_bias) {
-			pthread_mutex_unlock(&g_image_mu);
-			return;
+			break;
 		}
 	}
-	if (g_nimages < TIPSY_MAX_IMAGES) {
-		g_images[g_nimages].addr = load_bias;
-		if (name != NULL) {
-			strncpy(g_images[g_nimages].name, name, sizeof(g_images[0].name) - 1);
+	if (i < TIPSY_MAX_IMAGES) {
+		if (i == g_nimages) {
+			g_nimages++;
+		} else {
+			free(g_images[i].code);
 		}
-		g_nimages++;
+		g_images[i] = image;
+		atomic_fetch_add_explicit(&g_image_generation, 1, memory_order_release);
+	} else {
+		free(image.code);
 	}
 	pthread_mutex_unlock(&g_image_mu);
+}
+
+void tipsy_unregister_image(uintptr_t load_bias)
+{
+	int i;
+	pthread_mutex_lock(&g_image_mu);
+	for (i = 0; i < g_nimages; i++) {
+		if (g_images[i].addr == load_bias) {
+			free(g_images[i].code);
+			g_images[i] = g_images[--g_nimages];
+			memset(&g_images[g_nimages], 0, sizeof(g_images[0]));
+			atomic_fetch_add_explicit(&g_image_generation, 1, memory_order_release);
+			break;
+		}
+	}
+	pthread_mutex_unlock(&g_image_mu);
+}
+
+uint64_t tipsy_image_generation(void)
+{
+	return atomic_load_explicit(&g_image_generation, memory_order_acquire);
+}
+
+/* Only a diagnostic cache miss takes the registry lock. Bounds and generation
+ * are copied together, so TLS retains no pointers to replaceable metadata. */
+int tipsy_image_code_range(uintptr_t address, uintptr_t *start, uintptr_t *end,
+	uint64_t *generation)
+{
+	int i, module_class = TIPSY_BIONIC_SYNC_MODULE_UNKNOWN;
+	size_t p;
+	*start = *end = 0;
+	pthread_mutex_lock(&g_image_mu);
+	*generation = atomic_load_explicit(&g_image_generation, memory_order_relaxed);
+	for (i = 0; i < g_nimages; i++) {
+		for (p = 0; p < g_images[i].ncode; p++) {
+			struct tipsy_code_range range = g_images[i].code[p];
+			if (address >= range.start && address < range.end) {
+				*start = range.start;
+				*end = range.end;
+				module_class = g_images[i].module_class;
+				goto done;
+			}
+		}
+	}
+done:
+	pthread_mutex_unlock(&g_image_mu);
+	return module_class;
 }
 
 static int report_mapped_image(struct tipsy_image *im,

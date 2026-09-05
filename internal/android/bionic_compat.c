@@ -10,9 +10,13 @@
 #include "android_bridge.h"
 
 #include <assert.h>
+#include <dlfcn.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <poll.h>
+#include <pthread.h>
+#include <sched.h>
+#include <stdatomic.h>
 #include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -22,7 +26,405 @@
 #include <sys/socket.h>
 #include <sys/stat.h>
 #include <sys/types.h>
+#include <time.h>
 #include <unistd.h>
+
+/* The client imports these libc symbols.  During an ordinary launch the
+ * resolver deliberately leaves them bound directly to glibc.  A bounded
+ * TIPSY_STUTTER_DIAG launch opts into these pass-through wrappers before the
+ * Android image resolves, so host-internal pthreads are never observed. */
+struct bionic_sync_path {
+	_Atomic uint64_t calls;
+	_Atomic uint64_t contention;
+	_Atomic uint64_t errors;
+	_Atomic uint64_t samples;
+	_Atomic uint64_t sampled_ns;
+	_Atomic uint64_t max_ns;
+};
+
+struct bionic_sync_token {
+	uint64_t started_ns;
+	unsigned char thread_class;
+	unsigned char module_class;
+	unsigned char op;
+	unsigned char active;
+};
+
+static _Atomic int g_bionic_sync_enabled;
+static _Atomic uint64_t g_bionic_sync_clock_calls;
+static struct bionic_sync_path
+	g_bionic_sync[TIPSY_BIONIC_SYNC_THREADS][TIPSY_BIONIC_SYNC_MODULES]
+		[TIPSY_BIONIC_SYNC_OPS];
+static __thread uint32_t tls_bionic_sync_samples[TIPSY_BIONIC_SYNC_OPS];
+static __thread int tls_bionic_sync_thread_class = -1;
+static __thread uint32_t tls_bionic_sync_thread_name_samples;
+static __thread const void *tls_bionic_sync_last_return;
+static __thread int tls_bionic_sync_last_module = -1;
+static __thread uintptr_t tls_bionic_sync_code_start;
+static __thread uintptr_t tls_bionic_sync_code_end;
+static __thread uint64_t tls_bionic_sync_image_generation;
+
+static void bionic_sync_max(_Atomic uint64_t *dst, uint64_t value)
+{
+	uint64_t old = atomic_load_explicit(dst, memory_order_relaxed);
+
+	while (old < value && !atomic_compare_exchange_weak_explicit(dst, &old, value,
+		memory_order_relaxed, memory_order_relaxed)) {
+	}
+}
+
+static int bionic_sync_thread_class(void)
+{
+	char name[16] = {0};
+
+	/* Guest thread setup can cross pthread exports before naming the worker.
+	 * Refresh only once per 64 diagnostic crossings, not once for its lifetime. */
+	if ((tls_bionic_sync_thread_name_samples++ & 63u) != 0 &&
+	    tls_bionic_sync_thread_class >= 0) {
+		return tls_bionic_sync_thread_class;
+	}
+	tls_bionic_sync_thread_class = TIPSY_BIONIC_SYNC_THREAD_OTHER;
+	if (pthread_getname_np(pthread_self(), name, sizeof(name)) != 0) {
+		return tls_bionic_sync_thread_class;
+	}
+	if (strncmp(name, "RBX Worker", 10) == 0 && (name[10] == '\0' || name[10] == ' ')) {
+		tls_bionic_sync_thread_class = TIPSY_BIONIC_SYNC_THREAD_RBX_WORKER;
+	} else if (strcmp(name, "Main") == 0) {
+		tls_bionic_sync_thread_class = TIPSY_BIONIC_SYNC_THREAD_MAIN;
+	}
+	return tls_bionic_sync_thread_class;
+}
+
+static int bionic_sync_module_class(const void *return_address)
+{
+	Dl_info info;
+	const char *base;
+	uintptr_t address = (uintptr_t)return_address;
+	uint64_t generation = tipsy_image_generation();
+
+	if (generation == tls_bionic_sync_image_generation &&
+	    tls_bionic_sync_last_module >= 0 &&
+	    (return_address == tls_bionic_sync_last_return ||
+	     (address >= tls_bionic_sync_code_start && address < tls_bionic_sync_code_end))) {
+		return tls_bionic_sync_last_module;
+	}
+	tls_bionic_sync_last_return = return_address;
+	tls_bionic_sync_last_module = tipsy_image_code_range(address,
+		&tls_bionic_sync_code_start, &tls_bionic_sync_code_end,
+		&tls_bionic_sync_image_generation);
+	if (tls_bionic_sync_code_end != 0) {
+		return tls_bionic_sync_last_module;
+	}
+	if (return_address == NULL || dladdr(return_address, &info) == 0 ||
+	    info.dli_fname == NULL) {
+		return tls_bionic_sync_last_module;
+	}
+	base = strrchr(info.dli_fname, '/');
+	base = base == NULL ? info.dli_fname : base + 1;
+	tls_bionic_sync_last_module = strcmp(base, "libroblox.so") == 0 ?
+		TIPSY_BIONIC_SYNC_MODULE_ROBLOX : TIPSY_BIONIC_SYNC_MODULE_OTHER;
+	return tls_bionic_sync_last_module;
+}
+
+static struct bionic_sync_token bionic_sync_begin(int op, const void *return_address)
+{
+	struct bionic_sync_token token = {0};
+	struct timespec ts;
+	struct bionic_sync_path *path;
+
+	if (!atomic_load_explicit(&g_bionic_sync_enabled, memory_order_relaxed) ||
+	    op < 0 || op >= TIPSY_BIONIC_SYNC_OPS) {
+		return token;
+	}
+	token.thread_class = (unsigned char)bionic_sync_thread_class();
+	token.module_class = (unsigned char)bionic_sync_module_class(return_address);
+	token.op = (unsigned char)op;
+	token.active = 1;
+	path = &g_bionic_sync[token.thread_class][token.module_class][token.op];
+	atomic_fetch_add_explicit(&path->calls, 1, memory_order_relaxed);
+	/* One timestamp pair per 64 crossings; exact count/error fields stay cheap. */
+	if ((tls_bionic_sync_samples[op]++ & 63u) != 0) {
+		return token;
+	}
+	atomic_fetch_add_explicit(&g_bionic_sync_clock_calls, 1, memory_order_relaxed);
+	if (clock_gettime(CLOCK_MONOTONIC, &ts) != 0) {
+		return token;
+	}
+	token.started_ns = (uint64_t)ts.tv_sec * 1000000000ull + (uint64_t)ts.tv_nsec + 1ull;
+	return token;
+}
+
+static void bionic_sync_end(struct bionic_sync_token token, int error, int contention)
+{
+	struct bionic_sync_path *path;
+	struct timespec ts;
+	uint64_t ended_ns, elapsed;
+
+	if (!token.active) {
+		return;
+	}
+	path = &g_bionic_sync[token.thread_class][token.module_class][token.op];
+	if (error) {
+		atomic_fetch_add_explicit(&path->errors, 1, memory_order_relaxed);
+	}
+	if (contention) {
+		atomic_fetch_add_explicit(&path->contention, 1, memory_order_relaxed);
+	}
+	if (token.started_ns == 0) {
+		return;
+	}
+	atomic_fetch_add_explicit(&g_bionic_sync_clock_calls, 1, memory_order_relaxed);
+	if (clock_gettime(CLOCK_MONOTONIC, &ts) != 0) {
+		return;
+	}
+	ended_ns = (uint64_t)ts.tv_sec * 1000000000ull + (uint64_t)ts.tv_nsec + 1ull;
+	elapsed = ended_ns >= token.started_ns ? ended_ns - token.started_ns : 0;
+	atomic_fetch_add_explicit(&path->samples, 1, memory_order_relaxed);
+	atomic_fetch_add_explicit(&path->sampled_ns, elapsed, memory_order_relaxed);
+	bionic_sync_max(&path->max_ns, elapsed);
+}
+
+void tipsy_bionic_sync_set_enabled(int enabled)
+{
+	atomic_store_explicit(&g_bionic_sync_enabled, enabled != 0, memory_order_relaxed);
+}
+
+int tipsy_bionic_sync_enabled(void)
+{
+	return atomic_load_explicit(&g_bionic_sync_enabled, memory_order_relaxed);
+}
+
+int tipsy_bionic_sync_is_export(const char *name)
+{
+	static const char *const names[] = {
+		"pthread_mutex_lock", "pthread_mutex_trylock", "pthread_mutex_timedlock",
+		"pthread_mutex_unlock", "pthread_cond_signal", "pthread_cond_broadcast",
+		"pthread_setaffinity_np", "sched_yield", "sched_getaffinity",
+		"sched_setaffinity", "nice"
+	};
+	size_t i;
+
+	if (name == NULL) {
+		return 0;
+	}
+	for (i = 0; i < sizeof(names) / sizeof(names[0]); i++) {
+		if (strcmp(name, names[i]) == 0) {
+			return 1;
+		}
+	}
+	return 0;
+}
+
+void tipsy_bionic_sync_snapshot(TipsyBionicSyncStats *out, int reset)
+{
+	int thread_class, module_class, op;
+
+	if (out == NULL) {
+		return;
+	}
+	memset(out, 0, sizeof(*out));
+	for (thread_class = 0; thread_class < TIPSY_BIONIC_SYNC_THREADS; thread_class++) {
+		for (module_class = 0; module_class < TIPSY_BIONIC_SYNC_MODULES; module_class++) {
+			for (op = 0; op < TIPSY_BIONIC_SYNC_OPS; op++) {
+				struct bionic_sync_path *src = &g_bionic_sync[thread_class][module_class][op];
+				TipsyBionicSyncPathStats *dst = &out->path[thread_class][module_class][op];
+#define BIONIC_SYNC_STAT(field) (reset ? \
+	atomic_exchange_explicit(&src->field, 0, memory_order_relaxed) : \
+	atomic_load_explicit(&src->field, memory_order_relaxed))
+				dst->calls = BIONIC_SYNC_STAT(calls);
+				dst->contention = BIONIC_SYNC_STAT(contention);
+				dst->errors = BIONIC_SYNC_STAT(errors);
+				dst->samples = BIONIC_SYNC_STAT(samples);
+				dst->sampled_ns = BIONIC_SYNC_STAT(sampled_ns);
+				dst->max_ns = BIONIC_SYNC_STAT(max_ns);
+#undef BIONIC_SYNC_STAT
+			}
+		}
+	}
+}
+
+#define BIONIC_SYNC_CALL(op, expression, error_value, contention_value) do { \
+	int saved_errno = errno; \
+	struct bionic_sync_token token = bionic_sync_begin((op), __builtin_return_address(0)); \
+	int rc; \
+	errno = saved_errno; \
+	rc = (expression); \
+	saved_errno = errno; \
+	bionic_sync_end(token, (error_value), (contention_value)); \
+	errno = saved_errno; \
+	return rc; \
+} while (0)
+
+__attribute__((noinline)) int tipsy_pthread_mutex_lock(pthread_mutex_t *mutex)
+{
+	BIONIC_SYNC_CALL(TIPSY_BIONIC_SYNC_MUTEX_LOCK, pthread_mutex_lock(mutex), rc != 0, 0);
+}
+
+__attribute__((noinline)) int tipsy_pthread_mutex_trylock(pthread_mutex_t *mutex)
+{
+	BIONIC_SYNC_CALL(TIPSY_BIONIC_SYNC_MUTEX_TRYLOCK, pthread_mutex_trylock(mutex), rc != 0, rc == EBUSY);
+}
+
+__attribute__((noinline)) int tipsy_pthread_mutex_timedlock(pthread_mutex_t *mutex,
+	const struct timespec *abstime)
+{
+	BIONIC_SYNC_CALL(TIPSY_BIONIC_SYNC_MUTEX_TIMEDLOCK, pthread_mutex_timedlock(mutex, abstime),
+		rc != 0, rc == EBUSY || rc == ETIMEDOUT);
+}
+
+__attribute__((noinline)) int tipsy_pthread_mutex_unlock(pthread_mutex_t *mutex)
+{
+	BIONIC_SYNC_CALL(TIPSY_BIONIC_SYNC_MUTEX_UNLOCK, pthread_mutex_unlock(mutex), rc != 0, 0);
+}
+
+__attribute__((noinline)) int tipsy_pthread_cond_signal(pthread_cond_t *cond)
+{
+	BIONIC_SYNC_CALL(TIPSY_BIONIC_SYNC_COND_SIGNAL, pthread_cond_signal(cond), rc != 0, 0);
+}
+
+__attribute__((noinline)) int tipsy_pthread_cond_broadcast(pthread_cond_t *cond)
+{
+	BIONIC_SYNC_CALL(TIPSY_BIONIC_SYNC_COND_BROADCAST, pthread_cond_broadcast(cond), rc != 0, 0);
+}
+
+__attribute__((noinline)) int tipsy_pthread_setaffinity_np(pthread_t thread,
+	size_t cpusetsize, const cpu_set_t *cpuset)
+{
+	BIONIC_SYNC_CALL(TIPSY_BIONIC_SYNC_PTHREAD_SETAFFINITY,
+		pthread_setaffinity_np(thread, cpusetsize, cpuset), rc != 0, 0);
+}
+
+__attribute__((noinline)) int tipsy_sched_yield(void)
+{
+	BIONIC_SYNC_CALL(TIPSY_BIONIC_SYNC_SCHED_YIELD, sched_yield(), rc != 0, 0);
+}
+
+__attribute__((noinline)) int tipsy_sched_getaffinity(pid_t pid, size_t cpusetsize,
+	cpu_set_t *cpuset)
+{
+	BIONIC_SYNC_CALL(TIPSY_BIONIC_SYNC_SCHED_GETAFFINITY,
+		sched_getaffinity(pid, cpusetsize, cpuset), rc != 0, 0);
+}
+
+__attribute__((noinline)) int tipsy_sched_setaffinity(pid_t pid, size_t cpusetsize,
+	const cpu_set_t *cpuset)
+{
+	BIONIC_SYNC_CALL(TIPSY_BIONIC_SYNC_SCHED_SETAFFINITY,
+		sched_setaffinity(pid, cpusetsize, cpuset), rc != 0, 0);
+}
+
+__attribute__((noinline)) int tipsy_nice(int increment)
+{
+	int prior_errno = errno;
+	int host_errno;
+	struct bionic_sync_token token = bionic_sync_begin(TIPSY_BIONIC_SYNC_NICE,
+		__builtin_return_address(0));
+	int rc;
+
+	/* Linux permits a successful nice() to return -1. Clear errno only while
+	 * calling the host so the aggregate can distinguish that from a real
+	 * failure, then preserve the caller-visible errno contract. */
+	errno = 0;
+	rc = nice(increment);
+	host_errno = errno;
+	bionic_sync_end(token, rc == -1 && host_errno != 0, 0);
+	errno = rc == -1 && host_errno != 0 ? host_errno : prior_errno;
+	return rc;
+}
+
+#undef BIONIC_SYNC_CALL
+
+uint64_t tipsy_test_bionic_sync_clock_calls(void)
+{
+	return atomic_load_explicit(&g_bionic_sync_clock_calls, memory_order_relaxed);
+}
+
+void tipsy_test_bionic_sync_reset_tls(void)
+{
+	memset(tls_bionic_sync_samples, 0, sizeof(tls_bionic_sync_samples));
+	tls_bionic_sync_thread_class = -1;
+	tls_bionic_sync_thread_name_samples = 0;
+	tls_bionic_sync_last_return = NULL;
+	tls_bionic_sync_last_module = -1;
+	tls_bionic_sync_code_start = 0;
+	tls_bionic_sync_code_end = 0;
+	tls_bionic_sync_image_generation = 0;
+}
+
+int tipsy_test_bionic_sync_mutex(void)
+{
+	pthread_mutex_t mutex = PTHREAD_MUTEX_INITIALIZER;
+	int rc;
+
+	rc = tipsy_pthread_mutex_lock(&mutex);
+	if (rc == 0) {
+		rc = tipsy_pthread_mutex_trylock(&mutex);
+		(void)tipsy_pthread_mutex_unlock(&mutex);
+	}
+	(void)pthread_mutex_destroy(&mutex);
+	return rc == EBUSY ? 0 : -1;
+}
+
+int tipsy_test_bionic_sync_condition(void)
+{
+	pthread_cond_t cond = PTHREAD_COND_INITIALIZER;
+	int rc = tipsy_pthread_cond_signal(&cond);
+	if (rc == 0) {
+		rc = tipsy_pthread_cond_broadcast(&cond);
+	}
+	(void)pthread_cond_destroy(&cond);
+	return rc;
+}
+
+int tipsy_test_bionic_sync_host_dladdr(uintptr_t address)
+{
+	Dl_info info;
+	return dladdr((const void *)address, &info);
+}
+
+int tipsy_test_bionic_sync_named_call(uintptr_t entry, uintptr_t function, const char *name)
+{
+	char saved_name[16];
+	int rc;
+	if (pthread_getname_np(pthread_self(), saved_name, sizeof(saved_name)) != 0 ||
+	    pthread_setname_np(pthread_self(), name) != 0) {
+		return -1;
+	}
+	tls_bionic_sync_thread_class = -1;
+	rc = ((int (*)(uintptr_t))entry)(function);
+	(void)pthread_setname_np(pthread_self(), saved_name);
+	tls_bionic_sync_thread_class = -1;
+	return rc;
+}
+
+int tipsy_test_bionic_sync_module_class(uintptr_t address)
+{
+	return bionic_sync_module_class((const void *)address);
+}
+
+int tipsy_test_bionic_sync_rename_call(uintptr_t entry, uintptr_t function)
+{
+	char saved_name[16];
+	int i, rc = 0;
+	if (pthread_getname_np(pthread_self(), saved_name, sizeof(saved_name)) != 0 ||
+	    pthread_setname_np(pthread_self(), "tipsy-test") != 0) {
+		return -1;
+	}
+	tls_bionic_sync_thread_class = -1;
+	(void)((int (*)(uintptr_t))entry)(function);
+	if (pthread_setname_np(pthread_self(), "RBX Worker A") != 0) {
+		rc = -1;
+	} else {
+		for (i = 0; i < 128; i++) {
+			if (((int (*)(uintptr_t))entry)(function) != 0) {
+				rc = -1;
+			}
+		}
+	}
+	(void)pthread_setname_np(pthread_self(), saved_name);
+	tls_bionic_sync_thread_class = -1;
+	return rc;
+}
 
 /* AOSP bits/struct_file.h: LP64 FILE is 152 bytes, 8-aligned. glibc FILE is
  * larger (~216). Roblox indexes __sF[i] with the bionic stride, so a glibc
