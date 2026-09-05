@@ -70,6 +70,26 @@ func TestRunLaunchNeedsSetup(t *testing.T) {
 	}
 }
 
+func TestRunLaunchRejectsStudioURI(t *testing.T) {
+	code, _, errOut := runArgs(t, "launch", "roblox-studio:1+launchmode:edit+placeId:1")
+	if code != 2 {
+		t.Fatalf("exit %d, want 2; stderr=%s", code, errOut)
+	}
+	if !strings.Contains(errOut, "Studio") {
+		t.Fatalf("stderr=%s", errOut)
+	}
+}
+
+func TestRunLaunchProbeRejectsURI(t *testing.T) {
+	code, _, errOut := runArgs(t, "launch", "--probe", "roblox://experiences/start?placeId=1818")
+	if code != 2 {
+		t.Fatalf("exit %d, want 2; stderr=%s", code, errOut)
+	}
+	if !strings.Contains(errOut, "--probe") {
+		t.Fatalf("stderr=%s", errOut)
+	}
+}
+
 func TestRunRepairNotImplemented(t *testing.T) {
 	code, _, errOut := runArgs(t, "repair")
 	if code != 1 {
@@ -97,7 +117,8 @@ func TestRunSetupRejectsUnverifiedPackage(t *testing.T) {
 	src := t.TempDir()
 	apkPath := filepath.Join(src, "base.apk")
 	writeCLITestAPK(t, apkPath, map[string][]byte{
-		"lib/x86_64/libdummy.so": []byte("cli-setup-lib"),
+		"AndroidManifest.xml":     []byte("manifest"),
+		"lib/x86_64/libroblox.so": []byte("cli-setup-lib"),
 		"assets/a.txt":           []byte("asset"),
 	})
 

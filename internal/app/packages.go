@@ -12,6 +12,7 @@ import (
 	"github.com/tipsy-linux/tipsy/internal/compat"
 	"github.com/tipsy-linux/tipsy/internal/elfinspect"
 	"github.com/tipsy-linux/tipsy/internal/logging"
+	"github.com/tipsy-linux/tipsy/internal/rbxuri"
 	"github.com/tipsy-linux/tipsy/internal/runtime"
 	"github.com/tipsy-linux/tipsy/internal/setupsvc"
 )
@@ -47,14 +48,27 @@ func cmdSetup(ctx context.Context, args []string, stdout, stderr io.Writer) int 
 
 func cmdLaunch(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 	probe := false
+	uri := ""
 	rest := args
 	for len(rest) > 0 {
-		switch rest[0] {
-		case "-h", "--help":
+		switch {
+		case rest[0] == "-h" || rest[0] == "--help":
 			fmt.Fprint(stdout, launchHelp)
 			return 0
-		case "--probe":
+		case rest[0] == "--probe":
 			probe = true
+			rest = rest[1:]
+		case rest[0] == "--":
+			rest = rest[1:]
+			if len(rest) == 0 {
+				fmt.Fprintln(stderr, "launch: missing URI after --")
+				fmt.Fprint(stderr, launchHelp)
+				return 2
+			}
+			uri = rest[0]
+			rest = rest[1:]
+		case rbxuri.LooksLike(rest[0]):
+			uri = rest[0]
 			rest = rest[1:]
 		default:
 			fmt.Fprintf(stderr, "launch: unexpected argument %q\n", rest[0])
@@ -62,7 +76,16 @@ func cmdLaunch(ctx context.Context, args []string, stdout, stderr io.Writer) int
 			return 2
 		}
 	}
-	err := runtime.Launch(ctx, runtime.LaunchOptions{Probe: probe})
+	if probe && uri != "" {
+		fmt.Fprintln(stderr, "launch: --probe cannot take a website URI")
+		return 2
+	}
+	req, err := rbxuri.Parse(uri)
+	if err != nil {
+		fmt.Fprintln(stderr, logging.Redact(err.Error()))
+		return 2
+	}
+	err = runtime.Launch(ctx, runtime.LaunchOptions{Probe: probe, Request: req})
 	if err != nil {
 		fmt.Fprintln(stderr, logging.Redact(err.Error()))
 		return 1

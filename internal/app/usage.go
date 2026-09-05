@@ -22,7 +22,7 @@ Commands:
   version             Print version
   logs                Show log directory and TIPSY_LOG usage
   setup               Verify and install the official x86-64 client
-  launch              Load the official client (X11). Use --probe to exit after JNI_OnLoad
+  launch              Load the official client (X11). Optional Roblox website URI; --probe exits after JNI_OnLoad
   repair              Repair install (not yet implemented)
   help                Show this help
 
@@ -74,11 +74,17 @@ APKs, or .apkm/.xapk/.apks/.zip sets. Pass regular package files obtained
 through your own authorized account. Never commit Roblox packages.
 `
 
-const launchHelp = `Usage: tipsy launch [--probe]
+const launchHelp = `Usage: tipsy launch [--probe] [uri]
 
 Load the extracted official Android x86-64 client. Run tipsy setup first.
 
   --probe   Load libroblox.so, run JNI_OnLoad, then exit (no game loop)
+  uri       Optional Roblox website or protocol URI (roblox-player:,
+            roblox://experiences/start, or https://www.roblox.com/games/...)
+
+A website Play URI that includes an official authentication ticket signs the
+Android session in through the same private cookie store as in-app login.
+Ticket and cookie values are never logged.
 `
 
 const configHelp = `Usage: tipsy config [path|get|set]
