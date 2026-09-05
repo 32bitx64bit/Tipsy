@@ -29,7 +29,7 @@ jobs:
       - name: Native headers
         run: |
           sudo apt-get update
-          sudo apt-get install -y gcc pkg-config libx11-dev libegl1-mesa-dev libgles2-mesa-dev
+          sudo apt-get install -y gcc pkg-config libx11-dev libegl1-mesa-dev libgles2-mesa-dev libxrandr-dev libxtst-dev xvfb
 
       - name: Vet
         run: go vet ./...
