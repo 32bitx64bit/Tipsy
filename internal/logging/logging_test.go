@@ -74,6 +74,18 @@ func TestRedact(t *testing.T) {
 			contain:    redacted,
 		},
 		{
+			name:       "roblox-player gameinfo",
+			in:         "roblox-player:1+launchmode:play+gameinfo:SUPER-SECRET-TICKET+placeId:1818",
+			notContain: "SUPER-SECRET-TICKET",
+			contain:    redacted,
+		},
+		{
+			name:       "authentication ticket header",
+			in:         "RBX-Authentication-Ticket: SUPER-SECRET-TICKET",
+			notContain: "SUPER-SECRET-TICKET",
+			contain:    redacted,
+		},
+		{
 			name:       "refresh token",
 			in:         "refresh_token=rrrr-secret",
 			notContain: "rrrr-secret",

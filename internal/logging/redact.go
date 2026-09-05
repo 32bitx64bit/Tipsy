@@ -47,6 +47,15 @@ var redactPatterns = []struct {
 		re:   regexp.MustCompile(`(?i)(\b(?:password|passwd|pwd|pass)\s*[=:]\s*)[^\s"'&,;]+`),
 		repl: `${1}` + redacted,
 	},
+	// Website protocol-handler authentication tickets.
+	{
+		re:   regexp.MustCompile(`(?i)(gameinfo:)[^+\s]+`),
+		repl: `${1}` + redacted,
+	},
+	{
+		re:   regexp.MustCompile(`(?i)(rbx-authentication-ticket\s*[:=]\s*)[^\s,;]+`),
+		repl: `${1}` + redacted,
+	},
 }
 
 // Redact never leak cookies/tokens/passwords.
