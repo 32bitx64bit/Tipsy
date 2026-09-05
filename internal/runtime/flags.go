@@ -144,7 +144,7 @@ func fetchAndroidAppSettings() ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	req.Header.Set("User-Agent", "Roblox/2.734.917 (Linux; Android 8.0.0; tipsy)")
+	req.Header.Set("User-Agent", robloxUserAgent(installedVersionName(RuntimeDir())))
 	req.Header.Set("Accept", "application/json")
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {

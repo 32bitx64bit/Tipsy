@@ -384,7 +384,7 @@ func fetchOfficialAsset(ctx context.Context, assetID, version string) ([]byte, e
 	if err != nil {
 		return nil, err
 	}
-	req.Header.Set("User-Agent", "Roblox/2.734.917 (Linux; Android 8.0.0; tipsy)")
+	req.Header.Set("User-Agent", robloxUserAgent(installedVersionName(RuntimeDir())))
 	req.Header.Set("Accept", "*/*")
 	resp, err := assetHTTPClient.Do(req)
 	if err != nil {
