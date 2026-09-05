@@ -8,6 +8,8 @@ package runtime
 import (
 	"context"
 	"fmt"
+
+	"github.com/tipsy-linux/tipsy/internal/rbxuri"
 )
 
 // LaunchOptions controls tipsy launch.
@@ -16,6 +18,7 @@ type LaunchOptions struct {
 	Width   int
 	Height  int
 	Started func()
+	Request rbxuri.Request
 }
 
 // Launch is only implemented on Linux x86-64 with cgo.

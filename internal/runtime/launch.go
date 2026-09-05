@@ -25,6 +25,7 @@ import (
 	"github.com/tipsy-linux/tipsy/internal/jni"
 	"github.com/tipsy-linux/tipsy/internal/loader"
 	"github.com/tipsy-linux/tipsy/internal/logging"
+	"github.com/tipsy-linux/tipsy/internal/rbxuri"
 	"github.com/tipsy-linux/tipsy/internal/x11"
 )
 
@@ -33,6 +34,7 @@ type LaunchOptions struct {
 	Width   int
 	Height  int
 	Started func()
+	Request rbxuri.Request
 }
 
 // launchStartedAck gives in-process frontends one deterministic handoff from
@@ -235,11 +237,40 @@ func (p *clientPresenter) refreshRates() (float32, []float32) {
 	if p == nil {
 		return 0, nil
 	}
-	if p.egl != nil {
-		return float32(p.egl.RefreshRateHz()), p.egl.SupportedRefreshRatesHz()
-	}
+	// A raw combined snapshot preserves unknown-on-failure for retry. The EGL
+	// policy accessor intentionally retains stale rates, so cannot do that.
 	current, supported := graphics.WindowRefreshRates(p.xdpy, p.xid)
 	return float32(current), supported
+}
+
+// displayRefreshPublication tracks the X11 generation whose complete rate pair
+// the client has accepted. An unchanged window must do no X server round trips.
+type displayRefreshPublication struct {
+	version   uint64
+	current   float32
+	supported []float32
+}
+
+func (p *displayRefreshPublication) update(version uint64, query func() (float32, []float32), publish func(float32, []float32) error) error {
+	if version == 0 || version == p.version {
+		return nil
+	}
+	current, supported := query()
+	if current <= 0 {
+		// Transient XRandR failure keeps this generation pending for the next
+		// bounded stats tick; it must not publish a guessed monitor rate.
+		return nil
+	}
+	if displayRefreshRatesChanged(p.current, p.supported, current, supported) {
+		if err := publish(current, supported); err != nil {
+			return err
+		}
+		p.current, p.supported = current, supported
+	}
+	// The caller captured version before querying. Events arriving while the
+	// server replies or JNI publishes therefore remain pending.
+	p.version = version
+	return nil
 }
 
 func (p *clientPresenter) stop() {
@@ -482,9 +513,15 @@ func Launch(ctx context.Context, opt LaunchOptions) error {
 	if err := prepareRuntimeFiles(files, assets); err != nil {
 		return fmt.Errorf("runtime TLS files: %w", err)
 	}
+	if !opt.Request.Empty() {
+		logging.Logger(logging.CatRuntime).Info("website launch", "request", opt.Request.Summary())
+	}
+	if err := importWebsiteAuth(ctx, storage.CookieFile, &opt.Request); err != nil {
+		return fmt.Errorf("website sign-in: %w", err)
+	}
 
 	goruntime.LockOSThread()
-	win, err := x11.Open("Roblox", opt.Width, opt.Height)
+	win, err := x11.OpenOnDisplay("Roblox", opt.Width, opt.Height, settings.Display)
 	if err != nil {
 		return fmt.Errorf("x11: %w", err)
 	}
@@ -523,7 +560,10 @@ func Launch(ctx context.Context, opt LaunchOptions) error {
 	}
 	clientStarted := false
 	defer func() {
-		if err := closeClientModuleBeforeStart(clientStarted, mod.Close); err != nil {
+		if err := closeClientModuleBeforeStart(clientStarted, func() error {
+			android.UnregisterImage(mod.Base)
+			return mod.Close()
+		}); err != nil {
 			logging.Logger(logging.CatRuntime).Info("client module close failed", "err", err)
 		}
 	}()
@@ -550,9 +590,10 @@ func Launch(ctx context.Context, opt LaunchOptions) error {
 	if err := configureRobloxCookieBridge(vm, mod, vm.Env(), storage.CookieFile); err != nil {
 		return err
 	}
+	refreshVersion := win.RefreshVersion()
 	currentRefreshHz, supportedRefreshHz := presenter.refreshRates()
 	session, err := startGameActivity(ctx, vm, mod, aw, files, cache, preferences, obb,
-		opt.Width, opt.Height, currentRefreshHz, supportedRefreshHz)
+		opt.Width, opt.Height, currentRefreshHz, supportedRefreshHz, opt.Request)
 	if err != nil {
 		return err
 	}
@@ -561,6 +602,10 @@ func Launch(ctx context.Context, opt LaunchOptions) error {
 	// until the CLI/GUI host process exits; do not race those workers with
 	// loader.Module.Close/rawMunmap after the visible window is dismissed.
 	clientStarted = true
+	refreshPublication := displayRefreshPublication{version: refreshVersion, current: currentRefreshHz, supported: supportedRefreshHz}
+	if currentRefreshHz <= 0 {
+		refreshPublication.version = 0
+	}
 	resize := session.resize
 	defer jni.ClearRobloxDirectInputTarget()
 	defer jni.ClearRobloxDirectKeyTarget()
@@ -604,16 +649,20 @@ func Launch(ctx context.Context, opt LaunchOptions) error {
 			shutdownClient("context-cancelled")
 			return ctx.Err()
 		case <-stats.C:
-			nextCurrentRefreshHz, nextSupportedRefreshHz := presenter.refreshRates()
-			if displayRefreshRatesChanged(currentRefreshHz, supportedRefreshHz, nextCurrentRefreshHz, nextSupportedRefreshHz) {
-				if err := publishDisplayRefreshRates(mod, vm.Env(), nextCurrentRefreshHz, nextSupportedRefreshHz); err != nil {
-					logging.Logger(logging.CatGraphics).Error("republish Android display refresh rates", "err", err)
-				} else {
-					currentRefreshHz = nextCurrentRefreshHz
-					supportedRefreshHz = nextSupportedRefreshHz
-				}
+			if err := refreshPublication.update(win.RefreshVersion(), presenter.refreshRates, func(current float32, supported []float32) error {
+				return publishDisplayRefreshRates(mod, vm.Env(), current, supported)
+			}); err != nil {
+				logging.Logger(logging.CatGraphics).Error("republish Android display refresh rates", "err", err)
 			}
 			presenter.logPresentStats()
+			if presentTiming {
+				batch := android.VulkanPresentTimingSnapshot(presentTimingCursor)
+				logVulkanPresentTiming(batch)
+				presentTimingCursor = batch.Cursor
+			}
+			if stutterDiag {
+				logStutterDiagnostics(android.StutterWaitSnapshot(true), jni.StutterSnapshot(true), android.BionicSyncSnapshot(true))
+			}
 			s := jni.InputDeliveryStats()
 			d := jni.RobloxDirectInputStats()
 			textPass, textReturn, textSync, textDrop := jni.RbxTextDeliveryStats()
@@ -653,7 +702,7 @@ func installCrashDiagHandler() error {
 	return nil
 }
 
-func startGameActivity(ctx context.Context, vm *jni.VM, mod *loader.Module, aw *android.Window, files, cache, preferences, obb string, width, height int, currentRefreshHz float32, supportedRefreshHz []float32) (*gameActivitySession, error) {
+func startGameActivity(ctx context.Context, vm *jni.VM, mod *loader.Module, aw *android.Window, files, cache, preferences, obb string, width, height int, currentRefreshHz float32, supportedRefreshHz []float32, req rbxuri.Request) (*gameActivitySession, error) {
 	env := vm.Env()
 	activity := env.AllocObject(env.FindClass("com/roblox/client/startup/MainGameActivity"))
 	if activity == 0 {
@@ -682,7 +731,7 @@ func startGameActivity(ctx context.Context, vm *jni.VM, mod *loader.Module, aw *
 	wireRobloxDirectKey(mod, env)
 	wireRobloxTextInput(mod, env)
 	return dispatchGameActivityLifecycle(ctx, vm, mod, env, activity, uintptr(handle), files, cache, preferences,
-		width, height, currentRefreshHz, supportedRefreshHz, aw), nil
+		width, height, currentRefreshHz, supportedRefreshHz, aw, req), nil
 }
 
 // deliverTextInputConnection ensures the Tipsy-owned InputConnection object
@@ -773,13 +822,14 @@ func wireRobloxTextInput(mod *loader.Module, env *jni.Env) {
 	jni.SetRobloxTextInputTarget(env, class, passFn, returnFn, syncFn, loader.CallP8)
 }
 
-func dispatchGameActivityLifecycle(ctx context.Context, vm *jni.VM, mod *loader.Module, env *jni.Env, activity, handle uintptr, files, cache, preferences string, width, height int, currentRefreshHz float32, supportedRefreshHz []float32, aw *android.Window) *gameActivitySession {
+func dispatchGameActivityLifecycle(ctx context.Context, vm *jni.VM, mod *loader.Module, env *jni.Env, activity, handle uintptr, files, cache, preferences string, width, height int, currentRefreshHz float32, supportedRefreshHz []float32, aw *android.Window, req rbxuri.Request) *gameActivitySession {
 	call := func(name, sig string, extra ...uintptr) {
 		callGameActivityNative(vm, env, activity, handle, name, sig, extra...)
 	}
 	call("onStartNative", "(J)V")
 	setRobloxCacheAndFiles(mod, env, activity, files, cache)
 	setRobloxAssetPath(mod, env, activity)
+	handleColdStartProtocolLaunch(mod, env, activity, req)
 	startRobloxApp(mod, env, activity, files)
 	// Official MainScreenController ON_CREATE publishes Display 0's current
 	// and supported refresh rates after native/client-settings initialization
@@ -802,10 +852,11 @@ func dispatchGameActivityLifecycle(ctx context.Context, vm *jni.VM, mod *loader.
 		gl = activity
 	}
 	callRobloxJNI(mod, env.Raw(), gl, "Java_com_roblox_engine_jni_NativeGLInterface_nativeAppBridgeV2InitWithParams", initParams)
-	startParams := makeStartAppParams(env, activity, platform, surface)
+	startParams := makeStartAppParams(env, activity, platform, surface, req)
 	callRobloxJNI(mod, env.Raw(), gl, "Java_com_roblox_engine_jni_NativeGLInterface_nativeAppBridgeV2StartAppWithParams", startParams)
+	startWebsiteGame(mod, env, gl, activity, platform, device, surface, req)
 	for _, cmd := range []byte{appCmdInitWindow, appCmdStart, appCmdResume, appCmdGainedFocus, appCmdWindowResized, appCmdWindowRedraw} {
-		postAndroidAppCmd(mod, cmd)
+		postAndroidAppCmd(handle, cmd)
 	}
 	// X11 supplies the first real surface geometry. Deliver it once via the
 	// registered GameActivity contract after lifecycle and surface setup.
@@ -874,7 +925,7 @@ func (s *engineResizeSink) resizeBuffers(width, height int) error { return s.aw.
 
 func (s *engineResizeSink) setDisplaySize(width, height int) { s.vm.SetDisplaySize(width, height) }
 
-func (s *engineResizeSink) postAppCmd(cmd byte) { postAndroidAppCmd(s.mod, cmd) }
+func (s *engineResizeSink) postAppCmd(cmd byte) { postAndroidAppCmd(s.handle, cmd) }
 
 func (s *engineResizeSink) updateSurface(width, height int) {
 	if s == nil || s.mod == nil || s.env == nil || s.gl == 0 || s.surface == 0 || s.platform == 0 {
@@ -1126,25 +1177,16 @@ func startLoggedOutAppBridge(mod *loader.Module, env *jni.Env) {
 		env.NewStringUTF(""), env.NewStringUTF(""), env.NewStringUTF(""))
 }
 
-func postAndroidAppCmd(mod *loader.Module, cmd byte) {
-	const nativeEngineSingletonVA = 0x6fedc78
-	const androidAppFromEngineOff = 0x10
-	const androidAppMsgWriteOff = 0x124
-	if mod == nil || mod.Base == 0 {
+func postAndroidAppCmd(handle uintptr, cmd byte) {
+	const androidAppMsgWriteOff = 0x154
+	if handle < 0x10000 {
 		return
 	}
-	// This is the official android_app command pipe established by
-	// initializeNativeCode, not a libroblox text patch.
-	engine := *(*uintptr)(unsafe.Pointer(mod.Base + nativeEngineSingletonVA))
-	if engine < 0x10000 {
-		return
-	}
-	app := *(*uintptr)(unsafe.Pointer(engine + androidAppFromEngineOff))
-	if app < 0x10000 {
-		return
-	}
-	fd := int(*(*int32)(unsafe.Pointer(app + androidAppMsgWriteOff)))
-	if fd >= 3 {
+	// initializeNativeCode returns this GameActivity android_app object and
+	// stores the command-pipe write fd at +0x154 (msgread at +0x150). Do not
+	// walk a version-pinned Roblox engine BSS singleton to find it.
+	fd := int(*(*int32)(unsafe.Pointer(handle + androidAppMsgWriteOff)))
+	if fd >= 3 && fd < 1<<20 {
 		_, _ = syscall.Write(fd, []byte{cmd})
 	}
 }
@@ -1153,7 +1195,7 @@ func deliverInitialContentRect(mod *loader.Module, vm *jni.VM, env *jni.Env, act
 	if width <= 0 || height <= 0 {
 		return
 	}
-	postAndroidAppCmd(mod, appCmdContentRectChanged)
+	postAndroidAppCmd(handle, appCmdContentRectChanged)
 	callGameActivityNative(vm, env, activity, handle, "onContentRectChangedNative", "(JIIII)V", 0, 0, uintptr(width), uintptr(height))
 	callGameActivityNative(vm, env, activity, handle, "onWindowInsetsChangedNative", "(J)V")
 }
@@ -1344,11 +1386,11 @@ func makeInitParams(env *jni.Env, activity, platform, device uintptr) uintptr {
 	return p
 }
 
-func makeStartAppParams(env *jni.Env, activity, platform, surface uintptr) uintptr {
+func makeStartAppParams(env *jni.Env, activity, platform, surface uintptr, req rbxuri.Request) uintptr {
 	p := env.AllocObject(env.FindClass("com/roblox/engine/jni/autovalue/StartAppParams"))
 	for k, v := range map[string]any{
 		"surface": surface, "username": "", "appUserId": int64(0), "isUnder13": false, "membershipType": int32(0),
-		"selectedTheme": "", "appStarterPlace": "", "appStarterScript": "", "platformParams": platform, "vrContext": activity,
+		"selectedTheme": "", "appStarterPlace": appStarterPlace(req), "appStarterScript": "", "platformParams": platform, "vrContext": activity,
 	} {
 		env.PutField(p, k, v)
 	}

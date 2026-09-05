@@ -20,7 +20,6 @@ import (
 	"github.com/tipsy-linux/tipsy/internal/android"
 	"github.com/tipsy-linux/tipsy/internal/clientsettings"
 	"github.com/tipsy-linux/tipsy/internal/jni"
-	"github.com/tipsy-linux/tipsy/internal/loader"
 	"github.com/tipsy-linux/tipsy/internal/x11"
 )
 
@@ -727,10 +726,7 @@ func TestSurfaceResizePipeDeliversCommandBytes(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = syscall.Munmap(buf) })
 	base := uintptr(unsafe.Pointer(&buf[0]))
-	engine := base + 0x1000
-	app := base + 0x2000
-	*(*uintptr)(unsafe.Pointer(base + 0x6fedc78)) = engine
-	*(*uintptr)(unsafe.Pointer(engine + 0x10)) = app
+	handle := base + 0x2000
 
 	var pipeFDs [2]int
 	if err := syscall.Pipe2(pipeFDs[:], syscall.O_CLOEXEC|syscall.O_NONBLOCK); err != nil {
@@ -738,7 +734,7 @@ func TestSurfaceResizePipeDeliversCommandBytes(t *testing.T) {
 	}
 	rfd, wfd := os.NewFile(uintptr(pipeFDs[0]), "cmd-r"), os.NewFile(uintptr(pipeFDs[1]), "cmd-w")
 	t.Cleanup(func() { rfd.Close(); wfd.Close() })
-	*(*int32)(unsafe.Pointer(app + 0x124)) = int32(pipeFDs[1])
+	*(*int32)(unsafe.Pointer(handle + 0x154)) = int32(pipeFDs[1])
 
 	vm, err := jni.NewVM()
 	if err != nil {
@@ -746,7 +742,7 @@ func TestSurfaceResizePipeDeliversCommandBytes(t *testing.T) {
 	}
 	aw := android.NewWindow(1280, 720, nil)
 	s := &surfaceResize{
-		sink:   &engineResizeSink{mod: &loader.Module{Base: base}, vm: vm, aw: aw},
+		sink:   &engineResizeSink{handle: handle, vm: vm, aw: aw},
 		seeded: true, width: 1280, height: 720,
 	}
 
@@ -791,5 +787,136 @@ func TestSurfaceResizePipeDeliversCommandBytes(t *testing.T) {
 	}
 	if readable(100) {
 		t.Fatal("second delta wrote more than the three command bytes")
+	}
+}
+
+func TestPostAndroidAppCmdWritesHandlePipe(t *testing.T) {
+	buf, err := syscall.Mmap(-1, 0, 0x200, syscall.PROT_READ|syscall.PROT_WRITE, syscall.MAP_PRIVATE|syscall.MAP_ANONYMOUS)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = syscall.Munmap(buf) })
+	handle := uintptr(unsafe.Pointer(&buf[0]))
+	var pipeFDs [2]int
+	if err := syscall.Pipe2(pipeFDs[:], syscall.O_CLOEXEC|syscall.O_NONBLOCK); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = syscall.Close(pipeFDs[0]); _ = syscall.Close(pipeFDs[1]) })
+	*(*int32)(unsafe.Pointer(handle + 0x154)) = int32(pipeFDs[1])
+	postAndroidAppCmd(handle, appCmdInitWindow)
+	b := make([]byte, 1)
+	n, err := syscall.Read(pipeFDs[0], b)
+	if err != nil || n != 1 || b[0] != appCmdInitWindow {
+		t.Fatalf("pipe read n=%d err=%v b=%v", n, err, b[:n])
+	}
+	postAndroidAppCmd(0, appCmdStart)
+}
+
+func TestDisplayRefreshPublicationInvalidationAndRetry(t *testing.T) {
+	p := displayRefreshPublication{version: 1, current: 60, supported: []float32{60}}
+	queries, publications := 0, 0
+	current, supported := float32(60), []float32{60}
+	var publishErr error
+	query := func() (float32, []float32) {
+		queries++
+		return current, supported
+	}
+	publish := func(float32, []float32) error {
+		publications++
+		return publishErr
+	}
+	for i := 0; i < 1000; i++ {
+		if err := p.update(1, query, publish); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if queries != 0 || publications != 0 {
+		t.Fatal("unchanged window performed display work")
+	}
+	// A move within one monitor consumes the event with no duplicate JNI call.
+	if err := p.update(2, query, publish); err != nil {
+		t.Fatal(err)
+	}
+	if queries != 1 || publications != 0 || p.version != 2 {
+		t.Fatalf("unchanged rates: queries=%d publications=%d version=%d", queries, publications, p.version)
+	}
+	// Unknown XRandR data must retry on the same generation.
+	current, supported = 0, nil
+	if err := p.update(3, query, publish); err != nil || p.version != 2 {
+		t.Fatalf("failed query consumed generation: %+v, %v", p, err)
+	}
+	current, supported = 165, []float32{60, 165}
+	publishErr = errors.New("second JNI publication failed")
+	if err := p.update(3, query, publish); !errors.Is(err, publishErr) {
+		t.Fatalf("publish failure=%v", err)
+	}
+	if p.version != 2 || p.current != 60 {
+		t.Fatalf("partial JNI publication consumed snapshot: %+v", p)
+	}
+	publishErr = nil
+	if err := p.update(3, query, publish); err != nil || p.version != 3 || p.current != 165 {
+		t.Fatalf("retry did not publish changed monitor: %+v, %v", p, err)
+	}
+	if queries != 4 || publications != 2 {
+		t.Fatalf("queries=%d publications=%d", queries, publications)
+	}
+}
+
+func TestDisplayRefreshPublicationRetainsConcurrentEvent(t *testing.T) {
+	p := displayRefreshPublication{version: 1, current: 60, supported: []float32{60}}
+	version := uint64(2)
+	queries := 0
+	query := func() (float32, []float32) {
+		queries++
+		version = 3 // A further X11 event arrives while the server is replying.
+		return 165, []float32{60, 165}
+	}
+	publish := func(float32, []float32) error { return nil }
+	if err := p.update(version, query, publish); err != nil {
+		t.Fatal(err)
+	}
+	if p.version != 2 {
+		t.Fatalf("consumed event arriving during query: version=%d", p.version)
+	}
+	if err := p.update(version, query, publish); err != nil || queries != 2 || p.version != 3 {
+		t.Fatalf("pending event lost: queries=%d version=%d error=%v", queries, p.version, err)
+	}
+}
+
+func BenchmarkDisplayRefreshPublicationUnchanged(b *testing.B) {
+	p := displayRefreshPublication{version: 1}
+	// Nil callbacks also ensure the skip path cannot accidentally query X11.
+	b.ReportAllocs()
+	for i := 0; i < b.N; i++ {
+		_ = p.update(1, nil, nil)
+	}
+}
+
+func TestVulkanPresentTimingRequiresExactOptIn(t *testing.T) {
+	for _, tc := range []struct {
+		timing, sync string
+		want         bool
+	}{
+		{"", "", false}, {"0", "0", false}, {"true", "yes", false},
+		{"1", "", true}, {"", "1", true}, {"1", "1", true},
+	} {
+		getenv := func(name string) string {
+			if name == "TIPSY_PRESENT_TIMING" {
+				return tc.timing
+			}
+			if name == "TIPSY_STUTTER_DIAG" {
+				return tc.sync
+			}
+			return ""
+		}
+		if got := vulkanPresentTimingRequested(getenv); got != tc.want {
+			t.Errorf("timing=%q sync=%q enabled=%v", tc.timing, tc.sync, got)
+		}
+		if tc.timing == "1" && tc.sync == "" && stutterDiagnosticsRequested(getenv) {
+			t.Fatal("present-only timing enabled synchronization wrappers")
+		}
+	}
+	if vulkanPresentTimingRequested(nil) {
+		t.Fatal("nil environment enabled timing")
 	}
 }
