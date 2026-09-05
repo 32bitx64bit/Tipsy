@@ -50,6 +50,140 @@ static ALooper *g_ui_looper;
 static int g_cond_wait_poll;
 static int g_logged_nested_poll;
 
+struct wait_diag_path {
+	_Atomic uint64_t calls;
+	_Atomic uint64_t slices;
+	_Atomic uint64_t samples;
+	_Atomic uint64_t sampled_ns;
+	_Atomic uint64_t max_ns;
+};
+
+static _Atomic int g_stutter_wait_enabled;
+static _Atomic uint64_t g_stutter_wait_clock_calls;
+static struct wait_diag_path g_stutter_wait[TIPSY_STUTTER_WAIT_PATHS];
+static __thread uint32_t tls_stutter_wait_sample[TIPSY_STUTTER_WAIT_PATHS];
+
+static int valid_wait_path(int path)
+{
+	return path >= 0 && path < TIPSY_STUTTER_WAIT_PATHS;
+}
+
+static void wait_diag_max(_Atomic uint64_t *dst, uint64_t value)
+{
+	uint64_t old = atomic_load_explicit(dst, memory_order_relaxed);
+
+	while (old < value && !atomic_compare_exchange_weak_explicit(dst, &old, value,
+		memory_order_relaxed, memory_order_relaxed)) {
+	}
+}
+
+void tipsy_stutter_wait_set_enabled(int enabled)
+{
+	atomic_store_explicit(&g_stutter_wait_enabled, enabled != 0, memory_order_relaxed);
+}
+
+int tipsy_stutter_wait_enabled(void)
+{
+	return atomic_load_explicit(&g_stutter_wait_enabled, memory_order_relaxed);
+}
+
+uint64_t tipsy_stutter_wait_begin(int path)
+{
+	struct timespec ts;
+
+	if (!atomic_load_explicit(&g_stutter_wait_enabled, memory_order_relaxed) ||
+	    !valid_wait_path(path)) {
+		return 0;
+	}
+	atomic_fetch_add_explicit(&g_stutter_wait[path].calls, 1, memory_order_relaxed);
+	/* One duration sample per 64 entries. Counts and slices remain exact. */
+	if ((tls_stutter_wait_sample[path]++ & 63u) != 0) {
+		return 0;
+	}
+	atomic_fetch_add_explicit(&g_stutter_wait_clock_calls, 1, memory_order_relaxed);
+	if (clock_gettime(CLOCK_MONOTONIC, &ts) != 0) {
+		return 0;
+	}
+	/* Reserve zero as the unsampled token. */
+	return (uint64_t)ts.tv_sec * 1000000000u + (uint64_t)ts.tv_nsec + 1u;
+}
+
+void tipsy_stutter_wait_slice(int path)
+{
+	if (!atomic_load_explicit(&g_stutter_wait_enabled, memory_order_relaxed) ||
+	    !valid_wait_path(path)) {
+		return;
+	}
+	atomic_fetch_add_explicit(&g_stutter_wait[path].slices, 1, memory_order_relaxed);
+}
+
+void tipsy_stutter_wait_end(int path, uint64_t started_ns)
+{
+	struct timespec ts;
+	uint64_t ended_ns;
+	uint64_t elapsed;
+
+	if (started_ns == 0 || !valid_wait_path(path)) {
+		return;
+	}
+	atomic_fetch_add_explicit(&g_stutter_wait_clock_calls, 1, memory_order_relaxed);
+	if (clock_gettime(CLOCK_MONOTONIC, &ts) != 0) {
+		return;
+	}
+	ended_ns = (uint64_t)ts.tv_sec * 1000000000u + (uint64_t)ts.tv_nsec + 1u;
+	elapsed = ended_ns >= started_ns ? ended_ns - started_ns : 0;
+	atomic_fetch_add_explicit(&g_stutter_wait[path].samples, 1, memory_order_relaxed);
+	atomic_fetch_add_explicit(&g_stutter_wait[path].sampled_ns, elapsed, memory_order_relaxed);
+	wait_diag_max(&g_stutter_wait[path].max_ns, elapsed);
+}
+
+void tipsy_stutter_wait_snapshot(TipsyStutterWaitStats *out, int reset)
+{
+	int path;
+
+	if (out == NULL) {
+		return;
+	}
+	memset(out, 0, sizeof(*out));
+	for (path = 0; path < TIPSY_STUTTER_WAIT_PATHS; path++) {
+#define WAIT_STAT(field) (reset ? \
+	atomic_exchange_explicit(&g_stutter_wait[path].field, 0, memory_order_relaxed) : \
+	atomic_load_explicit(&g_stutter_wait[path].field, memory_order_relaxed))
+		out->path[path].calls = WAIT_STAT(calls);
+		out->path[path].slices = WAIT_STAT(slices);
+		out->path[path].samples = WAIT_STAT(samples);
+		out->path[path].sampled_ns = WAIT_STAT(sampled_ns);
+		out->path[path].max_ns = WAIT_STAT(max_ns);
+#undef WAIT_STAT
+	}
+}
+
+uint64_t tipsy_test_stutter_wait_clock_calls(void)
+{
+	return atomic_load_explicit(&g_stutter_wait_clock_calls, memory_order_relaxed);
+}
+
+void tipsy_test_stutter_wait_record(int path, uint64_t duration_ns, uint64_t slices)
+{
+	uint64_t started;
+	uint64_t n;
+
+	started = tipsy_stutter_wait_begin(path);
+	for (n = 0; n < slices; n++) {
+		tipsy_stutter_wait_slice(path);
+	}
+	if (started != 0) {
+		atomic_fetch_add_explicit(&g_stutter_wait[path].samples, 1, memory_order_relaxed);
+		atomic_fetch_add_explicit(&g_stutter_wait[path].sampled_ns, duration_ns, memory_order_relaxed);
+		wait_diag_max(&g_stutter_wait[path].max_ns, duration_ns);
+	}
+}
+
+void tipsy_test_stutter_wait_reset_tls(void)
+{
+	memset(tls_stutter_wait_sample, 0, sizeof(tls_stutter_wait_sample));
+}
+
 #define ANDROID_LOG_VERBOSE 2
 #define ANDROID_LOG_DEBUG 3
 
@@ -656,6 +790,7 @@ int tipsy_pthread_cond_wait(void *cond, void *mutex)
 	pthread_mutex_t *m = mutex;
 	struct timespec ts;
 	int rc;
+	uint64_t diag_started;
 
 	if (c == NULL || m == NULL) {
 		errno = EINVAL;
@@ -668,8 +803,11 @@ int tipsy_pthread_cond_wait(void *cond, void *mutex)
 	if (tls_looper == NULL && !g_cond_wait_poll) {
 		return pthread_cond_wait(c, m);
 	}
+	diag_started = tipsy_stutter_wait_begin(TIPSY_STUTTER_WAIT_COND);
 	if (clock_gettime(CLOCK_REALTIME, &ts) != 0) {
-		return pthread_cond_wait(c, m);
+		rc = pthread_cond_wait(c, m);
+		tipsy_stutter_wait_end(TIPSY_STUTTER_WAIT_COND, diag_started);
+		return rc;
 	}
 	ts.tv_nsec += 16L * 1000000L;
 	if (ts.tv_nsec >= 1000000000L) {
@@ -677,13 +815,18 @@ int tipsy_pthread_cond_wait(void *cond, void *mutex)
 		ts.tv_nsec -= 1000000000L;
 	}
 	rc = pthread_cond_timedwait(c, m, &ts);
+	tipsy_stutter_wait_slice(TIPSY_STUTTER_WAIT_COND);
 	if (rc == 0) {
+		tipsy_stutter_wait_end(TIPSY_STUTTER_WAIT_COND, diag_started);
 		return 0;
 	}
 	if (rc != ETIMEDOUT) {
 		if (rc == EINVAL) {
-			return pthread_cond_wait(c, m);
+			rc = pthread_cond_wait(c, m);
+			tipsy_stutter_wait_end(TIPSY_STUTTER_WAIT_COND, diag_started);
+			return rc;
 		}
+		tipsy_stutter_wait_end(TIPSY_STUTTER_WAIT_COND, diag_started);
 		return rc;
 	}
 	/* Mutex is held after timeout. Release so complete() / looper
@@ -692,6 +835,7 @@ int tipsy_pthread_cond_wait(void *cond, void *mutex)
 	pthread_mutex_unlock(m);
 	poll_looper_nested();
 	pthread_mutex_lock(m);
+	tipsy_stutter_wait_end(TIPSY_STUTTER_WAIT_COND, diag_started);
 	return 0;
 }
 
@@ -702,6 +846,7 @@ int tipsy_pthread_cond_timedwait(void *cond, void *mutex, void *abstime)
 	const struct timespec *deadline = abstime;
 	struct timespec ts, now;
 	int rc;
+	uint64_t diag_started;
 
 	if (c == NULL || m == NULL || deadline == NULL) {
 		errno = EINVAL;
@@ -710,12 +855,16 @@ int tipsy_pthread_cond_timedwait(void *cond, void *mutex, void *abstime)
 	if (tls_looper == NULL && !g_cond_wait_poll) {
 		return pthread_cond_timedwait(c, m, deadline);
 	}
+	diag_started = tipsy_stutter_wait_begin(TIPSY_STUTTER_WAIT_TIMEDCOND);
 	for (;;) {
 		if (clock_gettime(CLOCK_REALTIME, &now) != 0) {
-			return pthread_cond_timedwait(c, m, deadline);
+			rc = pthread_cond_timedwait(c, m, deadline);
+			tipsy_stutter_wait_end(TIPSY_STUTTER_WAIT_TIMEDCOND, diag_started);
+			return rc;
 		}
 		if (now.tv_sec > deadline->tv_sec ||
 		    (now.tv_sec == deadline->tv_sec && now.tv_nsec >= deadline->tv_nsec)) {
+			tipsy_stutter_wait_end(TIPSY_STUTTER_WAIT_TIMEDCOND, diag_started);
 			return ETIMEDOUT;
 		}
 		ts = now;
@@ -729,13 +878,18 @@ int tipsy_pthread_cond_timedwait(void *cond, void *mutex, void *abstime)
 			ts = *deadline;
 		}
 		rc = pthread_cond_timedwait(c, m, &ts);
+		tipsy_stutter_wait_slice(TIPSY_STUTTER_WAIT_TIMEDCOND);
 		if (rc == 0) {
+			tipsy_stutter_wait_end(TIPSY_STUTTER_WAIT_TIMEDCOND, diag_started);
 			return 0;
 		}
 		if (rc != ETIMEDOUT) {
 			if (rc == EINVAL) {
-				return pthread_cond_timedwait(c, m, deadline);
+				rc = pthread_cond_timedwait(c, m, deadline);
+				tipsy_stutter_wait_end(TIPSY_STUTTER_WAIT_TIMEDCOND, diag_started);
+				return rc;
 			}
+			tipsy_stutter_wait_end(TIPSY_STUTTER_WAIT_TIMEDCOND, diag_started);
 			return rc;
 		}
 		pthread_mutex_unlock(m);

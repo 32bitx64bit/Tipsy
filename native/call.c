@@ -25,8 +25,12 @@
  * tests leave them NULL and keep a cond_wait idle loop. */
 int tipsy_native_main_idle(int timeout_ms) __attribute__((weak));
 void tipsy_native_main_wake(void) __attribute__((weak));
+uint64_t tipsy_stutter_wait_begin(int path) __attribute__((weak));
+void tipsy_stutter_wait_slice(int path) __attribute__((weak));
+void tipsy_stutter_wait_end(int path, uint64_t started_ns) __attribute__((weak));
 
 enum { TIPSY_ALOOPER_POLL_ERROR = -4 };
+enum { TIPSY_STUTTER_WAIT_FUTEX_PUMP = 2 };
 
 #ifndef TIPSY_NATIVE_STACK
 #define TIPSY_NATIVE_STACK (64u * 1024u * 1024u)
@@ -262,6 +266,7 @@ void *tipsy_park_poll_futex_addr(void)
 long tipsy_park_poll_futex(int *uaddr, unsigned val)
 {
 	long rc;
+	uint64_t diag_started = 0;
 
 	if (uaddr == NULL) {
 		errno = EFAULT;
@@ -270,6 +275,9 @@ long tipsy_park_poll_futex(int *uaddr, unsigned val)
 	if (tipsy_native_main_idle == NULL) {
 		return syscall(SYS_futex, uaddr, TIPSY_FUTEX_WAIT_BITSET_PRIVATE,
 			(int)val, NULL, NULL, 0xffffffffu);
+	}
+	if (tipsy_stutter_wait_begin != NULL) {
+		diag_started = tipsy_stutter_wait_begin(TIPSY_STUTTER_WAIT_FUTEX_PUMP);
 	}
 	for (;;) {
 		struct timespec ts;
@@ -285,13 +293,25 @@ long tipsy_park_poll_futex(int *uaddr, unsigned val)
 		}
 		rc = syscall(SYS_futex, uaddr, TIPSY_FUTEX_WAIT_BITSET_PRIVATE,
 			(int)val, &ts, NULL, 0xffffffffu);
+		if (tipsy_stutter_wait_slice != NULL) {
+			tipsy_stutter_wait_slice(TIPSY_STUTTER_WAIT_FUTEX_PUMP);
+		}
 		if (rc == 0) {
+			if (tipsy_stutter_wait_end != NULL) {
+				tipsy_stutter_wait_end(TIPSY_STUTTER_WAIT_FUTEX_PUMP, diag_started);
+			}
 			return 0;
 		}
 		if (errno == EAGAIN) {
+			if (tipsy_stutter_wait_end != NULL) {
+				tipsy_stutter_wait_end(TIPSY_STUTTER_WAIT_FUTEX_PUMP, diag_started);
+			}
 			return 0;
 		}
 		if (errno != ETIMEDOUT && errno != EINTR) {
+			if (tipsy_stutter_wait_end != NULL) {
+				tipsy_stutter_wait_end(TIPSY_STUTTER_WAIT_FUTEX_PUMP, diag_started);
+			}
 			return rc;
 		}
 		(void)tipsy_native_main_idle(0);

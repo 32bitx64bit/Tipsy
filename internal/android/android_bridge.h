@@ -83,6 +83,65 @@ typedef struct AConfiguration {
 
 typedef struct ALooper ALooper;
 
+enum {
+	TIPSY_STUTTER_WAIT_COND = 0,
+	TIPSY_STUTTER_WAIT_TIMEDCOND = 1,
+	TIPSY_STUTTER_WAIT_FUTEX_PUMP = 2,
+	TIPSY_STUTTER_WAIT_PATHS = 3
+};
+
+typedef struct TipsyStutterWaitPathStats {
+	uint64_t calls;
+	uint64_t slices;
+	uint64_t samples;
+	uint64_t sampled_ns;
+	uint64_t max_ns;
+} TipsyStutterWaitPathStats;
+
+typedef struct TipsyStutterWaitStats {
+	TipsyStutterWaitPathStats path[TIPSY_STUTTER_WAIT_PATHS];
+} TipsyStutterWaitStats;
+
+/* Opt-in bionic ABI telemetry. These are resolver-only guest exports: when
+ * disabled, libroblox keeps its direct glibc binding and host locks never
+ * enter this surface. */
+enum {
+	TIPSY_BIONIC_SYNC_THREAD_RBX_WORKER = 0,
+	TIPSY_BIONIC_SYNC_THREAD_MAIN = 1,
+	TIPSY_BIONIC_SYNC_THREAD_OTHER = 2,
+	TIPSY_BIONIC_SYNC_THREADS = 3,
+	TIPSY_BIONIC_SYNC_MODULE_ROBLOX = 0,
+	TIPSY_BIONIC_SYNC_MODULE_OTHER = 1,
+	TIPSY_BIONIC_SYNC_MODULE_UNKNOWN = 2,
+	TIPSY_BIONIC_SYNC_MODULES = 3,
+	TIPSY_BIONIC_SYNC_MUTEX_LOCK = 0,
+	TIPSY_BIONIC_SYNC_MUTEX_TRYLOCK = 1,
+	TIPSY_BIONIC_SYNC_MUTEX_TIMEDLOCK = 2,
+	TIPSY_BIONIC_SYNC_MUTEX_UNLOCK = 3,
+	TIPSY_BIONIC_SYNC_COND_SIGNAL = 4,
+	TIPSY_BIONIC_SYNC_COND_BROADCAST = 5,
+	TIPSY_BIONIC_SYNC_PTHREAD_SETAFFINITY = 6,
+	TIPSY_BIONIC_SYNC_SCHED_YIELD = 7,
+	TIPSY_BIONIC_SYNC_SCHED_GETAFFINITY = 8,
+	TIPSY_BIONIC_SYNC_SCHED_SETAFFINITY = 9,
+	TIPSY_BIONIC_SYNC_NICE = 10,
+	TIPSY_BIONIC_SYNC_OPS = 11
+};
+
+typedef struct TipsyBionicSyncPathStats {
+	uint64_t calls;
+	uint64_t contention;
+	uint64_t errors;
+	uint64_t samples;
+	uint64_t sampled_ns;
+	uint64_t max_ns;
+} TipsyBionicSyncPathStats;
+
+typedef struct TipsyBionicSyncStats {
+	TipsyBionicSyncPathStats path[TIPSY_BIONIC_SYNC_THREADS]
+		[TIPSY_BIONIC_SYNC_MODULES][TIPSY_BIONIC_SYNC_OPS];
+} TipsyBionicSyncStats;
+
 void *tipsy_host_dlsym(const char *name);
 void *tipsy_android_lookup(const char *lib, const char *name);
 
@@ -160,10 +219,32 @@ void tipsy_native_main_wake(void);
 int tipsy_pthread_cond_wait(void *cond, void *mutex);
 int tipsy_pthread_cond_timedwait(void *cond, void *mutex, void *abstime);
 int tipsy_test_cond_wait_polls_looper(void);
+void tipsy_stutter_wait_set_enabled(int enabled);
+int tipsy_stutter_wait_enabled(void);
+uint64_t tipsy_stutter_wait_begin(int path);
+void tipsy_stutter_wait_slice(int path);
+void tipsy_stutter_wait_end(int path, uint64_t started_ns);
+void tipsy_stutter_wait_snapshot(TipsyStutterWaitStats *out, int reset);
+uint64_t tipsy_test_stutter_wait_clock_calls(void);
+void tipsy_test_stutter_wait_record(int path, uint64_t duration_ns, uint64_t slices);
+void tipsy_test_stutter_wait_reset_tls(void);
 
 void tipsy_bionic_compat_init(void);
 long tipsy_sysconf(int name);
 int tipsy_fflush_bionic_index(int idx);
+
+void tipsy_bionic_sync_set_enabled(int enabled);
+int tipsy_bionic_sync_enabled(void);
+int tipsy_bionic_sync_is_export(const char *name);
+void tipsy_bionic_sync_snapshot(TipsyBionicSyncStats *out, int reset);
+uint64_t tipsy_test_bionic_sync_clock_calls(void);
+void tipsy_test_bionic_sync_reset_tls(void);
+int tipsy_test_bionic_sync_mutex(void);
+int tipsy_test_bionic_sync_condition(void);
+int tipsy_test_bionic_sync_host_dladdr(uintptr_t address);
+int tipsy_test_bionic_sync_named_call(uintptr_t entry, uintptr_t function, const char *name);
+int tipsy_test_bionic_sync_module_class(uintptr_t address);
+int tipsy_test_bionic_sync_rename_call(uintptr_t entry, uintptr_t function);
 
 /* Exact-match "./exe/cacert.pem" -> FilesDir bundle shim (bionic_compat.c).
  * tipsy_open/tipsy_openat are variadic like their glibc namesakes; the
@@ -204,6 +285,9 @@ const char *tipsy_dlhandle_soname(void *handle);
 int tipsy_dlhandle_valid(void *handle);
 void tipsy_dlhandle_free(void *handle);
 void tipsy_register_image(uintptr_t load_bias, const char *name);
+void tipsy_unregister_image(uintptr_t load_bias);
+uint64_t tipsy_image_generation(void);
+int tipsy_image_code_range(uintptr_t address, uintptr_t *start, uintptr_t *end, uint64_t *generation);
 int tipsy_dl_iterate_count(void);
 
 /* OpenSL ES host bridge test probes. These exercise the same public interface
