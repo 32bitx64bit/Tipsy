@@ -25,6 +25,24 @@ func TestBindEGLNilWindow(t *testing.T) {
 	}
 }
 
+func TestRefreshRateSnapshot(t *testing.T) {
+	e := &EGL{refreshHz: 164.96, supportedHz: []float32{59.95, 120, 164.96}}
+	if got := e.RefreshRateHz(); got != 164.96 {
+		t.Fatalf("RefreshRateHz=%v", got)
+	}
+	rates := e.SupportedRefreshRatesHz()
+	if len(rates) != 3 || rates[0] != 59.95 || rates[2] != 164.96 {
+		t.Fatalf("SupportedRefreshRatesHz=%v", rates)
+	}
+	rates[0] = 1
+	if got := e.SupportedRefreshRatesHz()[0]; got != 59.95 {
+		t.Fatalf("SupportedRefreshRatesHz exposed internal slice: %v", got)
+	}
+	if (*EGL)(nil).RefreshRateHz() != 0 || (*EGL)(nil).SupportedRefreshRatesHz() != nil {
+		t.Fatal("nil EGL refresh snapshot is not empty")
+	}
+}
+
 func TestFirstFrame(t *testing.T) {
 	ensureDisplay(t)
 

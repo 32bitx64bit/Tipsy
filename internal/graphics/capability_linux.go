@@ -9,6 +9,7 @@ package graphics
 #cgo LDFLAGS: -ldl
 #include <dlfcn.h>
 #include <stdint.h>
+#include <stdlib.h>
 #include <string.h>
 
 // Minimal Vulkan 1.0 ABI declarations keep Vulkan an optional runtime
@@ -17,6 +18,11 @@ package graphics
 typedef void *TipsyVkInstance;
 typedef void *TipsyVkPhysicalDevice;
 typedef int32_t TipsyVkResult;
+
+typedef struct {
+	char extensionName[256];
+	uint32_t specVersion;
+} TipsyVkExtensionProperties;
 
 typedef struct {
 	uint32_t sType;
@@ -44,6 +50,7 @@ typedef TipsyVkResult (*tipsy_vkCreateInstance_fn)(const TipsyVkInstanceCreateIn
 typedef void (*tipsy_vkDestroyInstance_fn)(TipsyVkInstance, const void *);
 typedef TipsyVkResult (*tipsy_vkEnumeratePhysicalDevices_fn)(TipsyVkInstance, uint32_t *, TipsyVkPhysicalDevice *);
 typedef TipsyVkResult (*tipsy_vkEnumerateInstanceVersion_fn)(uint32_t *);
+typedef TipsyVkResult (*tipsy_vkEnumerateInstanceExtensionProperties_fn)(const char *, uint32_t *, TipsyVkExtensionProperties *);
 
 enum {
 	TIPSY_VK_NO_LIBRARY = 0,
@@ -56,8 +63,56 @@ enum {
 	TIPSY_VK_DEVICE_READY = 7,
 };
 
-static int tipsy_vulkan_host_probe(uint32_t *out_api, uint32_t *out_devices, int32_t *out_result) {
-	void *lib = dlopen("libvulkan.so.1", RTLD_NOW | RTLD_LOCAL);
+static void tipsy_vulkan_scan_wsi(tipsy_vkGetInstanceProcAddr_fn get_proc, int *out_xcb, int *out_xlib) {
+	tipsy_vkEnumerateInstanceExtensionProperties_fn enumerate_ext;
+	uint32_t count = 0;
+	TipsyVkExtensionProperties *props;
+	uint32_t i;
+	TipsyVkResult result;
+
+	if (out_xcb == NULL || out_xlib == NULL) {
+		return;
+	}
+	*out_xcb = 0;
+	*out_xlib = 0;
+	if (get_proc == NULL) {
+		return;
+	}
+	enumerate_ext = (tipsy_vkEnumerateInstanceExtensionProperties_fn)get_proc(NULL, "vkEnumerateInstanceExtensionProperties");
+	if (enumerate_ext == NULL) {
+		return;
+	}
+	result = enumerate_ext(NULL, &count, NULL);
+	if (result != 0 || count == 0) {
+		return;
+	}
+	props = (TipsyVkExtensionProperties *)malloc((size_t)count * sizeof(*props));
+	if (props == NULL) {
+		return;
+	}
+	memset(props, 0, (size_t)count * sizeof(*props));
+	result = enumerate_ext(NULL, &count, props);
+	if (result == 0 || result == 5) {
+		for (i = 0; i < count; i++) {
+			if (strcmp(props[i].extensionName, "VK_KHR_xcb_surface") == 0) {
+				*out_xcb = 1;
+			} else if (strcmp(props[i].extensionName, "VK_KHR_xlib_surface") == 0) {
+				*out_xlib = 1;
+			}
+		}
+	}
+	free(props);
+}
+
+static int tipsy_vulkan_host_probe(uint32_t *out_api, uint32_t *out_devices, int32_t *out_result, int *out_xcb, int *out_xlib) {
+	void *lib;
+	if (out_xcb != NULL) {
+		*out_xcb = 0;
+	}
+	if (out_xlib != NULL) {
+		*out_xlib = 0;
+	}
+	lib = dlopen("libvulkan.so.1", RTLD_NOW | RTLD_LOCAL);
 	if (lib == NULL) {
 		lib = dlopen("libvulkan.so", RTLD_NOW | RTLD_LOCAL);
 	}
@@ -70,6 +125,7 @@ static int tipsy_vulkan_host_probe(uint32_t *out_api, uint32_t *out_devices, int
 		dlclose(lib);
 		return TIPSY_VK_NO_LOADER;
 	}
+	tipsy_vulkan_scan_wsi(get_proc, out_xcb, out_xlib);
 
 	tipsy_vkEnumerateInstanceVersion_fn enumerate_version =
 		(tipsy_vkEnumerateInstanceVersion_fn)get_proc(NULL, "vkEnumerateInstanceVersion");
@@ -144,15 +200,20 @@ import "fmt"
 
 func platformOpenGLConstructed() bool { return true }
 
+func platformVulkanConstructed() bool { return true }
+
 func platformProbeHostVulkan() VulkanHostProbe {
 	var api, devices C.uint32_t
 	var result C.int32_t
-	stage := int(C.tipsy_vulkan_host_probe(&api, &devices, &result))
+	var xcb, xlib C.int
+	stage := int(C.tipsy_vulkan_host_probe(&api, &devices, &result, &xcb, &xlib))
 	probe := VulkanHostProbe{
 		Library:         stage != int(C.TIPSY_VK_NO_LIBRARY),
 		Loader:          stage >= int(C.TIPSY_VK_NO_CREATE),
 		APIVersion:      uint32(api),
 		PhysicalDevices: uint32(devices),
+		XcbSurface:      xcb != 0,
+		XlibSurface:     xlib != 0,
 		Result:          int32(result),
 	}
 	switch stage {

@@ -7,6 +7,12 @@ package graphics
 
 import "github.com/tipsy-linux/tipsy/internal/x11"
 
+func platformDisplayRefreshRates(xdisplay, xid uintptr) (float64, []float32) {
+	_ = xdisplay
+	_ = xid
+	return 0, nil
+}
+
 // BindEGL reports that native EGL is unavailable on this build.
 func BindEGL(x *x11.Window) (*EGL, error) {
 	_ = x

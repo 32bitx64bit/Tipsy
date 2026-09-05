@@ -6,11 +6,12 @@
 package graphics
 
 /*
-#cgo pkg-config: x11 egl glesv2
+#cgo pkg-config: x11 xrandr egl glesv2
 #cgo LDFLAGS: -lX11 -lEGL -lGLESv2 -pthread
 
 #define USE_X11 1
 #include <X11/Xlib.h>
+#include <X11/extensions/Xrandr.h>
 #include <EGL/egl.h>
 #include <EGL/eglext.h>
 #include <GLES2/gl2.h>
@@ -55,6 +56,141 @@ const char *tipsy_egl_bind_path(void) {
 		return "";
 	}
 	return tipsy_egl_path;
+}
+
+// Return the refresh rate of the active CRTC containing the center of xid.
+// XRandR mode timings are authoritative for the X11 presentation target. A
+// zero result deliberately means unknown; callers can choose a conservative
+// fallback without mistaking this observation for achieved application FPS.
+static double tipsy_xrr_mode_refresh_rate(const XRRModeInfo *info) {
+	if (info == NULL || info->dotClock == 0 || info->hTotal == 0 ||
+		info->vTotal == 0) {
+		return 0.0;
+	}
+	double hz = (double)info->dotClock /
+		((double)info->hTotal * (double)info->vTotal);
+	if ((info->modeFlags & RR_Interlace) != 0) {
+		hz *= 2.0;
+	}
+	if ((info->modeFlags & RR_DoubleScan) != 0) {
+		hz /= 2.0;
+	}
+	return hz;
+}
+
+static int tipsy_x11_active_crtc(Display *dpy, Window xid,
+	XRRScreenResources *resources, Window root, RRCrtc *out_crtc,
+	RRMode *out_mode) {
+	XWindowAttributes wa;
+	memset(&wa, 0, sizeof(wa));
+	if (!XGetWindowAttributes(dpy, xid, &wa)) {
+		return 0;
+	}
+	Window child = None;
+	int root_x = 0, root_y = 0;
+	if (!XTranslateCoordinates(dpy, xid, root, wa.width / 2, wa.height / 2,
+		&root_x, &root_y, &child)) {
+		return 0;
+	}
+	for (int i = 0; i < resources->ncrtc; i++) {
+		XRRCrtcInfo *crtc = XRRGetCrtcInfo(dpy, resources, resources->crtcs[i]);
+		if (crtc == NULL) {
+			continue;
+		}
+		int contains = crtc->mode != None && root_x >= crtc->x &&
+			root_y >= crtc->y && root_x < crtc->x + (int)crtc->width &&
+			root_y < crtc->y + (int)crtc->height;
+		if (contains) {
+			*out_crtc = resources->crtcs[i];
+			*out_mode = crtc->mode;
+			XRRFreeCrtcInfo(crtc);
+			return 1;
+		}
+		XRRFreeCrtcInfo(crtc);
+	}
+	return 0;
+}
+
+static double tipsy_x11_refresh_rate(uintptr_t xdisplay, unsigned long xid) {
+	Display *dpy = (Display *)xdisplay;
+	if (dpy == NULL || xid == 0) {
+		return 0.0;
+	}
+	XWindowAttributes wa;
+	memset(&wa, 0, sizeof(wa));
+	if (!XGetWindowAttributes(dpy, (Window)xid, &wa)) {
+		return 0.0;
+	}
+	Window root = RootWindowOfScreen(wa.screen);
+	XRRScreenResources *resources = XRRGetScreenResourcesCurrent(dpy, root);
+	if (resources == NULL) {
+		return 0.0;
+	}
+	RRCrtc active_crtc = None;
+	RRMode mode = None;
+	(void)tipsy_x11_active_crtc(dpy, (Window)xid, resources, root,
+		&active_crtc, &mode);
+	double hz = 0.0;
+	for (int i = 0; mode != None && i < resources->nmode; i++) {
+		XRRModeInfo *info = &resources->modes[i];
+		if (info->id != mode) {
+			continue;
+		}
+		hz = tipsy_xrr_mode_refresh_rate(info);
+		break;
+	}
+	XRRFreeScreenResources(resources);
+	return hz;
+}
+
+static int tipsy_x11_supported_refresh_rates(uintptr_t xdisplay,
+	unsigned long xid, double *out, int capacity) {
+	Display *dpy = (Display *)xdisplay;
+	if (dpy == NULL || xid == 0 || out == NULL || capacity <= 0) {
+		return 0;
+	}
+	XWindowAttributes wa;
+	memset(&wa, 0, sizeof(wa));
+	if (!XGetWindowAttributes(dpy, (Window)xid, &wa)) {
+		return 0;
+	}
+	Window root = RootWindowOfScreen(wa.screen);
+	XRRScreenResources *resources = XRRGetScreenResourcesCurrent(dpy, root);
+	if (resources == NULL) {
+		return 0;
+	}
+	RRCrtc active_crtc = None;
+	RRMode active_mode = None;
+	if (!tipsy_x11_active_crtc(dpy, (Window)xid, resources, root,
+		&active_crtc, &active_mode)) {
+		XRRFreeScreenResources(resources);
+		return 0;
+	}
+	int count = 0;
+	for (int i = 0; i < resources->noutput && count < capacity; i++) {
+		XRROutputInfo *output = XRRGetOutputInfo(dpy, resources,
+			resources->outputs[i]);
+		if (output == NULL) {
+			continue;
+		}
+		if (output->connection == RR_Connected && output->crtc == active_crtc) {
+			for (int j = 0; j < output->nmode && count < capacity; j++) {
+				for (int k = 0; k < resources->nmode; k++) {
+					if (resources->modes[k].id != output->modes[j]) {
+						continue;
+					}
+					double hz = tipsy_xrr_mode_refresh_rate(&resources->modes[k]);
+					if (hz > 0.0) {
+						out[count++] = hz;
+					}
+					break;
+				}
+			}
+		}
+		XRRFreeOutputInfo(output);
+	}
+	XRRFreeScreenResources(resources);
+	return count;
 }
 
 static int tipsy_choose_config(EGLDisplay dpy, VisualID visual, EGLConfig *out) {
@@ -370,7 +506,9 @@ import "C"
 
 import (
 	"fmt"
+	"math"
 	"runtime"
+	"sort"
 	"time"
 
 	"github.com/tipsy-linux/tipsy/internal/logging"
@@ -382,6 +520,36 @@ const (
 	eglVendor  = 0x3053
 	eglVersion = 0x3054
 )
+
+func platformDisplayRefreshRates(xdisplay, xid uintptr) (float64, []float32) {
+	if xdisplay == 0 || xid == 0 {
+		return 0, nil
+	}
+	current := float64(C.tipsy_x11_refresh_rate(C.uintptr_t(xdisplay), C.ulong(xid)))
+	var nativeRates [64]C.double
+	nativeRateCount := int(C.tipsy_x11_supported_refresh_rates(
+		C.uintptr_t(xdisplay), C.ulong(xid), &nativeRates[0], C.int(len(nativeRates))))
+	uniqueRates := make(map[int64]float64, nativeRateCount+1)
+	for i := 0; i < nativeRateCount; i++ {
+		hz := float64(nativeRates[i])
+		if hz > 0 {
+			uniqueRates[int64(math.Round(hz*1000))] = hz
+		}
+	}
+	if current > 0 {
+		uniqueRates[int64(math.Round(current*1000))] = current
+	}
+	rates := make([]float64, 0, len(uniqueRates))
+	for _, hz := range uniqueRates {
+		rates = append(rates, hz)
+	}
+	sort.Float64s(rates)
+	supported := make([]float32, 0, len(rates))
+	for _, hz := range rates {
+		supported = append(supported, float32(hz))
+	}
+	return current, supported
+}
 
 // BindEGL creates an OpenGL ES 2 context and window surface on x.
 func BindEGL(x *x11.Window) (*EGL, error) {
@@ -396,18 +564,22 @@ func BindEGL(x *x11.Window) (*EGL, error) {
 		return nil, fmt.Errorf("graphics: BindEGL failed: %s", eglErrorName(int(rc)))
 	}
 
+	refreshHz, supportedHz := platformDisplayRefreshRates(x.Display(), x.XID())
 	e := &EGL{
-		display:    uintptr(dpy),
-		surface:    uintptr(surf),
-		context:    uintptr(ctx),
-		x11Display: x.Display(),
-		x11XID:     x.XID(),
+		display:     uintptr(dpy),
+		surface:     uintptr(surf),
+		context:     uintptr(ctx),
+		x11Display:  x.Display(),
+		x11XID:      x.XID(),
+		refreshHz:   refreshHz,
+		supportedHz: supportedHz,
 	}
 	path := C.GoString(C.tipsy_egl_bind_path())
 	vendor := C.GoString(C.tipsy_egl_query(dpy, eglVendor))
 	version := C.GoString(C.tipsy_egl_query(dpy, eglVersion))
 	logging.Logger(logging.CatGraphics).Info("bound EGL on X11",
-		"path", path, "vendor", vendor, "version", version)
+		"path", path, "vendor", vendor, "version", version,
+		"refreshHz", e.refreshHz, "supportedRefreshRates", e.supportedHz)
 	return e, nil
 }
 
