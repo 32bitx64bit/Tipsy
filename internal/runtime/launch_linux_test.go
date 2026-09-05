@@ -11,14 +11,17 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
 	"syscall"
 	"testing"
 	"time"
 	"unsafe"
 
 	"github.com/tipsy-linux/tipsy/internal/android"
+	"github.com/tipsy-linux/tipsy/internal/clientsettings"
 	"github.com/tipsy-linux/tipsy/internal/jni"
 	"github.com/tipsy-linux/tipsy/internal/loader"
+	"github.com/tipsy-linux/tipsy/internal/x11"
 )
 
 func TestGameActivityCommandConstants(t *testing.T) {
@@ -28,8 +31,92 @@ func TestGameActivityCommandConstants(t *testing.T) {
 }
 
 func TestInputDispatchInterval(t *testing.T) {
-	if inputDispatchInterval != 4*time.Millisecond {
-		t.Fatalf("input dispatch interval = %s, want 4ms", inputDispatchInterval)
+	// The launch loop waits on Window.InputReady rather than a 4ms Pump ticker.
+	// Size() cannot change without InputResize on this X11 backend
+	// (ConfigureNotify always enters the ring), so a poll fallback is not used.
+	ch := (&x11.Window{}).InputReady()
+	if ch == nil {
+		t.Fatal("launch loop needs a selectable X11 InputReady channel")
+	}
+	select {
+	case <-ch:
+		t.Fatal("InputReady must start empty")
+	default:
+	}
+}
+
+func TestEGLPresentationPolicyHandoff(t *testing.T) {
+	t.Cleanup(func() { android.SetEGLVSync(false) })
+	for _, tt := range []struct {
+		name     string
+		settings clientsettings.Settings
+		want     bool
+	}{
+		{name: "default off unthrottles auto fps", settings: clientsettings.Default(), want: true},
+		{name: "off unthrottles low fixed fps", settings: clientsettings.Settings{FrameRate: clientsettings.FrameRate{Mode: clientsettings.FrameRateLimited, Limit: 30}}, want: true},
+		{name: "on synchronizes auto fps", settings: clientsettings.Settings{FrameRate: clientsettings.FrameRate{Mode: clientsettings.FrameRateAuto}, VSync: true}, want: false},
+		{name: "on synchronizes unlimited fps", settings: clientsettings.Settings{FrameRate: clientsettings.FrameRate{Mode: clientsettings.FrameRateUnlimited}, VSync: true}, want: false},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := configureEGLPresentationPolicy(tt.settings); got != tt.want {
+				t.Fatalf("configureEGLPresentationPolicy()=%v want %v", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestMesaVBlankModeTracksIndependentVSync(t *testing.T) {
+	t.Setenv("vblank_mode", "inherited")
+	if err := configureMesaVBlankMode(false); err != nil {
+		t.Fatal(err)
+	}
+	if got := os.Getenv("vblank_mode"); got != "0" {
+		t.Fatalf("VSync off vblank_mode=%q want 0", got)
+	}
+	if err := configureMesaVBlankMode(true); err != nil {
+		t.Fatal(err)
+	}
+	if got := os.Getenv("vblank_mode"); got != "1" {
+		t.Fatalf("VSync on vblank_mode=%q want 1", got)
+	}
+}
+
+func TestDisplayRefreshExportNamesAndABI(t *testing.T) {
+	if currentDisplayRefreshRateSym != "Java_com_roblox_engine_jni_NativeGLInterface_nativePassCurrentDisplayRefreshRate" {
+		t.Fatalf("current display refresh export = %q", currentDisplayRefreshRateSym)
+	}
+	if supportedRefreshRatesSym != "Java_com_roblox_engine_jni_NativeGLInterface_nativePassSupportedRefreshRates" {
+		t.Fatalf("supported refresh rates export = %q", supportedRefreshRatesSym)
+	}
+	vm, err := jni.NewVM()
+	if err != nil {
+		t.Fatal(err)
+	}
+	env := vm.Env()
+	class := env.FindClass("com/roblox/engine/jni/NativeGLInterface")
+	currentFn, supportedFn := testDisplayRefreshExportFunctions()
+	wantCurrent := float32(164.9577)
+	wantSupported := []float32{59.94, 60, 120, 144, wantCurrent}
+	if err := callDisplayRefreshRateExports(env, class, currentFn, supportedFn, wantCurrent, wantSupported); err != nil {
+		t.Fatal(err)
+	}
+	gotCurrent, gotSupported := testDisplayRefreshValues()
+	if gotCurrent != wantCurrent || !reflect.DeepEqual(gotSupported, wantSupported) {
+		t.Fatalf("published current=%v supported=%v, want current=%v supported=%v", gotCurrent, gotSupported, wantCurrent, wantSupported)
+	}
+}
+
+func TestDisplayRefreshRatesChanged(t *testing.T) {
+	current := float32(60)
+	supported := []float32{50, 59.94, 60}
+	if displayRefreshRatesChanged(current, supported, current, append([]float32(nil), supported...)) {
+		t.Fatal("identical defensive-copy snapshot reported a change")
+	}
+	if !displayRefreshRatesChanged(current, supported, 164.9577, []float32{60, 120, 164.9577}) {
+		t.Fatal("active-output move did not report a change")
+	}
+	if !displayRefreshRatesChanged(current, supported, current, []float32{50, 60}) {
+		t.Fatal("supported mode-list change did not report a change")
 	}
 }
 
@@ -95,6 +182,13 @@ func TestDirectWheelExportName(t *testing.T) {
 	const want = "Java_com_roblox_engine_jni_NativeInputInterface_nativePassMouseWheel"
 	if directMouseWheelSym != want {
 		t.Fatalf("directMouseWheelSym=%q want %q", directMouseWheelSym, want)
+	}
+}
+
+func TestDirectMouseLockGetterExportName(t *testing.T) {
+	const want = "Java_com_roblox_engine_jni_NativeInputInterface_nativeGetMainWindowIsMouseLockedCenter"
+	if directMouseLockedSym != want {
+		t.Fatalf("directMouseLockedSym=%q want %q", directMouseLockedSym, want)
 	}
 }
 

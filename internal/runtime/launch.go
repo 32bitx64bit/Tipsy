@@ -120,6 +120,133 @@ func (a *launchStartedAck) signal() {
 	a.once.Do(a.fn)
 }
 
+// configureEGLPresentationPolicy applies the independent VSync choice at the
+// Android EGL compatibility boundary. FPS mode and display refresh do not
+// participate: off always requests interval zero; on always requests one.
+func configureEGLPresentationPolicy(settings clientsettings.Settings) bool {
+	unthrottled := settings.NeedsUnthrottledPresentation()
+	android.SetEGLVSync(settings.VSync)
+	interval := 0
+	if settings.VSync {
+		interval = 1
+	}
+	logging.Logger(logging.CatGraphics).Info("VSync presentation policy",
+		"vsync", settings.VSync, "effectiveInterval", interval,
+		"fpsMode", settings.FrameRate.Mode, "fpsLimit", settings.FrameRate.Limit,
+		"unthrottledPresentation", unthrottled)
+	return unthrottled
+}
+
+// configureMesaVBlankMode must run before EGLDisplay/context creation. Mesa's
+// application-default mode (1) respects the interval-one VSync policy, while
+// mode 0 removes the driver-level vblank wait that can otherwise retain a
+// refresh-rate cap after EGL accepts interval zero.
+func configureMesaVBlankMode(vsync bool) error {
+	mode := "0"
+	if vsync {
+		mode = "1"
+	}
+	if err := os.Setenv("vblank_mode", mode); err != nil {
+		return fmt.Errorf("set Mesa vblank_mode=%s: %w", mode, err)
+	}
+	logging.Logger(logging.CatGraphics).Info("Mesa VSync policy configured",
+		"vsync", vsync, "vblankMode", mode)
+	return nil
+}
+
+type clientPresenter struct {
+	vulkan bool
+	egl    *graphics.EGL
+	xdpy   uintptr
+	xid    uintptr
+}
+
+func (p *clientPresenter) refreshRates() (float32, []float32) {
+	if p == nil {
+		return 0, nil
+	}
+	if p.egl != nil {
+		return float32(p.egl.RefreshRateHz()), p.egl.SupportedRefreshRatesHz()
+	}
+	current, supported := graphics.WindowRefreshRates(p.xdpy, p.xid)
+	return float32(current), supported
+}
+
+func (p *clientPresenter) stop() {
+	if p != nil && p.egl != nil {
+		p.egl.StopSwapThread()
+	}
+}
+
+func (p *clientPresenter) close() {
+	if p != nil && p.egl != nil {
+		_ = p.egl.Close()
+	}
+}
+
+func (p *clientPresenter) logPresentStats() {
+	if p != nil && p.vulkan {
+		stats := android.VulkanPresentStats()
+		logging.Logger(logging.CatGraphics).Info("Android Vulkan presentation rate",
+			"successfulPresents", stats.SuccessfulPresents,
+			"observationWindow", stats.Elapsed,
+			"observedFPS", stats.RateFPS)
+		return
+	}
+	eglStats := android.EGLSwapStats()
+	logging.Logger(logging.CatGraphics).Info("Android EGL presentation rate",
+		"successfulSwaps", eglStats.SuccessfulSwaps,
+		"observationWindow", eglStats.Elapsed,
+		"observedFPS", eglStats.RateFPS)
+}
+
+func configureVulkanPresentationPolicy(settings clientsettings.Settings) {
+	android.SetVulkanVSync(settings.VSync)
+	presentMode := "immediate"
+	if settings.VSync {
+		presentMode = "fifo"
+	}
+	logging.Logger(logging.CatGraphics).Info("VSync presentation policy",
+		"backend", "vulkan", "vsync", settings.VSync, "presentModePolicy", presentMode,
+		"fpsMode", settings.FrameRate.Mode, "fpsLimit", settings.FrameRate.Limit,
+		"unthrottledPresentation", settings.NeedsUnthrottledPresentation())
+}
+
+func bindClientPresenter(win *x11.Window, settings clientsettings.Settings) (*clientPresenter, error) {
+	resolved, err := graphics.ProbeRendererCapabilities().Resolve(graphics.Renderer(settings.Renderer))
+	if err != nil {
+		return nil, err
+	}
+	presenter := &clientPresenter{xdpy: win.Display(), xid: win.XID(), vulkan: resolved == graphics.RendererVulkan}
+	logging.Logger(logging.CatGraphics).Info("resolved client renderer",
+		"choice", settings.Renderer, "resolved", resolved)
+	if presenter.vulkan {
+		if err := android.BindVulkanWSI(win.Display(), win.XID()); err != nil {
+			return nil, err
+		}
+		configureVulkanPresentationPolicy(settings)
+		return presenter, nil
+	}
+	if err := configureMesaVBlankMode(settings.VSync); err != nil {
+		return nil, err
+	}
+	eglSurf, err := graphics.BindEGL(win)
+	if err != nil {
+		return nil, fmt.Errorf("egl: %w", err)
+	}
+	presenter.egl = eglSurf
+	configureEGLPresentationPolicy(settings)
+	_ = eglSurf.Swap()
+	if err := eglSurf.ReleaseCurrent(); err != nil {
+		_ = eglSurf.Close()
+		return nil, fmt.Errorf("egl release: %w", err)
+	}
+	if err := eglSurf.StartSwapThread(); err != nil {
+		logging.Logger(logging.CatRuntime).Info("EGL swap thread skipped", "err", err)
+	}
+	return presenter, nil
+}
+
 type xidHandle struct{ xid uintptr }
 
 func (h xidHandle) NativeHandle() uintptr { return h.xid }
@@ -143,6 +270,7 @@ const (
 	directMouseButtonSym = "Java_com_roblox_engine_jni_NativeInputInterface_nativePassMouseButton"
 	directMouseMoveSym   = "Java_com_roblox_engine_jni_NativeInputInterface_nativePassMouseMove"
 	directMouseWheelSym  = "Java_com_roblox_engine_jni_NativeInputInterface_nativePassMouseWheel"
+	directMouseLockedSym = "Java_com_roblox_engine_jni_NativeInputInterface_nativeGetMainWindowIsMouseLockedCenter"
 	directKeyEventSym    = "Java_com_roblox_engine_jni_NativeGLInterface_nativePassKeyEvent"
 	// setInputConnectionName/Sig is the exact Java→native handshake the
 	// engine registered (DEX ground truth, classes2.dex method table,
@@ -175,11 +303,6 @@ const (
 	appCmdGainedFocus        = 7
 	appCmdStart              = 11
 	appCmdResume             = 12
-
-	// inputDispatchInterval bounds the Go-side half of X11-to-engine input
-	// delivery. The C background pump captures at 2 ms; 4 ms avoids the
-	// previous 16 ms + 16 ms cursor lag while retaining bounded coalescing.
-	inputDispatchInterval = 4 * time.Millisecond
 )
 
 // Launch starts the official extracted Android x86-64 client under native X11.
@@ -222,6 +345,10 @@ func Launch(ctx context.Context, opt LaunchOptions) error {
 	if err := settingsService.ReconcileWhileClientLocked(ctx); err != nil {
 		return fmt.Errorf("client settings: %w", err)
 	}
+	settings, err := settingsService.Load(ctx)
+	if err != nil {
+		return fmt.Errorf("load client settings: %w", err)
+	}
 	// Roblox may normalize experimental values while shutting down. Reapply an
 	// explicit Tipsy-owned value after the client loop exits, while the launch
 	// lock still excludes GUI settings writes. The next launch also reconciles.
@@ -259,23 +386,16 @@ func Launch(ctx context.Context, opt LaunchOptions) error {
 		return fmt.Errorf("x11: %w", err)
 	}
 	defer win.Close()
-	eglSurf, err := graphics.BindEGL(win)
+	presenter, err := bindClientPresenter(win, settings)
 	if err != nil {
-		return fmt.Errorf("egl: %w", err)
+		return fmt.Errorf("renderer: %w", err)
 	}
-	defer eglSurf.Close()
-	_ = eglSurf.Swap()
-	if err := eglSurf.ReleaseCurrent(); err != nil {
-		return fmt.Errorf("egl release: %w", err)
-	}
+	defer presenter.close()
 	if err := win.StartBackgroundPump(); err != nil {
 		return fmt.Errorf("x11 pump thread: %w", err)
 	}
 	defer win.StopBackgroundPump()
-	if err := eglSurf.StartSwapThread(); err != nil {
-		logging.Logger(logging.CatRuntime).Info("EGL swap thread skipped", "err", err)
-	}
-	defer eglSurf.StopSwapThread()
+	defer presenter.stop()
 
 	android.NewResolver(android.Config{AssetsDir: assets, APKPath: filepath.Join(dir, "apk", "base.apk"), Width: int32(opt.Width), Height: int32(opt.Height)})
 	aw := android.NewWindow(opt.Width, opt.Height, xidHandle{xid: win.XID()})
@@ -324,7 +444,9 @@ func Launch(ctx context.Context, opt LaunchOptions) error {
 	if err := configureRobloxCookieBridge(vm, mod, vm.Env(), storage.CookieFile); err != nil {
 		return err
 	}
-	session, err := startGameActivity(ctx, vm, mod, aw, files, cache, preferences, obb, opt.Width, opt.Height)
+	currentRefreshHz, supportedRefreshHz := presenter.refreshRates()
+	session, err := startGameActivity(ctx, vm, mod, aw, files, cache, preferences, obb,
+		opt.Width, opt.Height, currentRefreshHz, supportedRefreshHz)
 	if err != nil {
 		return err
 	}
@@ -348,19 +470,18 @@ func Launch(ctx context.Context, opt LaunchOptions) error {
 	})
 	defer cancelResizeInput()
 
-	ticker := time.NewTicker(inputDispatchInterval)
-	defer ticker.Stop()
 	stats := time.NewTicker(2 * time.Second)
 	defer stats.Stop()
-	// Everything needed by the in-process client loop is live: X11/EGL and
-	// its pump were established above, GameActivity startup succeeded, input
-	// targets are wired, and resize/input subscribers plus loop tickers are
-	// installed. Immediate failures and --probe return before this boundary.
+	// Everything needed by the in-process client loop is live: X11 and the
+	// exclusive EGL or Vulkan presenter plus its pump were established above,
+	// GameActivity startup succeeded, input targets are wired, and the launch
+	// loop waits on the X11 input wake plus the 2s stats ticker. Immediate
+	// failures and --probe return before this boundary.
 	started.signal()
 	shutdownClient := func(reason string) {
 		_ = win.Dismiss()
 		_ = win.StopBackgroundPump()
-		eglSurf.StopSwapThread()
+		presenter.stop()
 		session.shutdown(reason)
 		// The official terminateNativeCode join has completed, while the
 		// package-private path and process-wide client lock are still live.
@@ -377,6 +498,16 @@ func Launch(ctx context.Context, opt LaunchOptions) error {
 			shutdownClient("context-cancelled")
 			return ctx.Err()
 		case <-stats.C:
+			nextCurrentRefreshHz, nextSupportedRefreshHz := presenter.refreshRates()
+			if displayRefreshRatesChanged(currentRefreshHz, supportedRefreshHz, nextCurrentRefreshHz, nextSupportedRefreshHz) {
+				if err := publishDisplayRefreshRates(mod, vm.Env(), nextCurrentRefreshHz, nextSupportedRefreshHz); err != nil {
+					logging.Logger(logging.CatGraphics).Error("republish Android display refresh rates", "err", err)
+				} else {
+					currentRefreshHz = nextCurrentRefreshHz
+					supportedRefreshHz = nextSupportedRefreshHz
+				}
+			}
+			presenter.logPresentStats()
 			s := jni.InputDeliveryStats()
 			d := jni.RobloxDirectInputStats()
 			textPass, textReturn, textSync, textDrop := jni.RbxTextDeliveryStats()
@@ -385,8 +516,9 @@ func Launch(ctx context.Context, opt LaunchOptions) error {
 				"focus", s.FocusDelivered, "gameActivityKeys", s.KeyDelivered, "gameActivityPointers", s.PointerDelivered,
 				"gameActivityConsumed", s.KeyConsumed+s.PointerConsumed, "gameActivityDropped", s.Dropped,
 				"directKeys", d.KeyDelivered, "directButtons", d.ButtonDelivered, "directMoves", d.MoveDelivered, "directWheels", d.WheelDelivered, "directDropped", d.Dropped,
+				"pointerLockQueries", d.LockQueries, "pointerLockTrue", d.LockTrue,
 				"textPass", textPass, "textReturn", textReturn, "textSync", textSync, "textDropped", textDrop)
-		case <-ticker.C:
+		case <-win.InputReady():
 			if err := win.Pump(); err != nil {
 				if err == x11.ErrClosed {
 					// Pump has already unmapped the window, bounding visible close
@@ -398,9 +530,9 @@ func Launch(ctx context.Context, opt LaunchOptions) error {
 				}
 				return err
 			}
-			// X11 delivers the normal path above in exact event order. Keep a
-			// deduplicated fallback for a future window backend that updates
-			// Size() without emitting InputResize.
+			// ConfigureNotify always enters the input ring on this X11 backend,
+			// so Size() cannot change without InputResize. observe after drain
+			// is the same dedup as before, now on the wake path rather than 4ms.
 			w, h := win.Size()
 			resize.observe(w, h)
 		}
@@ -415,7 +547,7 @@ func installCrashDiagHandler() error {
 	return nil
 }
 
-func startGameActivity(ctx context.Context, vm *jni.VM, mod *loader.Module, aw *android.Window, files, cache, preferences, obb string, width, height int) (*gameActivitySession, error) {
+func startGameActivity(ctx context.Context, vm *jni.VM, mod *loader.Module, aw *android.Window, files, cache, preferences, obb string, width, height int, currentRefreshHz float32, supportedRefreshHz []float32) (*gameActivitySession, error) {
 	env := vm.Env()
 	activity := env.AllocObject(env.FindClass("com/roblox/client/startup/MainGameActivity"))
 	if activity == 0 {
@@ -443,7 +575,8 @@ func startGameActivity(ctx context.Context, vm *jni.VM, mod *loader.Module, aw *
 	wireRobloxDirectInput(mod, env)
 	wireRobloxDirectKey(mod, env)
 	wireRobloxTextInput(mod, env)
-	return dispatchGameActivityLifecycle(ctx, vm, mod, env, activity, uintptr(handle), files, cache, preferences, width, height, aw), nil
+	return dispatchGameActivityLifecycle(ctx, vm, mod, env, activity, uintptr(handle), files, cache, preferences,
+		width, height, currentRefreshHz, supportedRefreshHz, aw), nil
 }
 
 // deliverTextInputConnection ensures the Tipsy-owned InputConnection object
@@ -474,13 +607,14 @@ func deliverTextInputConnection(vm *jni.VM, env *jni.Env, activity, handle uintp
 	return conn
 }
 
-// wireRobloxDirectInput resolves only the three public static native methods
-// used by the official 2.734.917 mouse listener. `nativePassMouse` is absent
-// and must not be guessed. Delivery remains A/B-gated inside internal/jni.
+// wireRobloxDirectInput resolves only the public static native methods used by
+// the official 2.734.917 mouse listeners. `nativePassMouse` is absent and must
+// not be guessed. The ()Z getter is the authority for host pointer capture.
 func wireRobloxDirectInput(mod *loader.Module, env *jni.Env) {
 	buttonFn, buttonErr := mod.Lookup(directMouseButtonSym)
 	moveFn, moveErr := mod.Lookup(directMouseMoveSym)
 	wheelFn, wheelErr := mod.Lookup(directMouseWheelSym)
+	lockedFn, lockedErr := mod.Lookup(directMouseLockedSym)
 	if buttonErr != nil {
 		logging.Logger(logging.CatJNI).Info("[jni] missing direct input export", "sym", directMouseButtonSym, "err", buttonErr)
 	}
@@ -490,8 +624,11 @@ func wireRobloxDirectInput(mod *loader.Module, env *jni.Env) {
 	if wheelErr != nil {
 		logging.Logger(logging.CatJNI).Info("[jni] missing direct input export", "sym", directMouseWheelSym, "err", wheelErr)
 	}
+	if lockedErr != nil {
+		logging.Logger(logging.CatJNI).Info("[jni] missing direct input export", "sym", directMouseLockedSym, "err", lockedErr)
+	}
 	class := env.FindClass("com/roblox/engine/jni/NativeInputInterface")
-	jni.SetRobloxDirectInputTarget(env.Raw(), class, buttonFn, moveFn, wheelFn)
+	jni.SetRobloxDirectInputTarget(env.Raw(), class, buttonFn, moveFn, wheelFn, lockedFn)
 }
 
 // wireRobloxDirectKey resolves the separate public static native key route
@@ -530,7 +667,7 @@ func wireRobloxTextInput(mod *loader.Module, env *jni.Env) {
 	jni.SetRobloxTextInputTarget(env, class, passFn, returnFn, syncFn, loader.CallP8)
 }
 
-func dispatchGameActivityLifecycle(ctx context.Context, vm *jni.VM, mod *loader.Module, env *jni.Env, activity, handle uintptr, files, cache, preferences string, width, height int, aw *android.Window) *gameActivitySession {
+func dispatchGameActivityLifecycle(ctx context.Context, vm *jni.VM, mod *loader.Module, env *jni.Env, activity, handle uintptr, files, cache, preferences string, width, height int, currentRefreshHz float32, supportedRefreshHz []float32, aw *android.Window) *gameActivitySession {
 	call := func(name, sig string, extra ...uintptr) {
 		callGameActivityNative(vm, env, activity, handle, name, sig, extra...)
 	}
@@ -538,6 +675,13 @@ func dispatchGameActivityLifecycle(ctx context.Context, vm *jni.VM, mod *loader.
 	setRobloxCacheAndFiles(mod, env, activity, files, cache)
 	setRobloxAssetPath(mod, env, activity)
 	startRobloxApp(mod, env, activity, files)
+	// Official MainScreenController ON_CREATE publishes Display 0's current
+	// and supported refresh rates after native/client-settings initialization
+	// and before resume/surface/V2Start. Reproduce that named JNI boundary
+	// with the XRandR modes of this window's active output.
+	if err := publishDisplayRefreshRates(mod, env, currentRefreshHz, supportedRefreshHz); err != nil {
+		logging.Logger(logging.CatGraphics).Error("Android display refresh publication failed", "err", err)
+	}
 	call("onResumeNative", "(J)V")
 	surface := env.AllocObject(env.FindClass("android/view/Surface"))
 	call("onSurfaceCreatedNative", "(JLandroid/view/Surface;)V", surface)

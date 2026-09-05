@@ -10,13 +10,17 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"path/filepath"
 	"time"
 
 	"github.com/tipsy-linux/tipsy/internal/clientsettings"
+	"github.com/tipsy-linux/tipsy/internal/logging"
 )
 
 // Official public client-settings endpoint the Android app uses.
 const androidAppSettingsURL = "https://clientsettingscdn.roblox.com/v2/settings/application/AndroidApp"
+
+const desktopAppPolicyFlag = "FStringAppConfigurationOverrideAppPolicy"
 
 // applicationSettingsFromResponse extracts the flag map as a JSON object.
 // Does not log flag names or values.
@@ -46,8 +50,8 @@ func applicationSettingsFromResponseWithOverrides(body []byte, overrides map[str
 	} else {
 		m = cloneFlagMap(m)
 	}
-	// Explicit renderer choices own this narrow conflict set. Auto produces no
-	// renderer override, leaving the official fetched defaults untouched.
+	// Explicit renderer choices own this narrow conflict set. Auto emits
+	// PreferVulkan only when the Vulkan WSI path is the resolved platform.
 	if _, ok := overrides["FFlagDebugGraphicsPreferOpenGL"]; ok {
 		delete(m, "FFlagDebugGraphicsPreferVulkan")
 		delete(m, "FFlagDebugGraphicsDisableVulkan")
@@ -90,6 +94,17 @@ func loadAndroidAppSettings(cachePath string) (string, int, error) {
 		// official client settings; the rejected override is simply not applied.
 		overrides = nil
 	}
+	// The named AppConfiguration override is a terminal whole-policy response,
+	// not a field merge. The OS-specific loader therefore returns a complete
+	// cached policy or nothing; any malformed, ambiguous, or touch-mode input
+	// fails closed and leaves Roblox's ordinary policy path intact.
+	var policyApplied bool
+	overrides, policyApplied, overrideErr = withDesktopAppPolicyOverride(cachePath, overrides)
+	if overrideErr != nil {
+		logging.Logger(logging.CatGameActivity).Info("desktop app policy override omitted", "err", overrideErr)
+	} else if policyApplied {
+		logging.Logger(logging.CatGameActivity).Info("desktop app policy override applied", "presentation_fields", 4)
+	}
 	body, err := fetchAndroidAppSettings()
 	if err != nil {
 		if cachePath != "" {
@@ -107,6 +122,19 @@ func loadAndroidAppSettings(cachePath string) (string, int, error) {
 		_ = os.WriteFile(cachePath, body, 0o600)
 	}
 	return js, n, nil
+}
+
+func withDesktopAppPolicyOverride(cachePath string, overrides map[string]any) (map[string]any, bool, error) {
+	policy, err := desktopAppPolicyOverride(filepath.Dir(cachePath))
+	if err != nil {
+		return overrides, false, err
+	}
+	if policy == "" {
+		return overrides, false, nil
+	}
+	overrides = cloneFlagMap(overrides)
+	overrides[desktopAppPolicyFlag] = policy
+	return overrides, true, nil
 }
 
 func fetchAndroidAppSettings() ([]byte, error) {
