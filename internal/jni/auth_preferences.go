@@ -31,6 +31,19 @@ var authCookies struct {
 	registered bool
 }
 
+// ImportAuthSetCookies writes official HTTPS Set-Cookie headers into the
+// private cookie store before native restore. It never logs header values.
+func ImportAuthSetCookies(path, baseURL, origin string, headers []string) error {
+	store, err := openAuthCookieStore(path, baseURL)
+	if err != nil {
+		return err
+	}
+	if err := store.set(origin, headers); err != nil {
+		return errors.New("cookie storage write failed")
+	}
+	return nil
+}
+
 // ConfigureAuthCookies opens the private cookie store before native startup.
 // It never invents an authenticated value. The registered official callback is
 // the only writer; RestoreAuthCookies returns only unexpired scoped cookies.

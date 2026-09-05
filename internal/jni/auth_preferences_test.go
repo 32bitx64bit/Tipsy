@@ -201,3 +201,30 @@ func TestAuthCookieBridgeRegistersOnlyAfterSettingsInitializationOnce(t *testing
 		t.Fatal("registration count is not one")
 	}
 }
+
+func TestImportAuthSetCookiesPersistsOfficialSetCookie(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.Chmod(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(dir, "cookies")
+	if err := ImportAuthSetCookies(path, "https://www.roblox.com/", "https://www.roblox.com/", []string{
+		".ROBLOSECURITY=synthetic-import; Domain=.roblox.com; Path=/; Secure; HttpOnly; Max-Age=3600",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	vm, err := NewVM()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = vm.ConfigureAuthCookies(path, "https://www.roblox.com/"); err != nil {
+		t.Fatal(err)
+	}
+	header, err := vm.RestoreAuthCookies()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(header, ".ROBLOSECURITY=synthetic-import") {
+		t.Fatal("imported cookie was not restored")
+	}
+}
