@@ -66,6 +66,8 @@ extern int tipsy_dl_iterate_phdr(void *, void *);
 /* host.c */
 extern void *tipsy_eglCreateWindowSurface(void *, void *, void *, const int32_t *);
 extern void *tipsy_eglGetProcAddress(const char *);
+extern uint32_t tipsy_eglSwapInterval(void *, int32_t);
+extern uint32_t tipsy_eglSwapBuffers(void *, void *);
 extern void *tipsy_egl_dlsym(const char *);
 extern void *tipsy_gles_dlsym(const char *);
 
@@ -328,6 +330,8 @@ static const struct sym table[] = {
 	{ "libandroid.so", "ANativeWindow_unlockAndPost", (void *)tipsy_ANativeWindow_unlockAndPost },
 
 	{ "libEGL.so", "eglCreateWindowSurface", (void *)tipsy_eglCreateWindowSurface },
+	{ "libEGL.so", "eglSwapInterval", (void *)tipsy_eglSwapInterval },
+	{ "libEGL.so", "eglSwapBuffers", (void *)tipsy_eglSwapBuffers },
 	{ "libEGL.so", "eglGetProcAddress", (void *)tipsy_eglGetProcAddress },
 
 	{ "libmediandk.so", "AMediaCodec_createDecoderByType", (void *)tipsy_AMediaCodec_createDecoderByType },
@@ -428,6 +432,12 @@ void *tipsy_android_lookup(const char *lib, const char *name)
 	}
 	if (lib != NULL && strcmp(lib, "libGLESv2.so") == 0) {
 		return tipsy_gles_dlsym(name);
+	}
+	if (lib != NULL && (strcmp(lib, "libvulkan.so") == 0 || strcmp(lib, "libvulkan.so.1") == 0)) {
+		return tipsy_vk_dlsym(name);
+	}
+	if ((lib == NULL || lib[0] == '\0') && name[0] == 'v' && name[1] == 'k') {
+		return tipsy_vk_dlsym(name);
 	}
 	return NULL;
 }

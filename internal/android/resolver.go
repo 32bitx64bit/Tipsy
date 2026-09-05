@@ -19,6 +19,7 @@ import (
 	"path"
 	"strings"
 	"sync"
+	"time"
 	"unsafe"
 
 	"github.com/tipsy-linux/tipsy/internal/loader"
@@ -30,6 +31,15 @@ type Resolver = loader.Resolver
 
 // LookupFunc resolves a single symbol inside a registered module.
 type LookupFunc func(sym string) (uintptr, error)
+
+// EGLSwapStatistics observes successful client calls through the Android EGL
+// compatibility export. It does not alter eglSwapBuffers behavior or inspect
+// engine state. RateFPS is zero until at least two swaps have completed.
+type EGLSwapStatistics struct {
+	SuccessfulSwaps uint64
+	Elapsed         time.Duration
+	RateFPS         float64
+}
 
 // Config controls asset and default window sizing for the resolver.
 type Config struct {
@@ -94,6 +104,61 @@ func SetAPKPath(apk string) {
 
 func init() {
 	C.tipsy_bionic_compat_init()
+}
+
+// SetEGLVSync controls the independent Android libEGL presentation policy.
+// Off requests interval zero and on requests interval one regardless of the
+// client's request. A rejected policy interval falls back to the exact client
+// interval so unsupported host behavior remains honest and recoverable.
+func SetEGLVSync(enabled bool) {
+	value := C.int(0)
+	if enabled {
+		value = 1
+	}
+	C.tipsy_egl_set_vsync(value)
+	C.tipsy_egl_reset_swap_stats()
+	logging.Logger(logging.CatGraphics).Info("Android EGL VSync policy configured", "vsync", enabled)
+}
+
+// EGLSwapStats returns a process-atomic observation of successful
+// eglSwapBuffers calls made through Android's libEGL compatibility boundary.
+func EGLSwapStats() EGLSwapStatistics {
+	var swaps, firstNS, lastNS C.uint64_t
+	C.tipsy_egl_swap_stats(&swaps, &firstNS, &lastNS)
+	stats := EGLSwapStatistics{SuccessfulSwaps: uint64(swaps)}
+	if stats.SuccessfulSwaps < 2 || lastNS <= firstNS {
+		return stats
+	}
+	stats.Elapsed = time.Duration(uint64(lastNS) - uint64(firstNS))
+	stats.RateFPS = float64(stats.SuccessfulSwaps-1) / stats.Elapsed.Seconds()
+	return stats
+}
+
+func testEGLRecordSwap(nowNS uint64) {
+	C.tipsy_test_egl_record_swap(C.uint64_t(nowNS))
+}
+
+func testEGLProcIsWrapped(name string) bool {
+	cName := C.CString(name)
+	defer C.free(unsafe.Pointer(cName))
+	return C.tipsy_test_egl_proc_is_wrapped(cName) != 0
+}
+
+func eglVSyncEnabled() bool {
+	return C.tipsy_egl_vsync_enabled() != 0
+}
+
+func testEGLSwapIntervalPolicy(vsync bool, requested, policyResult, policyError, clientResult, clientError int) (result, first, second, calls, reportedError int) {
+	var cFirst, cSecond, cCalls, cReportedError C.int
+	cVSync := C.int(0)
+	if vsync {
+		cVSync = 1
+	}
+	result = int(C.tipsy_test_egl_swap_interval_policy(
+		cVSync, C.int(requested), C.int(policyResult), C.int(policyError),
+		C.int(clientResult), C.int(clientError), &cFirst, &cSecond,
+		&cCalls, &cReportedError))
+	return result, int(cFirst), int(cSecond), int(cCalls), int(cReportedError)
 }
 
 // Sysconf is bionic sysconf: `name` is an AOSP `_SC_*` number, not glibc's.
@@ -244,6 +309,11 @@ func (p *provider) Lookup(lib, sym string) (uintptr, error) {
 			return addr, nil
 		}
 		return 0, missingSymbol(sym)
+	case "libvulkan.so", "libvulkan.so.1":
+		if addr := androidLookup("libvulkan.so", sym); addr != 0 {
+			return addr, nil
+		}
+		return 0, missingSymbol(sym)
 	case "":
 		if addr := androidLookup("", sym); addr != 0 {
 			return addr, nil
@@ -252,6 +322,9 @@ func (p *provider) Lookup(lib, sym string) (uintptr, error) {
 			return addr, nil
 		}
 		if addr := androidLookup("libGLESv2.so", sym); addr != 0 {
+			return addr, nil
+		}
+		if addr := androidLookup("libvulkan.so", sym); addr != 0 {
 			return addr, nil
 		}
 		if addr, err := lookupLibc("libc.so", sym); err == nil && addr != 0 {

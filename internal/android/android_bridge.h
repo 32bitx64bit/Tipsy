@@ -86,6 +86,61 @@ typedef struct ALooper ALooper;
 void *tipsy_host_dlsym(const char *name);
 void *tipsy_android_lookup(const char *lib, const char *name);
 
+/* Android EGL presentation policy. VSync off requests interval zero and
+ * VSync on requests interval one, independently of the client's interval.
+ * A rejected policy interval falls back to the exact client request. */
+void tipsy_egl_set_vsync(int enabled);
+int tipsy_egl_vsync_enabled(void);
+void tipsy_egl_swap_stats(uint64_t *successful_swaps, uint64_t *first_ns,
+                          uint64_t *last_ns);
+void tipsy_egl_reset_swap_stats(void);
+void tipsy_test_egl_record_swap(uint64_t now_ns);
+int tipsy_test_egl_proc_is_wrapped(const char *name);
+int tipsy_test_egl_swap_interval_policy(int vsync, int requested,
+										int policy_result, int policy_error,
+										int client_result, int client_error,
+                                        int *first_interval, int *second_interval,
+                                        int *calls, int *reported_error);
+
+/* liblog.so: C-side VERBOSE/DEBUG skip when slog Debug is off. */
+void tipsy_android_set_debug_log(int enabled);
+int tipsy_android_debug_log_enabled(void);
+uint64_t tipsy_android_log_skip_count(void);
+void tipsy_android_reset_log_counters(void);
+int tipsy_test_android_log_print(int prio, const char *tag, const char *text);
+int tipsy_test_android_log_write(int prio, const char *tag, const char *text);
+int tipsy_test_android_log_vprint(int prio, const char *tag, const char *text);
+void tipsy_test_android_log_assert(const char *cond, const char *tag, const char *text);
+int tipsy_test_android_log_buf_write(int bufID, int prio, const char *tag, const char *text);
+
+/* Android Vulkan loader adapter (identity-handle WSI). */
+void *tipsy_vk_dlsym(const char *name);
+int tipsy_vk_bind_wsi(uintptr_t display, uintptr_t xid);
+void tipsy_vk_unbind_wsi(void);
+int tipsy_vk_wsi_bound(void);
+void tipsy_vk_set_vsync(int enabled);
+int tipsy_vk_vsync_enabled(void);
+void tipsy_vk_set_present_stats(int enabled);
+int tipsy_vk_present_stats_enabled(void);
+void tipsy_vk_present_stats(uint64_t *successful_presents, uint64_t *first_ns,
+                            uint64_t *last_ns);
+void tipsy_vk_reset_present_stats(void);
+void tipsy_test_vk_record_present(uint64_t now_ns);
+void tipsy_test_vk_note_present_success(void);
+int tipsy_test_vk_proc_is_wrapped(const char *name);
+int tipsy_test_vk_proc_is_host_passthrough(const char *name);
+int tipsy_test_vk_android_surface_advertised(const char **host_names, uint32_t n);
+int tipsy_test_vk_rewrite_enabled_extensions(const char **in, uint32_t n, int has_xcb,
+                                            int has_xlib, const char **out);
+int tipsy_test_vk_filter_present_modes(const uint32_t *in, uint32_t n, int vsync,
+                                      uint32_t *out, uint32_t *out_n);
+int tipsy_test_vk_create_swapchain_policy(int vsync, uint32_t requested,
+                                         int32_t policy_result, int32_t fallback_result,
+                                         uint32_t *first_mode, uint32_t *second_mode,
+                                         int *calls, int32_t *final_result);
+int tipsy_vk_host_has_xcb_surface(void);
+int tipsy_vk_host_has_xlib_surface(void);
+
 void *tipsy_ANativeWindow_new(int32_t width, int32_t height, uintptr_t native_handle);
 void tipsy_ANativeWindow_set_handle(void *win, uintptr_t native_handle);
 void tipsy_set_default_window(void *win);

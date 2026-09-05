@@ -8,6 +8,7 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <pthread.h>
+#include <stdatomic.h>
 #include <stdint.h>
 #include <stdarg.h>
 #include <stdio.h>
@@ -48,6 +49,51 @@ static __thread ALooper *tls_looper;
 static ALooper *g_ui_looper;
 static int g_cond_wait_poll;
 static int g_logged_nested_poll;
+
+#define ANDROID_LOG_VERBOSE 2
+#define ANDROID_LOG_DEBUG 3
+
+static const char jni_roblox_settings_tag[] = "rbx.JNIRobloxSettings";
+
+/* C-visible slog Debug gate. Default off so VERBOSE/DEBUG skip without a Go call. */
+static _Atomic int android_debug_log_enabled;
+static _Atomic uint64_t android_log_skip_count;
+
+void tipsy_android_set_debug_log(int enabled)
+{
+	atomic_store_explicit(&android_debug_log_enabled, enabled != 0, memory_order_relaxed);
+}
+
+int tipsy_android_debug_log_enabled(void)
+{
+	return atomic_load_explicit(&android_debug_log_enabled, memory_order_relaxed);
+}
+
+uint64_t tipsy_android_log_skip_count(void)
+{
+	return atomic_load_explicit(&android_log_skip_count, memory_order_relaxed);
+}
+
+void tipsy_android_reset_log_counters(void)
+{
+	atomic_store_explicit(&android_log_skip_count, 0, memory_order_relaxed);
+}
+
+static int android_log_is_settings_tag(const char *tag)
+{
+	return tag != NULL && strcmp(tag, jni_roblox_settings_tag) == 0;
+}
+
+static int android_log_should_drop(int prio, const char *tag)
+{
+	if (prio != ANDROID_LOG_VERBOSE && prio != ANDROID_LOG_DEBUG) {
+		return 0;
+	}
+	if (android_log_is_settings_tag(tag)) {
+		return 0;
+	}
+	return atomic_load_explicit(&android_debug_log_enabled, memory_order_relaxed) == 0;
+}
 static AAssetManager g_amgr = { .magic = TIPSY_AMGR_MAGIC };
 
 int tipsy_on_native_main(void) __attribute__((weak));
@@ -214,6 +260,10 @@ int32_t tipsy_ANativeWindow_unlockAndPost(void *window)
 
 int tipsy_android_log_write(int prio, const char *tag, const char *text)
 {
+	if (android_log_should_drop(prio, tag)) {
+		atomic_fetch_add_explicit(&android_log_skip_count, 1, memory_order_relaxed);
+		return 1;
+	}
 	GoAndroid_LogWrite(prio, (char *)(tag ? tag : ""), (char *)(text ? text : ""));
 	return 1;
 }
@@ -222,6 +272,10 @@ int tipsy_android_log_print(int prio, const char *tag, const char *fmt, ...)
 {
 	char buf[2048];
 	va_list ap;
+	if (android_log_should_drop(prio, tag)) {
+		atomic_fetch_add_explicit(&android_log_skip_count, 1, memory_order_relaxed);
+		return 1;
+	}
 	va_start(ap, fmt);
 	vsnprintf(buf, sizeof buf, fmt ? fmt : "", ap);
 	va_end(ap);
@@ -231,6 +285,10 @@ int tipsy_android_log_print(int prio, const char *tag, const char *fmt, ...)
 int tipsy_android_log_vprint(int prio, const char *tag, const char *fmt, va_list ap)
 {
 	char buf[2048];
+	if (android_log_should_drop(prio, tag)) {
+		atomic_fetch_add_explicit(&android_log_skip_count, 1, memory_order_relaxed);
+		return 1;
+	}
 	vsnprintf(buf, sizeof buf, fmt ? fmt : "", ap);
 	return tipsy_android_log_write(prio, tag, buf);
 }
@@ -251,6 +309,41 @@ int tipsy_android_log_buf_write(int bufID, int prio, const char *tag, const char
 {
 	(void)bufID;
 	return tipsy_android_log_write(prio, tag, text);
+}
+
+int tipsy_test_android_log_print(int prio, const char *tag, const char *text)
+{
+	return tipsy_android_log_print(prio, tag, "%s", text ? text : "");
+}
+
+int tipsy_test_android_log_write(int prio, const char *tag, const char *text)
+{
+	return tipsy_android_log_write(prio, tag, text);
+}
+
+static int android_log_vprint_wrap(int prio, const char *tag, const char *fmt, ...)
+{
+	va_list ap;
+	int rc;
+	va_start(ap, fmt);
+	rc = tipsy_android_log_vprint(prio, tag, fmt, ap);
+	va_end(ap);
+	return rc;
+}
+
+int tipsy_test_android_log_vprint(int prio, const char *tag, const char *text)
+{
+	return android_log_vprint_wrap(prio, tag, "%s", text ? text : "");
+}
+
+void tipsy_test_android_log_assert(const char *cond, const char *tag, const char *text)
+{
+	tipsy_android_log_assert(cond, tag, "%s", text ? text : "");
+}
+
+int tipsy_test_android_log_buf_write(int bufID, int prio, const char *tag, const char *text)
+{
+	return tipsy_android_log_buf_write(bufID, prio, tag, text);
 }
 
 void tipsy_android_set_abort_message(const char *msg)

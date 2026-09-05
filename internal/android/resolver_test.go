@@ -59,6 +59,96 @@ func TestAndroidLookupALooper(t *testing.T) {
 	}
 }
 
+func TestEGLPresentationLookupsUseCompatibilityWrappers(t *testing.T) {
+	for _, name := range []string{"eglSwapInterval", "eglSwapBuffers"} {
+		ours, err := Provider().Lookup("libEGL.so", name)
+		if err != nil || ours == 0 {
+			t.Fatalf("%s: p=%#x err=%v", name, ours, err)
+		}
+		host := hostDlsym(name)
+		if host != 0 && ours == host {
+			t.Fatalf("%s Lookup=%#x is host EGL, want Tipsy compatibility wrapper", name, ours)
+		}
+		if !testEGLProcIsWrapped(name) {
+			t.Fatalf("eglGetProcAddress(%q) did not return Tipsy compatibility wrapper", name)
+		}
+	}
+}
+
+func TestEGLSwapStatsReportsSuccessfulPresentRate(t *testing.T) {
+	SetEGLVSync(false)
+	testEGLRecordSwap(1_000_000_000)
+	testEGLRecordSwap(1_004_000_000)
+	testEGLRecordSwap(1_008_000_000)
+	got := EGLSwapStats()
+	if got.SuccessfulSwaps != 3 || got.Elapsed != 8*time.Millisecond || got.RateFPS != 250 {
+		t.Fatalf("EGLSwapStats() = %+v", got)
+	}
+}
+
+func TestEGLSwapIntervalPolicyVSyncOffForcesZero(t *testing.T) {
+	t.Cleanup(func() { SetEGLVSync(false) })
+	testEGLRecordSwap(1_000_000_000)
+	testEGLRecordSwap(1_004_000_000)
+	result, first, second, calls, _ := testEGLSwapIntervalPolicy(false, 1, 1, 0, 1, 0)
+	if result != 1 || first != 0 || second != 0 || calls != 1 {
+		t.Fatalf("VSync-off result=%d intervals=(%d,%d) calls=%d", result, first, second, calls)
+	}
+	if got := EGLSwapStats(); got.SuccessfulSwaps != 0 {
+		t.Fatalf("accepted interval did not start a fresh presentation epoch: %+v", got)
+	}
+	if eglVSyncEnabled() {
+		t.Fatal("VSync-off test left VSync enabled")
+	}
+}
+
+func TestEGLSwapIntervalPolicyVSyncOnForcesOne(t *testing.T) {
+	t.Cleanup(func() { SetEGLVSync(false) })
+	result, first, second, calls, _ := testEGLSwapIntervalPolicy(true, 0, 1, 0, 1, 0)
+	if result != 1 || first != 1 || second != 0 || calls != 1 {
+		t.Fatalf("VSync-on result=%d intervals=(%d,%d) calls=%d", result, first, second, calls)
+	}
+}
+
+func TestEGLSwapIntervalPolicyOffFallsBackHonestly(t *testing.T) {
+	t.Cleanup(func() { SetEGLVSync(false) })
+	const badParameter = 0x300c
+	result, first, second, calls, reportedError := testEGLSwapIntervalPolicy(false, 1, 0, badParameter, 1, 0)
+	if result != 1 || first != 0 || second != 1 || calls != 2 || reportedError != 0 {
+		t.Fatalf("VSync-off fallback result=%d intervals=(%d,%d) calls=%d finalError=%#x", result, first, second, calls, reportedError)
+	}
+}
+
+func TestEGLSwapIntervalPolicyOnFallsBackHonestly(t *testing.T) {
+	t.Cleanup(func() { SetEGLVSync(false) })
+	const badParameter = 0x300c
+	result, first, second, calls, reportedError := testEGLSwapIntervalPolicy(true, 0, 0, badParameter, 1, 0)
+	if result != 1 || first != 1 || second != 0 || calls != 2 || reportedError != 0 {
+		t.Fatalf("VSync-on fallback result=%d intervals=(%d,%d) calls=%d finalError=%#x", result, first, second, calls, reportedError)
+	}
+}
+
+func TestEGLSwapIntervalPolicyLeavesFallbackErrorForClient(t *testing.T) {
+	t.Cleanup(func() { SetEGLVSync(false) })
+	const (
+		badParameter = 0x300c
+		badDisplay   = 0x3008
+	)
+	result, first, second, calls, reportedError := testEGLSwapIntervalPolicy(false, 1, 0, badParameter, 0, badDisplay)
+	if result != 0 || first != 0 || second != 1 || calls != 2 || reportedError != badDisplay {
+		t.Fatalf("failure result=%d intervals=(%d,%d) calls=%d callerError=%#x", result, first, second, calls, reportedError)
+	}
+}
+
+func TestEGLSwapIntervalPolicyLeavesDirectErrorForClient(t *testing.T) {
+	t.Cleanup(func() { SetEGLVSync(false) })
+	const badParameter = 0x300c
+	result, first, second, calls, reportedError := testEGLSwapIntervalPolicy(true, 1, 0, badParameter, 1, 0)
+	if result != 0 || first != 1 || second != 0 || calls != 1 || reportedError != badParameter {
+		t.Fatalf("direct failure result=%d intervals=(%d,%d) calls=%d callerError=%#x", result, first, second, calls, reportedError)
+	}
+}
+
 func TestBionicCompatSymbols(t *testing.T) {
 	r := Provider()
 	for _, name := range []string{
