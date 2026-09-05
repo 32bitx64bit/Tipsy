@@ -32,6 +32,12 @@ const (
 
 	flagPreferOpenGL = "FFlagDebugGraphicsPreferOpenGL"
 	flagPreferVulkan = "FFlagDebugGraphicsPreferVulkan"
+	// The 2.734.917 client resolves GameBasicSettingsFramerateCap through its
+	// versioned flag lookup with version 5. Fast-variable ingestion supplies
+	// the FFlag type prefix used here.
+	flagGameBasicSettingsFramerateCap = "FFlagGameBasicSettingsFramerateCap5"
+	flagTaskSchedulerLimitFPS240      = "FFlagTaskSchedulerLimitTargetFpsTo2402"
+	intTaskSchedulerTargetFPS         = "DFIntTaskSchedulerTargetFps"
 
 	maxSettingsBytes  = 64 << 10
 	maxRobloxXMLBytes = 4 << 20
@@ -46,8 +52,17 @@ type RendererOption struct {
 
 func RendererOptions() []RendererOption {
 	caps := graphics.ProbeRendererCapabilities()
+	auto := RendererOption{Renderer: RendererAuto, Available: caps.OpenGL.Available || caps.Vulkan.Available}
+	switch {
+	case caps.Vulkan.Available:
+		auto.Reason = "Auto selects Vulkan when the Android WSI adapter and a host device are available"
+	case caps.OpenGL.Available:
+		auto.Reason = caps.OpenGL.Reason
+	default:
+		auto.Reason = caps.OpenGL.Reason
+	}
 	return []RendererOption{
-		{Renderer: RendererAuto, Available: caps.OpenGL.Available, Reason: caps.OpenGL.Reason},
+		auto,
 		{Renderer: RendererOpenGL, Available: caps.OpenGL.Available, Reason: caps.OpenGL.Reason},
 		{Renderer: RendererVulkan, Available: caps.Vulkan.Available, Reason: caps.Vulkan.Reason},
 	}
@@ -70,9 +85,37 @@ type FrameRate struct {
 	Limit int           `json:"limit,omitempty"`
 }
 
+// NeedsUnthrottledPresentation is the superseded FPS-coupled policy retained
+// only until the Runtime integration switches to Settings' VSync policy. New
+// callers must use Settings.NeedsUnthrottledPresentation so FPS and VSync stay
+// independent.
+func (f FrameRate) NeedsUnthrottledPresentation(refreshHz float64) bool {
+	switch f.Mode {
+	case FrameRateUnlimited:
+		return true
+	case FrameRateLimited:
+		if refreshHz <= 0 {
+			refreshHz = 60
+		}
+		// Accommodate nominal modes such as 59.94 and 143.98 Hz without
+		// treating matching integer limits as requests above refresh.
+		return float64(f.Limit) > refreshHz+1
+	default:
+		return false
+	}
+}
+
 type Settings struct {
 	Renderer  Renderer  `json:"renderer"`
 	FrameRate FrameRate `json:"frameRate"`
+	VSync     bool      `json:"vsync"`
+}
+
+// NeedsUnthrottledPresentation reports the inverse of the user's independent
+// VSync choice. VSync defaults off, so a missing field in an older persisted
+// config requests unthrottled presentation without changing its FPS target.
+func (s Settings) NeedsUnthrottledPresentation() bool {
+	return !s.VSync
 }
 
 type ApplyResult struct {
@@ -272,20 +315,44 @@ func (s *Service) Reset(ctx context.Context) (Settings, error) {
 	return want, err
 }
 
-// Overrides converts renderer choices into Roblox ClientAppSettings strings.
-// FPS is intentionally absent: Tipsy owns only the verified UserGameSettings
-// FramerateCap XML field for FPS, avoiding contradictory configuration paths.
+// Overrides converts renderer and FPS choices into Roblox ClientAppSettings
+// strings. The feature gate exposes the current client's official
+// GameBasicSettings frame-rate surface. Limited mode sets the current client's
+// legacy scheduler target; Unlimited opts out of the current 240 limiter and
+// keeps its high finite target in GlobalBasicSettings_13.xml. Automatic mode
+// deliberately leaves both controls under downloaded-policy/client ownership.
 func Overrides(s Settings) (map[string]any, error) {
 	s = normalized(s)
 	if err := s.Validate(); err != nil {
 		return nil, err
 	}
-	out := make(map[string]any, 1)
+	out := map[string]any{flagGameBasicSettingsFramerateCap: "True"}
 	switch s.Renderer {
 	case RendererOpenGL:
 		out[flagPreferOpenGL] = "True"
 	case RendererVulkan:
 		out[flagPreferVulkan] = "True"
+	case RendererAuto:
+		resolved, err := graphics.ProbeRendererCapabilities().Resolve(graphics.RendererAuto)
+		if err != nil {
+			return nil, err
+		}
+		if resolved == graphics.RendererVulkan {
+			out[flagPreferVulkan] = "True"
+		}
+	}
+	switch s.FrameRate.Mode {
+	case FrameRateLimited:
+		out[intTaskSchedulerTargetFPS] = strconv.Itoa(s.FrameRate.Limit)
+	case FrameRateUnlimited:
+		// The current downloaded Android policy enables this exact 240-FPS
+		// limiter. Unlimited alone opts out; its high finite 9999 request is
+		// owned by GlobalBasicSettings_13.xml. Do not also feed 9999 through the
+		// legacy TaskSchedulerTargetFps registry: this client unconditionally
+		// clamps that integer to 240 during post-settings initialization. Limited
+		// stays within 30..240, and Auto leaves both settings under
+		// downloaded-policy/client ownership.
+		out[flagTaskSchedulerLimitFPS240] = "False"
 	}
 	return out, nil
 }
@@ -310,7 +377,7 @@ func noteForFrameRate(f FrameRate, prior string) string {
 		return prior
 	}
 	if f.Mode == FrameRateUnlimited {
-		return "Experimental: Tipsy requests an effectively uncapped value; Roblox may normalize or enforce a 240 FPS ceiling."
+		return "Experimental: Tipsy requests a high finite 9999 FPS target; Roblox, the graphics driver, or the hardware may impose another limit."
 	}
 	return ""
 }

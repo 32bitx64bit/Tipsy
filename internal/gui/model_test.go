@@ -178,7 +178,7 @@ func TestSetupCancel(t *testing.T) {
 }
 
 func TestSettingsBindingValidationApplyAndReset(t *testing.T) {
-	fake := &fakeService{settings: Settings{Renderer: RendererOpenGL, FPSMode: FPSLimited, FrameRate: 144}}
+	fake := &fakeService{settings: Settings{Renderer: RendererOpenGL, FPSMode: FPSLimited, FrameRate: 144, VSync: true}}
 	model := NewSettingsModel(fake)
 	if err := model.Load(context.Background()); err != nil {
 		t.Fatal(err)
@@ -186,7 +186,7 @@ func TestSettingsBindingValidationApplyAndReset(t *testing.T) {
 	if got := model.View().Draft; got != fake.settings {
 		t.Fatalf("loaded=%+v want=%+v", got, fake.settings)
 	}
-	view := model.Edit(Settings{Renderer: RendererOpenGL, FPSMode: FPSLimited, FrameRate: 240})
+	view := model.Edit(Settings{Renderer: RendererOpenGL, FPSMode: FPSLimited, FrameRate: 240, VSync: true})
 	if !view.Dirty || view.ValidationError != "" {
 		t.Fatalf("valid edit view: %+v", view)
 	}
@@ -207,6 +207,31 @@ func TestSettingsBindingValidationApplyAndReset(t *testing.T) {
 	reset, err := model.Reset(context.Background())
 	if err != nil || reset != DefaultSettings() || model.View().Dirty {
 		t.Fatalf("reset=%+v err=%v view=%+v", reset, err, model.View())
+	}
+}
+
+func TestVSyncIsIndependentAndDefaultsOff(t *testing.T) {
+	defaults := DefaultSettings()
+	if defaults.VSync {
+		t.Fatal("VSync defaulted on")
+	}
+	fake := &fakeService{settings: defaults}
+	model := NewSettingsModel(fake)
+	if err := model.Load(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+
+	view := model.Edit(Settings{Renderer: RendererAuto, FPSMode: FPSAuto, VSync: true})
+	if !view.Dirty || view.ValidationError != "" || view.Draft.FPSMode != FPSAuto {
+		t.Fatalf("independent VSync edit view=%+v", view)
+	}
+	result, err := model.Apply(context.Background())
+	if err != nil || !result.RestartRequired || len(fake.applyCalls) != 1 || !fake.applyCalls[0].VSync {
+		t.Fatalf("VSync apply result=%+v err=%v calls=%+v", result, err, fake.applyCalls)
+	}
+	reset, err := model.Reset(context.Background())
+	if err != nil || reset.VSync || model.View().Dirty || !model.View().RestartRequired {
+		t.Fatalf("VSync reset=%+v err=%v view=%+v", reset, err, model.View())
 	}
 }
 

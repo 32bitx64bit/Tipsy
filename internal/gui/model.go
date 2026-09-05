@@ -30,6 +30,7 @@ type Settings struct {
 	Renderer  Renderer
 	FPSMode   FPSMode
 	FrameRate int
+	VSync     bool
 }
 
 // RendererOption is a backend-provided capability. The GUI keeps every known
@@ -49,7 +50,7 @@ const (
 )
 
 func DefaultSettings() Settings {
-	return Settings{Renderer: RendererAuto, FPSMode: FPSAuto}
+	return Settings{Renderer: RendererAuto, FPSMode: FPSAuto, VSync: false}
 }
 
 func ValidateSettings(settings Settings, renderers []RendererOption) error {

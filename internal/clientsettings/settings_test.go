@@ -13,6 +13,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/tipsy-linux/tipsy/internal/graphics"
 )
 
 func testService(t *testing.T) *Service {
@@ -82,6 +84,41 @@ func TestDefaultsAndRestartSurvival(t *testing.T) {
 	}
 }
 
+func TestVSyncDefaultsOffAndMigratesExistingSettings(t *testing.T) {
+	s := testService(t)
+	writeXML(t, s, "-1")
+	if err := os.MkdirAll(filepath.Dir(s.Path), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	old := []byte(`{"renderer":"auto","frameRate":{"mode":"auto"}}`)
+	if err := os.WriteFile(s.Path, old, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := s.Load(context.Background())
+	if err != nil || got.VSync {
+		t.Fatalf("old config migration=%+v err=%v", got, err)
+	}
+	unchanged, err := os.ReadFile(s.Path)
+	if err != nil || !bytes.Equal(unchanged, old) {
+		t.Fatalf("load rewrote old config=%q err=%v", unchanged, err)
+	}
+
+	got.VSync = true
+	result, err := s.Apply(context.Background(), got)
+	if err != nil || !result.RestartRequired || !result.Settings.VSync {
+		t.Fatalf("enable VSync result=%+v err=%v", result, err)
+	}
+	reloaded, err := s.Load(context.Background())
+	if err != nil || !reloaded.VSync {
+		t.Fatalf("reloaded VSync=%+v err=%v", reloaded, err)
+	}
+	reset, err := s.Reset(context.Background())
+	if err != nil || reset.VSync {
+		t.Fatalf("reset VSync=%+v err=%v", reset, err)
+	}
+}
+
 func TestFrameRateBoundsUnlimitedAndResetOwnership(t *testing.T) {
 	s := testService(t)
 	original := writeXML(t, s, "-1")
@@ -105,6 +142,10 @@ func TestFrameRateBoundsUnlimitedAndResetOwnership(t *testing.T) {
 	if !strings.Contains(strings.ToLower(result.FrameRateNote), "experimental") {
 		t.Fatalf("unlimited note=%q", result.FrameRateNote)
 	}
+	if !strings.Contains(result.FrameRateNote, unlimitedFPSValue) ||
+		!strings.Contains(result.FrameRateNote, "may impose another limit") {
+		t.Fatalf("unlimited warning must state the finite request and residual limits: %q", result.FrameRateNote)
+	}
 	raw, _ := os.ReadFile(s.XMLPath)
 	if !bytes.Contains(raw, []byte(`name="FramerateCap">9999</int>`)) {
 		t.Fatalf("unlimited XML=%s", raw)
@@ -116,6 +157,27 @@ func TestFrameRateBoundsUnlimitedAndResetOwnership(t *testing.T) {
 	raw, _ = os.ReadFile(s.XMLPath)
 	if !bytes.Equal(raw, original) {
 		t.Fatalf("auto did not byte-restore original\nwant=%s\ngot=%s", original, raw)
+	}
+}
+
+func TestVSyncPresentationPolicy(t *testing.T) {
+	tests := []struct {
+		name  string
+		value Settings
+		want  bool
+	}{
+		{name: "default is unthrottled", value: Default(), want: true},
+		{name: "off is independent of low fixed cap", value: Settings{FrameRate: FrameRate{Mode: FrameRateLimited, Limit: 30}}, want: true},
+		{name: "off is independent of unlimited", value: Settings{FrameRate: FrameRate{Mode: FrameRateUnlimited}}, want: true},
+		{name: "on synchronizes low fixed cap", value: Settings{FrameRate: FrameRate{Mode: FrameRateLimited, Limit: 30}, VSync: true}, want: false},
+		{name: "on synchronizes unlimited", value: Settings{FrameRate: FrameRate{Mode: FrameRateUnlimited}, VSync: true}, want: false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := tt.value.NeedsUnthrottledPresentation(); got != tt.want {
+				t.Fatalf("NeedsUnthrottledPresentation()=%v want %v", got, tt.want)
+			}
+		})
 	}
 }
 
@@ -168,24 +230,68 @@ func TestRendererOverridesAndVulkanAvailability(t *testing.T) {
 	if err != nil || got[flagPreferOpenGL] != "True" {
 		t.Fatalf("OpenGL overrides=%v err=%v", got, err)
 	}
+	if got[flagGameBasicSettingsFramerateCap] != "True" ||
+		got[flagTaskSchedulerLimitFPS240] != "False" {
+		t.Fatalf("unlimited FPS overrides=%v", got)
+	}
+	if _, ok := got[intTaskSchedulerTargetFPS]; ok {
+		t.Fatalf("unlimited must not enter the client's legacy 240-clamped integer path: %v", got)
+	}
 	if _, ok := got[flagPreferVulkan]; ok {
 		t.Fatalf("conflicting Vulkan override: %v", got)
 	}
-	if _, ok := got["DFIntTaskSchedulerTargetFps"]; ok {
-		t.Fatalf("FPS must not use ClientAppSettings: %v", got)
+	limited, err := Overrides(Settings{Renderer: RendererAuto, FrameRate: FrameRate{Mode: FrameRateLimited, Limit: 144}})
+	if err != nil || limited[intTaskSchedulerTargetFPS] != "144" {
+		t.Fatalf("limited FPS overrides=%v err=%v", limited, err)
+	}
+	if _, ok := limited[flagTaskSchedulerLimitFPS240]; ok {
+		t.Fatalf("limited must preserve downloaded 240-limit policy: %v", limited)
 	}
 	auto, err := Overrides(Default())
-	if err != nil || len(auto) != 0 {
+	if err != nil {
+		t.Fatalf("auto overrides err=%v", err)
+	}
+	if auto[flagGameBasicSettingsFramerateCap] != "True" {
+		t.Fatalf("auto overrides=%v", auto)
+	}
+	if _, ok := auto[intTaskSchedulerTargetFPS]; ok {
+		t.Fatalf("auto must preserve scheduler target ownership: %v", auto)
+	}
+	if _, ok := auto[flagTaskSchedulerLimitFPS240]; ok {
+		t.Fatalf("auto must preserve scheduler limit ownership: %v", auto)
+	}
+	caps := graphics.ProbeRendererCapabilities()
+	if _, ok := auto[flagPreferVulkan]; ok != caps.Vulkan.Available {
+		t.Fatalf("auto PreferVulkan=%v vulkanAvailable=%v overrides=%v", ok, caps.Vulkan.Available, auto)
+	}
+	if _, ok := auto[flagPreferOpenGL]; ok {
+		t.Fatalf("auto must not emit PreferOpenGL: %v", auto)
+	}
+	if !caps.Vulkan.Available && len(auto) != 1 {
 		t.Fatalf("auto overrides=%v err=%v", auto, err)
 	}
+	withVSync, err := Overrides(Settings{Renderer: RendererAuto, FrameRate: FrameRate{Mode: FrameRateUnlimited}, VSync: true})
+	if err != nil || withVSync[flagTaskSchedulerLimitFPS240] != "False" ||
+		withVSync[flagGameBasicSettingsFramerateCap] != "True" {
+		t.Fatalf("VSync changed independent FPS overrides=%v err=%v", withVSync, err)
+	}
+	if _, ok := withVSync[intTaskSchedulerTargetFPS]; ok {
+		t.Fatalf("VSync changed Unlimited scheduler ownership=%v", withVSync)
+	}
 	_, err = Overrides(Settings{Renderer: RendererVulkan, FrameRate: FrameRate{Mode: FrameRateAuto}})
-	var unsupported *UnsupportedRendererError
-	if !errors.As(err, &unsupported) {
-		t.Fatalf("Vulkan error=%T %v", err, err)
+	if caps.Vulkan.Available {
+		if err != nil {
+			t.Fatalf("Vulkan available but Overrides failed: %v", err)
+		}
+	} else {
+		var unsupported *UnsupportedRendererError
+		if !errors.As(err, &unsupported) {
+			t.Fatalf("Vulkan error=%T %v", err, err)
+		}
 	}
 	opts := RendererOptions()
-	if len(opts) != 3 || opts[2].Available || opts[2].Renderer != RendererVulkan {
-		t.Fatalf("renderer options=%+v", opts)
+	if len(opts) != 3 || opts[2].Renderer != RendererVulkan || opts[2].Available != caps.Vulkan.Available {
+		t.Fatalf("renderer options=%+v vulkanAvailable=%v", opts, caps.Vulkan.Available)
 	}
 }
 
@@ -210,6 +316,12 @@ func TestUnavailableRendererRemainsPersistedButCannotApply(t *testing.T) {
 		t.Fatalf("load unavailable renderer=%+v err=%v", got, err)
 	}
 	_, err = s.Apply(context.Background(), got)
+	if graphics.ProbeRendererCapabilities().Vulkan.Available {
+		if err != nil {
+			t.Fatalf("Vulkan is selectable; Apply should persist it: %v", err)
+		}
+		return
+	}
 	var unsupported *UnsupportedRendererError
 	if !errors.As(err, &unsupported) {
 		t.Fatalf("apply unavailable renderer error=%v", err)
