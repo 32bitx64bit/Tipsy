@@ -6,14 +6,54 @@ package config
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
+	"syscall"
 )
 
+const DevelopmentConsentSchema = "tipsy.development-consent.v1"
+
+// DevelopmentConsent records the user's explicit choice to run a source build
+// outside the official release trust boundary. It is never inferred from a
+// missing production root, a development version string, or an unsigned file.
+type DevelopmentConsent struct {
+	Schema       string `json:"schema"`
+	Acknowledged bool   `json:"acknowledged"`
+}
+
+// OfficialVerification points at a locally available TUF repository and the
+// artifact it authenticates. These locations are inputs, never trust roots by
+// themselves: releasemeta must still bind the root and Sigstore evidence to
+// compiled production identities before OfficialVerified is possible.
+type OfficialVerification struct {
+	InitialRootPath string `json:"initialRootPath,omitempty"`
+	MetadataDir     string `json:"metadataDir,omitempty"`
+	TargetsDir      string `json:"targetsDir,omitempty"`
+	ArtifactPath    string `json:"artifactPath,omitempty"`
+	TargetPath      string `json:"targetPath,omitempty"`
+	Channel         string `json:"channel,omitempty"`
+	StateDir        string `json:"stateDir,omitempty"`
+}
+
 type Config struct {
-	DataDir       string   `json:"dataDir,omitempty"`
-	LogLevel      string   `json:"logLevel,omitempty"`
-	LogCategories []string `json:"logCategories,omitempty"`
+	DataDir              string                `json:"dataDir,omitempty"`
+	LogLevel             string                `json:"logLevel,omitempty"`
+	LogCategories        []string              `json:"logCategories,omitempty"`
+	DevelopmentConsent   *DevelopmentConsent   `json:"developmentConsent,omitempty"`
+	OfficialVerification *OfficialVerification `json:"officialVerification,omitempty"`
+}
+
+func (c *Config) DevelopmentApproved() bool {
+	return c != nil && c.DevelopmentConsent != nil &&
+		c.DevelopmentConsent.Schema == DevelopmentConsentSchema &&
+		c.DevelopmentConsent.Acknowledged
+}
+
+func (c *Config) ApproveDevelopment() {
+	if c != nil {
+		c.DevelopmentConsent = &DevelopmentConsent{Schema: DevelopmentConsentSchema, Acknowledged: true}
+	}
 }
 
 // Layout is the XDG directory set for Tipsy.
@@ -57,10 +97,19 @@ func xdgDir(env, homeFallback string) string {
 
 func Load() (*Config, error) {
 	p := Paths()
-	data, err := os.ReadFile(p.ConfigFile)
+	info, err := os.Lstat(p.ConfigFile)
 	if errors.Is(err, os.ErrNotExist) {
 		return &Config{}, nil
 	}
+	if err != nil {
+		return nil, err
+	}
+	stat, ok := info.Sys().(*syscall.Stat_t)
+	if !info.Mode().IsRegular() || info.Mode()&os.ModeSymlink != 0 ||
+		info.Mode().Perm()&0o077 != 0 || !ok || stat.Uid != uint32(os.Geteuid()) {
+		return nil, fmt.Errorf("config file is not an owner-private regular file")
+	}
+	data, err := os.ReadFile(p.ConfigFile)
 	if err != nil {
 		return nil, err
 	}
