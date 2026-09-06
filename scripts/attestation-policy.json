@@ -1,0 +1,1 @@
+{"builderEnvironment":"github-hosted","issuer":"https://token.actions.githubusercontent.com","predicateType":"https://slsa.dev/provenance/v1","repository":"32bitx64bit/Tipsy","schema":"tipsy.attestation-policy.v1","sourceRefPattern":"refs/tags/v*","status":"bootstrap-unverified","workflow":".github/workflows/release.yml"}
