@@ -100,7 +100,7 @@ func TestHandshakeAndSetActivityRoundTrip(t *testing.T) {
 		t.Fatalf("activity opcode=%d", second.Op)
 	}
 	raw := string(second.Body)
-	if !json.Valid(second.Body) || !containsAll(raw, `"SET_ACTIVITY"`, `"Crossroads - Tipsy"`, `"Join"`, `"https://www.roblox.com/games/1818"`, `"pid":4242`) {
+	if !json.Valid(second.Body) || !containsAll(raw, `"SET_ACTIVITY"`, `"Crossroads - Tipsy"`, `"Join"`, `"https://www.roblox.com/games/start?placeId=1818"`, `"pid":4242`) {
 		t.Fatalf("activity payload=%s", raw)
 	}
 	if containsAny(raw, "ticket", "userId", "accessCode", "gameinfo") {

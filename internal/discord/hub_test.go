@@ -78,7 +78,7 @@ func TestHubPublishesSeededPlaceAndClearsOnClose(t *testing.T) {
 	mu.Lock()
 	defer mu.Unlock()
 	joined := strings.Join(payloads, "\n")
-	if !strings.Contains(joined, `"Crossroads - Tipsy"`) || !strings.Contains(joined, `"https://www.roblox.com/games/1818"`) {
+	if !strings.Contains(joined, `"Crossroads - Tipsy"`) || !strings.Contains(joined, `"https://www.roblox.com/games/start?placeId=1818"`) {
 		t.Fatalf("payloads=%v", payloads)
 	}
 	if !strings.Contains(joined, `"activity":null`) && !strings.Contains(joined, `"activity": null`) {

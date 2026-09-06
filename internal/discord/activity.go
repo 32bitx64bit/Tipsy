@@ -5,10 +5,9 @@ package discord
 
 import (
 	"net/url"
+	"strconv"
 	"strings"
 	"time"
-
-	"github.com/tipsy-linux/tipsy/internal/rbxuri"
 )
 
 const (
@@ -17,6 +16,7 @@ const (
 	homeLabel       = "Home"
 	fallbackName    = "Roblox"
 	joinLabel       = "Join"
+	joinURLPrefix   = "https://www.roblox.com/games/start?placeId="
 )
 
 // Place is the public identity shown in Rich Presence. It must never carry
@@ -77,8 +77,8 @@ func BuildActivity(place Place, join bool, started time.Time) *activityPayload {
 		}
 		act.Instance = true
 		if join {
-			if page := rbxuri.PlacePageURL(place.ID); page != "" {
-				act.Buttons = []button{{Label: joinLabel, URL: page}}
+			if target := publicJoinURL(place.ID); target != "" {
+				act.Buttons = []button{{Label: joinLabel, URL: target}}
 			}
 		}
 		return act
@@ -88,6 +88,18 @@ func BuildActivity(place Place, join bool, started time.Time) *activityPayload {
 		LargeText:  "Tipsy",
 	}
 	return act
+}
+
+// publicJoinURL is Roblox's documented HTTPS web-to-app deep link. Unlike the
+// public /games/{placeId} listing used previously, /games/start asks the web
+// flow to launch the registered Roblox protocol handler and join the place.
+// It intentionally contains only the public place id: no job id, access code,
+// join secret, ticket, or account identity crosses Discord.
+func publicJoinURL(placeID int64) string {
+	if placeID <= 0 {
+		return ""
+	}
+	return joinURLPrefix + strconv.FormatInt(placeID, 10)
 }
 
 func displayName(place Place) string {

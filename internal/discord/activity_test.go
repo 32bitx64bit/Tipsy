@@ -8,8 +8,6 @@ import (
 	"strings"
 	"testing"
 	"time"
-
-	"github.com/tipsy-linux/tipsy/internal/rbxuri"
 )
 
 func TestBuildActivityHomeOmitsJoinAndSmallBadge(t *testing.T) {
@@ -33,7 +31,7 @@ func TestBuildActivityHomeOmitsJoinAndSmallBadge(t *testing.T) {
 	}
 }
 
-func TestBuildActivityExperienceUsesPublicJoinURL(t *testing.T) {
+func TestBuildActivityExperienceUsesWebToAppJoinURL(t *testing.T) {
 	t.Parallel()
 	act := BuildActivity(Place{
 		ID:      1818,
@@ -49,7 +47,7 @@ func TestBuildActivityExperienceUsesPublicJoinURL(t *testing.T) {
 	if act.Assets.SmallText != "Tipsy" {
 		t.Fatalf("small text=%q", act.Assets.SmallText)
 	}
-	if len(act.Buttons) != 1 || act.Buttons[0].Label != "Join" || act.Buttons[0].URL != rbxuri.PlacePageURL(1818) {
+	if len(act.Buttons) != 1 || act.Buttons[0].Label != "Join" || act.Buttons[0].URL != "https://www.roblox.com/games/start?placeId=1818" {
 		t.Fatalf("buttons=%+v", act.Buttons)
 	}
 	if !act.Instance {
@@ -60,6 +58,13 @@ func TestBuildActivityExperienceUsesPublicJoinURL(t *testing.T) {
 	}
 	if act.Timestamps == nil || act.Timestamps.Start != 1_700_000_000_000 {
 		t.Fatalf("timestamps=%+v", act.Timestamps)
+	}
+}
+
+func TestPublicJoinURLRejectsNonPositivePlaceIDs(t *testing.T) {
+	t.Parallel()
+	if publicJoinURL(0) != "" || publicJoinURL(-1) != "" {
+		t.Fatal("non-positive place ids produced a join URL")
 	}
 }
 
