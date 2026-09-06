@@ -158,6 +158,10 @@ type Settings struct {
 	// restores window-manager mouse placement, and any other value is an
 	// XRandR/Qt output name. A missing output falls back to primary at spawn.
 	Display string `json:"display,omitempty"`
+	// DiscordRichPresence shows the current experience on Discord. Missing
+	// JSON defaults on; DiscordJoinButton stays off unless explicitly enabled.
+	DiscordRichPresence bool `json:"discordRichPresence"`
+	DiscordJoinButton   bool `json:"discordJoinButton"`
 }
 
 // NeedsUnthrottledPresentation reports the inverse of the user's independent
@@ -200,7 +204,12 @@ func RobloxSettingsPath() string {
 }
 
 func Default() Settings {
-	return Settings{Renderer: RendererAuto, FrameRate: FrameRate{Mode: FrameRateAuto}, Display: DisplayPrimary}
+	return Settings{
+		Renderer:            RendererAuto,
+		FrameRate:           FrameRate{Mode: FrameRateAuto},
+		Display:             DisplayPrimary,
+		DiscordRichPresence: true,
+	}
 }
 
 func (s Settings) Validate() error {
@@ -254,6 +263,20 @@ func NormalizeDisplay(display string) string {
 	return display
 }
 
+// discordOnlyChange reports a draft that differs from saved settings only in
+// Discord Rich Presence toggles, which apply while Roblox is running and
+// must not take the client lock.
+func discordOnlyChange(draft, saved Settings) bool {
+	draft = normalized(draft)
+	saved = normalized(saved)
+	if draft.DiscordRichPresence == saved.DiscordRichPresence && draft.DiscordJoinButton == saved.DiscordJoinButton {
+		return false
+	}
+	draft.DiscordRichPresence, draft.DiscordJoinButton = false, false
+	saved.DiscordRichPresence, saved.DiscordJoinButton = false, false
+	return draft == saved
+}
+
 func normalized(s Settings) Settings {
 	if s.Renderer == "" {
 		s.Renderer = RendererAuto
@@ -274,6 +297,13 @@ func (s *Service) Apply(ctx context.Context, wanted Settings) (ApplyResult, erro
 	wanted = normalized(wanted)
 	if err := wanted.Validate(); err != nil {
 		return ApplyResult{}, err
+	}
+	oldDoc, err := s.loadDocument(ctx)
+	if err != nil {
+		return ApplyResult{}, err
+	}
+	if discordOnlyChange(wanted, oldDoc.Settings) {
+		return s.applyLocked(ctx, wanted)
 	}
 	release, err := AcquireClientLock()
 	if err != nil {
@@ -343,6 +373,7 @@ func (s *Service) applyLocked(ctx context.Context, wanted Settings) (ApplyResult
 
 	graphicsChanged := oldDoc.Renderer != wanted.Renderer || oldDoc.FrameRate != wanted.FrameRate || oldDoc.VSync != wanted.VSync || oldDoc.LowTextureMode != wanted.LowTextureMode
 	placementChanged := oldDoc.Display != wanted.Display
+	discordChanged := oldDoc.DiscordRichPresence != wanted.DiscordRichPresence || oldDoc.DiscordJoinButton != wanted.DiscordJoinButton
 	docChanged := oldDoc != newDoc
 	if xmlChanged {
 		if err := config.AtomicWriteFile(xmlPath, newXML, 0o600); err != nil {
@@ -360,6 +391,9 @@ func (s *Service) applyLocked(ctx context.Context, wanted Settings) (ApplyResult
 	applyNote := noteForFrameRate(wanted.FrameRate, note)
 	if placementChanged && !graphicsChanged && !xmlChanged {
 		applyNote = noteForDisplay(wanted.Display)
+	}
+	if discordChanged && !graphicsChanged && !xmlChanged && !placementChanged {
+		applyNote = noteForDiscord(wanted)
 	}
 	return ApplyResult{
 		Settings:         wanted,
@@ -510,6 +544,16 @@ func noteForDisplay(display string) string {
 	}
 }
 
+func noteForDiscord(s Settings) string {
+	if !s.DiscordRichPresence {
+		return "Discord Rich Presence is off. The change applies while Roblox is running."
+	}
+	if s.DiscordJoinButton {
+		return "Discord Rich Presence will show a public Roblox Join button to friends. Discord does not show it on your own status. The change applies while Roblox is running."
+	}
+	return "Discord Rich Presence updates while Roblox is running."
+}
+
 func (s *Service) loadDocument(ctx context.Context) (persistedSettings, error) {
 	if ctx == nil {
 		ctx = context.Background()
@@ -526,7 +570,7 @@ func (s *Service) loadDocument(ctx context.Context) (persistedSettings, error) {
 		return persistedSettings{}, err
 	}
 	var got persistedSettings
-	if err := json.Unmarshal(data, &got); err != nil {
+	if err := decodePersisted(data, &got); err != nil {
 		return s.recoverMalformed(ctx, path)
 	}
 	got.Settings = normalized(got.Settings)
@@ -537,6 +581,48 @@ func (s *Service) loadDocument(ctx context.Context) (persistedSettings, error) {
 		return s.recoverMalformed(ctx, path)
 	}
 	return got, nil
+}
+
+type persistedWire struct {
+	Renderer            Renderer  `json:"renderer"`
+	FrameRate           FrameRate `json:"frameRate"`
+	VSync               bool      `json:"vsync"`
+	LowTextureMode      bool      `json:"lowTextureMode"`
+	Display             string    `json:"display,omitempty"`
+	DiscordRichPresence *bool     `json:"discordRichPresence"`
+	DiscordJoinButton   bool      `json:"discordJoinButton"`
+	FPSOwned            bool      `json:"fpsOwned,omitempty"`
+	FPSOriginal         string    `json:"fpsOriginal,omitempty"`
+	FPSApplied          string    `json:"fpsApplied,omitempty"`
+}
+
+func decodePersisted(data []byte, got *persistedSettings) error {
+	if got == nil {
+		return fmt.Errorf("persisted settings destination is nil")
+	}
+	var wire persistedWire
+	if err := json.Unmarshal(data, &wire); err != nil {
+		return err
+	}
+	presence := true
+	if wire.DiscordRichPresence != nil {
+		presence = *wire.DiscordRichPresence
+	}
+	*got = persistedSettings{
+		Settings: Settings{
+			Renderer:            wire.Renderer,
+			FrameRate:           wire.FrameRate,
+			VSync:               wire.VSync,
+			LowTextureMode:      wire.LowTextureMode,
+			Display:             wire.Display,
+			DiscordRichPresence: presence,
+			DiscordJoinButton:   wire.DiscordJoinButton,
+		},
+		FPSOwned:    wire.FPSOwned,
+		FPSOriginal: wire.FPSOriginal,
+		FPSApplied:  wire.FPSApplied,
+	}
+	return nil
 }
 
 func (s *Service) writeDocument(doc persistedSettings) error {

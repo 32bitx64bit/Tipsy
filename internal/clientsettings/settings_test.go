@@ -220,6 +220,49 @@ func TestDisplayDefaultsToPrimaryAndPointerDoesNotRestart(t *testing.T) {
 	}
 }
 
+func TestDiscordPresenceDefaultsOnAndJoinOffWithoutRestart(t *testing.T) {
+	s := testService(t)
+	writeXML(t, s, "-1")
+	if err := os.MkdirAll(filepath.Dir(s.Path), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	old := []byte(`{"renderer":"auto","frameRate":{"mode":"auto"}}`)
+	if err := os.WriteFile(s.Path, old, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := s.Load(context.Background())
+	if err != nil || !got.DiscordRichPresence || got.DiscordJoinButton {
+		t.Fatalf("old config discord=%+v err=%v", got, err)
+	}
+	unchanged, err := os.ReadFile(s.Path)
+	if err != nil || !bytes.Equal(unchanged, old) {
+		t.Fatalf("load rewrote old config=%q err=%v", unchanged, err)
+	}
+	if d := Default(); !d.DiscordRichPresence || d.DiscordJoinButton {
+		t.Fatalf("Default discord=%+v", d)
+	}
+
+	got.DiscordJoinButton = true
+	result, err := s.Apply(context.Background(), got)
+	if err != nil || result.RestartRequired || !result.Settings.DiscordJoinButton || !strings.Contains(result.FrameRateNote, "Join button") {
+		t.Fatalf("enable join result=%+v err=%v", result, err)
+	}
+	got.DiscordRichPresence = false
+	result, err = s.Apply(context.Background(), got)
+	if err != nil || result.RestartRequired || result.Settings.DiscordRichPresence || !strings.Contains(result.FrameRateNote, "is off") {
+		t.Fatalf("disable presence result=%+v err=%v", result, err)
+	}
+	reloaded, err := s.Load(context.Background())
+	if err != nil || reloaded.DiscordRichPresence || !reloaded.DiscordJoinButton {
+		t.Fatalf("reloaded discord=%+v err=%v", reloaded, err)
+	}
+	reset, err := s.Reset(context.Background())
+	if err != nil || !reset.DiscordRichPresence || reset.DiscordJoinButton || reset != Default() {
+		t.Fatalf("reset discord=%+v err=%v", reset, err)
+	}
+}
+
 func TestFrameRateBoundsUnlimitedAndResetOwnership(t *testing.T) {
 	s := testService(t)
 	original := writeXML(t, s, "-1")
@@ -548,6 +591,35 @@ func TestClientLockBlocksApply(t *testing.T) {
 	defer release()
 	if _, err := s.Apply(context.Background(), Default()); err == nil || !strings.Contains(err.Error(), "running") {
 		t.Fatalf("lock error=%v", err)
+	}
+}
+
+func TestClientLockAllowsDiscordOnlyApply(t *testing.T) {
+	s := testService(t)
+	if _, err := s.Apply(context.Background(), Default()); err != nil {
+		t.Fatal(err)
+	}
+	release, err := AcquireClientLock()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer release()
+	wanted := Default()
+	wanted.DiscordJoinButton = true
+	result, err := s.Apply(context.Background(), wanted)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.RestartRequired || !strings.Contains(result.FrameRateNote, "Join button") {
+		t.Fatalf("discord-only apply=%+v", result)
+	}
+	got, err := s.Load(context.Background())
+	if err != nil || !got.DiscordJoinButton || !got.DiscordRichPresence {
+		t.Fatalf("loaded=%+v err=%v", got, err)
+	}
+	wanted.VSync = true
+	if _, err := s.Apply(context.Background(), wanted); err == nil || !strings.Contains(err.Error(), "running") {
+		t.Fatalf("graphics apply while locked err=%v", err)
 	}
 }
 
