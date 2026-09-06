@@ -4,10 +4,17 @@
 package appimage_test
 
 import (
+	"archive/zip"
+	"bytes"
+	"crypto/sha256"
+	"encoding/json"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"runtime"
+	"sort"
 	"strings"
 	"testing"
 )
@@ -237,6 +244,368 @@ func TestReleaseGuardNamesForbiddenPayloads(t *testing.T) {
 				t.Fatalf("guard did not name forbidden content: %s", output)
 			}
 		})
+	}
+}
+
+func TestReleaseGuardAcceptsCanonicalMinimalTree(t *testing.T) {
+	appdir := minimalAppDir(t)
+	command := exec.Command(filepath.Join(repoRoot(t), "scripts", "check-release-tree.sh"), appdir)
+	if output, err := command.CombinedOutput(); err != nil {
+		t.Fatalf("guard rejected canonical fixture: %v\n%s", err, output)
+	}
+}
+
+func TestReleaseGuardRejectsUnsafeFilesystemAndContent(t *testing.T) {
+	repo := repoRoot(t)
+	guard := filepath.Join(repo, "scripts", "check-release-tree.sh")
+	tests := []struct {
+		name    string
+		want    string
+		mutate  func(*testing.T, string)
+		prepare bool
+	}{
+		{
+			name: "symbolic link",
+			want: "symbolic links",
+			mutate: func(t *testing.T, root string) {
+				t.Helper()
+				mustSymlink(t, "build-info", filepath.Join(root, "usr/share/tipsy/linked"))
+			},
+		},
+		{
+			name: "hard link",
+			want: "hard-linked",
+			mutate: func(t *testing.T, root string) {
+				t.Helper()
+				if err := os.Link(filepath.Join(root, "usr/share/tipsy/build-info"), filepath.Join(root, "usr/share/tipsy/linked")); err != nil {
+					t.Fatal(err)
+				}
+			},
+		},
+		{
+			name: "fifo",
+			want: "special filesystem",
+			mutate: func(t *testing.T, root string) {
+				t.Helper()
+				if output, err := exec.Command("mkfifo", filepath.Join(root, "usr/share/tipsy/pipe")).CombinedOutput(); err != nil {
+					t.Fatalf("mkfifo: %v: %s", err, output)
+				}
+			},
+		},
+		{
+			name: "group writable",
+			want: "group/world-writable",
+			mutate: func(t *testing.T, root string) {
+				t.Helper()
+				mustChmod(t, filepath.Join(root, "usr/share/tipsy/build-info"), 0o664)
+			},
+		},
+		{
+			name: "setuid",
+			want: "setuid/setgid",
+			mutate: func(t *testing.T, root string) {
+				t.Helper()
+				if output, err := exec.Command("chmod", "4755", filepath.Join(root, "AppRun")).CombinedOutput(); err != nil {
+					t.Fatalf("chmod: %v: %s", err, output)
+				}
+			},
+		},
+		{
+			name: "unexpected executable",
+			want: "unexpected executable",
+			mutate: func(t *testing.T, root string) {
+				t.Helper()
+				mustWrite(t, filepath.Join(root, "usr/share/tipsy/run-me"), []byte("#!/bin/sh\n"), 0o755)
+			},
+		},
+		{
+			name: "unsafe path spelling",
+			want: "unsafe release path spelling",
+			mutate: func(t *testing.T, root string) {
+				t.Helper()
+				mustWrite(t, filepath.Join(root, "usr/share/tipsy/bad name"), []byte("data\n"), 0o644)
+			},
+		},
+		{
+			name: "private key marker",
+			want: "credential",
+			mutate: func(t *testing.T, root string) {
+				t.Helper()
+				mustWrite(t, filepath.Join(root, "usr/share/tipsy/metadata"), []byte("-----BEGIN PRIVATE KEY-----\nfixture\n"), 0o644)
+			},
+		},
+		{
+			name: "renamed zip",
+			want: "ZIP/APK-like",
+			mutate: func(t *testing.T, root string) {
+				t.Helper()
+				path := filepath.Join(root, "usr/share/tipsy/payload.bin")
+				file, err := os.Create(path)
+				if err != nil {
+					t.Fatal(err)
+				}
+				archive := zip.NewWriter(file)
+				part, err := archive.Create("lib/x86_64/libroblox.so")
+				if err != nil {
+					t.Fatal(err)
+				}
+				if _, err := part.Write([]byte("proprietary-fixture")); err != nil {
+					t.Fatal(err)
+				}
+				if err := archive.Close(); err != nil {
+					t.Fatal(err)
+				}
+				if err := file.Close(); err != nil {
+					t.Fatal(err)
+				}
+			},
+		},
+		{
+			name: "unsafe rpath",
+			want: "RPATH/RUNPATH",
+			mutate: func(t *testing.T, root string) {
+				t.Helper()
+				data, err := os.ReadFile("/bin/true")
+				if err != nil {
+					t.Fatal(err)
+				}
+				path := filepath.Join(root, "usr/bin/tipsy")
+				mustWrite(t, path, data, 0o755)
+				if output, err := exec.Command("patchelf", "--set-rpath", "/opt/host", path).CombinedOutput(); err != nil {
+					t.Fatalf("patchelf: %v: %s", err, output)
+				}
+			},
+		},
+		{
+			name:    "unmanifested file",
+			want:    "manifest covers",
+			prepare: true,
+			mutate: func(t *testing.T, root string) {
+				t.Helper()
+				mustWrite(t, filepath.Join(root, "usr/share/tipsy/unmanifested"), []byte("data\n"), 0o644)
+			},
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			appdir := minimalAppDir(t)
+			if test.prepare {
+				refreshManifest(t, appdir)
+			}
+			test.mutate(t, appdir)
+			command := exec.Command(guard, appdir)
+			output, err := command.CombinedOutput()
+			if err == nil {
+				t.Fatalf("guard accepted unsafe fixture\n%s", output)
+			}
+			if !strings.Contains(string(output), test.want) {
+				t.Fatalf("guard output %q does not contain %q", output, test.want)
+			}
+		})
+	}
+}
+
+func TestReleaseGuardRejectsFileCapabilities(t *testing.T) {
+	repo := repoRoot(t)
+	appdir := minimalAppDir(t)
+	tools := t.TempDir()
+	stub := "#!/bin/sh\ncase \"$*\" in *usr/bin/tipsy) printf '%s cap_net_bind_service=ep\\n' \"$3\";; esac\n"
+	mustWrite(t, filepath.Join(tools, "getcap"), []byte(stub), 0o755)
+	command := exec.Command(filepath.Join(repo, "scripts", "check-release-tree.sh"), appdir)
+	command.Env = append(os.Environ(), "PATH="+tools+":"+os.Getenv("PATH"))
+	output, err := command.CombinedOutput()
+	if err == nil || !strings.Contains(string(output), "file capabilities") {
+		t.Fatalf("guard did not reject reported file capability: %v\n%s", err, output)
+	}
+}
+
+func TestReleaseInputLockIsCanonicalAndFailClosed(t *testing.T) {
+	repo := repoRoot(t)
+	script := filepath.Join(repo, "scripts", "release-lock.py")
+	lock := filepath.Join(repo, "scripts", "release-inputs.lock.json")
+	if output, err := exec.Command(script, "--lock", lock, "--mode", "developer").CombinedOutput(); err != nil {
+		t.Fatalf("developer lock validation: %v\n%s", err, output)
+	}
+	output, err := exec.Command(script, "--lock", lock, "--mode", "official").CombinedOutput()
+	if err == nil || !strings.Contains(string(output), "reviewed release input lock") {
+		t.Fatalf("bootstrap lock did not block official build: %v\n%s", err, output)
+	}
+	digest, err := exec.Command(script, "--lock", lock, "--mode", "developer", "--digest").Output()
+	if err != nil || !regexp.MustCompile(`^[0-9a-f]{64}\n$`).Match(digest) {
+		t.Fatalf("lock digest is not canonical SHA-256: %v %q", err, digest)
+	}
+
+	raw, err := os.ReadFile(lock)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var mutated map[string]any
+	if err := json.Unmarshal(raw, &mutated); err != nil {
+		t.Fatal(err)
+	}
+	mutated["builder"].(map[string]any)["unexpected"] = true
+	canonical, err := json.Marshal(mutated)
+	if err != nil {
+		t.Fatal(err)
+	}
+	badLock := filepath.Join(t.TempDir(), "release-inputs.lock.json")
+	mustWrite(t, badLock, append(canonical, '\n'), 0o644)
+	output, err = exec.Command(script, "--lock", badLock, "--mode", "developer").CombinedOutput()
+	if err == nil || !strings.Contains(string(output), "unknown fields") {
+		t.Fatalf("nested unknown lock field was accepted: %v\n%s", err, output)
+	}
+}
+
+func TestReleaseEvidenceIsDeterministicAndPrivatePathFree(t *testing.T) {
+	repo := repoRoot(t)
+	appdir := minimalAppDir(t)
+	artifact := filepath.Join(t.TempDir(), "Tipsy-test-x86_64.AppDir.tar.gz")
+	mustWrite(t, artifact, []byte("deterministic-artifact\n"), 0o644)
+	lock := filepath.Join(repo, "scripts", "release-inputs.lock.json")
+	outputs := []string{"artifact-manifest.json", "build-materials.json", "provenance-input.json", "release-hashes.sha256", "tipsy.spdx.json"}
+	var baseline map[string][]byte
+	for pass := 0; pass < 2; pass++ {
+		out := filepath.Join(t.TempDir(), "evidence")
+		command := exec.Command(filepath.Join(repo, "scripts", "release-evidence.py"),
+			"evidence",
+			"--version", "0.0.0-test",
+			"--source-commit", strings.Repeat("a", 40),
+			"--source-date-epoch", "1700000000",
+			"--release-lock", lock,
+			"--mode", "developer",
+			"--appdir", appdir,
+			"--artifact", artifact,
+			"--output-dir", out,
+		)
+		if output, err := command.CombinedOutput(); err != nil {
+			t.Fatalf("evidence pass %d: %v\n%s", pass, err, output)
+		}
+		current := make(map[string][]byte)
+		for _, name := range outputs {
+			data, err := os.ReadFile(filepath.Join(out, name))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if bytes.Contains(data, []byte("/home/")) || bytes.Contains(data, []byte(".tipsy-private")) {
+				t.Fatalf("%s leaked a private/local path: %s", name, data)
+			}
+			current[name] = data
+		}
+		if pass == 0 {
+			baseline = current
+			continue
+		}
+		for _, name := range outputs {
+			if !bytes.Equal(baseline[name], current[name]) {
+				t.Fatalf("%s is not deterministic", name)
+			}
+		}
+	}
+	var document map[string]any
+	if err := json.Unmarshal(baseline["tipsy.spdx.json"], &document); err != nil {
+		t.Fatal(err)
+	}
+	if document["spdxVersion"] != "SPDX-2.3" {
+		t.Fatalf("unexpected SPDX document: %v", document["spdxVersion"])
+	}
+}
+
+func TestBuildInfoMarksDeveloperArtifactUnrestricted(t *testing.T) {
+	repo := repoRoot(t)
+	output := filepath.Join(t.TempDir(), "build-info.json")
+	command := exec.Command(filepath.Join(repo, "scripts", "release-evidence.py"),
+		"build-info",
+		"--version", "test",
+		"--source-commit", strings.Repeat("b", 40),
+		"--source-date-epoch", "1700000000",
+		"--release-lock", filepath.Join(repo, "scripts", "release-inputs.lock.json"),
+		"--mode", "developer",
+		"--source-dirty",
+		"--output", output,
+	)
+	if data, err := command.CombinedOutput(); err != nil {
+		t.Fatalf("build info: %v\n%s", err, data)
+	}
+	data, err := os.ReadFile(output)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Contains(data, []byte(`"releaseKind":"development-unrestricted"`)) || !bytes.Contains(data, []byte(`"tree":"dirty"`)) {
+		t.Fatalf("developer label is not explicit: %s", data)
+	}
+}
+
+func TestWorkflowDependenciesAreImmutableAndLeastPrivilege(t *testing.T) {
+	data, err := os.ReadFile(filepath.Join(repoRoot(t), ".github", "workflows", "ci.yml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(data)
+	uses := regexp.MustCompile(`(?m)^\s*- uses: [^@\s]+@([^\s]+)`).FindAllStringSubmatch(text, -1)
+	if len(uses) == 0 {
+		t.Fatal("workflow has no action dependencies")
+	}
+	for _, match := range uses {
+		if !regexp.MustCompile(`^[0-9a-f]{40}$`).MatchString(match[1]) {
+			t.Errorf("workflow action is not pinned to a full SHA: %s", match[0])
+		}
+	}
+	for _, forbidden := range []string{"ubuntu-latest", "continue-on-error: true", "permissions: write-all"} {
+		if strings.Contains(text, forbidden) {
+			t.Errorf("workflow retains unsafe/mutable setting %q", forbidden)
+		}
+	}
+	for _, required := range []string{"permissions:\n  contents: read", "persist-credentials: false", `go-version: "1.27.1"`} {
+		if !strings.Contains(text, required) {
+			t.Errorf("workflow is missing %q", required)
+		}
+	}
+}
+
+func TestReleaseBuilderUsesExistingWritableMountpoints(t *testing.T) {
+	data, err := os.ReadFile(filepath.Join(repoRoot(t), "scripts", "release-build.sh"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(data)
+	for _, forbidden := range []string{"--dir /release-out", `--bind "$destination" /release-out`} {
+		if strings.Contains(text, forbidden) {
+			t.Errorf("release builder creates a mountpoint after the read-only root bind: %q", forbidden)
+		}
+	}
+	for _, required := range []string{
+		`--bind "$destination" "$destination"`,
+		`--dir /tmp/home`,
+		`--setenv PATH "$go_bin_dir:/usr/local/bin:/usr/bin:/bin"`,
+	} {
+		if !strings.Contains(text, required) {
+			t.Errorf("release builder is missing isolated-build invariant %q", required)
+		}
+	}
+}
+
+func TestAttestationScaffoldPinsVerifierAndFailsBeforeH0(t *testing.T) {
+	repo := repoRoot(t)
+	policy := filepath.Join(repo, "scripts", "attestation-policy.json")
+	data, err := os.ReadFile(policy)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var parsed map[string]any
+	if err := json.Unmarshal(data, &parsed); err != nil {
+		t.Fatal(err)
+	}
+	if parsed["status"] != "bootstrap-unverified" || parsed["builderEnvironment"] != "github-hosted" {
+		t.Fatalf("unsafe bootstrap attestation policy: %s", data)
+	}
+	script, err := os.ReadFile(filepath.Join(repo, "scripts", "verify-release-attestation.sh"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, required := range []string{"gh_sha256", "--bundle", "--unshare-net", "--deny-self-hosted-runners", "reviewed"} {
+		if !bytes.Contains(script, []byte(required)) {
+			t.Errorf("attestation verifier scaffold is missing %q", required)
+		}
 	}
 }
 
@@ -669,6 +1038,7 @@ func minimalAppDir(t *testing.T) string {
 		"usr/share/licenses/tipsy/NOTICE",
 		"usr/share/metainfo/io.github.tipsy_linux.Tipsy.metainfo.xml",
 		"usr/share/tipsy/build-info",
+		"usr/share/tipsy/build-info.json",
 		"usr/share/tipsy/manifest.sha256",
 	}
 	for _, relative := range files {
@@ -684,5 +1054,66 @@ func minimalAppDir(t *testing.T) string {
 			t.Fatal(err)
 		}
 	}
+	refreshManifest(t, root)
 	return root
+}
+
+func mustWrite(t *testing.T, path string, data []byte, mode os.FileMode) {
+	t.Helper()
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, data, mode); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func mustChmod(t *testing.T, path string, mode os.FileMode) {
+	t.Helper()
+	if err := os.Chmod(path, mode); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func mustSymlink(t *testing.T, target, path string) {
+	t.Helper()
+	if err := os.Symlink(target, path); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func refreshManifest(t *testing.T, root string) {
+	t.Helper()
+	manifest := filepath.Join(root, "usr/share/tipsy/manifest.sha256")
+	var paths []string
+	err := filepath.WalkDir(root, func(path string, entry os.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if path == manifest || !entry.Type().IsRegular() {
+			return nil
+		}
+		relative, err := filepath.Rel(root, path)
+		if err != nil {
+			return err
+		}
+		paths = append(paths, filepath.ToSlash(relative))
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	sort.Strings(paths)
+	var contents strings.Builder
+	for _, relative := range paths {
+		data, err := os.ReadFile(filepath.Join(root, filepath.FromSlash(relative)))
+		if err != nil {
+			t.Fatal(err)
+		}
+		digest := sha256.Sum256(data)
+		fmt.Fprintf(&contents, "%x  %s\n", digest, relative)
+	}
+	if err := os.WriteFile(manifest, []byte(contents.String()), 0o644); err != nil {
+		t.Fatal(err)
+	}
 }
