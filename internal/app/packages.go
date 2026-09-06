@@ -5,11 +5,13 @@ package app
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 
 	"github.com/tipsy-linux/tipsy/internal/apk"
 	"github.com/tipsy-linux/tipsy/internal/compat"
+	"github.com/tipsy-linux/tipsy/internal/config"
 	"github.com/tipsy-linux/tipsy/internal/elfinspect"
 	"github.com/tipsy-linux/tipsy/internal/logging"
 	"github.com/tipsy-linux/tipsy/internal/rbxuri"
@@ -18,7 +20,7 @@ import (
 )
 
 func cmdSetup(ctx context.Context, args []string, stdout, stderr io.Writer) int {
-	f, err := parseFlags(args)
+	f, development, err := parseSetupFlags(args)
 	if err != nil {
 		fmt.Fprintln(stderr, err)
 		return 2
@@ -32,7 +34,26 @@ func cmdSetup(ctx context.Context, args []string, stdout, stderr io.Writer) int 
 		fmt.Fprint(stderr, setupHelp)
 		return 2
 	}
-	res, err := setupsvc.New().Install(ctx, setupsvc.InstallRequest{Mode: setupsvc.InstallLocal, LocalPaths: f.rest}, nil)
+	cfg, err := loadConfigWithDevelopmentConsent(development)
+	if err != nil {
+		fmt.Fprintln(stderr, logging.Redact(err.Error()))
+		return 1
+	}
+	service := setupsvc.New()
+	installedVersion := int64(0)
+	if snapshot, snapshotErr := service.Snapshot(ctx); snapshotErr == nil {
+		installedVersion = snapshot.VersionCode
+	}
+	authority, err := resolveAuthority(ctx, cfg, installedVersion, defaultAuthorityDependencies())
+	if err != nil {
+		fmt.Fprintln(stderr, logging.Redact(err.Error()))
+		return 1
+	}
+	if authority.Mode == setupsvc.DevelopmentUnrestricted {
+		printDevelopmentWarning(stderr)
+	}
+	service.Trust = authority.Trust
+	res, err := service.Install(ctx, setupsvc.InstallRequest{Mode: setupsvc.InstallLocal, LocalPaths: f.rest}, nil)
 	if err != nil {
 		fmt.Fprintln(stderr, logging.Redact(err.Error()))
 		return 1
@@ -47,7 +68,12 @@ func cmdSetup(ctx context.Context, args []string, stdout, stderr io.Writer) int 
 }
 
 func cmdLaunch(ctx context.Context, args []string, stdout, stderr io.Writer) int {
+	return cmdLaunchWithDependencies(ctx, args, stdout, stderr, defaultAuthorityDependencies(), defaultGenerationDependencies())
+}
+
+func cmdLaunchWithDependencies(ctx context.Context, args []string, stdout, stderr io.Writer, authorityDeps authorityDependencies, generationDeps generationDependencies) int {
 	probe := false
+	development := false
 	uri := ""
 	rest := args
 	for len(rest) > 0 {
@@ -57,6 +83,9 @@ func cmdLaunch(ctx context.Context, args []string, stdout, stderr io.Writer) int
 			return 0
 		case rest[0] == "--probe":
 			probe = true
+			rest = rest[1:]
+		case rest[0] == "--development":
+			development = true
 			rest = rest[1:]
 		case rest[0] == "--":
 			rest = rest[1:]
@@ -85,7 +114,20 @@ func cmdLaunch(ctx context.Context, args []string, stdout, stderr io.Writer) int
 		fmt.Fprintln(stderr, logging.Redact(err.Error()))
 		return 2
 	}
-	err = runtime.Launch(ctx, runtime.LaunchOptions{Probe: probe, Request: req})
+	session, err := openAuthorizedLaunchSession(ctx, development, authorityDeps, generationDeps)
+	if err != nil {
+		var sessionErr *LaunchSessionError
+		if errors.As(err, &sessionErr) && sessionErr.Authority.Warning != "" {
+			fmt.Fprintln(stderr, sessionErr.Authority.Warning)
+		}
+		fmt.Fprintln(stderr, logging.Redact(err.Error()))
+		return 1
+	}
+	defer session.Close()
+	if warning := session.State().Warning; warning != "" {
+		fmt.Fprintln(stderr, warning)
+	}
+	err = session.Launch(ctx, runtime.LaunchOptions{Probe: probe, Request: req})
 	if err != nil {
 		fmt.Fprintln(stderr, logging.Redact(err.Error()))
 		return 1
@@ -94,6 +136,38 @@ func cmdLaunch(ctx context.Context, args []string, stdout, stderr io.Writer) int
 		fmt.Fprintln(stdout, "probe: libroblox.so loaded, JNI_OnLoad returned")
 	}
 	return 0
+}
+
+func parseSetupFlags(args []string) (flags, bool, error) {
+	var ordinary []string
+	development := false
+	for _, arg := range args {
+		if arg == "--development" {
+			development = true
+			continue
+		}
+		ordinary = append(ordinary, arg)
+	}
+	f, err := parseFlags(ordinary)
+	return f, development, err
+}
+
+func loadConfigWithDevelopmentConsent(requested bool) (*config.Config, error) {
+	cfg, err := config.Load()
+	if err != nil {
+		return nil, err
+	}
+	if requested && !cfg.DevelopmentApproved() {
+		cfg.ApproveDevelopment()
+		if err := config.Save(cfg); err != nil {
+			return nil, fmt.Errorf("record explicit development authorization: %w", err)
+		}
+	}
+	return cfg, nil
+}
+
+func printDevelopmentWarning(w io.Writer) {
+	fmt.Fprintln(w, DevelopmentUnrestrictedWarning)
 }
 
 func cmdInspect(ctx context.Context, args []string, stdout, stderr io.Writer) int {

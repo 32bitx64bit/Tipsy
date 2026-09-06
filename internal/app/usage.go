@@ -22,7 +22,7 @@ Commands:
   version             Print version
   logs                Show log directory and TIPSY_LOG usage
   setup               Verify and install the official x86-64 client
-  launch              Load the official client (X11). Optional Roblox website URI; --probe exits after JNI_OnLoad
+  launch              Load the verified client (X11). --development explicitly authorizes source-build mode
   repair              Repair install (not yet implemented)
   help                Show this help
 
@@ -67,17 +67,23 @@ const reportHelp = `Usage: tipsy report [--json] <apk-or-dir> [...]
 Combined machine-readable compatibility report (APK + ELF + hints).
 `
 
-const setupHelp = `Usage: tipsy setup <apk-or-dir> [...]
+const setupHelp = `Usage: tipsy setup [--development] <apk-or-dir> [...]
 
 Cryptographically verify and atomically install official Roblox APKs, split
 APKs, or .apkm/.xapk/.apks/.zip sets. Pass regular package files obtained
 through your own authorized account. Never commit Roblox packages.
+
+  --development   Persist explicit DevelopmentUnrestricted consent for this
+                  source build. It never grants OfficialVerified status.
 `
 
-const launchHelp = `Usage: tipsy launch [--probe] [uri]
+const launchHelp = `Usage: tipsy launch [--development] [--probe] [uri]
 
-Load the extracted official Android x86-64 client. Run tipsy setup first.
+Load an authenticated Android x86-64 runtime generation. Run tipsy setup first.
 
+  --development   Persist explicit DevelopmentUnrestricted consent, then
+                  derive from an existing cryptographically verified retained
+                  APK when needed. Every such launch displays a warning.
   --probe   Load libroblox.so, run JNI_OnLoad, then exit (no game loop)
   uri       Optional Roblox website or protocol URI (roblox-player:,
             roblox://experiences/start, or https://www.roblox.com/games/...)
