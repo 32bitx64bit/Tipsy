@@ -13,6 +13,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"strings"
 	"syscall"
 	"testing"
 	"time"
@@ -20,6 +21,7 @@ import (
 
 	"github.com/tipsy-linux/tipsy/internal/android"
 	"github.com/tipsy-linux/tipsy/internal/clientsettings"
+	"github.com/tipsy-linux/tipsy/internal/integrity"
 	"github.com/tipsy-linux/tipsy/internal/jni"
 	"github.com/tipsy-linux/tipsy/internal/x11"
 )
@@ -341,13 +343,105 @@ func TestLaunchDoesNotAcknowledgeImmediateFailure(t *testing.T) {
 	if err == nil {
 		t.Fatal("Launch without an installed runtime unexpectedly succeeded")
 	}
+	if !errors.Is(err, ErrAuthorizedGenerationRequired) {
+		t.Fatalf("Launch error = %v, want authenticated-generation gate", err)
+	}
 	if calls != 0 {
 		t.Fatalf("Started callback calls = %d, want 0 before client-loop readiness", calls)
 	}
 }
 
+type fakeAuthorizedGeneration struct {
+	set   *integrity.NativeDescriptorSet
+	files AuthorizedRuntimeFiles
+	err   error
+}
+
+func (g fakeAuthorizedGeneration) NativeDescriptorSet(context.Context) (*integrity.NativeDescriptorSet, error) {
+	return g.set, g.err
+}
+
+func (g fakeAuthorizedGeneration) AuthorizedRuntimeFiles(context.Context) (AuthorizedRuntimeFiles, error) {
+	return g.files, g.err
+}
+
+func runtimeTestNativeDescriptorSet(t *testing.T) *integrity.NativeDescriptorSet {
+	t.Helper()
+	id := strings.Repeat("c", 64)
+	path := filepath.Join(t.TempDir(), "libroblox.so")
+	if err := os.WriteFile(path, []byte("not mapped by this handoff test"), 0o400); err != nil {
+		t.Fatal(err)
+	}
+	file, err := os.Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = file.Close() })
+	record := integrity.FileRecord{
+		Path: "lib/x86_64/libroblox.so", Size: 31, SHA256: strings.Repeat("d", 64),
+		APKEntry: "lib/x86_64/libroblox.so", APKDigest: strings.Repeat("e", 64), Executable: true,
+	}
+	generation := &integrity.Generation{
+		ID: id, InventorySHA256: id,
+		Inventory: integrity.Inventory{Files: []integrity.FileRecord{record}},
+		Files:     map[string]*integrity.PinnedFile{record.Path: {File: file, Record: record}},
+	}
+	set, err := generation.NativeDescriptorSet()
+	if err != nil {
+		t.Fatal(err)
+	}
+	return set
+}
+
+func TestAuthorizedNativeDescriptorSetHandoffFailsClosed(t *testing.T) {
+	if _, err := authorizedNativeDescriptorSet(context.Background(), nil); !errors.Is(err, ErrAuthorizedGenerationRequired) {
+		t.Fatalf("nil authority error = %v", err)
+	}
+	sentinel := errors.New("active.json is unavailable")
+	if _, err := authorizedNativeDescriptorSet(context.Background(), fakeAuthorizedGeneration{err: sentinel}); !errors.Is(err, sentinel) {
+		t.Fatalf("generation error = %v", err)
+	}
+	if _, err := authorizedNativeDescriptorSet(context.Background(), fakeAuthorizedGeneration{}); err == nil || !strings.Contains(err.Error(), "no native descriptor set") {
+		t.Fatalf("empty generation error = %v", err)
+	}
+	want := runtimeTestNativeDescriptorSet(t)
+	got, err := authorizedNativeDescriptorSet(context.Background(), fakeAuthorizedGeneration{set: want})
+	if err != nil || got != want || got.GenerationID() != want.GenerationID() {
+		t.Fatalf("authorized descriptor-set handoff = %#v, %v", got, err)
+	}
+}
+
+func TestAuthorizedRuntimeFilesHandoffFailsClosedAndBindsGeneration(t *testing.T) {
+	id := strings.Repeat("c", 64)
+	root := filepath.Join(t.TempDir(), "generations", id)
+	want := AuthorizedRuntimeFiles{
+		GenerationID: id,
+		RootDir:      root,
+		AssetsDir:    filepath.Join(root, "assets"),
+		BaseAPKPath:  filepath.Join(root, "apk", "base.apk"),
+		VersionName:  "2.734.917",
+	}
+	if _, err := authorizedRuntimeFiles(context.Background(), nil, id); !errors.Is(err, ErrAuthorizedGenerationRequired) {
+		t.Fatalf("nil authority error = %v", err)
+	}
+	if got, err := authorizedRuntimeFiles(context.Background(), fakeAuthorizedGeneration{files: want}, id); err != nil || got != want {
+		t.Fatalf("authorized runtime files = %+v, %v", got, err)
+	}
+	foreign := want
+	foreign.GenerationID = strings.Repeat("d", 64)
+	if _, err := authorizedRuntimeFiles(context.Background(), fakeAuthorizedGeneration{files: foreign}, id); err == nil {
+		t.Fatal("foreign-generation runtime files were accepted")
+	}
+	escaped := want
+	escaped.AssetsDir = filepath.Join(t.TempDir(), "assets")
+	if _, err := authorizedRuntimeFiles(context.Background(), fakeAuthorizedGeneration{files: escaped}, id); err == nil {
+		t.Fatal("noncanonical asset path was accepted")
+	}
+}
+
 func TestAssetContentDir(t *testing.T) {
-	if got, want := assetContentDir(), filepath.Join(RuntimeDir(), "assets", "content"); got != want {
+	assets := filepath.Join(t.TempDir(), "generation", "assets")
+	if got, want := assetContentDir(assets), filepath.Join(assets, "content"); got != want {
 		t.Fatalf("assetContentDir()=%q want %q", got, want)
 	}
 }
@@ -570,23 +664,6 @@ func TestTextInputHandshakeOrder(t *testing.T) {
 	}
 	if got, err := os.Getwd(); err != nil || got != old {
 		t.Fatalf("working directory = %q, %v; want unchanged %q", got, err, old)
-	}
-}
-
-func TestEnsureOfficialFontViews(t *testing.T) {
-	dir := t.TempDir()
-	src := filepath.Join(dir, "content", "fonts")
-	if err := os.MkdirAll(src, 0o700); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(src, "test.ttf"), []byte("ttf"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	if err := EnsureOfficialFontViews(dir); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := os.Stat(filepath.Join(dir, "android", "fonts", "test.ttf")); err != nil {
-		t.Fatal(err)
 	}
 }
 

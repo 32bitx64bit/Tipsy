@@ -87,7 +87,7 @@ func cloneFlagMap(m map[string]any) map[string]any {
 	return out
 }
 
-func loadAndroidAppSettings(cachePath string) (string, int, error) {
+func loadAndroidAppSettings(cachePath, version string) (string, int, error) {
 	overrides, overrideErr := clientsettings.New().LoadOverrides(context.Background())
 	if overrideErr != nil {
 		// A settings-permission/symlink failure must not prevent use of the
@@ -105,7 +105,7 @@ func loadAndroidAppSettings(cachePath string) (string, int, error) {
 	} else if policyApplied {
 		logging.Logger(logging.CatGameActivity).Info("desktop app policy override applied", "presentation_fields", 4)
 	}
-	body, err := fetchAndroidAppSettings()
+	body, err := fetchAndroidAppSettings(version)
 	if err != nil {
 		if cachePath != "" {
 			if cached, rerr := os.ReadFile(cachePath); rerr == nil && len(cached) > 2 {
@@ -137,14 +137,14 @@ func withDesktopAppPolicyOverride(cachePath string, overrides map[string]any) (m
 	return overrides, true, nil
 }
 
-func fetchAndroidAppSettings() ([]byte, error) {
+func fetchAndroidAppSettings(version string) ([]byte, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, androidAppSettingsURL, nil)
 	if err != nil {
 		return nil, err
 	}
-	req.Header.Set("User-Agent", robloxUserAgent(installedVersionName(RuntimeDir())))
+	req.Header.Set("User-Agent", robloxUserAgent(version))
 	req.Header.Set("Accept", "application/json")
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {

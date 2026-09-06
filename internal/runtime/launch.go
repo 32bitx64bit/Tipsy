@@ -8,8 +8,8 @@ package runtime
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
-	"io/fs"
 	"os"
 	"path/filepath"
 	goruntime "runtime"
@@ -22,6 +22,7 @@ import (
 	"github.com/tipsy-linux/tipsy/internal/android"
 	"github.com/tipsy-linux/tipsy/internal/clientsettings"
 	"github.com/tipsy-linux/tipsy/internal/graphics"
+	"github.com/tipsy-linux/tipsy/internal/integrity"
 	"github.com/tipsy-linux/tipsy/internal/jni"
 	"github.com/tipsy-linux/tipsy/internal/loader"
 	"github.com/tipsy-linux/tipsy/internal/logging"
@@ -30,11 +31,70 @@ import (
 )
 
 type LaunchOptions struct {
-	Probe   bool
-	Width   int
-	Height  int
-	Started func()
-	Request rbxuri.Request
+	Probe                bool
+	Width                int
+	Height               int
+	Started              func()
+	Request              rbxuri.Request
+	AuthorizedGeneration AuthorizedGeneration
+}
+
+// AuthorizedRuntimeFiles is the same-generation, already authenticated file
+// view used by Android assets and launch metadata. Paths are usable only while
+// the AuthorizedGeneration owner remains open.
+type AuthorizedRuntimeFiles struct {
+	GenerationID string
+	RootDir      string
+	AssetsDir    string
+	BaseAPKPath  string
+	VersionName  string
+}
+
+// AuthorizedGeneration is the narrow launch-side view implemented by
+// setupsvc.AuthorizedGeneration. Keeping the interface here avoids a package
+// cycle: setupsvc owns installation and currently depends on runtime setup
+// helpers. Official callers must keep the generation open until Launch returns.
+type AuthorizedGeneration interface {
+	NativeDescriptorSet(context.Context) (*integrity.NativeDescriptorSet, error)
+	AuthorizedRuntimeFiles(context.Context) (AuthorizedRuntimeFiles, error)
+}
+
+var ErrAuthorizedGenerationRequired = errors.New("runtime: authenticated runtime generation is required")
+
+func authorizedNativeDescriptorSet(ctx context.Context, generation AuthorizedGeneration) (*integrity.NativeDescriptorSet, error) {
+	if generation == nil {
+		return nil, ErrAuthorizedGenerationRequired
+	}
+	set, err := generation.NativeDescriptorSet(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("runtime: authenticated runtime generation: %w", err)
+	}
+	if set == nil {
+		return nil, fmt.Errorf("runtime: authenticated runtime generation has no native descriptor set")
+	}
+	if err := set.Validate(); err != nil {
+		return nil, fmt.Errorf("runtime: authenticated runtime generation descriptor set: %w", err)
+	}
+	return set, nil
+}
+
+func authorizedRuntimeFiles(ctx context.Context, generation AuthorizedGeneration, generationID string) (AuthorizedRuntimeFiles, error) {
+	if generation == nil {
+		return AuthorizedRuntimeFiles{}, ErrAuthorizedGenerationRequired
+	}
+	files, err := generation.AuthorizedRuntimeFiles(ctx)
+	if err != nil {
+		return AuthorizedRuntimeFiles{}, fmt.Errorf("runtime: authenticated runtime files: %w", err)
+	}
+	if files.GenerationID == "" || files.GenerationID != generationID || files.RootDir == "" ||
+		files.AssetsDir == "" || files.BaseAPKPath == "" || strings.TrimSpace(files.VersionName) == "" {
+		return AuthorizedRuntimeFiles{}, fmt.Errorf("runtime: authenticated runtime files are incomplete or from a different generation")
+	}
+	if !filepath.IsAbs(files.RootDir) || files.AssetsDir != filepath.Join(files.RootDir, "assets") ||
+		files.BaseAPKPath != filepath.Join(files.RootDir, "apk", "base.apk") {
+		return AuthorizedRuntimeFiles{}, fmt.Errorf("runtime: authenticated runtime file layout is not canonical")
+	}
+	return files, nil
 }
 
 // launchStartedAck gives in-process frontends one deterministic handoff from
@@ -413,6 +473,14 @@ func Launch(ctx context.Context, opt LaunchOptions) error {
 	if ctx == nil {
 		ctx = context.Background()
 	}
+	nativeDescriptorSet, err := authorizedNativeDescriptorSet(ctx, opt.AuthorizedGeneration)
+	if err != nil {
+		return err
+	}
+	runtimeFiles, err := authorizedRuntimeFiles(ctx, opt.AuthorizedGeneration, nativeDescriptorSet.GenerationID())
+	if err != nil {
+		return err
+	}
 	presentTiming := vulkanPresentTimingRequested(os.Getenv)
 	presentTimingCursor := android.SetVulkanPresentTiming(presentTiming)
 	if presentTiming {
@@ -452,13 +520,12 @@ func Launch(ctx context.Context, opt LaunchOptions) error {
 		opt.Height = 720
 	}
 	started := &launchStartedAck{fn: opt.Started}
-	dir, err := filepath.Abs(RuntimeDir())
+	dir, err := filepath.Abs(runtimeFiles.RootDir)
 	if err != nil {
-		return fmt.Errorf("runtime directory: %w", err)
+		return fmt.Errorf("authenticated runtime directory: %w", err)
 	}
-	lib := filepath.Join(dir, "lib", "x86_64", "libroblox.so")
-	if _, err := os.Stat(lib); err != nil {
-		return fmt.Errorf("runtime not set up; run: tipsy setup <official-apk-or-dir>")
+	if dir != runtimeFiles.RootDir {
+		return fmt.Errorf("authenticated runtime directory is not canonical")
 	}
 	releaseClientLock, err := clientsettings.AcquireClientLock()
 	if err != nil {
@@ -493,18 +560,10 @@ func Launch(ctx context.Context, opt LaunchOptions) error {
 	files := storage.FilesDir
 	cache := storage.CacheDir
 	preferences := storage.CookieFile
-	assets := filepath.Join(dir, "assets")
-	obb := filepath.Join(dir, "obb")
-	for _, d := range []string{obb, filepath.Join(dir, "android")} {
-		if err := os.MkdirAll(d, 0o700); err != nil {
-			return err
-		}
-	}
-	if err := EnsureOfficialPatches(ctx, assets); err != nil {
-		return fmt.Errorf("official ExtraContent: %w", err)
-	}
-	if err := EnsureOfficialFontViews(assets); err != nil {
-		return fmt.Errorf("official fonts: %w", err)
+	assets := runtimeFiles.AssetsDir
+	obb := filepath.Join(storage.DataRoot, "obb")
+	if err := os.MkdirAll(obb, 0o700); err != nil {
+		return err
 	}
 	// Install the APK's authoritative CA bundle under Android FilesDir before
 	// native startup. Do not change the process CWD here: an otherwise
@@ -543,7 +602,7 @@ func Launch(ctx context.Context, opt LaunchOptions) error {
 	}
 	defer focusedTextOverlay.Close()
 
-	android.NewResolver(android.Config{AssetsDir: assets, APKPath: filepath.Join(dir, "apk", "base.apk"), Width: int32(opt.Width), Height: int32(opt.Height)})
+	android.NewResolver(android.Config{AssetsDir: assets, APKPath: runtimeFiles.BaseAPKPath, Width: int32(opt.Width), Height: int32(opt.Height)})
 	aw := android.NewWindow(opt.Width, opt.Height, xidHandle{xid: win.XID()})
 	android.BindDefaultWindow(aw)
 	vm, err := jni.NewVM()
@@ -551,7 +610,7 @@ func Launch(ctx context.Context, opt LaunchOptions) error {
 		return fmt.Errorf("jni: %w", err)
 	}
 	vm.SetDirs(files, cache, obb, assets)
-	ver := installedVersionName(dir)
+	ver := runtimeFiles.VersionName
 	vm.SetAppVersion(ver)
 	logging.Logger(logging.CatRuntime).Info("installed client", "version", ver)
 	vm.SetDisplaySize(opt.Width, opt.Height)
@@ -559,9 +618,7 @@ func Launch(ctx context.Context, opt LaunchOptions) error {
 	if mmW, mmH := jni.X11DisplayPhysicalSizeMM(win.Display()); mmW > 0 && mmH > 0 {
 		vm.SetDisplayPhysicalSizeMM(mmW, mmH)
 	}
-	loader.SetJNIFunctions(vm.NativeInterface())
-
-	mod, err := loader.Open(lib, android.Provider())
+	mod, err := loader.OpenFD(ctx, "libroblox.so", nativeDescriptorSet, android.Provider())
 	if err != nil {
 		return err
 	}
@@ -575,7 +632,7 @@ func Launch(ctx context.Context, opt LaunchOptions) error {
 		}
 	}()
 	android.Register("libroblox.so", func(sym string) (uintptr, error) { return mod.Lookup(sym) })
-	android.RegisterImage(mod.Base, lib)
+	android.RegisterImage(mod.Base, mod.Path)
 	if err := mod.Init(); err != nil {
 		return fmt.Errorf("init: %w", err)
 	}
@@ -599,11 +656,13 @@ func Launch(ctx context.Context, opt LaunchOptions) error {
 	}
 	refreshVersion := win.RefreshVersion()
 	currentRefreshHz, supportedRefreshHz := presenter.refreshRates()
-	session, err := startGameActivity(ctx, vm, mod, aw, files, cache, preferences, obb,
+	session, err := startGameActivity(ctx, vm, mod, aw, files, cache, preferences, obb, assets, ver,
 		opt.Width, opt.Height, currentRefreshHz, supportedRefreshHz, opt.Request)
 	if err != nil {
 		return err
 	}
+	presence := startDiscordPresence(ctx, settingsService.Load, opt.Request.PlaceID, filepath.Join(files, "appData", "logs"))
+	defer stopDiscordPresence(presence)
 	// A successful session means initializeNativeCode has entered the official
 	// client and may have created engine-owned workers. Keep the image mapped
 	// until the CLI/GUI host process exits; do not race those workers with
@@ -750,7 +809,7 @@ func installCrashDiagHandler() error {
 	return nil
 }
 
-func startGameActivity(ctx context.Context, vm *jni.VM, mod *loader.Module, aw *android.Window, files, cache, preferences, obb string, width, height int, currentRefreshHz float32, supportedRefreshHz []float32, req rbxuri.Request) (*gameActivitySession, error) {
+func startGameActivity(ctx context.Context, vm *jni.VM, mod *loader.Module, aw *android.Window, files, cache, preferences, obb, assets, version string, width, height int, currentRefreshHz float32, supportedRefreshHz []float32, req rbxuri.Request) (*gameActivitySession, error) {
 	env := vm.Env()
 	activity := env.AllocObject(env.FindClass("com/roblox/client/startup/MainGameActivity"))
 	if activity == 0 {
@@ -778,7 +837,7 @@ func startGameActivity(ctx context.Context, vm *jni.VM, mod *loader.Module, aw *
 	wireRobloxDirectInput(mod, env)
 	wireRobloxDirectKey(mod, env)
 	wireRobloxTextInput(mod, env)
-	return dispatchGameActivityLifecycle(ctx, vm, mod, env, activity, uintptr(handle), files, cache, preferences,
+	return dispatchGameActivityLifecycle(ctx, vm, mod, env, activity, uintptr(handle), files, cache, preferences, assets, version,
 		width, height, currentRefreshHz, supportedRefreshHz, aw, req), nil
 }
 
@@ -872,15 +931,16 @@ func wireRobloxTextInput(mod *loader.Module, env *jni.Env) {
 	jni.SetRobloxTextInputTarget(env, class, passFn, returnFn, syncFn, getInfoFn, loader.CallP8)
 }
 
-func dispatchGameActivityLifecycle(ctx context.Context, vm *jni.VM, mod *loader.Module, env *jni.Env, activity, handle uintptr, files, cache, preferences string, width, height int, currentRefreshHz float32, supportedRefreshHz []float32, aw *android.Window, req rbxuri.Request) *gameActivitySession {
+func dispatchGameActivityLifecycle(ctx context.Context, vm *jni.VM, mod *loader.Module, env *jni.Env, activity, handle uintptr, files, cache, preferences, assets, version string, width, height int, currentRefreshHz float32, supportedRefreshHz []float32, aw *android.Window, req rbxuri.Request) *gameActivitySession {
 	call := func(name, sig string, extra ...uintptr) {
 		callGameActivityNative(vm, env, activity, handle, name, sig, extra...)
 	}
 	call("onStartNative", "(J)V")
 	setRobloxCacheAndFiles(mod, env, activity, files, cache)
-	setRobloxAssetPath(mod, env, activity)
+	content := assetContentDir(assets)
+	setRobloxAssetPath(mod, env, activity, content)
 	handleColdStartProtocolLaunch(mod, env, activity, req)
-	startRobloxApp(mod, env, activity, files)
+	startRobloxApp(mod, env, activity, files, version)
 	// Official MainScreenController ON_CREATE publishes Display 0's current
 	// and supported refresh rates after native/client-settings initialization
 	// and before resume/surface/V2Start. Reproduce that named JNI boundary
@@ -893,9 +953,9 @@ func dispatchGameActivityLifecycle(ctx context.Context, vm *jni.VM, mod *loader.
 	call("onSurfaceCreatedNative", "(JLandroid/view/Surface;)V", surface)
 	call("onWindowFocusChangedNative", "(JZ)V", 1)
 
-	platform := makePlatformParams(env, assetContentDir(), width, height)
-	device := makeDeviceParams(env, width, height)
-	initParams := makeInitParams(env, activity, platform, device)
+	platform := makePlatformParams(env, content, width, height)
+	device := makeDeviceParams(env, width, height, version)
+	initParams := makeInitParams(env, activity, platform, device, version)
 	callRobloxJNI(mod, env.Raw(), activity, "Java_com_roblox_client_startup_MainGameActivity_nativeAppBridgeSetInitParams", initParams)
 	gl := env.FindClass("com/roblox/engine/jni/NativeGLInterface")
 	if gl == 0 {
@@ -1067,8 +1127,8 @@ func callGameActivityNative(vm *jni.VM, env *jni.Env, activity, handle uintptr, 
 	loader.CallP8(fn, args[0], args[1], args[2], args[3], args[4], args[5], args[6], args[7])
 }
 
-func setRobloxAssetPath(mod *loader.Module, env *jni.Env, activity uintptr) {
-	callRobloxJNI(mod, env.Raw(), activity, setAssetPathSym, env.NewStringUTF(assetContentDir()))
+func setRobloxAssetPath(mod *loader.Module, env *jni.Env, activity uintptr, contentDir string) {
+	callRobloxJNI(mod, env.Raw(), activity, setAssetPathSym, env.NewStringUTF(contentDir))
 }
 
 func setRobloxCacheAndFiles(mod *loader.Module, env *jni.Env, activity uintptr, files, cache string) {
@@ -1187,8 +1247,8 @@ func initRobloxLocalStorageManager(mod *loader.Module, env *jni.Env, files, cach
 	loader.CallP8(fn, env.Raw(), thiz, am, env.NewStringUTF(files), env.NewStringUTF(cache), 0, 0, 0)
 }
 
-func startRobloxApp(mod *loader.Module, env *jni.Env, activity uintptr, files string) {
-	flags, _, err := loadAndroidAppSettings(filepath.Join(files, "ClientAppSettings.json"))
+func startRobloxApp(mod *loader.Module, env *jni.Env, activity uintptr, files, version string) {
+	flags, _, err := loadAndroidAppSettings(filepath.Join(files, "ClientAppSettings.json"), version)
 	if err != nil || flags == "" {
 		logging.Logger(logging.CatGameActivity).Info("client settings unavailable", "err", err)
 		return
@@ -1256,7 +1316,7 @@ func deliverInitialContentRect(mod *loader.Module, vm *jni.VM, env *jni.Env, act
 	callGameActivityNative(vm, env, activity, handle, "onWindowInsetsChangedNative", "(J)V")
 }
 
-func assetContentDir() string { return filepath.Join(RuntimeDir(), "assets", "content") }
+func assetContentDir(assetsDir string) string { return filepath.Join(assetsDir, "content") }
 
 func absExistingDir(path string) string {
 	if strings.TrimSpace(path) == "" || os.MkdirAll(path, 0o700) != nil {
@@ -1267,54 +1327,6 @@ func absExistingDir(path string) string {
 		return ""
 	}
 	return abs
-}
-
-func EnsureOfficialFontViews(assetsDir string) error {
-	if strings.TrimSpace(assetsDir) == "" {
-		return nil
-	}
-	src := filepath.Join(assetsDir, "content", "fonts")
-	st, err := os.Stat(src)
-	if err != nil {
-		if os.IsNotExist(err) {
-			return nil
-		}
-		return err
-	}
-	if !st.IsDir() {
-		return nil
-	}
-	src, err = filepath.Abs(src)
-	if err != nil {
-		return err
-	}
-	for _, dest := range []string{filepath.Join(assetsDir, "android", "fonts"), filepath.Join(assetsDir, "ExtraContent", "fonts")} {
-		if err := filepath.WalkDir(src, func(path string, d fs.DirEntry, err error) error {
-			if err != nil {
-				return err
-			}
-			rel, err := filepath.Rel(src, path)
-			if err != nil {
-				return err
-			}
-			target := filepath.Join(dest, rel)
-			if d.IsDir() {
-				return os.MkdirAll(target, 0o700)
-			}
-			if _, err := os.Lstat(target); err == nil {
-				return nil
-			} else if !os.IsNotExist(err) {
-				return err
-			}
-			if err := os.MkdirAll(filepath.Dir(target), 0o700); err != nil {
-				return err
-			}
-			return os.Symlink(path, target)
-		}); err != nil {
-			return err
-		}
-	}
-	return nil
 }
 
 // prepareRuntimeFiles installs the CA bundle the official APK shipped under
@@ -1416,10 +1428,10 @@ func setPlatformViewport(env *jni.Env, platform uintptr, width, height int) {
 	env.PutField(platform, "viewportHeightMm", int32(height*254/1600))
 }
 
-func makeDeviceParams(env *jni.Env, width, height int) uintptr {
+func makeDeviceParams(env *jni.Env, width, height int, version string) uintptr {
 	d := env.AllocObject(env.FindClass("com/roblox/engine/jni/model/DeviceParams"))
 	for k, v := range map[string]any{
-		"appBuildVariant": "GooglePlay", "appVersion": installedVersionName(RuntimeDir()), "country": "US", "cpu64Bit": true,
+		"appBuildVariant": "GooglePlay", "appVersion": version, "country": "US", "cpu64Bit": true,
 		"deviceName": "tipsy", "deviceSku": "tipsy", "deviceTotalMemoryMB": int32(8192),
 		"displayPhysicalHeightPixels": int32(height), "displayPhysicalWidthPixels": int32(width),
 		"displayResolution": fmt.Sprintf("%dx%d", width, height), "isChrome": false, "isLowRamDevice": false,
@@ -1431,10 +1443,10 @@ func makeDeviceParams(env *jni.Env, width, height int) uintptr {
 	return d
 }
 
-func makeInitParams(env *jni.Env, activity, platform, device uintptr) uintptr {
+func makeInitParams(env *jni.Env, activity, platform, device uintptr, version string) uintptr {
 	p := env.AllocObject(env.FindClass("com/roblox/engine/jni/autovalue/InitParams"))
 	for k, v := range map[string]any{
-		"baseURL": "https://www.roblox.com", "buildVariant": "GooglePlay", "userAgent": robloxUserAgent(installedVersionName(RuntimeDir())),
+		"baseURL": "https://www.roblox.com", "buildVariant": "GooglePlay", "userAgent": robloxUserAgent(version),
 		"deviceParams": device, "platformParams": platform, "isPotato": false, "isTablet": false, "isVrDevice": false, "vrContext": activity,
 	} {
 		env.PutField(p, k, v)
