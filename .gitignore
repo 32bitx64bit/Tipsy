@@ -35,12 +35,12 @@ lib/*.so
 /cache/
 *.log
 
-# Private local engineering material and local discovery bridges
+# Private local engineering material and local discovery bridges.
+# README.md is the public project page and is tracked.
 /.tipsy-private/
 /AGENTS.md
 /.cursor
 /docs/
-/README.md
 /CONTRIBUTING.md
 
 # Credentials and private key material

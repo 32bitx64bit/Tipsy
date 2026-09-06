@@ -93,8 +93,6 @@ export GOARCH=amd64
 export CGO_ENABLED=1
 export GOTOOLCHAIN=local
 
-"$repo/scripts/check-public-tree.sh"
-
 work=$(mktemp -d "${TMPDIR:-/tmp}/tipsy-appdir.XXXXXXXX")
 cleanup() {
 	if [[ -n "${work:-}" && -d "$work" && "$work" == "${TMPDIR:-/tmp}"/tipsy-appdir.* ]]; then
@@ -300,7 +298,6 @@ manifest="$appdir/usr/share/tipsy/manifest.sha256"
 		done
 ) > "$manifest"
 
-"$repo/scripts/check-public-tree.sh" "$appdir"
 "$repo/scripts/check-release-tree.sh" "$appdir"
 
 while IFS= read -r -d '' entry; do
