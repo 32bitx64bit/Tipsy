@@ -12,6 +12,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strings"
 )
@@ -64,7 +65,9 @@ type SigningInfo struct {
 	CertSHA256             []string `json:"certSha256,omitempty"`
 	Subjects               []string `json:"subjects,omitempty"`
 	CryptographicallyValid bool     `json:"cryptographicallyValid,omitempty"`
+	VerifiedScheme         string   `json:"verifiedScheme,omitempty"`
 	VerifiedCertSHA256     []string `json:"verifiedCertSha256,omitempty"`
+	VerifiedLineageSHA256  []string `json:"verifiedLineageSha256,omitempty"`
 	ParseError             string   `json:"parseError,omitempty"`
 }
 
@@ -607,6 +610,11 @@ func mergePackages(pkgs []Package) *Merged {
 		m.Signing.HasV3 = m.Signing.HasV3 || p.Signing.HasV3
 		m.Signing.HasV3_1 = m.Signing.HasV3_1 || p.Signing.HasV3_1
 		m.Signing.CryptographicallyValid = m.Signing.CryptographicallyValid || p.Signing.CryptographicallyValid
+		if m.Signing.VerifiedScheme == "" {
+			m.Signing.VerifiedScheme = p.Signing.VerifiedScheme
+		} else if p.Signing.VerifiedScheme != "" && m.Signing.VerifiedScheme != p.Signing.VerifiedScheme && m.Signing.ParseError == "" {
+			m.Signing.ParseError = "APK splits use different verified signature schemes"
+		}
 		if p.Signing.ParseError != "" && m.Signing.ParseError == "" {
 			m.Signing.ParseError = p.Signing.ParseError
 		}
@@ -625,6 +633,11 @@ func mergePackages(pkgs []Package) *Merged {
 			}
 		}
 		m.Signing.VerifiedCertSHA256 = appendUnique(m.Signing.VerifiedCertSHA256, p.Signing.VerifiedCertSHA256...)
+		if len(m.Signing.VerifiedLineageSHA256) == 0 {
+			m.Signing.VerifiedLineageSHA256 = append([]string(nil), p.Signing.VerifiedLineageSHA256...)
+		} else if len(p.Signing.VerifiedLineageSHA256) > 0 && !slices.Equal(m.Signing.VerifiedLineageSHA256, p.Signing.VerifiedLineageSHA256) && m.Signing.ParseError == "" {
+			m.Signing.ParseError = "APK splits use different verified signer lineages"
+		}
 	}
 	m.Architectures = sortABIs(keys(abiSet))
 	m.NativeCode = uniqueSorted(keys(ncSet))

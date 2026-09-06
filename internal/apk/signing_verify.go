@@ -23,14 +23,15 @@ import (
 )
 
 const (
-	sigRSAPSSSHA256   = 0x0101
-	sigRSAPSSSHA512   = 0x0102
-	sigRSAPKCS1SHA256 = 0x0103
-	sigRSAPKCS1SHA512 = 0x0104
-	sigECDSASHA256    = 0x0201
-	sigECDSASHA512    = 0x0202
-	sigDSASHA256      = 0x0301
-	apkChunkSize      = 1 << 20
+	sigRSAPSSSHA256             = 0x0101
+	sigRSAPSSSHA512             = 0x0102
+	sigRSAPKCS1SHA256           = 0x0103
+	sigRSAPKCS1SHA512           = 0x0104
+	sigECDSASHA256              = 0x0201
+	sigECDSASHA512              = 0x0202
+	sigDSASHA256                = 0x0301
+	apkChunkSize                = 1 << 20
+	v2StrippingProtectionAttrID = 0xbeeff00d
 )
 
 type signatureRecord struct {
@@ -60,13 +61,15 @@ func VerifyReportSignatures(ctx context.Context, rep *Report) error {
 		if err != nil {
 			return fmt.Errorf("apk: open package for signature verification: %w", err)
 		}
-		certs, verifyErr := verifySourceV2(ctx, src.Reader, src.Size)
+		verified, verifyErr := VerifyReaderAt(ctx, src.Reader, src.Size)
 		_ = src.Close()
 		if verifyErr != nil {
-			return fmt.Errorf("apk: verify v2 signature: %w", verifyErr)
+			return fmt.Errorf("apk: verify signature: %w", verifyErr)
 		}
 		rep.Packages[i].Signing.CryptographicallyValid = true
-		rep.Packages[i].Signing.VerifiedCertSHA256 = certs
+		rep.Packages[i].Signing.VerifiedScheme = verified.Scheme
+		rep.Packages[i].Signing.VerifiedCertSHA256 = verified.CurrentSHA256
+		rep.Packages[i].Signing.VerifiedLineageSHA256 = verified.LineageSHA256
 	}
 	rep.Merged = mergePackages(rep.Packages)
 	return nil
@@ -78,10 +81,11 @@ func verifySourceV2(ctx context.Context, ra io.ReaderAt, size int64) ([]string, 
 		return nil, err
 	}
 	var v2 []byte
+	present := make(map[uint32]struct{})
 	for _, pair := range pairs {
+		present[pair.id] = struct{}{}
 		if pair.id == apkSigIDV2 {
 			v2 = pair.value
-			break
 		}
 	}
 	if len(v2) == 0 {
@@ -92,81 +96,165 @@ func verifySourceV2(ctx context.Context, ra io.ReaderAt, size int64) ([]string, 
 		return nil, fmt.Errorf("malformed v2 signer sequence")
 	}
 	var verified []string
+	requiredSchemes := make(map[uint32]struct{})
 	for off := 0; off < len(signers); {
+		if len(verified) == maxV3Signers {
+			return nil, fmt.Errorf("v2 block has too many signers")
+		}
 		signer, n, err := readU32Prefixed(signers, off)
 		if err != nil {
 			return nil, fmt.Errorf("malformed v2 signer: %w", err)
 		}
 		off = n
-		cert, err := verifyV2Signer(ctx, ra, size, signer)
+		cert, required, err := verifyV2Signer(ctx, ra, size, signer)
 		if err != nil {
 			return nil, err
 		}
 		verified = append(verified, sha256Hex(cert.Raw))
+		for _, scheme := range required {
+			requiredSchemes[scheme] = struct{}{}
+		}
 	}
 	if len(verified) == 0 {
 		return nil, fmt.Errorf("v2 block has no signers")
+	}
+	for scheme := range requiredSchemes {
+		var blockID uint32
+		switch scheme {
+		case 3:
+			blockID = apkSigIDV3
+		default:
+			return nil, fmt.Errorf("v2 signer requires unsupported signature scheme %d", scheme)
+		}
+		if _, ok := present[blockID]; !ok {
+			return nil, fmt.Errorf("v2 stripping protection requires signature scheme %d", scheme)
+		}
 	}
 	sort.Strings(verified)
 	return uniqueStrings(verified), nil
 }
 
-func verifyV2Signer(ctx context.Context, ra io.ReaderAt, size int64, signer []byte) (*x509.Certificate, error) {
+func verifyV2Signer(ctx context.Context, ra io.ReaderAt, size int64, signer []byte) (*x509.Certificate, []uint32, error) {
 	signedData, off, err := readU32Prefixed(signer, 0)
 	if err != nil {
-		return nil, fmt.Errorf("v2 signed data: %w", err)
+		return nil, nil, fmt.Errorf("v2 signed data: %w", err)
 	}
 	signaturesRaw, off, err := readU32Prefixed(signer, off)
 	if err != nil {
-		return nil, fmt.Errorf("v2 signatures: %w", err)
+		return nil, nil, fmt.Errorf("v2 signatures: %w", err)
 	}
 	publicKey, off, err := readU32Prefixed(signer, off)
 	if err != nil || off != len(signer) {
-		return nil, fmt.Errorf("v2 public key is malformed")
+		return nil, nil, fmt.Errorf("v2 public key is malformed")
 	}
 	digestsRaw, dOff, err := readU32Prefixed(signedData, 0)
 	if err != nil {
-		return nil, fmt.Errorf("v2 digests: %w", err)
+		return nil, nil, fmt.Errorf("v2 digests: %w", err)
 	}
-	certsRaw, _, err := readU32Prefixed(signedData, dOff)
+	certsRaw, dOff, err := readU32Prefixed(signedData, dOff)
 	if err != nil {
-		return nil, fmt.Errorf("v2 certificates: %w", err)
+		return nil, nil, fmt.Errorf("v2 certificates: %w", err)
+	}
+	attributes, dOff, err := readU32Prefixed(signedData, dOff)
+	if err != nil {
+		return nil, nil, fmt.Errorf("v2 attributes are malformed")
+	}
+	// Current AOSP apksig emits one additional empty length-prefixed field.
+	// Accept that exact canonical form, but reject arbitrary trailing data.
+	if dOff != len(signedData) {
+		empty, end, trailingErr := readU32Prefixed(signedData, dOff)
+		if trailingErr != nil || len(empty) != 0 || end != len(signedData) {
+			return nil, nil, fmt.Errorf("v2 attributes are malformed")
+		}
+		dOff = end
+	}
+	requiredSchemes, err := parseV2Attributes(attributes)
+	if err != nil {
+		return nil, nil, err
 	}
 	digests, err := parseDigestRecords(digestsRaw)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	signatures, err := parseSignatureRecords(signaturesRaw)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
-	certDER, _, err := readU32Prefixed(certsRaw, 0)
-	if err != nil {
-		return nil, fmt.Errorf("v2 leaf certificate: %w", err)
+	if !sameAlgorithmOrder(signatures, digests) {
+		return nil, nil, fmt.Errorf("v2 signature and digest algorithm lists differ")
+	}
+	certDER, certOff, err := readU32Prefixed(certsRaw, 0)
+	if err != nil || len(certDER) == 0 {
+		return nil, nil, fmt.Errorf("v2 leaf certificate: %w", err)
 	}
 	cert, err := x509.ParseCertificate(certDER)
 	if err != nil {
-		return nil, fmt.Errorf("v2 leaf certificate parse: %w", err)
+		return nil, nil, fmt.Errorf("v2 leaf certificate parse: %w", err)
 	}
 	encodedKey, err := x509.MarshalPKIXPublicKey(cert.PublicKey)
 	if err != nil || !bytes.Equal(encodedKey, publicKey) {
-		return nil, fmt.Errorf("v2 public key does not match leaf certificate")
+		return nil, nil, fmt.Errorf("v2 public key does not match leaf certificate")
+	}
+	seenCertificates := map[string]struct{}{sha256Hex(cert.Raw): {}}
+	for count := 1; certOff < len(certsRaw); count++ {
+		if count == maxRotationLevels {
+			return nil, nil, fmt.Errorf("v2 certificate chain is too long")
+		}
+		chainDER, next, err := readU32Prefixed(certsRaw, certOff)
+		if err != nil || len(chainDER) == 0 {
+			return nil, nil, fmt.Errorf("v2 certificate chain is malformed")
+		}
+		certOff = next
+		chainCert, err := x509.ParseCertificate(chainDER)
+		if err != nil {
+			return nil, nil, fmt.Errorf("v2 certificate chain parse: %w", err)
+		}
+		digest := sha256Hex(chainCert.Raw)
+		if _, duplicate := seenCertificates[digest]; duplicate {
+			return nil, nil, fmt.Errorf("v2 certificate chain repeats a certificate")
+		}
+		seenCertificates[digest] = struct{}{}
 	}
 	selected, digest, err := selectSignature(signatures, digests)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	if err := verifySignedData(cert.PublicKey, selected, signedData); err != nil {
-		return nil, fmt.Errorf("v2 signer signature invalid: %w", err)
+		return nil, nil, fmt.Errorf("v2 signer signature invalid: %w", err)
 	}
 	computed, err := apkContentDigest(ctx, ra, size, hashForAlgorithm(selected.algorithm))
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	if !bytes.Equal(computed, digest.value) {
-		return nil, fmt.Errorf("v2 APK content digest mismatch")
+		return nil, nil, fmt.Errorf("v2 APK content digest mismatch")
 	}
-	return cert, nil
+	return cert, requiredSchemes, nil
+}
+
+func parseV2Attributes(raw []byte) ([]uint32, error) {
+	seen := make(map[uint32]struct{})
+	var required []uint32
+	for off := 0; off < len(raw); {
+		record, next, err := readU32Prefixed(raw, off)
+		if err != nil || len(record) < 4 {
+			return nil, fmt.Errorf("v2 attributes are malformed")
+		}
+		off = next
+		id := binary.LittleEndian.Uint32(record)
+		if _, duplicate := seen[id]; duplicate {
+			return nil, fmt.Errorf("v2 attributes repeat id 0x%x", id)
+		}
+		seen[id] = struct{}{}
+		if id != v2StrippingProtectionAttrID {
+			continue
+		}
+		if len(record) != 8 {
+			return nil, fmt.Errorf("v2 stripping protection attribute is malformed")
+		}
+		required = append(required, binary.LittleEndian.Uint32(record[4:]))
+	}
+	return required, nil
 }
 
 func parseSignatureRecords(raw []byte) ([]signatureRecord, error) {
