@@ -5,9 +5,11 @@ package main
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -31,10 +33,17 @@ func TestOffscreenVisualProof(t *testing.T) {
 	qt.QApplication_SetStyleWithStyle("Fusion")
 	app.SetStyleSheet(appStyleSheet)
 
-	service := visualService{
-		launchEntered: make(chan struct{}),
-		launchReady:   make(chan struct{}),
-		launchDone:    make(chan struct{}),
+	service := &secureVisualService{
+		visualService: visualService{
+			launchEntered: make(chan struct{}),
+			launchReady:   make(chan struct{}),
+			launchDone:    make(chan struct{}),
+		},
+		requireConsent: true,
+		authority: guimodel.LaunchAuthority{
+			Mode:    "development-unrestricted",
+			Warning: "WARNING: DevelopmentUnrestricted mode is active; this is not an OfficialVerified Tipsy session.",
+		},
 	}
 	icon := brandIcon()
 	win := newMainWindow(service, icon)
@@ -64,6 +73,12 @@ func TestOffscreenVisualProof(t *testing.T) {
 	if win.settingsLowTexture == nil || win.settingsLowTexture.IsChecked() || win.settingsLowTexture.AccessibleName() != "Low texture mode" {
 		t.Fatalf("Low texture mode control did not render unchecked and accessible: %#v", win.settingsLowTexture)
 	}
+	if win.settingsDiscordPresence == nil || !win.settingsDiscordPresence.IsChecked() || win.settingsDiscordPresence.AccessibleName() != "Discord Rich Presence" {
+		t.Fatalf("Discord Rich Presence control did not render checked and accessible: %#v", win.settingsDiscordPresence)
+	}
+	if win.settingsDiscordJoin == nil || win.settingsDiscordJoin.IsChecked() || win.settingsDiscordJoin.AccessibleName() != "Show Join button" || !win.settingsDiscordJoin.IsEnabled() {
+		t.Fatalf("Join button control did not render unchecked and enabled: %#v", win.settingsDiscordJoin)
+	}
 	if description := win.settingsLowTexture.AccessibleDescription(); !strings.Contains(strings.ToLower(description), "memory") || !strings.Contains(description, "VRAM") {
 		t.Fatalf("Low texture mode accessibility copy is not honest: %q", description)
 	}
@@ -78,6 +93,12 @@ func TestOffscreenVisualProof(t *testing.T) {
 	}
 	if got := win.settingsLowTexture.Text(); got != lowTextureToggleText(false) {
 		t.Fatalf("unchecked low texture state text=%q, want %q", got, lowTextureToggleText(false))
+	}
+	if got := win.settingsDiscordPresence.Text(); got != discordPresenceToggleText(true) {
+		t.Fatalf("checked Discord presence text=%q, want %q", got, discordPresenceToggleText(true))
+	}
+	if got := win.settingsDiscordJoin.Text(); got != discordJoinToggleText(false) {
+		t.Fatalf("unchecked Discord join text=%q, want %q", got, discordJoinToggleText(false))
 	}
 	if description := win.settingsFPSMode.AccessibleDescription(); !strings.Contains(description, "experimental uncapped request") || !strings.Contains(description, "no frame rate is guaranteed") {
 		t.Fatalf("Unlimited accessibility copy is not honest: %q", description)
@@ -153,7 +174,7 @@ func TestOffscreenVisualProof(t *testing.T) {
 		t.Fatalf("Unlimited state copy=%q limitEnabled=%v", win.settingsHint.Text(), win.settingsFPS.IsEnabled())
 	}
 	compactSettings := win.win.Grab()
-	if compactSettings.IsNull() || !win.settingsVSync.IsVisible() || !win.settingsLowTexture.IsVisible() {
+	if compactSettings.IsNull() || !win.settingsVSync.IsVisible() || !win.settingsLowTexture.IsVisible() || !win.settingsDiscordPresence.IsVisible() || !win.settingsDiscordJoin.IsVisible() {
 		t.Fatal("compact settings page did not keep the VSync and low-texture controls in the scrollable layout")
 	}
 	if path := os.Getenv("TIPSY_GUI_SCREENSHOT"); path != "" {
@@ -208,11 +229,33 @@ func TestOffscreenVisualProof(t *testing.T) {
 	wizard.Delete()
 
 	win.selectPage(0)
+	originalConfirm := confirmDevelopmentLaunch
+	defer func() { confirmDevelopmentLaunch = originalConfirm }()
+	confirmDevelopmentLaunch = func(*qt.QWidget) bool { return false }
+	started, err := win.startAuthorizedLaunch(context.Background(), guimodel.LaunchRequest{})
+	if err != nil || started {
+		t.Fatalf("declined development authority started=%v err=%v", started, err)
+	}
+	if got := win.playAuthority.Text(); !strings.Contains(got, "Approval required") || !strings.Contains(got, "OfficialVerified") {
+		t.Fatalf("missing-consent warning was not visible: %q", got)
+	}
+	select {
+	case <-service.launchEntered:
+		t.Fatal("declined development consent reached the launch backend")
+	default:
+	}
+	confirmDevelopmentLaunch = func(*qt.QWidget) bool { return true }
 	win.playButton.Click()
 	select {
 	case <-service.launchEntered:
 	case <-time.After(time.Second):
 		t.Fatal("offscreen launch backend was not entered")
+	}
+	if got := win.playAuthority.Text(); got != service.authority.Warning {
+		t.Fatalf("development warning was not propagated exactly: %q", got)
+	}
+	if approvals := service.approvalCalls(); len(approvals) != 3 || approvals[0] || approvals[1] || !approvals[2] {
+		t.Fatalf("development approval flow = %v", approvals)
 	}
 	win.refreshLaunchState()
 	if !win.win.IsVisible() || win.launcherHidden {
@@ -292,6 +335,30 @@ type visualService struct {
 	launchDone    chan struct{}
 }
 
+type secureVisualService struct {
+	visualService
+	mu             sync.Mutex
+	requireConsent bool
+	authority      guimodel.LaunchAuthority
+	approvals      []bool
+}
+
+func (s *secureVisualService) PrepareLaunch(_ context.Context, approveDevelopment bool) (guimodel.LaunchAuthority, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.approvals = append(s.approvals, approveDevelopment)
+	if s.requireConsent && !approveDevelopment {
+		return guimodel.LaunchAuthority{DevelopmentConsentRequired: true}, errors.New("development consent required")
+	}
+	return s.authority, nil
+}
+
+func (s *secureVisualService) approvalCalls() []bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return append([]bool(nil), s.approvals...)
+}
+
 func (visualService) Snapshot(context.Context) (guimodel.InstallSnapshot, error) {
 	return guimodel.InstallSnapshot{
 		Installed: true,
@@ -318,6 +385,10 @@ func (visualService) Install(context.Context, guimodel.InstallRequest, func(guim
 	return nil
 }
 
+func (visualService) PrepareLaunch(context.Context, bool) (guimodel.LaunchAuthority, error) {
+	return guimodel.LaunchAuthority{Mode: "official-verified"}, nil
+}
+
 func (s visualService) Launch(_ context.Context, _ guimodel.LaunchRequest, started func()) error {
 	if s.launchEntered != nil {
 		close(s.launchEntered)
@@ -333,7 +404,10 @@ func (s visualService) Launch(_ context.Context, _ guimodel.LaunchRequest, start
 }
 
 func (visualService) LoadSettings(context.Context) (guimodel.Settings, error) {
-	return guimodel.Settings{Renderer: guimodel.RendererAuto, FPSMode: guimodel.FPSLimited, FrameRate: 60}, nil
+	settings := guimodel.DefaultSettings()
+	settings.FPSMode = guimodel.FPSLimited
+	settings.FrameRate = 60
+	return settings, nil
 }
 
 func (visualService) RendererOptions(context.Context) []guimodel.RendererOption {
