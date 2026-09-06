@@ -7,6 +7,7 @@ import (
 	qt "github.com/mappu/miqt/qt6"
 
 	guimodel "github.com/tipsy-linux/tipsy/internal/gui"
+	"github.com/tipsy-linux/tipsy/internal/setupsvc"
 	"github.com/tipsy-linux/tipsy/internal/version"
 )
 
@@ -27,30 +28,33 @@ type mainWindow struct {
 	setupLoadErr error
 	settingsErr  error
 
-	playButton          *qt.QPushButton
-	playState           *qt.QLabel
-	installBadge        *qt.QLabel
-	installVersion      *qt.QLabel
-	installDetail       *qt.QLabel
-	installPageBadge    *qt.QLabel
-	installPageVer      *qt.QLabel
-	installPageDetail   *qt.QLabel
-	settingsRenderer    *qt.QComboBox
-	settingsFPSMode     *qt.QComboBox
-	settingsFPS         *qt.QSpinBox
-	settingsVSync       *qt.QCheckBox
-	settingsLowTexture  *qt.QCheckBox
-	settingsDisplay     *qt.QComboBox
-	settingsDisplayKeys []string
-	settingsSyncing     bool
-	settingsApply       *qt.QPushButton
-	settingsReset       *qt.QPushButton
-	settingsHint        *qt.QLabel
-	doctorSummary       *qt.QLabel
-	doctorDetails       *qt.QPlainTextEdit
-	settingsProfile     *qt.QLabel
-	pageEntry           []*qt.QWidget
-	wizardScrolls       map[*qt.QWizardPage]*qt.QScrollArea
+	playButton              *qt.QPushButton
+	playState               *qt.QLabel
+	playAuthority           *qt.QLabel
+	installBadge            *qt.QLabel
+	installVersion          *qt.QLabel
+	installDetail           *qt.QLabel
+	installPageBadge        *qt.QLabel
+	installPageVer          *qt.QLabel
+	installPageDetail       *qt.QLabel
+	settingsRenderer        *qt.QComboBox
+	settingsFPSMode         *qt.QComboBox
+	settingsFPS             *qt.QSpinBox
+	settingsVSync           *qt.QCheckBox
+	settingsLowTexture      *qt.QCheckBox
+	settingsDiscordPresence *qt.QCheckBox
+	settingsDiscordJoin     *qt.QCheckBox
+	settingsDisplay         *qt.QComboBox
+	settingsDisplayKeys     []string
+	settingsSyncing         bool
+	settingsApply           *qt.QPushButton
+	settingsReset           *qt.QPushButton
+	settingsHint            *qt.QLabel
+	doctorSummary           *qt.QLabel
+	doctorDetails           *qt.QPlainTextEdit
+	settingsProfile         *qt.QLabel
+	pageEntry               []*qt.QWidget
+	wizardScrolls           map[*qt.QWizardPage]*qt.QScrollArea
 
 	lastLaunchState guimodel.LaunchState
 	launchTimer     *qt.QTimer
@@ -96,10 +100,16 @@ func (w *mainWindow) Show() {
 func (w *mainWindow) startInMode(mode, uri string) {
 	if (mode == guiModePlay || uri != "") && !w.FirstRun() {
 		qt.QGuiApplication_SetQuitOnLastWindowClosed(false)
-		if err := w.launch.StartRequest(context.Background(), guimodel.LaunchRequest{URI: uri}); err != nil {
+		started, err := w.startAuthorizedLaunch(context.Background(), guimodel.LaunchRequest{URI: uri})
+		if err != nil {
 			qt.QGuiApplication_SetQuitOnLastWindowClosed(true)
 			w.Show()
 			qt.QMessageBox_Warning(w.win.QWidget, "Could not launch Roblox", err.Error())
+			return
+		}
+		if !started {
+			qt.QGuiApplication_SetQuitOnLastWindowClosed(true)
+			w.Show()
 			return
 		}
 		w.lastLaunchState = guimodel.LaunchStarting
@@ -292,13 +302,81 @@ func (w *mainWindow) setInstallText(installed bool, versionText, detail string) 
 	}
 }
 
-func (w *mainWindow) launchRoblox() {
-	if err := w.launch.Start(context.Background()); err != nil {
+func (w *mainWindow) launchRoblox() bool {
+	started, err := w.startAuthorizedLaunch(context.Background(), guimodel.LaunchRequest{})
+	if err != nil {
 		qt.QMessageBox_Warning(w.win.QWidget, "Could not launch Roblox", err.Error())
-		return
+		return false
+	}
+	if !started {
+		return false
 	}
 	w.lastLaunchState = guimodel.LaunchStarting
 	w.refreshLaunchState()
+	return true
+}
+
+func (w *mainWindow) startAuthorizedLaunch(ctx context.Context, request guimodel.LaunchRequest) (bool, error) {
+	authority, err := w.service.PrepareLaunch(ctx, false)
+	if authority.DevelopmentConsentRequired {
+		w.setLaunchAuthority(authority)
+		if !confirmDevelopmentLaunch(w.win.QWidget) {
+			if w.status != nil {
+				w.status.ShowMessage2("Development launch was not authorized.", 6000)
+			}
+			return false, nil
+		}
+		authority, err = w.service.PrepareLaunch(ctx, true)
+	}
+	w.setLaunchAuthority(authority)
+	if err != nil {
+		return false, err
+	}
+	if err := w.launch.StartRequest(ctx, request); err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
+var confirmDevelopmentLaunch = func(parent *qt.QWidget) bool {
+	buttons := qt.QMessageBox__StandardButton(int(qt.QMessageBox__Yes) | int(qt.QMessageBox__No))
+	dialog := qt.NewQMessageBox6(
+		qt.QMessageBox__Warning,
+		"Authorize development launch",
+		"This source build cannot be authenticated as an official Tipsy release. Continue in DevelopmentUnrestricted mode?\n\nThis records your explicit choice in Tipsy's owner-private configuration. The official Roblox APK and active generation will still be verified, but this Tipsy session must not be represented as OfficialVerified.",
+		buttons,
+		parent,
+	)
+	dialog.SetDefaultButtonWithButton(qt.QMessageBox__No)
+	dialog.SetEscapeButtonWithButton(qt.QMessageBox__No)
+	result := dialog.Exec()
+	dialog.Delete()
+	return result == int(qt.QMessageBox__Yes)
+}
+
+func (w *mainWindow) setLaunchAuthority(authority guimodel.LaunchAuthority) {
+	if w.playAuthority == nil {
+		return
+	}
+	switch {
+	case authority.DevelopmentConsentRequired:
+		w.playAuthority.SetText("Approval required — source builds cannot launch as OfficialVerified.")
+		setObjectName(w.playAuthority.QObject, "noticeWarning")
+	case authority.Mode == string(setupsvc.DevelopmentUnrestricted):
+		warning := authority.Warning
+		if warning == "" {
+			warning = "DevelopmentUnrestricted mode is active; this is not an OfficialVerified Tipsy session."
+		}
+		w.playAuthority.SetText(warning)
+		setObjectName(w.playAuthority.QObject, "noticeWarning")
+	case authority.Mode == string(setupsvc.OfficialVerified):
+		w.playAuthority.SetText("OfficialVerified — release authority and the active Roblox generation are authenticated.")
+		setObjectName(w.playAuthority.QObject, "noticeSuccess")
+	default:
+		w.playAuthority.SetText("Launch authority will be verified before Roblox starts.")
+		setObjectName(w.playAuthority.QObject, "noticeInfo")
+	}
+	refreshStyle(w.playAuthority.QWidget)
 }
 
 func (w *mainWindow) refreshLaunchState() {

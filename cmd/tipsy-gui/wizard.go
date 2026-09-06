@@ -414,8 +414,9 @@ func (w *mainWindow) buildReadyWizardPage(wizard *qt.QWizard) *qt.QWizardPage {
 	setObjectName(launch.QObject, "playButton")
 	launch.SetAccessibleName("Launch Roblox now")
 	launch.OnClicked(func() {
-		w.launchRoblox()
-		wizard.Accept()
+		if w.launchRoblox() {
+			wizard.Accept()
+		}
 	})
 	layout.AddWidget(launch.QWidget)
 	layout.AddStretch()

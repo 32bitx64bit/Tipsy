@@ -276,12 +276,20 @@ func testMainSurface(t *testing.T, win *mainWindow, service *acceptanceService) 
 		t.Fatalf("Settings page Tab focus=%q, want Low texture mode", focused.AccessibleName())
 	}
 	sendTab(t)
+	if focused := qt.QApplication_FocusWidget(); focused == nil || focused.AccessibleName() != "Discord Rich Presence" {
+		t.Fatalf("Settings page Tab focus=%q, want Discord Rich Presence", focused.AccessibleName())
+	}
+	sendTab(t)
+	if focused := qt.QApplication_FocusWidget(); focused == nil || focused.AccessibleName() != "Show Join button" {
+		t.Fatalf("Settings page Tab focus=%q, want Show Join button", focused.AccessibleName())
+	}
+	sendTab(t)
 	if focused := qt.QApplication_FocusWidget(); focused == nil || focused.AccessibleName() != "Default monitor" {
 		t.Fatalf("Settings page Tab focus=%q, want Default monitor", focused.AccessibleName())
 	}
 
 	win.selectPage(2)
-	if win.settingsApply.IsEnabled() || win.settingsRenderer.CurrentText() != "Auto (recommended)" || win.settingsVSync.IsChecked() || win.settingsLowTexture.IsChecked() || win.settingsDisplay.CurrentText() != "Main monitor (default)" {
+	if win.settingsApply.IsEnabled() || win.settingsRenderer.CurrentText() != "Auto (recommended)" || win.settingsVSync.IsChecked() || win.settingsLowTexture.IsChecked() || !win.settingsDiscordPresence.IsChecked() || win.settingsDiscordJoin.IsChecked() || win.settingsDisplay.CurrentText() != "Main monitor (default)" {
 		t.Fatal("settings did not start clean on Auto with VSync off, high textures, main monitor, and Apply disabled")
 	}
 	model := win.settingsRenderer.Model()
@@ -308,7 +316,7 @@ func testMainSurface(t *testing.T, win *mainWindow, service *acceptanceService) 
 	if settings, err := service.LoadSettings(context.Background()); err != nil || !settings.VSync || settings.FPSMode != guimodel.FPSLimited {
 		t.Fatalf("VSync did not round-trip independently through Apply: settings=%+v err=%v", settings, err)
 	}
-	if got := win.settingsProfile.Text(); got != "OpenGL · 240 FPS · VSync on · High textures · Main monitor" {
+	if got := win.settingsProfile.Text(); got != "OpenGL · 240 FPS · VSync on · High textures · Discord · Main monitor" {
 		t.Fatalf("Home profile did not refresh after Apply: %q", got)
 	}
 	captureMainPageAtSizes(t, win, 2, "settings-limited")
@@ -320,7 +328,7 @@ func testMainSurface(t *testing.T, win *mainWindow, service *acceptanceService) 
 	if win.settingsLowTexture.IsChecked() {
 		t.Fatal("Reset defaults left low texture mode enabled")
 	}
-	if got := win.settingsProfile.Text(); got != "Auto renderer · Automatic FPS · VSync off · High textures · Main monitor" {
+	if got := win.settingsProfile.Text(); got != "Auto renderer · Automatic FPS · VSync off · High textures · Discord · Main monitor" {
 		t.Fatalf("Home profile did not refresh after Reset: %q", got)
 	}
 	win.settingsFPSMode.SetCurrentIndex(2)
@@ -566,6 +574,10 @@ func (s *acceptanceService) Install(ctx context.Context, request guimodel.Instal
 	default:
 		return errors.New("selected package does not exist: " + strings.Join(request.LocalPaths, ", "))
 	}
+}
+
+func (s *acceptanceService) PrepareLaunch(context.Context, bool) (guimodel.LaunchAuthority, error) {
+	return guimodel.LaunchAuthority{Mode: "official-verified"}, nil
 }
 
 func (s *acceptanceService) Launch(_ context.Context, _ guimodel.LaunchRequest, acknowledge func()) error {
