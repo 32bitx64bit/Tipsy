@@ -38,13 +38,40 @@ const (
 	flagGameBasicSettingsFramerateCap = "FFlagGameBasicSettingsFramerateCap5"
 	flagTaskSchedulerLimitFPS240      = "FFlagTaskSchedulerLimitTargetFpsTo2402"
 	intTaskSchedulerTargetFPS         = "DFIntTaskSchedulerTargetFps"
-	// Official allowlisted ClientAppSettings keys. Android Roblox otherwise
-	// loads mobile-phone texture quality. 3 is high; 1 is the documented
-	// memory-saving low (not last-resort 0).
-	flagTextureQualityOverrideEnabled = "DFFlagTextureQualityOverrideEnabled"
-	intTextureQualityOverride         = "DFIntTextureQualityOverride"
-	textureQualityHigh                = "3"
-	textureQualityLow                 = "1"
+	// Texture quality uses the named LowTextureMode mapping. The current
+	// Android client's TM2 repeatedly completes finer-mip requests with the
+	// same coarse image, even with the high quality and memory settings active.
+	// High uses the official TM1 path, verified with close-up avatar textures.
+	// Both manager gates are required: NewRenderUseTextureManager2 otherwise
+	// reenables the version-24 RenderUseTextureManager2 gate during startup.
+	// Low restores both gates so the previous high launch cannot linger in
+	// the engine flag cache. The 3/1 quality override pair remains high/low.
+	flagTextureQualityOverrideEnabled     = "DFFlagTextureQualityOverrideEnabled"
+	intTextureQualityOverride             = "DFIntTextureQualityOverride"
+	flagUITextureCompressionDesktop       = "FFlagUITextureCompressionDesktop"
+	flagTCTextureCompressionDesktop       = "FFlagTCTextureCompressionDesktop"
+	intRenderTextureTotalBudgetMB         = "FIntRenderTextureTotalBudgetMB"
+	intRenderTextureMipBias               = "FIntRenderTextureMipBias"
+	intTextureCompositorLowResFactor      = "FIntTextureCompositorLowResFactor"
+	intAvatarTextureMemoryMax             = "FIntAvatarTextureMemoryMax"
+	intRenderForceVideoMemorySize         = "FIntRenderForceVideoMemorySize"
+	flagTM2RuntimeTextureDisableStreaming = "FFlagTM2RuntimeTextureDisableStreaming"
+	flagTM2SkipMipsForUnstreamable2       = "FFlagTM2SkipMipsForUnstreamable2"
+	flagUseTM1LegacyMipPackForDecal       = "FFlagUseTM1PropsetUseLegacyMipPackForDecal"
+	flagRenderUseTextureManager2          = "FFlagRenderUseTextureManager224"
+	flagNewRenderUseTextureManager2       = "FFlagNewRenderUseTextureManager2"
+	textureQualityHigh                    = "3"
+	textureQualityLow                     = "1"
+	textureBudgetHighMB                   = "128"
+	textureBudgetLowMB                    = "64"
+	textureMipBiasHigh                    = "0"
+	textureMipBiasLow                     = "2"
+	textureCompositorFull                 = "1"
+	textureCompositorCDN                  = "4"
+	avatarTextureMemoryMaxHigh            = "33554432"
+	// 1 GiB / 64 MiB in bytes. INT32-safe; matches caps.videoMemory units.
+	videoMemoryHighBytes = "1073741824"
+	videoMemoryLowBytes  = "67108864"
 
 	maxSettingsBytes  = 64 << 10
 	maxRobloxXMLBytes = 4 << 20
@@ -120,9 +147,11 @@ type Settings struct {
 	Renderer  Renderer  `json:"renderer"`
 	FrameRate FrameRate `json:"frameRate"`
 	VSync     bool      `json:"vsync"`
-	// LowTextureMode requests Roblox's documented memory-saving texture
-	// quality (override 1). The zero value / missing JSON field is false, so
-	// existing configs and Default() emit high quality (override 3).
+	// LowTextureMode requests the memory-saving texture mapping (override 1,
+	// CDN compositor 4, 64 MiB video-memory cap, TM2 skip-mips, no desktop
+	// DXT). The zero value / missing JSON field is false, so existing
+	// configs and Default() emit the high-quality mapping (override 3,
+	// 1 GiB video-memory cap, compositor 1, desktop DXT, official TM1).
 	LowTextureMode bool `json:"lowTextureMode"`
 	// Display selects where Tipsy maps the launcher and Roblox windows.
 	// "primary" (default) pins them to the current main monitor, "pointer"
@@ -366,8 +395,9 @@ func (s *Service) Reset(ctx context.Context) (Settings, error) {
 // client's legacy scheduler target; Unlimited opts out of the current 240
 // limiter and keeps its high finite target in GlobalBasicSettings_13.xml.
 // Automatic mode deliberately leaves both FPS controls under
-// downloaded-policy/client ownership. Texture quality is always overridden:
-// high (3) by default, or low (1) when LowTextureMode is on.
+// downloaded-policy/client ownership. High texture quality selects the
+// official TM1 path because TM2 does not retain finer completed mips on the
+// current Android client. Low restores TM2 and the memory-saving mapping.
 func Overrides(s Settings) (map[string]any, error) {
 	s = normalized(s)
 	if err := s.Validate(); err != nil {
@@ -375,12 +405,8 @@ func Overrides(s Settings) (map[string]any, error) {
 	}
 	out := map[string]any{
 		flagGameBasicSettingsFramerateCap: "True",
-		flagTextureQualityOverrideEnabled: "True",
-		intTextureQualityOverride:         textureQualityHigh,
 	}
-	if s.LowTextureMode {
-		out[intTextureQualityOverride] = textureQualityLow
-	}
+	applyTextureQualityOverrides(out, s.LowTextureMode)
 	switch s.Renderer {
 	case RendererOpenGL:
 		out[flagPreferOpenGL] = "True"
@@ -409,6 +435,43 @@ func Overrides(s Settings) (map[string]any, error) {
 		out[flagTaskSchedulerLimitFPS240] = "False"
 	}
 	return out, nil
+}
+
+// applyTextureQualityOverrides writes Tipsy's named LowTextureMode mapping.
+// Desktop compression, legacy-decal, and video-memory keys are explicit so a
+// previous high launch cannot linger in the engine flag cache when Low
+// texture mode is on. Avatar texture memory is high-only so CDN/client keep
+// ownership in the low path.
+func applyTextureQualityOverrides(out map[string]any, low bool) {
+	out[flagTextureQualityOverrideEnabled] = "True"
+	if low {
+		out[intTextureQualityOverride] = textureQualityLow
+		out[flagUITextureCompressionDesktop] = "False"
+		out[flagTCTextureCompressionDesktop] = "False"
+		out[intRenderTextureTotalBudgetMB] = textureBudgetLowMB
+		out[intRenderTextureMipBias] = textureMipBiasLow
+		out[intTextureCompositorLowResFactor] = textureCompositorCDN
+		out[intRenderForceVideoMemorySize] = videoMemoryLowBytes
+		out[flagTM2RuntimeTextureDisableStreaming] = "True"
+		out[flagTM2SkipMipsForUnstreamable2] = "True"
+		out[flagUseTM1LegacyMipPackForDecal] = "True"
+		out[flagRenderUseTextureManager2] = "True"
+		out[flagNewRenderUseTextureManager2] = "True"
+		return
+	}
+	out[intTextureQualityOverride] = textureQualityHigh
+	out[flagRenderUseTextureManager2] = "False"
+	out[flagNewRenderUseTextureManager2] = "False"
+	out[flagUITextureCompressionDesktop] = "True"
+	out[flagTCTextureCompressionDesktop] = "True"
+	out[intRenderTextureTotalBudgetMB] = textureBudgetHighMB
+	out[intRenderTextureMipBias] = textureMipBiasHigh
+	out[intTextureCompositorLowResFactor] = textureCompositorFull
+	out[intAvatarTextureMemoryMax] = avatarTextureMemoryMaxHigh
+	out[intRenderForceVideoMemorySize] = videoMemoryHighBytes
+	out[flagTM2RuntimeTextureDisableStreaming] = "False"
+	out[flagTM2SkipMipsForUnstreamable2] = "False"
+	out[flagUseTM1LegacyMipPackForDecal] = "False"
 }
 
 func (s *Service) LoadOverrides(ctx context.Context) (map[string]any, error) {

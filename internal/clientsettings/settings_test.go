@@ -105,9 +105,10 @@ func TestLowTextureModeDefaultsOffAndEmitsAllowlistedOverrides(t *testing.T) {
 	}
 
 	high, err := Overrides(got)
-	if err != nil || high[flagTextureQualityOverrideEnabled] != "True" || high[intTextureQualityOverride] != textureQualityHigh {
-		t.Fatalf("default high texture overrides=%v err=%v", high, err)
+	if err != nil {
+		t.Fatalf("default high texture overrides err=%v", err)
 	}
+	assertHighTextureOverrides(t, high)
 
 	got.LowTextureMode = true
 	result, err := s.Apply(context.Background(), got)
@@ -119,17 +120,19 @@ func TestLowTextureModeDefaultsOffAndEmitsAllowlistedOverrides(t *testing.T) {
 		t.Fatalf("reloaded LowTextureMode=%+v err=%v", reloaded, err)
 	}
 	low, err := Overrides(reloaded)
-	if err != nil || low[flagTextureQualityOverrideEnabled] != "True" || low[intTextureQualityOverride] != textureQualityLow {
-		t.Fatalf("low texture overrides=%v err=%v", low, err)
+	if err != nil {
+		t.Fatalf("low texture overrides err=%v", err)
 	}
+	assertLowTextureOverrides(t, low)
 	reset, err := s.Reset(context.Background())
 	if err != nil || reset.LowTextureMode || reset != Default() {
 		t.Fatalf("reset LowTextureMode=%+v err=%v", reset, err)
 	}
 	restored, err := Overrides(reset)
-	if err != nil || restored[intTextureQualityOverride] != textureQualityHigh {
-		t.Fatalf("reset texture overrides=%v err=%v", restored, err)
+	if err != nil {
+		t.Fatalf("reset texture overrides err=%v", err)
 	}
+	assertHighTextureOverrides(t, restored)
 }
 
 func TestVSyncDefaultsOffAndMigratesExistingSettings(t *testing.T) {
@@ -331,6 +334,7 @@ func TestRendererOverridesAndVulkanAvailability(t *testing.T) {
 	if got[flagTextureQualityOverrideEnabled] != "True" || got[intTextureQualityOverride] != textureQualityHigh {
 		t.Fatalf("OpenGL high texture overrides=%v", got)
 	}
+	assertHighTextureOverrides(t, got)
 	if got[flagGameBasicSettingsFramerateCap] != "True" ||
 		got[flagTaskSchedulerLimitFPS240] != "False" {
 		t.Fatalf("unlimited FPS overrides=%v", got)
@@ -358,6 +362,7 @@ func TestRendererOverridesAndVulkanAvailability(t *testing.T) {
 	if auto[flagTextureQualityOverrideEnabled] != "True" || auto[intTextureQualityOverride] != textureQualityHigh {
 		t.Fatalf("default high texture overrides=%v", auto)
 	}
+	assertHighTextureOverrides(t, auto)
 	if _, ok := auto[intTaskSchedulerTargetFPS]; ok {
 		t.Fatalf("auto must preserve scheduler target ownership: %v", auto)
 	}
@@ -371,7 +376,7 @@ func TestRendererOverridesAndVulkanAvailability(t *testing.T) {
 	if _, ok := auto[flagPreferOpenGL]; ok {
 		t.Fatalf("auto must not emit PreferOpenGL: %v", auto)
 	}
-	wantAutoLen := 3 // framerate-cap gate + two texture-quality flags
+	wantAutoLen := 15 // framerate-cap gate + fourteen high-quality texture keys
 	if caps.Vulkan.Available {
 		wantAutoLen++
 	}
@@ -379,9 +384,10 @@ func TestRendererOverridesAndVulkanAvailability(t *testing.T) {
 		t.Fatalf("auto overrides=%v want %d keys err=%v", auto, wantAutoLen, err)
 	}
 	low, err := Overrides(Settings{Renderer: RendererAuto, FrameRate: FrameRate{Mode: FrameRateAuto}, LowTextureMode: true})
-	if err != nil || low[flagTextureQualityOverrideEnabled] != "True" || low[intTextureQualityOverride] != textureQualityLow {
-		t.Fatalf("low texture overrides=%v err=%v", low, err)
+	if err != nil {
+		t.Fatalf("low texture overrides err=%v", err)
 	}
+	assertLowTextureOverrides(t, low)
 	withVSync, err := Overrides(Settings{Renderer: RendererAuto, FrameRate: FrameRate{Mode: FrameRateUnlimited}, VSync: true})
 	if err != nil || withVSync[flagTaskSchedulerLimitFPS240] != "False" ||
 		withVSync[flagGameBasicSettingsFramerateCap] != "True" {
@@ -542,5 +548,71 @@ func TestClientLockBlocksApply(t *testing.T) {
 	defer release()
 	if _, err := s.Apply(context.Background(), Default()); err == nil || !strings.Contains(err.Error(), "running") {
 		t.Fatalf("lock error=%v", err)
+	}
+}
+
+func assertHighTextureOverrides(t *testing.T, got map[string]any) {
+	t.Helper()
+	want := map[string]any{
+		flagTextureQualityOverrideEnabled:     "True",
+		intTextureQualityOverride:             textureQualityHigh,
+		flagUITextureCompressionDesktop:       "True",
+		flagTCTextureCompressionDesktop:       "True",
+		intRenderTextureTotalBudgetMB:         textureBudgetHighMB,
+		intRenderTextureMipBias:               textureMipBiasHigh,
+		intTextureCompositorLowResFactor:      textureCompositorFull,
+		intAvatarTextureMemoryMax:             avatarTextureMemoryMaxHigh,
+		intRenderForceVideoMemorySize:         videoMemoryHighBytes,
+		flagTM2RuntimeTextureDisableStreaming: "False",
+		flagTM2SkipMipsForUnstreamable2:       "False",
+		flagUseTM1LegacyMipPackForDecal:       "False",
+		"FFlagRenderUseTextureManager224":     "False",
+		"FFlagNewRenderUseTextureManager2":    "False",
+	}
+	for key, value := range want {
+		if got[key] != value {
+			t.Fatalf("high texture %s=%v want %v in %v", key, got[key], value, got)
+		}
+	}
+	assertNoForbiddenTextureOverrides(t, got)
+}
+
+func assertLowTextureOverrides(t *testing.T, got map[string]any) {
+	t.Helper()
+	want := map[string]any{
+		flagTextureQualityOverrideEnabled:     "True",
+		intTextureQualityOverride:             textureQualityLow,
+		flagUITextureCompressionDesktop:       "False",
+		flagTCTextureCompressionDesktop:       "False",
+		intRenderTextureTotalBudgetMB:         textureBudgetLowMB,
+		intRenderTextureMipBias:               textureMipBiasLow,
+		intTextureCompositorLowResFactor:      textureCompositorCDN,
+		intRenderForceVideoMemorySize:         videoMemoryLowBytes,
+		flagTM2RuntimeTextureDisableStreaming: "True",
+		flagTM2SkipMipsForUnstreamable2:       "True",
+		flagUseTM1LegacyMipPackForDecal:       "True",
+		"FFlagRenderUseTextureManager224":     "True",
+		"FFlagNewRenderUseTextureManager2":    "True",
+	}
+	for key, value := range want {
+		if got[key] != value {
+			t.Fatalf("low texture %s=%v want %v in %v", key, got[key], value, got)
+		}
+	}
+	if _, ok := got[intAvatarTextureMemoryMax]; ok {
+		t.Fatalf("low texture must omit AvatarTextureMemoryMax: %v", got)
+	}
+	assertNoForbiddenTextureOverrides(t, got)
+}
+
+func assertNoForbiddenTextureOverrides(t *testing.T, got map[string]any) {
+	t.Helper()
+	for _, key := range []string{
+		"FIntDebugFRMQualityLevelOverride",
+		"DFIntRenderForceVideoMemorySize",
+	} {
+		if _, ok := got[key]; ok {
+			t.Fatalf("forbidden texture override %s in %v", key, got)
+		}
 	}
 }
