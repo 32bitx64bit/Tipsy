@@ -43,6 +43,12 @@ func protFromFlags(flags elf.ProgFlag) int {
 	return prot
 }
 
+func stagedLoadProt(final int) int {
+	// Relocations and BSS initialization may write to load segments, but code
+	// is never executable until all loader writes have finished.
+	return (final | syscall.PROT_WRITE) &^ syscall.PROT_EXEC
+}
+
 func rawMmap(addr, length uintptr, prot, flags, fd int, offset int64) (uintptr, error) {
 	if length == 0 {
 		return 0, fmt.Errorf("loader: mmap length 0")
@@ -125,6 +131,9 @@ func (m *Module) mapLoads(fd *os.File, ef *elf.File) error {
 
 	var minV, maxV uint64
 	for i, p := range loads {
+		if p.Flags&(elf.PF_W|elf.PF_X) == elf.PF_W|elf.PF_X {
+			return fmt.Errorf("loader: writable executable PT_LOAD in %s", m.Path)
+		}
 		if i == 0 || p.Vaddr < minV {
 			minV = p.Vaddr
 		}
@@ -198,8 +207,10 @@ func mapOneLoad(fd int, bias uintptr, p *elf.Prog) error {
 	segPageEnd := pageRound(segEnd)
 	fileEnd := segStart + uintptr(p.Filesz)
 	prot := protFromFlags(p.Flags)
-	// Keep writable until relocs finish; final prot restored afterwards.
-	mapProt := prot | syscall.PROT_WRITE
+	// Keep segments writable while relocations and BSS initialization run,
+	// but never writable and executable at the same time. Executable mappings
+	// become RX only after relocation validation succeeds.
+	mapProt := stagedLoadProt(prot)
 	if mapProt&^syscall.PROT_WRITE == 0 && prot == 0 {
 		mapProt = syscall.PROT_NONE
 	}
@@ -238,11 +249,16 @@ func mapOneLoad(fd int, bias uintptr, p *elf.Prog) error {
 	return nil
 }
 
-func (m *Module) protectFinal() {
+func (m *Module) protectFinal() error {
 	for _, s := range m.segs {
+		if s.prot&syscall.PROT_WRITE != 0 && s.prot&syscall.PROT_EXEC != 0 {
+			return fmt.Errorf("loader: refusing writable executable final mapping in %s", m.Path)
+		}
 		addr := m.bias + uintptr(s.vaddr)
 		sz := uintptr(s.memsz)
-		_ = rawMprotect(pageTrunc(addr), pageRound(addr+sz)-pageTrunc(addr), s.prot)
+		if err := rawMprotect(pageTrunc(addr), pageRound(addr+sz)-pageTrunc(addr), s.prot); err != nil {
+			return fmt.Errorf("loader: final PT_LOAD protection in %s: %w", m.Path, err)
+		}
 	}
 	for _, s := range m.relro {
 		addr := m.bias + uintptr(s.vaddr)
@@ -250,8 +266,28 @@ func (m *Module) protectFinal() {
 		if sz == 0 {
 			continue
 		}
-		_ = rawMprotect(pageTrunc(addr), pageRound(addr+sz)-pageTrunc(addr), syscall.PROT_READ)
+		if err := rawMprotect(pageTrunc(addr), pageRound(addr+sz)-pageTrunc(addr), syscall.PROT_READ); err != nil {
+			return fmt.Errorf("loader: GNU_RELRO protection in %s: %w", m.Path, err)
+		}
 	}
+	return nil
+}
+
+func (m *Module) protectExecutableLoads() error {
+	for _, s := range m.segs {
+		if s.prot&syscall.PROT_EXEC == 0 {
+			continue
+		}
+		if s.prot&syscall.PROT_WRITE != 0 {
+			return fmt.Errorf("loader: refusing writable executable PT_LOAD in %s", m.Path)
+		}
+		addr := m.bias + uintptr(s.vaddr)
+		sz := uintptr(s.memsz)
+		if err := rawMprotect(pageTrunc(addr), pageRound(addr+sz)-pageTrunc(addr), s.prot); err != nil {
+			return fmt.Errorf("loader: executable PT_LOAD protection in %s: %w", m.Path, err)
+		}
+	}
+	return nil
 }
 
 func vaddrFileBytes(ef *elf.File, vaddr, size uint64) ([]byte, error) {
@@ -283,6 +319,11 @@ func vaddrFileBytes(ef *elf.File, vaddr, size uint64) ([]byte, error) {
 func (m *Module) write64(vaddr uint64, val uint64) error {
 	if !m.contains(vaddr, 8) {
 		return fmt.Errorf("loader: reloc store 0x%x out of range", vaddr)
+	}
+	for _, s := range m.segs {
+		if vaddr >= s.vaddr && vaddr+8 <= s.vaddr+s.memsz && s.prot&syscall.PROT_EXEC != 0 {
+			return fmt.Errorf("loader: text relocation store 0x%x prohibited in %s", vaddr, m.Path)
+		}
 	}
 	addr := m.bias + uintptr(vaddr)
 	binary.LittleEndian.PutUint64(sliceAt(addr, 8), val)

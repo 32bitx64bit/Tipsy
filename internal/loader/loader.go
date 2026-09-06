@@ -6,9 +6,11 @@
 package loader
 
 import (
+	"context"
 	"debug/elf"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -49,6 +51,9 @@ type Module struct {
 
 	missing []string
 	missSet map[string]struct{}
+
+	authorized     *authorizedFiles
+	authorizedRoot bool
 }
 
 type loadSession struct {
@@ -85,68 +90,109 @@ func (m *Module) noteMissing(name string) {
 	m.missing = append(m.missing, name)
 }
 
-// Open maps path, loads same-dir DT_NEEDED Android DSOs, and applies relocations.
+// Open is the unrestricted development/diagnostic pathname loader. Official
+// launch must use OpenFD so authenticated inputs are never reopened by path.
 // Constructors run in Init, not here.
 func Open(path string, r Resolver) (*Module, error) {
-	return open(path, r, newSession())
+	return openPath(path, r, newSession())
 }
 
-func open(path string, r Resolver, sess *loadSession) (*Module, error) {
+func sessionModule(sess *loadSession, key string) *Module {
+	sess.mu.Lock()
+	defer sess.mu.Unlock()
+	if m := sess.done[key]; m != nil {
+		return m
+	}
+	return sess.busy[key]
+}
+
+func openPath(path string, r Resolver, sess *loadSession) (*Module, error) {
 	abs, err := filepath.Abs(path)
 	if err != nil {
 		return nil, err
 	}
-	sess.mu.Lock()
-	if m := sess.done[abs]; m != nil {
-		sess.mu.Unlock()
+	if m := sessionModule(sess, abs); m != nil {
 		return m, nil
 	}
-	if m := sess.busy[abs]; m != nil {
-		sess.mu.Unlock()
-		return m, nil
-	}
-	sess.mu.Unlock()
-
 	f, err := os.Open(abs)
 	if err != nil {
 		return nil, fmt.Errorf("loader: open %s: %w", path, err)
 	}
-	ef, err := elf.NewFile(f)
+	return openFile(abs, abs, f, false, r, sess, nil)
+}
+
+func openAuthorized(soname string, r Resolver, sess *loadSession, files *authorizedFiles) (*Module, error) {
+	key := "authorized:" + soname
+	if m := sessionModule(sess, key); m != nil {
+		return m, nil
+	}
+	input := files.bySONAME[soname]
+	if input == nil || input.duplicate == nil {
+		return nil, fmt.Errorf("loader: needed %s is not in the authorized descriptor set", soname)
+	}
+	return openFile(key, soname, input.duplicate, true, r, sess, files)
+}
+
+func openFile(key, display string, f *os.File, authenticated bool, r Resolver, sess *loadSession, files *authorizedFiles) (*Module, error) {
+	st, err := f.Stat()
 	if err != nil {
-		f.Close()
-		return nil, fmt.Errorf("loader: parse %s: %w", path, err)
+		if !authenticated {
+			_ = f.Close()
+		}
+		return nil, fmt.Errorf("loader: stat %s: %w", display, err)
+	}
+	// SectionReader deliberately has no Close method. In authenticated mode the
+	// descriptor set, not debug/elf, owns every duplicate through Module.Close.
+	ef, err := elf.NewFile(io.NewSectionReader(f, 0, st.Size()))
+	if err != nil {
+		if !authenticated {
+			_ = f.Close()
+		}
+		return nil, fmt.Errorf("loader: parse %s: %w", display, err)
 	}
 
 	if ef.Class != elf.ELFCLASS64 || ef.Machine != elf.EM_X86_64 {
-		ef.Close()
-		f.Close()
-		return nil, fmt.Errorf("loader: %s is %s %s (need ELF64 EM_X86_64)", path, ef.Class, ef.Machine)
+		_ = ef.Close()
+		if !authenticated {
+			_ = f.Close()
+		}
+		return nil, fmt.Errorf("loader: %s is %s %s (need ELF64 EM_X86_64)", display, ef.Class, ef.Machine)
 	}
 	if ef.Type != elf.ET_DYN {
-		ef.Close()
-		f.Close()
-		return nil, fmt.Errorf("loader: %s is %s (need ET_DYN)", path, ef.Type)
+		_ = ef.Close()
+		if !authenticated {
+			_ = f.Close()
+		}
+		return nil, fmt.Errorf("loader: %s is %s (need ET_DYN)", display, ef.Type)
 	}
 
 	m := &Module{
-		Path:     abs,
+		Path:     display,
 		resolver: r,
-		file:     f,
 		ef:       ef,
 	}
+	if !authenticated {
+		m.file = f
+	}
 	sess.mu.Lock()
-	sess.busy[abs] = m
+	sess.busy[key] = m
 	sess.mu.Unlock()
 
 	fail := func(err error) (*Module, error) {
 		sess.mu.Lock()
-		delete(sess.busy, abs)
+		delete(sess.busy, key)
 		sess.mu.Unlock()
-		m.Close()
+		_ = m.Close()
 		return nil, err
 	}
 
 	if err := m.mapLoads(f, ef); err != nil {
+		return fail(err)
+	}
+	// IRELATIVE resolvers execute during relocation. Finish executable
+	// segments before any relocation can call into them; later relocation
+	// stores to those ranges are rejected as text relocations.
+	if err := m.protectExecutableLoads(); err != nil {
 		return fail(err)
 	}
 
@@ -163,7 +209,7 @@ func open(path string, r Resolver, sess *loadSession) (*Module, error) {
 	if strtabVA != 0 {
 		strtab, err = vaddrFileBytes(ef, strtabVA, strsz)
 		if err != nil {
-			return fail(fmt.Errorf("loader: strtab %s: %w", path, err))
+			return fail(fmt.Errorf("loader: strtab %s: %w", display, err))
 		}
 	}
 	d, err := parseDyn(ents, strtab)
@@ -173,6 +219,9 @@ func open(path string, r Resolver, sess *loadSession) (*Module, error) {
 	m.dyn = d
 	m.Needed = append([]string(nil), d.needed...)
 	m.soname = d.soname
+	if authenticated && d.soname != "" && d.soname != display {
+		return fail(fmt.Errorf("loader: authenticated descriptor %s declares SONAME %s", display, d.soname))
+	}
 
 	syms, _, err := loadDynsym(ef, d)
 	if err != nil {
@@ -180,10 +229,21 @@ func open(path string, r Resolver, sess *loadSession) (*Module, error) {
 	}
 	m.syms = syms
 
-	dir := filepath.Dir(abs)
+	dir := filepath.Dir(display)
 	for _, n := range m.Needed {
 		base := neededBase(n)
+		if authenticated && base != n {
+			return fail(fmt.Errorf("loader: authenticated DT_NEEDED %q is not a SONAME", n))
+		}
 		if _, sys := systemSonames[base]; sys {
+			continue
+		}
+		if authenticated {
+			dep, err := openAuthorized(base, r, sess, files)
+			if err != nil {
+				return fail(fmt.Errorf("loader: needed %s: %w", base, err))
+			}
+			m.deps = append(m.deps, dep)
 			continue
 		}
 		cand := filepath.Join(dir, base)
@@ -191,7 +251,7 @@ func open(path string, r Resolver, sess *loadSession) (*Module, error) {
 		if err != nil || st.IsDir() {
 			continue
 		}
-		dep, err := open(cand, r, sess)
+		dep, err := openPath(cand, r, sess)
 		if err != nil {
 			return fail(fmt.Errorf("loader: needed %s: %w", base, err))
 		}
@@ -201,19 +261,22 @@ func open(path string, r Resolver, sess *loadSession) (*Module, error) {
 	if err := m.relocate(); err != nil {
 		return fail(err)
 	}
-	m.hookLLVMEmutls()
-	m.protectFinal()
+	if err := m.protectFinal(); err != nil {
+		return fail(err)
+	}
 
 	// Relocs done: we can drop the elf.File parser (fd stays until Close
 	// only if still needed; mappings are MAP_PRIVATE so fd can close).
-	ef.Close()
+	_ = ef.Close()
 	m.ef = nil
-	f.Close()
-	m.file = nil
+	if !authenticated {
+		_ = f.Close()
+		m.file = nil
+	}
 
 	sess.mu.Lock()
-	delete(sess.busy, abs)
-	sess.done[abs] = m
+	delete(sess.busy, key)
+	sess.done[key] = m
 	sess.mu.Unlock()
 	return m, nil
 }
@@ -250,6 +313,11 @@ func (m *Module) Init() error {
 		return nil
 	}
 	m.mu.Unlock()
+	if m.authorizedRoot {
+		if err := m.authorized.verify(context.Background()); err != nil {
+			return fmt.Errorf("loader: authorized descriptors changed before constructors: %w", err)
+		}
+	}
 
 	for _, d := range m.deps {
 		if err := d.Init(); err != nil {
@@ -321,6 +389,7 @@ func (m *Module) Close() error {
 	}
 	m.closed = true
 	deps := m.deps
+	authorized, authorizedRoot := m.authorized, m.authorizedRoot
 	if m.ef != nil {
 		m.ef.Close()
 		m.ef = nil
@@ -338,6 +407,11 @@ func (m *Module) Close() error {
 	err := rawMunmap(start, size)
 	for _, d := range deps {
 		if e := d.Close(); e != nil && err == nil {
+			err = e
+		}
+	}
+	if authorizedRoot && authorized != nil {
+		if e := authorized.close(); e != nil && err == nil {
 			err = e
 		}
 	}

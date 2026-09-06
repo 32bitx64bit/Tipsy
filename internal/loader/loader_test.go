@@ -302,13 +302,16 @@ func TestCallJNIOnLoadTrampoline(t *testing.T) {
 	// Tiny SysV function: mov eax, 0x10006; ret   (JNI_VERSION_1_6)
 	code := []byte{0xB8, 0x06, 0x00, 0x01, 0x00, 0xC3}
 	page := syscall.Getpagesize()
-	mem, err := syscall.Mmap(-1, 0, page, syscall.PROT_READ|syscall.PROT_WRITE|syscall.PROT_EXEC,
+	mem, err := syscall.Mmap(-1, 0, page, syscall.PROT_READ|syscall.PROT_WRITE,
 		syscall.MAP_PRIVATE|syscall.MAP_ANONYMOUS)
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer syscall.Munmap(mem)
 	copy(mem, code)
+	if err := syscall.Mprotect(mem, syscall.PROT_READ|syscall.PROT_EXEC); err != nil {
+		t.Fatal(err)
+	}
 	fn := uintptr(unsafe.Pointer(&mem[0]))
 	got := CallJNIOnLoad(fn, 0, 0)
 	if got != 0x10006 {
@@ -317,10 +320,12 @@ func TestCallJNIOnLoadTrampoline(t *testing.T) {
 }
 
 type synthOpts struct {
-	needed   []string
-	imports  []string
-	withAPS2 bool
-	withIRel bool
+	needed        []string
+	imports       []string
+	withAPS2      bool
+	withIRel      bool
+	withTextReloc bool
+	writableExec  bool
 }
 
 func buildSynthELF(opt synthOpts) []byte {
@@ -410,6 +415,9 @@ func buildSynthELF(opt synthOpts) []byte {
 	if opt.withIRel {
 		relas = append(relas, Reloc{Off: vaIRelSlot, Info: relInfo(0, elf.R_X86_64_IRELATIVE), Addend: int64(vaIFunc)})
 	}
+	if opt.withTextReloc {
+		relas = append(relas, Reloc{Off: vaInit + 8, Info: relInfo(0, elf.R_X86_64_RELATIVE), Addend: 0x55})
+	}
 	for _, im := range opt.imports {
 		relas = append(relas, Reloc{
 			Off:  vaGlobSlot,
@@ -496,9 +504,13 @@ func buildSynthELF(opt synthOpts) []byte {
 		_ = binary.Write(pb, binary.LittleEndian, &p)
 		copy(buf[off:], pb.Bytes())
 	}
+	rxFlags := elf.PF_R | elf.PF_X
+	if opt.writableExec {
+		rxFlags |= elf.PF_W
+	}
 	writePhdr(64, elf.Prog64{
 		Type:   uint32(elf.PT_LOAD),
-		Flags:  uint32(elf.PF_R | elf.PF_X),
+		Flags:  uint32(rxFlags),
 		Off:    0,
 		Vaddr:  0,
 		Paddr:  0,
