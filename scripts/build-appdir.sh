@@ -5,7 +5,8 @@ set -euo pipefail
 
 usage() {
 	cat >&2 <<USAGE
-usage: $0 --version VERSION [--output-dir DIRECTORY]
+usage: $0 --version VERSION [--output-dir DIRECTORY] [--mode developer|official]
+  [--release-lock FILE] [--source-commit COMMIT]
 
 Builds a clean x86_64 AppDir and reproducible .tar.gz archive. The build uses
 the installed Qt 6 runtime and never downloads tools, APKs, or dependencies.
@@ -20,6 +21,9 @@ fail() {
 
 version=
 output_dir=
+mode=developer
+release_lock=
+source_commit=
 while [[ $# -gt 0 ]]; do
 	case "$1" in
 		--version)
@@ -32,6 +36,21 @@ while [[ $# -gt 0 ]]; do
 			output_dir=$2
 			shift 2
 			;;
+		--mode)
+			[[ $# -ge 2 ]] || usage
+			mode=$2
+			shift 2
+			;;
+		--release-lock)
+			[[ $# -ge 2 ]] || usage
+			release_lock=$2
+			shift 2
+			;;
+		--source-commit)
+			[[ $# -ge 2 ]] || usage
+			source_commit=$2
+			shift 2
+			;;
 		-h|--help)
 			usage
 			;;
@@ -42,8 +61,35 @@ while [[ $# -gt 0 ]]; do
 done
 
 [[ "$version" =~ ^[0-9A-Za-z][0-9A-Za-z._+-]*$ ]] || fail 'VERSION must contain only release-safe characters'
+[[ "$mode" == developer || "$mode" == official ]] || fail 'mode must be developer or official'
 
 repo=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
+if [[ -z "$release_lock" ]]; then
+	release_lock="$repo/scripts/release-inputs.lock.json"
+fi
+[[ -f "$release_lock" && ! -L "$release_lock" ]] || fail 'release input lock is not a regular file'
+release_lock=$(readlink -f -- "$release_lock")
+"$repo/scripts/release-lock.py" --lock "$release_lock" --mode "$mode"
+release_lock_sha256=$("$repo/scripts/release-lock.py" --lock "$release_lock" --mode "$mode" --digest)
+canonical_repository=$("$repo/scripts/release-lock.py" --lock "$release_lock" --mode "$mode" --get source.repository)
+head_commit=$(git -C "$repo" rev-parse HEAD 2>/dev/null) || fail 'source tree has no reviewed Git commit'
+[[ "$head_commit" =~ ^[0-9a-f]{40}$ ]] || fail 'source HEAD is not a full Git commit'
+if [[ -z "$source_commit" ]]; then
+	source_commit=$head_commit
+fi
+[[ "$source_commit" =~ ^[0-9a-f]{40}$ ]] || fail 'source commit must contain 40 lowercase hexadecimal characters'
+source_dirty=false
+if [[ -n $(git -C "$repo" status --porcelain=v1 --untracked-files=all) ]]; then
+	source_dirty=true
+fi
+if [[ "$mode" == official ]]; then
+	[[ "$source_commit" == "$head_commit" ]] || fail 'official candidate source commit does not match HEAD'
+	[[ "$source_dirty" == false ]] || fail 'official candidate requires a completely clean source tree'
+	[[ "${TIPSY_RELEASE_SOURCE_READONLY:-}" == 1 ]] || fail 'official candidate must run through the read-only isolated release builder'
+	origin=$(git -C "$repo" remote get-url origin 2>/dev/null || true)
+	origin=${origin%.git}
+	[[ "$origin" == "$canonical_repository" ]] || fail 'Git origin does not match the canonical release-input repository'
+fi
 if [[ -z "$output_dir" ]]; then
 	output_dir="$repo/dist"
 fi
@@ -67,7 +113,7 @@ final_archive="$output_dir/$archive_name"
 [[ ! -e "$final_appdir" ]] || fail "output already exists: $final_appdir"
 [[ ! -e "$final_archive" ]] || fail "output already exists: $final_archive"
 
-required_commands=(go gcc pkg-config qmake6 patchelf ldd readelf file install sha256sum tar gzip)
+required_commands=(go gcc pkg-config qmake6 patchelf ldd readelf file getcap install python3 readlink sha256sum stat tar gzip)
 for command_name in "${required_commands[@]}"; do
 	command -v "$command_name" >/dev/null 2>&1 || fail "required command is missing: $command_name"
 done
@@ -75,23 +121,34 @@ required_pkg_modules=(Qt6Widgets Qt6Gui Qt6Core x11 xext pangocairo pangoft2 cai
 pkg-config --exists "${required_pkg_modules[@]}" || \
 	fail 'Qt 6, X11/Xext, or Pango/Cairo development files are missing'
 [[ $(go env GOOS) == linux ]] || fail 'the active Go toolchain is not targeting Linux'
+if [[ "$mode" == official ]]; then
+	expected_go="go$("$repo/scripts/release-lock.py" --lock "$release_lock" --mode official --get target.go)"
+	[[ $(go env GOVERSION) == "$expected_go" ]] || fail "official Go toolchain mismatch (expected $expected_go)"
+fi
 
 qt_plugins=$(qmake6 -query QT_INSTALL_PLUGINS)
 [[ -d "$qt_plugins" ]] || fail "Qt plugin directory does not exist: $qt_plugins"
 
 source_date_epoch=${SOURCE_DATE_EPOCH:-}
 if [[ -z "$source_date_epoch" ]]; then
-	source_date_epoch=$(git -C "$repo" log -1 --format=%ct 2>/dev/null || true)
+	source_date_epoch=$(git -C "$repo" show -s --format=%ct "$source_commit" 2>/dev/null || true)
 fi
 [[ "$source_date_epoch" =~ ^[0-9]+$ ]] || fail 'set SOURCE_DATE_EPOCH to a non-negative integer'
+commit_epoch=$(git -C "$repo" show -s --format=%ct "$source_commit" 2>/dev/null || true)
+[[ "$commit_epoch" =~ ^[0-9]+$ ]] || fail 'source commit has no valid timestamp'
+if [[ "$mode" == official && "$source_date_epoch" != "$commit_epoch" ]]; then
+	fail 'official SOURCE_DATE_EPOCH must equal the reviewed commit timestamp'
+fi
 
 umask 022
-export LC_ALL=C
+export LC_ALL=C.UTF-8
 export TZ=UTC
 export GOOS=linux
 export GOARCH=amd64
 export CGO_ENABLED=1
 export GOTOOLCHAIN=local
+export GOPROXY=off
+export GOSUMDB=off
 
 work=$(mktemp -d "${TMPDIR:-/tmp}/tipsy-appdir.XXXXXXXX")
 cleanup() {
@@ -279,14 +336,37 @@ done < <(find "$appdir/usr/plugins" -type f -name '*.so' -print0)
 
 qt_version=$(pkg-config --modversion Qt6Core)
 go_version=$(go env GOVERSION)
+release_kind=development-unrestricted
+if [[ "$mode" == official ]]; then
+	release_kind=release-candidate-unsigned
+fi
 cat > "$appdir/usr/share/tipsy/build-info" <<BUILD_INFO
+format=tipsy.build-info.v1
 name=Tipsy
 version=$version
 architecture=$arch
 source_date_epoch=$source_date_epoch
+source_repository=$canonical_repository
+source_commit=$source_commit
+source_tree=$([[ "$source_dirty" == true ]] && printf dirty || printf clean)
+release_kind=$release_kind
+input_lock_sha256=$release_lock_sha256
 go=$go_version
 qt=$qt_version
 BUILD_INFO
+build_info_args=(
+	build-info
+	--version "$version"
+	--source-commit "$source_commit"
+	--source-date-epoch "$source_date_epoch"
+	--release-lock "$release_lock"
+	--mode "$mode"
+	--output "$appdir/usr/share/tipsy/build-info.json"
+)
+if [[ "$source_dirty" == true ]]; then
+	build_info_args+=(--source-dirty)
+fi
+"$repo/scripts/release-evidence.py" "${build_info_args[@]}"
 
 manifest="$appdir/usr/share/tipsy/manifest.sha256"
 (

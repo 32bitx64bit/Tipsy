@@ -6,7 +6,8 @@ set -euo pipefail
 usage() {
 	cat >&2 <<USAGE
 usage: $0 --appdir DIRECTORY --version VERSION --tool APPIMAGETOOL \\
-  --tool-sha256 SHA256 [--runtime-file FILE --runtime-sha256 SHA256] [--output FILE]
+  --tool-sha256 SHA256 [--runtime-file FILE --runtime-sha256 SHA256] [--output FILE] \\
+  [--mode developer|official] [--release-lock FILE]
 
 The appimagetool binary is never downloaded. Supply a pinned local binary and
 its independently verified SHA-256 digest. If the tool would otherwise fetch an
@@ -27,6 +28,8 @@ tool_sha256=
 runtime_file=
 runtime_sha256=
 output=
+mode=developer
+release_lock=
 while [[ $# -gt 0 ]]; do
 	case "$1" in
 		--appdir) [[ $# -ge 2 ]] || usage; appdir=$2; shift 2 ;;
@@ -36,6 +39,8 @@ while [[ $# -gt 0 ]]; do
 		--runtime-file) [[ $# -ge 2 ]] || usage; runtime_file=$2; shift 2 ;;
 		--runtime-sha256) [[ $# -ge 2 ]] || usage; runtime_sha256=$2; shift 2 ;;
 		--output) [[ $# -ge 2 ]] || usage; output=$2; shift 2 ;;
+		--mode) [[ $# -ge 2 ]] || usage; mode=$2; shift 2 ;;
+		--release-lock) [[ $# -ge 2 ]] || usage; release_lock=$2; shift 2 ;;
 		-h|--help) usage ;;
 		*) usage ;;
 	esac
@@ -43,6 +48,7 @@ done
 
 [[ -d "$appdir" ]] || fail 'AppDir does not exist'
 [[ "$version" =~ ^[0-9A-Za-z][0-9A-Za-z._+-]*$ ]] || fail 'invalid version'
+[[ "$mode" == developer || "$mode" == official ]] || fail 'mode must be developer or official'
 [[ -f "$tool" && -x "$tool" ]] || fail 'appimagetool is not an executable regular file'
 [[ "$tool_sha256" =~ ^[0-9a-fA-F]{64}$ ]] || fail 'tool SHA-256 must contain exactly 64 hexadecimal characters'
 
@@ -62,6 +68,19 @@ if [[ -n "$runtime_file" || -n "$runtime_sha256" ]]; then
 fi
 
 repo=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
+if [[ -z "$release_lock" ]]; then
+	release_lock="$repo/scripts/release-inputs.lock.json"
+fi
+[[ -f "$release_lock" && ! -L "$release_lock" ]] || fail 'release input lock is not a regular file'
+"$repo/scripts/release-lock.py" --lock "$release_lock" --mode "$mode"
+if [[ "$mode" == official ]]; then
+	[[ "${TIPSY_RELEASE_SOURCE_READONLY:-}" == 1 ]] || fail 'official candidate must run through the isolated release builder'
+	locked_tool=$("$repo/scripts/release-lock.py" --lock "$release_lock" --mode official --get downloads.appimagetool.sha256)
+	[[ "$actual_sha256" == "$locked_tool" ]] || fail 'appimagetool digest does not match the reviewed release input lock'
+	[[ -n "$runtime_file" ]] || fail 'official AppImage build requires a pinned explicit type-2 runtime'
+	locked_runtime=$("$repo/scripts/release-lock.py" --lock "$release_lock" --mode official --get downloads.type2-runtime.sha256)
+	[[ "$actual_runtime" == "$locked_runtime" ]] || fail 'runtime digest does not match the reviewed release input lock'
+fi
 "$repo/scripts/check-release-tree.sh" "$appdir"
 
 if [[ -z "$output" ]]; then
@@ -81,5 +100,6 @@ export APPIMAGE_EXTRACT_AND_RUN=1
 ARCH=x86_64 VERSION="$version" SOURCE_DATE_EPOCH="$source_date_epoch" \
 	"$tool" "${runtime_args[@]}" "$appdir" "$output"
 [[ -s "$output" ]] || fail 'appimagetool did not produce an artifact'
+[[ -f "$output" && ! -L "$output" && $(stat -c '%h' "$output") == 1 ]] || fail 'appimagetool output is not a single-link regular file'
 chmod 0755 "$output"
 printf 'AppImage: %s\n' "$output"
