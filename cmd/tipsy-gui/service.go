@@ -5,7 +5,9 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"sync"
 
+	"github.com/tipsy-linux/tipsy/internal/app"
 	"github.com/tipsy-linux/tipsy/internal/clientsettings"
 	"github.com/tipsy-linux/tipsy/internal/diagnostics"
 	guimodel "github.com/tipsy-linux/tipsy/internal/gui"
@@ -20,12 +22,33 @@ import (
 type productionService struct {
 	installer *setupsvc.Service
 	settings  *clientsettings.Service
+
+	launchMu       sync.Mutex
+	launchBackend  authorizedLaunchBackend
+	preparedLaunch authorizedLaunchSession
+	launchActive   bool
 }
 
 var _ guimodel.Service = (*productionService)(nil)
 
+type authorizedLaunchSession interface {
+	State() app.LaunchAuthorityState
+	Launch(context.Context, tipsyruntime.LaunchOptions) error
+	Close() error
+}
+
+type authorizedLaunchBackend struct {
+	open func(context.Context, bool) (authorizedLaunchSession, error)
+}
+
 func newProductionService() guimodel.Service {
-	return &productionService{installer: setupsvc.New(), settings: clientsettings.New()}
+	return &productionService{
+		installer: setupsvc.New(),
+		settings:  clientsettings.New(),
+		launchBackend: authorizedLaunchBackend{open: func(ctx context.Context, approveDevelopment bool) (authorizedLaunchSession, error) {
+			return app.OpenLaunchSession(ctx, approveDevelopment)
+		}},
+	}
 }
 
 func (s *productionService) Snapshot(ctx context.Context) (guimodel.InstallSnapshot, error) {
@@ -68,12 +91,98 @@ func (s *productionService) Install(ctx context.Context, request guimodel.Instal
 	return nil
 }
 
-func (s *productionService) Launch(ctx context.Context, req guimodel.LaunchRequest, started func()) error {
+// PrepareLaunch resolves authority through internal/app and retains exactly one
+// authenticated generation for the next Launch call. It never infers official
+// authority from missing release metadata.
+func (s *productionService) PrepareLaunch(ctx context.Context, approveDevelopment bool) (guimodel.LaunchAuthority, error) {
+	if s == nil || s.launchBackend.open == nil {
+		return guimodel.LaunchAuthority{}, fmt.Errorf("authorized GUI launch integration is unavailable")
+	}
+	session, err := s.launchBackend.open(ctx, approveDevelopment)
+	if err != nil {
+		state := app.LaunchAuthorityState{}
+		var sessionErr *app.LaunchSessionError
+		if errors.As(err, &sessionErr) {
+			state = sessionErr.Authority
+		}
+		return guiLaunchAuthority(state), err
+	}
+	if session == nil {
+		return guimodel.LaunchAuthority{}, fmt.Errorf("authorized GUI launch session is nil")
+	}
+	state := guiLaunchAuthority(session.State())
+	if state.DevelopmentConsentRequired {
+		_ = session.Close()
+		return state, fmt.Errorf("authorized GUI launch session returned incomplete authority")
+	}
+	switch state.Mode {
+	case string(setupsvc.DevelopmentUnrestricted):
+		if state.Warning != app.DevelopmentUnrestrictedWarning {
+			_ = session.Close()
+			return state, fmt.Errorf("development GUI launch omitted its required warning")
+		}
+	case string(setupsvc.OfficialVerified):
+		if state.Warning != "" {
+			_ = session.Close()
+			return state, fmt.Errorf("official GUI launch returned an unexpected warning")
+		}
+	default:
+		_ = session.Close()
+		return state, fmt.Errorf("authorized GUI launch session returned an unknown authority mode")
+	}
+
+	s.launchMu.Lock()
+	if s.launchActive {
+		s.launchMu.Unlock()
+		_ = session.Close()
+		return state, fmt.Errorf("Roblox is already running")
+	}
+	previous := s.preparedLaunch
+	s.preparedLaunch = session
+	s.launchMu.Unlock()
+	if previous != nil {
+		_ = previous.Close()
+	}
+	return state, nil
+}
+
+func guiLaunchAuthority(state app.LaunchAuthorityState) guimodel.LaunchAuthority {
+	return guimodel.LaunchAuthority{
+		Mode:                       string(state.Mode),
+		Warning:                    state.Warning,
+		DevelopmentConsentRequired: state.DevelopmentConsentRequired,
+	}
+}
+
+func (s *productionService) Launch(ctx context.Context, req guimodel.LaunchRequest, started func()) (result error) {
 	launchReq, err := rbxuri.Parse(req.URI)
 	if err != nil {
+		s.launchMu.Lock()
+		prepared := s.preparedLaunch
+		s.preparedLaunch = nil
+		s.launchMu.Unlock()
+		if prepared != nil {
+			return errors.Join(err, prepared.Close())
+		}
 		return err
 	}
-	return tipsyruntime.Launch(ctx, tipsyruntime.LaunchOptions{Started: started, Request: launchReq})
+	s.launchMu.Lock()
+	session := s.preparedLaunch
+	if session == nil || s.launchActive {
+		s.launchMu.Unlock()
+		return fmt.Errorf("authorized GUI launch session is required")
+	}
+	s.preparedLaunch = nil
+	s.launchActive = true
+	s.launchMu.Unlock()
+
+	defer func() {
+		result = errors.Join(result, session.Close())
+		s.launchMu.Lock()
+		s.launchActive = false
+		s.launchMu.Unlock()
+	}()
+	return session.Launch(ctx, tipsyruntime.LaunchOptions{Started: started, Request: launchReq})
 }
 
 func (s *productionService) LoadSettings(ctx context.Context) (guimodel.Settings, error) {
@@ -148,7 +257,7 @@ func (s *productionService) Doctor(ctx context.Context) (guimodel.DoctorSummary,
 }
 
 func guiSettings(settings clientsettings.Settings) guimodel.Settings {
-	result := guimodel.Settings{Renderer: guimodel.Renderer(settings.Renderer), FPSMode: guimodel.FPSMode(settings.FrameRate.Mode), FrameRate: settings.FrameRate.Limit, VSync: settings.VSync, LowTextureMode: settings.LowTextureMode, Display: guimodel.NormalizeDisplay(settings.Display)}
+	result := guimodel.Settings{Renderer: guimodel.Renderer(settings.Renderer), FPSMode: guimodel.FPSMode(settings.FrameRate.Mode), FrameRate: settings.FrameRate.Limit, VSync: settings.VSync, LowTextureMode: settings.LowTextureMode, Display: guimodel.NormalizeDisplay(settings.Display), DiscordRichPresence: settings.DiscordRichPresence, DiscordJoinButton: settings.DiscordJoinButton}
 	if result.Renderer == "" {
 		result.Renderer = guimodel.RendererAuto
 	}
@@ -164,10 +273,12 @@ func backendSettings(settings guimodel.Settings) clientsettings.Settings {
 		limit = settings.FrameRate
 	}
 	return clientsettings.Settings{
-		Renderer:       clientsettings.Renderer(settings.Renderer),
-		VSync:          settings.VSync,
-		LowTextureMode: settings.LowTextureMode,
-		Display:        clientsettings.NormalizeDisplay(settings.Display),
+		Renderer:            clientsettings.Renderer(settings.Renderer),
+		VSync:               settings.VSync,
+		LowTextureMode:      settings.LowTextureMode,
+		Display:             clientsettings.NormalizeDisplay(settings.Display),
+		DiscordRichPresence: settings.DiscordRichPresence,
+		DiscordJoinButton:   settings.DiscordJoinButton,
 		FrameRate: clientsettings.FrameRate{
 			Mode:  clientsettings.FrameRateMode(settings.FPSMode),
 			Limit: limit,
