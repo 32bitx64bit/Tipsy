@@ -116,6 +116,15 @@ func (r Request) WebLoginURI() string {
 	return r.AndroidDeepLink
 }
 
+// PlacePageURL is the public Roblox website page for a place. It never includes
+// job ids, access codes, tickets, or user identities.
+func PlacePageURL(placeID int64) string {
+	if placeID <= 0 {
+		return ""
+	}
+	return "https://www.roblox.com/games/" + strconv.FormatInt(placeID, 10)
+}
+
 // Summary is safe for logs: identities only, never ticket or cookie values.
 func (r Request) Summary() string {
 	if r.Empty() {

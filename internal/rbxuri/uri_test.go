@@ -137,6 +137,16 @@ func TestParseEmptyAndLooksLike(t *testing.T) {
 	}
 }
 
+func TestPlacePageURLIsPublicHTTPS(t *testing.T) {
+	t.Parallel()
+	if got := PlacePageURL(1818); got != "https://www.roblox.com/games/1818" {
+		t.Fatalf("url=%q", got)
+	}
+	if PlacePageURL(0) != "" || PlacePageURL(-1) != "" {
+		t.Fatal("non-positive place ids must not produce a join url")
+	}
+}
+
 func itoa(n int64) string {
 	if n == 0 {
 		return "0"
