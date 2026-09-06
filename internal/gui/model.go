@@ -31,12 +31,14 @@ const (
 )
 
 type Settings struct {
-	Renderer       Renderer
-	FPSMode        FPSMode
-	FrameRate      int
-	VSync          bool
-	LowTextureMode bool
-	Display        string
+	Renderer            Renderer
+	FPSMode             FPSMode
+	FrameRate           int
+	VSync               bool
+	LowTextureMode      bool
+	Display             string
+	DiscordRichPresence bool
+	DiscordJoinButton   bool
 }
 
 // RendererOption is a backend-provided capability. The GUI keeps every known
@@ -56,7 +58,7 @@ const (
 )
 
 func DefaultSettings() Settings {
-	return Settings{Renderer: RendererAuto, FPSMode: FPSAuto, VSync: false, LowTextureMode: false, Display: DisplayPrimary}
+	return Settings{Renderer: RendererAuto, FPSMode: FPSAuto, VSync: false, LowTextureMode: false, Display: DisplayPrimary, DiscordRichPresence: true}
 }
 
 func ValidateSettings(settings Settings, renderers []RendererOption) error {
@@ -173,6 +175,19 @@ func normalizeSettings(settings Settings) Settings {
 	return settings
 }
 
+// DiscordOnlyChange reports a draft that differs from saved settings only in
+// Discord Rich Presence toggles, which apply while Roblox is running.
+func DiscordOnlyChange(draft, saved Settings) bool {
+	draft = normalizeSettings(draft)
+	saved = normalizeSettings(saved)
+	if draft.DiscordRichPresence == saved.DiscordRichPresence && draft.DiscordJoinButton == saved.DiscordJoinButton {
+		return false
+	}
+	draft.DiscordRichPresence, draft.DiscordJoinButton = false, false
+	saved.DiscordRichPresence, saved.DiscordJoinButton = false, false
+	return draft == saved
+}
+
 type ApplyResult struct {
 	RestartRequired bool
 	FrameRateNote   string
@@ -256,6 +271,9 @@ type Service interface {
 	Doctor(context.Context) (DoctorSummary, error)
 	AutomaticAvailability(context.Context) AutomaticAvailability
 	Install(context.Context, InstallRequest, func(InstallProgress)) error
+	// PrepareLaunch authenticates and retains one generation for the following
+	// Launch call. Development approval is true only after explicit UI consent.
+	PrepareLaunch(context.Context, bool) (LaunchAuthority, error)
 	// Launch blocks for the lifetime of the in-process Roblox client. The
 	// callback is invoked exactly once after startup has completed far enough
 	// for the client window to own the desktop surface. Implementations must not
@@ -265,6 +283,14 @@ type Service interface {
 	RendererOptions(context.Context) []RendererOption
 	ApplySettings(context.Context, Settings) (ApplyResult, error)
 	ResetSettings(context.Context) (Settings, error)
+}
+
+// LaunchAuthority is presentation-safe authority state returned by a secure
+// launch adapter. The GUI never constructs or upgrades this state itself.
+type LaunchAuthority struct {
+	Mode                       string
+	Warning                    string
+	DevelopmentConsentRequired bool
 }
 
 type SetupState string

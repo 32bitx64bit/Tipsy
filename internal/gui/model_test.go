@@ -24,6 +24,7 @@ type fakeService struct {
 	waitForCancel  bool
 	installCalls   []InstallRequest
 	applyCalls     []Settings
+	noRestart      bool
 	launches       int
 	launchReq      LaunchRequest
 	launchErr      error
@@ -56,6 +57,9 @@ func (f *fakeService) Install(ctx context.Context, req InstallRequest, progress 
 	}
 	return err
 }
+func (f *fakeService) PrepareLaunch(context.Context, bool) (LaunchAuthority, error) {
+	return LaunchAuthority{Mode: "official-verified"}, nil
+}
 func (f *fakeService) Launch(_ context.Context, req LaunchRequest, started func()) error {
 	f.mu.Lock()
 	f.launches++
@@ -85,7 +89,7 @@ func (f *fakeService) RendererOptions(context.Context) []RendererOption {
 func (f *fakeService) ApplySettings(_ context.Context, settings Settings) (ApplyResult, error) {
 	f.applyCalls = append(f.applyCalls, settings)
 	f.settings = settings
-	return ApplyResult{RestartRequired: true, FrameRateNote: "Experimental frame-rate note"}, nil
+	return ApplyResult{RestartRequired: !f.noRestart, FrameRateNote: "Experimental frame-rate note"}, nil
 }
 func (f *fakeService) ResetSettings(context.Context) (Settings, error) {
 	f.settings = DefaultSettings()
@@ -180,7 +184,7 @@ func TestSetupCancel(t *testing.T) {
 }
 
 func TestSettingsBindingValidationApplyAndReset(t *testing.T) {
-	fake := &fakeService{settings: Settings{Renderer: RendererOpenGL, FPSMode: FPSLimited, FrameRate: 144, VSync: true, Display: DisplayPrimary}}
+	fake := &fakeService{settings: Settings{Renderer: RendererOpenGL, FPSMode: FPSLimited, FrameRate: 144, VSync: true, Display: DisplayPrimary, DiscordRichPresence: true}}
 	model := NewSettingsModel(fake)
 	if err := model.Load(context.Background()); err != nil {
 		t.Fatal(err)
@@ -188,7 +192,7 @@ func TestSettingsBindingValidationApplyAndReset(t *testing.T) {
 	if got := model.View().Draft; got != fake.settings {
 		t.Fatalf("loaded=%+v want=%+v", got, fake.settings)
 	}
-	view := model.Edit(Settings{Renderer: RendererOpenGL, FPSMode: FPSLimited, FrameRate: 240, VSync: true, Display: DisplayPrimary})
+	view := model.Edit(Settings{Renderer: RendererOpenGL, FPSMode: FPSLimited, FrameRate: 240, VSync: true, Display: DisplayPrimary, DiscordRichPresence: true})
 	if !view.Dirty || view.ValidationError != "" {
 		t.Fatalf("valid edit view: %+v", view)
 	}
@@ -223,7 +227,7 @@ func TestLowTextureModeDefaultsOffAndResetsToHighQuality(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	view := model.Edit(Settings{Renderer: RendererAuto, FPSMode: FPSAuto, LowTextureMode: true})
+	view := model.Edit(Settings{Renderer: RendererAuto, FPSMode: FPSAuto, LowTextureMode: true, DiscordRichPresence: true, Display: DisplayPrimary})
 	if !view.Dirty || view.ValidationError != "" || view.Draft.FPSMode != FPSAuto || view.Draft.VSync {
 		t.Fatalf("independent low-texture edit view=%+v", view)
 	}
@@ -234,6 +238,26 @@ func TestLowTextureModeDefaultsOffAndResetsToHighQuality(t *testing.T) {
 	reset, err := model.Reset(context.Background())
 	if err != nil || reset.LowTextureMode || model.View().Dirty || !model.View().RestartRequired {
 		t.Fatalf("LowTextureMode reset=%+v err=%v view=%+v", reset, err, model.View())
+	}
+}
+
+func TestDiscordPresenceDefaultsOnAndDoesNotRestart(t *testing.T) {
+	defaults := DefaultSettings()
+	if !defaults.DiscordRichPresence || defaults.DiscordJoinButton {
+		t.Fatalf("discord defaults=%+v", defaults)
+	}
+	fake := &fakeService{settings: defaults, noRestart: true}
+	model := NewSettingsModel(fake)
+	if err := model.Load(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	view := model.Edit(Settings{Renderer: RendererAuto, FPSMode: FPSAuto, Display: DisplayPrimary, DiscordRichPresence: true, DiscordJoinButton: true})
+	if !view.Dirty || !DiscordOnlyChange(view.Draft, view.Saved) {
+		t.Fatalf("join-only edit view=%+v", view)
+	}
+	result, err := model.Apply(context.Background())
+	if err != nil || result.RestartRequired || len(fake.applyCalls) != 1 || !fake.applyCalls[0].DiscordJoinButton {
+		t.Fatalf("discord apply result=%+v err=%v calls=%+v", result, err, fake.applyCalls)
 	}
 }
 
@@ -254,7 +278,7 @@ func TestVSyncIsIndependentAndDefaultsOff(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	view := model.Edit(Settings{Renderer: RendererAuto, FPSMode: FPSAuto, VSync: true})
+	view := model.Edit(Settings{Renderer: RendererAuto, FPSMode: FPSAuto, VSync: true, DiscordRichPresence: true, Display: DisplayPrimary})
 	if !view.Dirty || view.ValidationError != "" || view.Draft.FPSMode != FPSAuto {
 		t.Fatalf("independent VSync edit view=%+v", view)
 	}
@@ -277,18 +301,18 @@ func TestDisplayPlacementDefaultsPrimaryAndEditsIndependently(t *testing.T) {
 	if got := model.View().Draft.Display; got != DisplayPrimary {
 		t.Fatalf("loaded display=%q", got)
 	}
-	view := model.Edit(Settings{Renderer: RendererAuto, FPSMode: FPSAuto, Display: DisplayPointer})
+	view := model.Edit(Settings{Renderer: RendererAuto, FPSMode: FPSAuto, Display: DisplayPointer, DiscordRichPresence: true})
 	if !view.Dirty || view.ValidationError != "" || view.Draft.Display != DisplayPointer || view.Draft.VSync {
 		t.Fatalf("pointer edit view=%+v", view)
 	}
 	if _, err := model.Apply(context.Background()); err != nil || fake.applyCalls[0].Display != DisplayPointer {
 		t.Fatalf("pointer apply err=%v calls=%+v", err, fake.applyCalls)
 	}
-	view = model.Edit(Settings{Renderer: RendererAuto, FPSMode: FPSAuto, Display: "HDMI-0"})
+	view = model.Edit(Settings{Renderer: RendererAuto, FPSMode: FPSAuto, Display: "HDMI-0", DiscordRichPresence: true})
 	if view.Draft.Display != "HDMI-0" || view.ValidationError != "" {
 		t.Fatalf("named output edit view=%+v", view)
 	}
-	view = model.Edit(Settings{Renderer: RendererAuto, FPSMode: FPSAuto, Display: "bad/name"})
+	view = model.Edit(Settings{Renderer: RendererAuto, FPSMode: FPSAuto, Display: "bad/name", DiscordRichPresence: true})
 	if view.ValidationError == "" {
 		t.Fatal("path-like monitor name accepted")
 	}
