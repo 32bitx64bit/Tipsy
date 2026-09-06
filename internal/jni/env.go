@@ -122,8 +122,11 @@ func (e *Env) PutField(obj uintptr, name string, val any) {
 	if o == nil {
 		return
 	}
+	className := ""
+	if o.class != nil {
+		className = o.class.name
+	}
 	e.vm.mu.Lock()
-	defer e.vm.mu.Unlock()
 	if o.fields == nil {
 		o.fields = make(map[string]any)
 	}
@@ -132,6 +135,10 @@ func (e *Env) PutField(obj uintptr, name string, val any) {
 		e.vm.storeFieldObjLocked(o, name, jobjectToID(t))
 	default:
 		o.fields[name] = val
+	}
+	e.vm.mu.Unlock()
+	if id, ok := int64Field(val); ok {
+		noteStartGamePlaceID(className, name, id)
 	}
 }
 

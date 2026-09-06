@@ -6,6 +6,7 @@
 package jni
 
 import (
+	"fmt"
 	"os"
 	"sync"
 	"sync/atomic"
@@ -26,24 +27,22 @@ type VM struct {
 	objects map[int64]*Object
 	nextID  int64
 
-	pending int64 // throwable object id, 0 = none
+	// threadStates owns the JNI locals and pending exception for each attached
+	// environment. g_native is shared, but no JNIEnv object or local state is.
+	threadStates map[uintptr]*jniThreadState
 
 	filesDir   string
 	cacheDir   string
 	obbDir     string
 	assetsDir  string
 	appVersion string
-	dispW     int32
-	dispH     int32
-	dispMmW   int32
-	dispMmH   int32
+	dispW      int32
+	dispH      int32
+	dispMmW    int32
+	dispMmH    int32
 
 	natives  map[string]uintptr // class + "." + name + sig → fnPtr
 	monitors map[int64]*sync.Mutex
-
-	// localFrames tracks JNI local-ref membership for the pinned JNIEnv.
-	// frames[0] lives for the env; PushLocalFrame appends, PopLocalFrame pops.
-	localFrames []localFrame
 
 	// Immortal JNI objects reused across calls for stable Android paths and
 	// identity strings. Cleared when SetDirs changes the matching path.
@@ -72,18 +71,18 @@ func vmFromEnv(_ unsafe.Pointer) *VM {
 // NewVM constructs a JNI 1.6 JavaVM with the seeded Android/GameActivity classes.
 func NewVM() (*VM, error) {
 	vm := &VM{
-		classes:     make(map[string]*Class),
-		objects:     make(map[int64]*Object),
-		nextID:      1,
-		filesDir:    os.TempDir(),
-		cacheDir:    os.TempDir(),
-		obbDir:      os.TempDir(),
-		assetsDir:   "",
-		dispW:       1280,
-		dispH:       720,
-		natives:     make(map[string]uintptr),
-		monitors:    make(map[int64]*sync.Mutex),
-		localFrames: []localFrame{{refs: make(map[int64]int)}},
+		classes:      make(map[string]*Class),
+		objects:      make(map[int64]*Object),
+		nextID:       1,
+		filesDir:     os.TempDir(),
+		cacheDir:     os.TempDir(),
+		obbDir:       os.TempDir(),
+		assetsDir:    "",
+		dispW:        1280,
+		dispH:        720,
+		natives:      make(map[string]uintptr),
+		monitors:     make(map[int64]*sync.Mutex),
+		threadStates: make(map[uintptr]*jniThreadState),
 	}
 	vm.seedClasses()
 
@@ -91,15 +90,22 @@ func NewVM() (*VM, error) {
 		return nil, err
 	}
 	vm.javaVM = javaVMPtr()
-	vm.envRaw = envPtr()
 	vm.functions = nativeInterfacePtr()
+	globalVM.Store(vm)
+	vm.envRaw = attachNativeMainEnvPtr()
+	if vm.envRaw == nil {
+		globalVM.CompareAndSwap(vm, nil)
+		return nil, fmt.Errorf("jni: attach C Main")
+	}
+	vm.mu.Lock()
+	vm.ensureThreadStateLocked(vm.envRaw)
+	vm.mu.Unlock()
 
 	// Deliver real X11 window input through the engine-registered
 	// GameActivity input natives once an input target is wired; until
 	// then events are counted as dropped, never synthesized.
 	bindX11InputBridge()
 
-	globalVM.Store(vm)
 	return vm, nil
 }
 

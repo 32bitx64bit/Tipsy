@@ -441,8 +441,19 @@ struct JNIInvokeInterface_ {
 
 int tipsy_jni_init(void);
 JNIEnv *tipsy_jni_env(void);
+JNIEnv *tipsy_jni_attach_native_main(void);
+JNIEnv *tipsy_jni_current_env(void);
 JavaVM *tipsy_jni_java_vm(void);
 void *tipsy_jni_native_interface(void);
+
+jint tipsy_jni_attach_current_thread(JNIEnv **env, int daemon);
+jint tipsy_jni_detach_current_thread(void);
+jint tipsy_jni_get_env(void **env, jint version);
+size_t tipsy_jni_attached_thread_count(void);
+int tipsy_jni_test_attach_and_exit(void);
+int tipsy_jni_test_native_main_env_is(JNIEnv *expected);
+int tipsy_jni_test_wrap_native_main(int enabled);
+size_t tipsy_jni_test_wrapped_find_calls(int *owner_ok);
 
 jclass tipsy_jni_FindClass(JNIEnv *env, const char *name);
 jstring tipsy_jni_NewStringUTF(JNIEnv *env, const char *utf);

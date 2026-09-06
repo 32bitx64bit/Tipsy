@@ -207,7 +207,7 @@ func GoJNI_Throw(env *C.JNIEnv, obj C.jthrowable) C.jint {
 		return C.JNI_ERR
 	}
 	vm.mu.Lock()
-	vm.pending = jobjectToID(uintptr(asJobjectFromThrow(obj)))
+	vm.setPendingLocked(jobjectToID(uintptr(asJobjectFromThrow(obj))))
 	vm.mu.Unlock()
 	return C.JNI_OK
 }
@@ -228,7 +228,7 @@ func GoJNI_ThrowNew(env *C.JNIEnv, clazz C.jclass, msg *C.char) C.jint {
 	if msg != nil {
 		o.str = C.GoString(msg)
 	}
-	vm.pending = o.id
+	vm.setPendingLocked(o.id)
 	vm.mu.Unlock()
 	return C.JNI_OK
 }
@@ -240,7 +240,10 @@ func GoJNI_ExceptionOccurred(env *C.JNIEnv) C.jthrowable {
 		return jthrowableOf(jnull())
 	}
 	vm.mu.Lock()
-	id := vm.pending
+	id := vm.pendingLocked()
+	if id != 0 {
+		vm.addLocalLocked(id)
+	}
 	vm.mu.Unlock()
 	return jthrowableOf(idToJobject(id))
 }
@@ -252,7 +255,7 @@ func GoJNI_ExceptionDescribe(env *C.JNIEnv) {
 		return
 	}
 	vm.mu.Lock()
-	id := vm.pending
+	id := vm.pendingLocked()
 	vm.mu.Unlock()
 	if id != 0 {
 		logf("[jni] pending exception")
@@ -266,7 +269,7 @@ func GoJNI_ExceptionClear(env *C.JNIEnv) {
 		return
 	}
 	vm.mu.Lock()
-	vm.pending = 0
+	vm.setPendingLocked(0)
 	vm.mu.Unlock()
 }
 
@@ -579,7 +582,7 @@ func (vm *VM) dispatchCore(o *Object, obj C.jobject, class, name, sig string, ar
 		return obj, true
 	case "bootstrapTheApp()V":
 		if onBootstrap != nil {
-			onBootstrap(uintptr(vm.envRaw), uintptr(obj))
+			onBootstrap(vm.currentEnvKey(), uintptr(obj))
 		}
 		return obj, true
 	case "addBoolean(Ljava/lang/String;ZZ)V",
@@ -822,6 +825,11 @@ func (vm *VM) fieldGetter(o *Object, name, sig string) (C.jobject, bool) {
 		case int:
 			n = int64(t)
 		}
+		className := ""
+		if o.class != nil {
+			className = o.class.name
+		}
+		noteStartGamePlaceID(className, name, n)
 		return C.jobject(unsafe.Pointer(uintptr(n))), true
 	case "F":
 		var f float32
@@ -963,7 +971,7 @@ func GoJNI_GetField(env *C.JNIEnv, obj C.jobject, clazz C.jclass, fieldID C.jfie
 	if vm == nil {
 		return
 	}
-	_, name, sig, _, ok := parseField(fieldID)
+	class, name, sig, _, ok := parseField(fieldID)
 	if !ok {
 		return
 	}
@@ -1017,6 +1025,7 @@ func GoJNI_GetField(env *C.JNIEnv, obj C.jobject, clazz C.jclass, fieldID C.jfie
 	case 'J':
 		if i, ok := val.(int64); ok {
 			C.tipsy_jvalue_set_j(out, C.jlong(i))
+			noteStartGamePlaceID(class, name, i)
 		}
 	case 'Z':
 		b := false
@@ -1042,7 +1051,7 @@ func GoJNI_SetField(env *C.JNIEnv, obj C.jobject, clazz C.jclass, fieldID C.jfie
 	if vm == nil {
 		return
 	}
-	_, name, _, _, ok := parseField(fieldID)
+	class, name, _, _, ok := parseField(fieldID)
 	if !ok {
 		return
 	}
@@ -1058,17 +1067,27 @@ func GoJNI_SetField(env *C.JNIEnv, obj C.jobject, clazz C.jclass, fieldID C.jfie
 	if o == nil {
 		return
 	}
+	var place int64
+	sawPlace := false
 	vm.mu.Lock()
-	defer vm.mu.Unlock()
+	if o.fields == nil {
+		o.fields = make(map[string]any)
+	}
 	switch rune(retKind) {
 	case 'L':
 		vm.storeFieldObjLocked(o, name, jobjectToID(uintptr(C.tipsy_jvalue_l(&val))))
 	case 'I':
 		o.fields[name] = int32(C.tipsy_jvalue_i(&val))
 	case 'J':
-		o.fields[name] = int64(C.tipsy_jvalue_j(&val))
+		place = int64(C.tipsy_jvalue_j(&val))
+		o.fields[name] = place
+		sawPlace = true
 	case 'Z':
 		o.fields[name] = C.tipsy_jvalue_i(&val) != 0
+	}
+	vm.mu.Unlock()
+	if sawPlace {
+		noteStartGamePlaceID(class, name, place)
 	}
 }
 
@@ -1515,6 +1534,14 @@ func GoJNI_GetJavaVM(env *C.JNIEnv, vmOut **C.JavaVM) C.jint {
 	return C.JNI_OK
 }
 
+//export GoJNI_EnvDetached
+func GoJNI_EnvDetached(env *C.JNIEnv) {
+	vm := globalVM.Load()
+	if vm != nil {
+		vm.detachThreadState(unsafe.Pointer(env))
+	}
+}
+
 //export GoJNI_ExceptionCheck
 func GoJNI_ExceptionCheck(env *C.JNIEnv) C.jboolean {
 	vm := vmFromEnv(unsafe.Pointer(env))
@@ -1522,7 +1549,7 @@ func GoJNI_ExceptionCheck(env *C.JNIEnv) C.jboolean {
 		return C.JNI_FALSE
 	}
 	vm.mu.Lock()
-	p := vm.pending
+	p := vm.pendingLocked()
 	vm.mu.Unlock()
 	if p != 0 {
 		return C.JNI_TRUE

@@ -28,12 +28,84 @@ func javaVMPtr() unsafe.Pointer {
 	return unsafe.Pointer(C.tipsy_jni_java_vm())
 }
 
-func envPtr() unsafe.Pointer {
-	return unsafe.Pointer(C.tipsy_jni_env())
+func attachNativeMainEnvPtr() unsafe.Pointer {
+	return unsafe.Pointer(C.tipsy_jni_attach_native_main())
+}
+
+func currentEnvPtr() unsafe.Pointer {
+	return unsafe.Pointer(C.tipsy_jni_current_env())
 }
 
 func nativeInterfacePtr() unsafe.Pointer {
 	return unsafe.Pointer(C.tipsy_jni_native_interface())
+}
+
+func attachCurrentThreadForTest(daemon bool) (int32, unsafe.Pointer) {
+	var env *C.JNIEnv
+	d := C.int(0)
+	if daemon {
+		d = 1
+	}
+	rc := C.tipsy_jni_attach_current_thread(&env, d)
+	return int32(rc), unsafe.Pointer(env)
+}
+
+func detachCurrentThreadForTest() int32 {
+	return int32(C.tipsy_jni_detach_current_thread())
+}
+
+func getEnvForTest(version int32) (int32, unsafe.Pointer) {
+	// A non-NULL sentinel proves that every failure path clears the output.
+	sentinel := C.malloc(1)
+	defer C.free(sentinel)
+	env := sentinel
+	rc := C.tipsy_jni_get_env(&env, C.jint(version))
+	return int32(rc), env
+}
+
+func envFunctionsForTest(raw unsafe.Pointer) uintptr {
+	if raw == nil {
+		return 0
+	}
+	return uintptr(unsafe.Pointer((*C.JNIEnv)(raw).functions))
+}
+
+func attachedThreadCountForTest() int {
+	return int(C.tipsy_jni_attached_thread_count())
+}
+
+func attachAndExitThreadForTest() int32 {
+	return int32(C.tipsy_jni_test_attach_and_exit())
+}
+
+func nativeMainEnvIsForTest(raw unsafe.Pointer) bool {
+	return C.tipsy_jni_test_native_main_env_is((*C.JNIEnv)(raw)) != 0
+}
+
+func throwForTest(raw unsafe.Pointer, obj uintptr) int32 {
+	return int32(GoJNI_Throw((*C.JNIEnv)(raw), jthrowableOf(idToJobject(jobjectToID(obj)))))
+}
+
+func exceptionOccurredForTest(raw unsafe.Pointer) uintptr {
+	return uintptr(asJobjectFromThrow(GoJNI_ExceptionOccurred((*C.JNIEnv)(raw))))
+}
+
+func exceptionClearForTest(raw unsafe.Pointer) {
+	GoJNI_ExceptionClear((*C.JNIEnv)(raw))
+}
+
+func wrapNativeMainForTest(enabled bool) int32 {
+	v := C.int(0)
+	if enabled {
+		v = 1
+	}
+	return int32(C.tipsy_jni_test_wrap_native_main(v))
+}
+
+func wrappedFindCallsForTest() (int, bool) {
+	var ownerOK C.int
+	calls := C.tipsy_jni_test_wrapped_find_calls(&ownerOK)
+	return int(calls), ownerOK != 0
 }
 
 func allocMethod(class, name, sig string, static bool) C.jmethodID {

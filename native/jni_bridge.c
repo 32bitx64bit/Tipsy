@@ -5,6 +5,7 @@
  */
 #include "jni_bridge.h"
 
+#include <pthread.h>
 #include <stdlib.h>
 #include <string.h>
 #include <stdio.h>
@@ -73,13 +74,40 @@ extern jlong GoJNI_GetDirectBufferCapacity(JNIEnv *env, jobject buf);
 extern jobjectRefType GoJNI_GetObjectRefType(JNIEnv *env, jobject obj);
 extern jobject GoJNI_NewWeakGlobalRef(JNIEnv *env, jobject obj);
 extern void GoJNI_DeleteWeakGlobalRef(JNIEnv *env, jweak ref);
+extern void GoJNI_EnvDetached(JNIEnv *env);
 extern void GoJNI_Unimplemented(char *name);
 
-static JNIEnv g_env;
 static JavaVM g_vm;
 static struct JNINativeInterface_ g_native;
 static struct JNIInvokeInterface_ g_invoke;
-static int g_inited;
+static pthread_once_t g_init_once = PTHREAD_ONCE_INIT;
+static pthread_key_t g_env_key;
+static int g_init_result;
+static JNIEnv *g_native_main_env;
+static pthread_mutex_t g_env_count_mu = PTHREAD_MUTEX_INITIALIZER;
+static size_t g_env_count;
+static struct JNINativeInterface_ g_test_wrapped_native;
+static pthread_mutex_t g_test_wrap_mu = PTHREAD_MUTEX_INITIALIZER;
+static size_t g_test_wrapped_find_calls;
+static int g_test_wrapped_owner_ok = 1;
+
+struct tipsy_thread_env {
+	JNIEnv env;
+	int daemon;
+};
+
+_Static_assert(sizeof(JNIEnv) == sizeof(void *), "JNIEnv ABI");
+_Static_assert(sizeof(JavaVM) == sizeof(void *), "JavaVM ABI");
+_Static_assert(offsetof(struct JNINativeInterface_, GetVersion) == 4 * sizeof(void *), "JNI GetVersion slot");
+_Static_assert(offsetof(struct JNINativeInterface_, GetObjectRefType) == 232 * sizeof(void *), "JNI GetObjectRefType slot");
+_Static_assert(offsetof(struct JNIInvokeInterface_, AttachCurrentThread) == 4 * sizeof(void *), "VM Attach slot");
+_Static_assert(offsetof(struct JNIInvokeInterface_, AttachCurrentThreadAsDaemon) == 7 * sizeof(void *), "VM daemon Attach slot");
+
+/* Provided by internal/loader when the complete runtime is linked. JNI-only
+ * tests intentionally exercise the current-pthread fallback. */
+extern uintptr_t tipsy_call0_ret(void *fn) __attribute__((weak));
+extern int64_t tipsy_call_p8(void *fn, void *a0, void *a1, void *a2, void *a3,
+	void *a4, void *a5, void *a6, void *a7) __attribute__((weak));
 
 int tipsy_pack_jargs(const char *sig, va_list ap, jvalue *out, int max)
 {
@@ -1037,43 +1065,118 @@ static jobjectRefType JNICALL t_GetObjectRefType(JNIEnv *env, jobject obj)
 	return GoJNI_GetObjectRefType(env, obj);
 }
 
+static void thread_env_destroy(void *value)
+{
+	struct tipsy_thread_env *thread_env = value;
+
+	if (thread_env == NULL) {
+		return;
+	}
+	/* Publish detachment while the environment identity is still valid. */
+	GoJNI_EnvDetached(&thread_env->env);
+	pthread_mutex_lock(&g_env_count_mu);
+	if (g_env_count != 0) {
+		g_env_count--;
+	}
+	pthread_mutex_unlock(&g_env_count_mu);
+	free(thread_env);
+}
+
+static int supported_jni_version(jint version)
+{
+	return version == JNI_VERSION_1_1 || version == JNI_VERSION_1_2 ||
+		version == JNI_VERSION_1_4 || version == JNI_VERSION_1_6;
+}
+
 static jint JNICALL t_DestroyJavaVM(JavaVM *vm)
 {
+	/* Tipsy's native-main executor is intentionally process-lifetime and has no
+	 * stop/join protocol yet. Returning success would falsely promise that all
+	 * non-daemon threads and callbacks were quiesced. */
 	(void)vm;
+	return JNI_ERR;
+}
+
+static jint attach_current_thread(JavaVM *vm, JNIEnv **penv, void *args, int daemon)
+{
+	struct tipsy_thread_env *thread_env;
+
+	(void)args;
+	if (penv == NULL) {
+		return JNI_ERR;
+	}
+	*penv = NULL;
+	if (vm != &g_vm) {
+		return JNI_ERR;
+	}
+	thread_env = pthread_getspecific(g_env_key);
+	if (thread_env == NULL) {
+		thread_env = calloc(1, sizeof(*thread_env));
+		if (thread_env == NULL) {
+			return JNI_ERR;
+		}
+		thread_env->env.functions = &g_native;
+		thread_env->daemon = daemon != 0;
+		if (pthread_setspecific(g_env_key, thread_env) != 0) {
+			free(thread_env);
+			return JNI_ERR;
+		}
+		pthread_mutex_lock(&g_env_count_mu);
+		g_env_count++;
+		pthread_mutex_unlock(&g_env_count_mu);
+	}
+	*penv = &thread_env->env;
 	return JNI_OK;
 }
 
 static jint JNICALL t_AttachCurrentThread(JavaVM *vm, JNIEnv **penv, void *args)
 {
-	(void)vm;
-	(void)args;
-	if (penv != NULL) {
-		*penv = &g_env;
-	}
-	return JNI_OK;
+	return attach_current_thread(vm, penv, args, 0);
 }
 
 static jint JNICALL t_DetachCurrentThread(JavaVM *vm)
 {
-	(void)vm;
+	struct tipsy_thread_env *thread_env;
+
+	if (vm != &g_vm) {
+		return JNI_ERR;
+	}
+	thread_env = pthread_getspecific(g_env_key);
+	if (thread_env == NULL) {
+		return JNI_OK;
+	}
+	if (pthread_setspecific(g_env_key, NULL) != 0) {
+		return JNI_ERR;
+	}
+	thread_env_destroy(thread_env);
 	return JNI_OK;
 }
 
 static jint JNICALL t_GetEnv(JavaVM *vm, void **penv, jint version)
 {
-	(void)vm;
-	if (version > JNI_VERSION_1_6 && version != JNI_VERSION_1_8 && version != JNI_VERSION_10) {
+	struct tipsy_thread_env *thread_env;
+
+	if (penv == NULL) {
+		return JNI_ERR;
+	}
+	*penv = NULL;
+	if (vm != &g_vm) {
+		return JNI_ERR;
+	}
+	if (!supported_jni_version(version)) {
 		return JNI_EVERSION;
 	}
-	if (penv != NULL) {
-		*penv = &g_env;
+	thread_env = pthread_getspecific(g_env_key);
+	if (thread_env == NULL) {
+		return JNI_EDETACHED;
 	}
+	*penv = &thread_env->env;
 	return JNI_OK;
 }
 
 static jint JNICALL t_AttachCurrentThreadAsDaemon(JavaVM *vm, JNIEnv **penv, void *args)
 {
-	return t_AttachCurrentThread(vm, penv, args);
+	return attach_current_thread(vm, penv, args, 1);
 }
 
 static void fill_native(struct JNINativeInterface_ *t)
@@ -1310,11 +1413,8 @@ static void fill_native(struct JNINativeInterface_ *t)
 	t->GetObjectRefType = t_GetObjectRefType;
 }
 
-int tipsy_jni_init(void)
+static void init_bridge_once(void)
 {
-	if (g_inited) {
-		return 0;
-	}
 	fill_native(&g_native);
 	memset(&g_invoke, 0, sizeof g_invoke);
 	g_invoke.DestroyJavaVM = t_DestroyJavaVM;
@@ -1322,73 +1422,376 @@ int tipsy_jni_init(void)
 	g_invoke.DetachCurrentThread = t_DetachCurrentThread;
 	g_invoke.GetEnv = t_GetEnv;
 	g_invoke.AttachCurrentThreadAsDaemon = t_AttachCurrentThreadAsDaemon;
-	g_env.functions = &g_native;
 	g_vm.functions = &g_invoke;
-	g_inited = 1;
+	g_init_result = pthread_key_create(&g_env_key, thread_env_destroy);
+}
+
+int tipsy_jni_init(void)
+{
+	if (pthread_once(&g_init_once, init_bridge_once) != 0 || g_init_result != 0) {
+		return -1;
+	}
 	return 0;
 }
 
 JNIEnv *tipsy_jni_env(void)
 {
-	tipsy_jni_init();
-	return &g_env;
+	void *env = NULL;
+
+	if (tipsy_jni_init() != 0) {
+		return NULL;
+	}
+	if (t_GetEnv(&g_vm, &env, JNI_VERSION_1_6) != JNI_OK) {
+		return NULL;
+	}
+	return env;
+}
+
+JNIEnv *tipsy_jni_current_env(void)
+{
+	struct tipsy_thread_env *thread_env;
+
+	if (tipsy_jni_init() != 0) {
+		return NULL;
+	}
+	thread_env = pthread_getspecific(g_env_key);
+	return thread_env == NULL ? NULL : &thread_env->env;
+}
+
+jint tipsy_jni_attach_current_thread(JNIEnv **env, int daemon)
+{
+	if (tipsy_jni_init() != 0) {
+		if (env != NULL) {
+			*env = NULL;
+		}
+		return JNI_ERR;
+	}
+	if (daemon) {
+		return t_AttachCurrentThreadAsDaemon(&g_vm, env, NULL);
+	}
+	return t_AttachCurrentThread(&g_vm, env, NULL);
+}
+
+jint tipsy_jni_detach_current_thread(void)
+{
+	if (tipsy_jni_init() != 0) {
+		return JNI_ERR;
+	}
+	return t_DetachCurrentThread(&g_vm);
+}
+
+jint tipsy_jni_get_env(void **env, jint version)
+{
+	if (tipsy_jni_init() != 0) {
+		if (env != NULL) {
+			*env = NULL;
+		}
+		return JNI_ERR;
+	}
+	return t_GetEnv(&g_vm, env, version);
+}
+
+static uintptr_t attach_native_main_job(void)
+{
+	JNIEnv *env = NULL;
+
+	if (t_AttachCurrentThread(&g_vm, &env, NULL) != JNI_OK) {
+		return 0;
+	}
+	return (uintptr_t)env;
+}
+
+static uintptr_t current_env_job(void)
+{
+	void *env = NULL;
+
+	if (t_GetEnv(&g_vm, &env, JNI_VERSION_1_6) != JNI_OK) {
+		return 0;
+	}
+	return (uintptr_t)env;
+}
+
+JNIEnv *tipsy_jni_attach_native_main(void)
+{
+	JNIEnv *env;
+
+	if (tipsy_jni_init() != 0) {
+		return NULL;
+	}
+	if (tipsy_call0_ret != NULL) {
+		env = (JNIEnv *)tipsy_call0_ret((void *)attach_native_main_job);
+	} else {
+		/* JNI-only binaries do not link the runtime's C Main executor. */
+		env = (JNIEnv *)attach_native_main_job();
+	}
+	g_native_main_env = env;
+	return env;
+}
+
+size_t tipsy_jni_attached_thread_count(void)
+{
+	size_t count;
+
+	pthread_mutex_lock(&g_env_count_mu);
+	count = g_env_count;
+	pthread_mutex_unlock(&g_env_count_mu);
+	return count;
+}
+
+static void *test_attach_and_exit_thread(void *unused)
+{
+	JNIEnv *env = NULL;
+
+	(void)unused;
+	return (void *)(intptr_t)t_AttachCurrentThread(&g_vm, &env, NULL);
+}
+
+int tipsy_jni_test_attach_and_exit(void)
+{
+	pthread_t thread;
+	void *result = (void *)(intptr_t)JNI_ERR;
+
+	if (tipsy_jni_init() != 0 ||
+		pthread_create(&thread, NULL, test_attach_and_exit_thread, NULL) != 0) {
+		return JNI_ERR;
+	}
+	if (pthread_join(thread, &result) != 0) {
+		return JNI_ERR;
+	}
+	return (int)(intptr_t)result;
+}
+
+int tipsy_jni_test_native_main_env_is(JNIEnv *expected)
+{
+	if (expected == NULL || tipsy_call0_ret == NULL) {
+		return 0;
+	}
+	return tipsy_call0_ret((void *)current_env_job) == (uintptr_t)expected;
+}
+
+static jclass JNICALL test_wrapped_FindClass(JNIEnv *env, const char *name)
+{
+	pthread_mutex_lock(&g_test_wrap_mu);
+	g_test_wrapped_find_calls++;
+	if (tipsy_jni_current_env() != env || env != g_native_main_env) {
+		g_test_wrapped_owner_ok = 0;
+	}
+	pthread_mutex_unlock(&g_test_wrap_mu);
+	return g_native.FindClass(env, name);
+}
+
+int tipsy_jni_test_wrap_native_main(int enabled)
+{
+	if (g_native_main_env == NULL) {
+		return JNI_ERR;
+	}
+	pthread_mutex_lock(&g_test_wrap_mu);
+	if (enabled) {
+		g_test_wrapped_native = g_native;
+		g_test_wrapped_native.FindClass = test_wrapped_FindClass;
+		g_native_main_env->functions = &g_test_wrapped_native;
+		g_test_wrapped_find_calls = 0;
+		g_test_wrapped_owner_ok = 1;
+	} else {
+		g_native_main_env->functions = &g_native;
+	}
+	pthread_mutex_unlock(&g_test_wrap_mu);
+	return JNI_OK;
+}
+
+size_t tipsy_jni_test_wrapped_find_calls(int *owner_ok)
+{
+	size_t calls;
+
+	pthread_mutex_lock(&g_test_wrap_mu);
+	calls = g_test_wrapped_find_calls;
+	if (owner_ok != NULL) {
+		*owner_ok = g_test_wrapped_owner_ok;
+	}
+	pthread_mutex_unlock(&g_test_wrap_mu);
+	return calls;
 }
 
 void *tipsy_jni_native_interface(void)
 {
-	tipsy_jni_init();
+	if (tipsy_jni_init() != 0) {
+		return NULL;
+	}
 	return (void *)&g_native;
 }
 
 JavaVM *tipsy_jni_java_vm(void)
 {
-	tipsy_jni_init();
+	if (tipsy_jni_init() != 0) {
+		return NULL;
+	}
 	return &g_vm;
+}
+
+enum env_call_mode {
+	ENV_CALL_INVALID = -1,
+	ENV_CALL_DIRECT,
+	ENV_CALL_NATIVE_MAIN,
+};
+
+static enum env_call_mode env_owner_call_mode(JNIEnv *env)
+{
+	if (tipsy_jni_current_env() == env) {
+		return ENV_CALL_DIRECT;
+	}
+	if (env == g_native_main_env && tipsy_call_p8 != NULL) {
+		return ENV_CALL_NATIVE_MAIN;
+	}
+	return ENV_CALL_INVALID;
+}
+
+static int64_t owner_FindClass(void *env, void *name, void *a2, void *a3,
+	void *a4, void *a5, void *a6, void *a7)
+{
+	(void)a2; (void)a3; (void)a4; (void)a5; (void)a6; (void)a7;
+	return (int64_t)(intptr_t)((JNIEnv *)env)->functions->FindClass(env, name);
 }
 
 jclass tipsy_jni_FindClass(JNIEnv *env, const char *name)
 {
+	enum env_call_mode mode;
+
 	if (env == NULL || env->functions == NULL || env->functions->FindClass == NULL) {
+		return NULL;
+	}
+	mode = env_owner_call_mode(env);
+	if (mode == ENV_CALL_NATIVE_MAIN) {
+		return (jclass)(intptr_t)tipsy_call_p8((void *)owner_FindClass, env,
+			(void *)name, NULL, NULL, NULL, NULL, NULL, NULL);
+	}
+	if (mode == ENV_CALL_INVALID) {
 		return NULL;
 	}
 	return env->functions->FindClass(env, name);
 }
 
+static int64_t owner_NewStringUTF(void *env, void *utf, void *a2, void *a3,
+	void *a4, void *a5, void *a6, void *a7)
+{
+	(void)a2; (void)a3; (void)a4; (void)a5; (void)a6; (void)a7;
+	return (int64_t)(intptr_t)((JNIEnv *)env)->functions->NewStringUTF(env, utf);
+}
+
 jstring tipsy_jni_NewStringUTF(JNIEnv *env, const char *utf)
 {
+	enum env_call_mode mode;
+
 	if (env == NULL || env->functions == NULL || env->functions->NewStringUTF == NULL) {
+		return NULL;
+	}
+	mode = env_owner_call_mode(env);
+	if (mode == ENV_CALL_NATIVE_MAIN) {
+		return (jstring)(intptr_t)tipsy_call_p8((void *)owner_NewStringUTF, env,
+			(void *)utf, NULL, NULL, NULL, NULL, NULL, NULL);
+	}
+	if (mode == ENV_CALL_INVALID) {
 		return NULL;
 	}
 	return env->functions->NewStringUTF(env, utf);
 }
 
+static int64_t owner_GetStringUTFChars(void *env, void *str, void *is_copy,
+	void *a3, void *a4, void *a5, void *a6, void *a7)
+{
+	(void)a3; (void)a4; (void)a5; (void)a6; (void)a7;
+	return (int64_t)(intptr_t)((JNIEnv *)env)->functions->GetStringUTFChars(env, str, is_copy);
+}
+
 const char *tipsy_jni_GetStringUTFChars(JNIEnv *env, jstring str, jboolean *isCopy)
 {
+	enum env_call_mode mode;
+
 	if (env == NULL || env->functions == NULL || env->functions->GetStringUTFChars == NULL) {
+		return NULL;
+	}
+	mode = env_owner_call_mode(env);
+	if (mode == ENV_CALL_NATIVE_MAIN) {
+		return (const char *)(intptr_t)tipsy_call_p8((void *)owner_GetStringUTFChars,
+			env, str, isCopy, NULL, NULL, NULL, NULL, NULL);
+	}
+	if (mode == ENV_CALL_INVALID) {
 		return NULL;
 	}
 	return env->functions->GetStringUTFChars(env, str, isCopy);
 }
 
+static int64_t owner_ReleaseStringUTFChars(void *env, void *str, void *chars,
+	void *a3, void *a4, void *a5, void *a6, void *a7)
+{
+	(void)a3; (void)a4; (void)a5; (void)a6; (void)a7;
+	((JNIEnv *)env)->functions->ReleaseStringUTFChars(env, str, chars);
+	return 0;
+}
+
 void tipsy_jni_ReleaseStringUTFChars(JNIEnv *env, jstring str, const char *chars)
 {
+	enum env_call_mode mode;
+
 	if (env == NULL || env->functions == NULL || env->functions->ReleaseStringUTFChars == NULL) {
+		return;
+	}
+	mode = env_owner_call_mode(env);
+	if (mode == ENV_CALL_NATIVE_MAIN) {
+		(void)tipsy_call_p8((void *)owner_ReleaseStringUTFChars, env, str,
+			(void *)chars, NULL, NULL, NULL, NULL, NULL);
+		return;
+	}
+	if (mode == ENV_CALL_INVALID) {
 		return;
 	}
 	env->functions->ReleaseStringUTFChars(env, str, chars);
 }
 
+static int64_t owner_AllocObject(void *env, void *clazz, void *a2, void *a3,
+	void *a4, void *a5, void *a6, void *a7)
+{
+	(void)a2; (void)a3; (void)a4; (void)a5; (void)a6; (void)a7;
+	return (int64_t)(intptr_t)((JNIEnv *)env)->functions->AllocObject(env, clazz);
+}
+
 jobject tipsy_jni_AllocObject(JNIEnv *env, jclass clazz)
 {
+	enum env_call_mode mode;
+
 	if (env == NULL || env->functions == NULL || env->functions->AllocObject == NULL) {
+		return NULL;
+	}
+	mode = env_owner_call_mode(env);
+	if (mode == ENV_CALL_NATIVE_MAIN) {
+		return (jobject)(intptr_t)tipsy_call_p8((void *)owner_AllocObject, env,
+			clazz, NULL, NULL, NULL, NULL, NULL, NULL);
+	}
+	if (mode == ENV_CALL_INVALID) {
 		return NULL;
 	}
 	return env->functions->AllocObject(env, clazz);
 }
 
+static int64_t owner_NewByteArray(void *env, void *len, void *a2, void *a3,
+	void *a4, void *a5, void *a6, void *a7)
+{
+	(void)a2; (void)a3; (void)a4; (void)a5; (void)a6; (void)a7;
+	return (int64_t)(intptr_t)((JNIEnv *)env)->functions->NewByteArray(env, (jsize)(intptr_t)len);
+}
+
 jbyteArray tipsy_jni_NewByteArray(JNIEnv *env, jsize len)
 {
+	enum env_call_mode mode;
+
 	if (env == NULL || env->functions == NULL || env->functions->NewByteArray == NULL) {
+		return NULL;
+	}
+	mode = env_owner_call_mode(env);
+	if (mode == ENV_CALL_NATIVE_MAIN) {
+		return (jbyteArray)(intptr_t)tipsy_call_p8((void *)owner_NewByteArray, env,
+			(void *)(intptr_t)len, NULL, NULL, NULL, NULL, NULL, NULL);
+	}
+	if (mode == ENV_CALL_INVALID) {
 		return NULL;
 	}
 	return env->functions->NewByteArray(env, len);

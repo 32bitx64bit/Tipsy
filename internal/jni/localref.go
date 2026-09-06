@@ -21,21 +21,63 @@ type localFrame struct {
 	refs map[int64]int
 }
 
-func (vm *VM) ensureFramesLocked() {
+type jniThreadState struct {
+	localFrames []localFrame
+	pending     int64
+}
+
+func (vm *VM) currentEnvKey() uintptr {
 	if vm == nil {
-		return
+		return 0
 	}
-	if len(vm.localFrames) == 0 {
-		vm.localFrames = []localFrame{{refs: make(map[int64]int)}}
+	if current := currentEnvPtr(); current != nil {
+		return uintptr(current)
 	}
+	return uintptr(vm.envRaw)
+}
+
+func (vm *VM) ensureThreadStateLocked(env unsafe.Pointer) *jniThreadState {
+	if vm == nil {
+		return nil
+	}
+	key := uintptr(env)
+	if env == nil {
+		key = vm.currentEnvKey()
+	}
+	if key == 0 {
+		return nil
+	}
+	state := vm.threadStates[key]
+	if state == nil {
+		state = &jniThreadState{localFrames: []localFrame{{refs: make(map[int64]int)}}}
+		vm.threadStates[key] = state
+	}
+	return state
+}
+
+func (vm *VM) ensureFramesLocked() *jniThreadState {
+	if vm == nil {
+		return nil
+	}
+	state := vm.ensureThreadStateLocked(nil)
+	if state == nil {
+		return nil
+	}
+	if len(state.localFrames) == 0 {
+		state.localFrames = []localFrame{{refs: make(map[int64]int)}}
+	}
+	return state
 }
 
 func (vm *VM) addLocalLocked(id int64) {
 	if vm == nil || id == 0 {
 		return
 	}
-	vm.ensureFramesLocked()
-	f := &vm.localFrames[len(vm.localFrames)-1]
+	state := vm.ensureFramesLocked()
+	if state == nil {
+		return
+	}
+	f := &state.localFrames[len(state.localFrames)-1]
 	if f.refs == nil {
 		f.refs = make(map[int64]int)
 	}
@@ -47,8 +89,23 @@ func (vm *VM) localCountLocked(id int64) int {
 		return 0
 	}
 	n := 0
-	for i := range vm.localFrames {
-		n += vm.localFrames[i].refs[id]
+	for _, state := range vm.threadStates {
+		for i := range state.localFrames {
+			n += state.localFrames[i].refs[id]
+		}
+	}
+	return n
+}
+
+func (vm *VM) pendingCountLocked(id int64) int {
+	if vm == nil || id == 0 {
+		return 0
+	}
+	n := 0
+	for _, state := range vm.threadStates {
+		if state.pending == id {
+			n++
+		}
 	}
 	return n
 }
@@ -59,15 +116,19 @@ func (vm *VM) dropLocalLocked(id int64) {
 	if vm == nil || id == 0 {
 		return
 	}
-	for i := len(vm.localFrames) - 1; i >= 0; i-- {
-		c := vm.localFrames[i].refs[id]
+	state := vm.ensureFramesLocked()
+	if state == nil {
+		return
+	}
+	for i := len(state.localFrames) - 1; i >= 0; i-- {
+		c := state.localFrames[i].refs[id]
 		if c <= 0 {
 			continue
 		}
 		if c == 1 {
-			delete(vm.localFrames[i].refs, id)
+			delete(state.localFrames[i].refs, id)
 		} else {
-			vm.localFrames[i].refs[id] = c - 1
+			state.localFrames[i].refs[id] = c - 1
 		}
 		return
 	}
@@ -144,7 +205,7 @@ func (vm *VM) maybeReclaimLocked(id int64) {
 	if o == nil || o.global || o.immortal {
 		return
 	}
-	if vm.localCountLocked(id) > 0 || o.heapRefs > 0 {
+	if vm.localCountLocked(id) > 0 || vm.pendingCountLocked(id) > 0 || o.heapRefs > 0 {
 		return
 	}
 	delete(vm.objects, id)
@@ -152,13 +213,19 @@ func (vm *VM) maybeReclaimLocked(id int64) {
 }
 
 func (vm *VM) pushLocalFrameLocked() {
-	vm.ensureFramesLocked()
-	vm.localFrames = append(vm.localFrames, localFrame{refs: make(map[int64]int)})
+	state := vm.ensureFramesLocked()
+	if state == nil {
+		return
+	}
+	state.localFrames = append(state.localFrames, localFrame{refs: make(map[int64]int)})
 }
 
 func (vm *VM) popLocalFrameLocked(resultID int64) {
-	vm.ensureFramesLocked()
-	if len(vm.localFrames) <= 1 {
+	state := vm.ensureFramesLocked()
+	if state == nil {
+		return
+	}
+	if len(state.localFrames) <= 1 {
 		// Frame 0 lives for the env. Promoting result into it is still
 		// useful if native pops too far.
 		if resultID != 0 {
@@ -166,8 +233,8 @@ func (vm *VM) popLocalFrameLocked(resultID int64) {
 		}
 		return
 	}
-	top := vm.localFrames[len(vm.localFrames)-1]
-	vm.localFrames = vm.localFrames[:len(vm.localFrames)-1]
+	top := state.localFrames[len(state.localFrames)-1]
+	state.localFrames = state.localFrames[:len(state.localFrames)-1]
 	for id := range top.refs {
 		if id == resultID {
 			continue
@@ -176,6 +243,49 @@ func (vm *VM) popLocalFrameLocked(resultID int64) {
 	}
 	if resultID != 0 {
 		vm.addLocalLocked(resultID)
+	}
+}
+
+func (vm *VM) detachThreadState(env unsafe.Pointer) {
+	if vm == nil || env == nil {
+		return
+	}
+	vm.mu.Lock()
+	state := vm.threadStates[uintptr(env)]
+	delete(vm.threadStates, uintptr(env))
+	if state != nil {
+		ids := make(map[int64]struct{})
+		for _, frame := range state.localFrames {
+			for id := range frame.refs {
+				ids[id] = struct{}{}
+			}
+		}
+		if state.pending != 0 {
+			ids[state.pending] = struct{}{}
+		}
+		for id := range ids {
+			vm.maybeReclaimLocked(id)
+		}
+	}
+	vm.mu.Unlock()
+}
+
+func (vm *VM) pendingLocked() int64 {
+	state := vm.ensureThreadStateLocked(nil)
+	if state == nil {
+		return 0
+	}
+	return state.pending
+}
+
+func (vm *VM) setPendingLocked(id int64) {
+	state := vm.ensureThreadStateLocked(nil)
+	if state != nil {
+		old := state.pending
+		state.pending = id
+		if old != 0 && old != id {
+			vm.maybeReclaimLocked(old)
+		}
 	}
 }
 

@@ -117,7 +117,7 @@ func (vm *VM) authCookieFailure() {
 	defer vm.mu.Unlock()
 	o := vm.newObjectLocked(vm.ensureClassLocked("java/lang/IllegalStateException"))
 	o.str = "cookie persistence unavailable"
-	vm.pending = o.id
+	vm.setPendingLocked(o.id)
 }
 
 func (vm *VM) dispatchAuthCookies(o *Object, class, name, sig string, args *C.jvalue) (C.jobject, bool) {
