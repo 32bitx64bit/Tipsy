@@ -17,8 +17,11 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/tipsy-linux/tipsy/internal/apk"
+	"github.com/tipsy-linux/tipsy/internal/integrity"
+	"github.com/tipsy-linux/tipsy/internal/securitypolicy"
 )
 
 func validReport(cert string) *apk.Report {
@@ -30,7 +33,7 @@ func validReport(cert string) *apk.Report {
 		ManifestOK:      true,
 		Architectures:   []string{"x86_64"},
 		NativeLibraries: []apk.NativeLib{{ABI: "x86_64", Name: "libroblox.so", ZIPPath: "lib/x86_64/libroblox.so"}},
-		Signing:         apk.SigningInfo{HasV2: true, CryptographicallyValid: true, VerifiedCertSHA256: []string{cert}},
+		Signing:         apk.SigningInfo{HasV2: true, CryptographicallyValid: true, VerifiedScheme: "v2", VerifiedCertSHA256: []string{cert}, VerifiedLineageSHA256: []string{cert}},
 	}
 	return &apk.Report{
 		Packages: []apk.Package{pkg},
@@ -41,7 +44,7 @@ func validReport(cert string) *apk.Report {
 	}
 }
 
-func TestValidateOfficialPackageWhenProvided(t *testing.T) {
+func TestValidateDevelopmentPackageWhenProvided(t *testing.T) {
 	raw := os.Getenv("TIPSY_TEST_OFFICIAL_PACKAGES")
 	if raw == "" {
 		t.Skip("set TIPSY_TEST_OFFICIAL_PACKAGES to colon-separated locally owned APK paths")
@@ -58,14 +61,18 @@ func TestValidateOfficialPackageWhenProvided(t *testing.T) {
 	if err := apk.VerifyReportSignatures(context.Background(), rep); err != nil {
 		t.Fatal(err)
 	}
-	if err := ValidateReport(rep, OfficialTrustPolicy()); err != nil {
+	authorization, err := AuthorizeReport(rep, DevelopmentTrustPolicy())
+	if err != nil {
 		t.Fatal(err)
+	}
+	if authorization.Mode != DevelopmentUnrestricted || authorization.PolicyAuthorized {
+		t.Fatalf("development authorization claimed official policy: %+v", authorization)
 	}
 	t.Logf("validated official package %s (%d), files=%d", rep.Merged.VersionName, rep.Merged.VersionCode, len(rep.Packages))
 }
 
 func testTrust(cert string) TrustPolicy {
-	return TrustPolicy{PackageName: "com.roblox.client", AllowedCertificateSHA256: []string{cert}, SupportedSplits: []string{"", "config.x86_64"}}
+	return TrustPolicy{Mode: DevelopmentUnrestricted, PackageName: "com.roblox.client", AllowedCertificateSHA256: []string{cert}, SupportedSplits: []string{"", "config.x86_64"}}
 }
 
 func TestValidateReportRejectsPackageABIAndSignature(t *testing.T) {
@@ -107,6 +114,118 @@ func TestValidateReportRejectsUptodownInstaller(t *testing.T) {
 	err := ValidateReport(r, testTrust(cert))
 	if ErrorKindOf(err) != ErrWrongPackage || !strings.Contains(err.Error(), "installer") {
 		t.Fatalf("err=%v", err)
+	}
+}
+
+func TestAuthenticatedPolicyAuthorizesRotationWithoutSelfAuthorizingCandidate(t *testing.T) {
+	const (
+		compiled = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+		rotated  = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+	)
+	policy := securitypolicy.RobloxPolicy{
+		Schema: "tipsy.roblox-policy.v1",
+		Validity: securitypolicy.Validity{
+			Sequence: 7, NotBefore: time.Unix(1, 0).UTC().Format(time.RFC3339), Expires: time.Unix(1<<30, 0).UTC().Format(time.RFC3339),
+		},
+		PackageName: "com.roblox.client", Platform: "android", Architecture: "x86_64",
+		MinVersionCode: 2908, MaxVersionCode: 4000, AllowedSplits: []string{"base", "config.x86_64"},
+		SignerLineages: []securitypolicy.SignerLineage{{ID: "official-rotation", SHA256: []string{compiled, rotated}, MinVersionCode: 2908, MaxVersionCode: 4000}},
+	}
+	rep := validReport(rotated)
+	rep.Packages[0].Signing.HasV2 = false
+	rep.Packages[0].Signing.HasV3 = true
+	rep.Packages[0].Signing.VerifiedScheme = "v3"
+	rep.Packages[0].Signing.VerifiedLineageSHA256 = []string{compiled, rotated}
+	trust := TrustPolicy{
+		PackageName: "com.roblox.client", AllowedCertificateSHA256: []string{compiled}, SupportedSplits: []string{"", "config.x86_64"},
+		MinimumVersionCode: CompiledMinimumRobloxVersionCode, RobloxPolicy: &policy, MinimumPolicySequence: 7,
+	}
+	authorization, err := AuthorizeReport(rep, trust)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if authorization.SignerLineageID != "official-rotation" || authorization.PolicySequence != 7 || strings.Join(authorization.SignerLineage, ",") != compiled+","+rotated {
+		t.Fatalf("authorization=%+v", authorization)
+	}
+
+	t.Run("candidate cannot teach compiled root", func(t *testing.T) {
+		self := validReport(rotated)
+		self.Packages[0].Signing.HasV2 = false
+		self.Packages[0].Signing.HasV3 = true
+		self.Packages[0].Signing.VerifiedScheme = "v3"
+		self.Packages[0].Signing.VerifiedLineageSHA256 = []string{rotated}
+		if _, err := AuthorizeReport(self, trust); ErrorKindOf(err) != ErrUntrustedSigner {
+			t.Fatalf("self-authorized signer err=%v", err)
+		}
+	})
+	t.Run("policy omits authenticated predecessor", func(t *testing.T) {
+		missing := policy
+		missing.SignerLineages = []securitypolicy.SignerLineage{{ID: "incomplete", SHA256: []string{rotated}, MinVersionCode: 2908, MaxVersionCode: 4000}}
+		badTrust := trust
+		badTrust.RobloxPolicy = &missing
+		if _, err := AuthorizeReport(rep, badTrust); ErrorKindOf(err) != ErrUntrustedSigner {
+			t.Fatalf("incomplete lineage err=%v", err)
+		}
+	})
+	t.Run("stale policy", func(t *testing.T) {
+		stale := trust
+		stale.MinimumPolicySequence = 8
+		if _, err := AuthorizeReport(rep, stale); ErrorKindOf(err) != ErrPolicy {
+			t.Fatalf("stale policy err=%v", err)
+		}
+	})
+	t.Run("installed downgrade", func(t *testing.T) {
+		downgrade := trust
+		downgrade.InstalledVersionCode = rep.Merged.VersionCode + 1
+		if _, err := AuthorizeReport(rep, downgrade); ErrorKindOf(err) != ErrDowngrade {
+			t.Fatalf("downgrade err=%v", err)
+		}
+	})
+	t.Run("duplicate split", func(t *testing.T) {
+		duplicated := *rep
+		duplicated.Packages = append([]apk.Package(nil), rep.Packages...)
+		split := duplicated.Packages[0]
+		split.SplitName, split.IsSplit = "config.x86_64", true
+		duplicated.Packages = append(duplicated.Packages, split, split)
+		if _, err := AuthorizeReport(&duplicated, trust); ErrorKindOf(err) != ErrUnsupportedSplit {
+			t.Fatalf("duplicate split err=%v", err)
+		}
+	})
+}
+
+func TestAuthorizationModesKeepDevelopmentDistinctAndCandidateCannotSelfAuthorize(t *testing.T) {
+	const (
+		compiled = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+		rotated  = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+		unknown  = "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+	)
+	report := validReport(rotated)
+	report.Packages[0].Signing.HasV2 = false
+	report.Packages[0].Signing.HasV3_1 = true
+	report.Packages[0].Signing.VerifiedScheme = "v3.1"
+	report.Packages[0].Signing.VerifiedLineageSHA256 = []string{compiled, rotated}
+
+	official := TrustPolicy{Mode: OfficialVerified, PackageName: "com.roblox.client", AllowedCertificateSHA256: []string{compiled, rotated}, SupportedSplits: []string{"", "config.x86_64"}}
+	if _, err := AuthorizeReport(report, official); ErrorKindOf(err) != ErrPolicy {
+		t.Fatalf("official mode without authenticated policy err=%v", err)
+	}
+	development := official
+	development.Mode = DevelopmentUnrestricted
+	authorization, err := AuthorizeReport(report, development)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if authorization.Mode != DevelopmentUnrestricted || authorization.PolicyAuthorized || authorization.PolicySequence != 0 || authorization.SignerLineageID != "compiled-development" {
+		t.Fatalf("development authorization=%+v", authorization)
+	}
+
+	self := validReport(unknown)
+	self.Packages[0].Signing.HasV2 = false
+	self.Packages[0].Signing.HasV3_1 = true
+	self.Packages[0].Signing.VerifiedScheme = "v3.1"
+	self.Packages[0].Signing.VerifiedLineageSHA256 = []string{compiled, unknown}
+	if _, err := AuthorizeReport(self, development); ErrorKindOf(err) != ErrUntrustedSigner {
+		t.Fatalf("candidate taught development mode a new terminus: %v", err)
 	}
 }
 
@@ -284,7 +403,7 @@ func TestHTTPSBundleSourceCancellationCleansPartialFile(t *testing.T) {
 	}
 }
 
-func TestInstallStagesThenAtomicallyReplacesRuntime(t *testing.T) {
+func TestInstallStagesThenAtomicallyActivatesGeneration(t *testing.T) {
 	root := t.TempDir()
 	input := writeTestZIP(t, filepath.Join(root, "base.apk"), map[string][]byte{
 		"AndroidManifest.xml":     []byte("manifest"),
@@ -305,20 +424,48 @@ func TestInstallStagesThenAtomicallyReplacesRuntime(t *testing.T) {
 		t.Fatal(err)
 	}
 	const cert = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	nativeBody := []byte("verified")
 	s := New()
 	s.RuntimeDir = runtimeDir
+	s.GenerationStoreRoot = filepath.Join(root, "data", "runtime-generations")
+	t.Cleanup(func() { makeGenerationTreeWritable(s.GenerationStoreRoot) })
 	s.Trust = testTrust(cert)
-	s.inspect = func(context.Context, []string) (*apk.Report, error) { return validReport(cert), nil }
+	s.inspect = func(_ context.Context, selected []string) (*apk.Report, error) {
+		report := validReport(cert)
+		digest, size, err := hashGenerationFile(context.Background(), selected[0])
+		if err != nil {
+			return nil, err
+		}
+		report.Packages[0].Path, report.Packages[0].FileSHA256, report.Packages[0].Size = selected[0], digest, size
+		report.Packages[0].NativeLibraries[0].APKPath = selected[0]
+		report.Packages[0].NativeLibraries[0].SHA256 = testSHA256(nativeBody)
+		report.Packages[0].NativeLibraries[0].Size = int64(len(nativeBody))
+		report.Merged.NativeLibraries = append([]apk.NativeLib(nil), report.Packages[0].NativeLibraries...)
+		return report, nil
+	}
 	s.verify = func(context.Context, *apk.Report) error { return nil }
 	s.prepare = func() error { return nil }
-	s.extract = func(_ context.Context, _ []string, dest string) (*apk.ExtractResult, error) {
+	s.authorizeStaged = func(context.Context, integrity.Store, string, TrustPolicy) error { return nil }
+	s.extract = func(_ context.Context, selected []string, dest string) (*apk.ExtractResult, error) {
+		if err := os.MkdirAll(filepath.Join(dest, "apk"), 0o700); err != nil {
+			return nil, err
+		}
 		if err := os.MkdirAll(filepath.Join(dest, "lib", "x86_64"), 0o700); err != nil {
 			return nil, err
 		}
-		if err := os.WriteFile(filepath.Join(dest, "lib", "x86_64", "libroblox.so"), []byte("verified"), 0o600); err != nil {
+		rawAPK, err := os.ReadFile(selected[0])
+		if err != nil {
 			return nil, err
 		}
-		meta := apk.Meta{PackageName: "com.roblox.client", VersionName: "2.734.917", VersionCode: 2908}
+		if err := os.WriteFile(filepath.Join(dest, "apk", "base.apk"), rawAPK, 0o600); err != nil {
+			return nil, err
+		}
+		if err := os.WriteFile(filepath.Join(dest, "lib", "x86_64", "libroblox.so"), nativeBody, 0o600); err != nil {
+			return nil, err
+		}
+		apkDigest := testSHA256(rawAPK)
+		meta := apk.Meta{PackageName: "com.roblox.client", VersionName: "2.734.917", VersionCode: 2908,
+			Packages: []apk.MetaFile{{Dest: "apk/base.apk", SHA256: apkDigest, Size: int64(len(rawAPK))}}}
 		raw, _ := json.Marshal(meta)
 		if err := os.WriteFile(filepath.Join(dest, "meta.json"), raw, 0o600); err != nil {
 			return nil, err
@@ -334,14 +481,43 @@ func TestInstallStagesThenAtomicallyReplacesRuntime(t *testing.T) {
 	if err != nil || result == nil || !result.Snapshot.Installed {
 		t.Fatalf("result=%+v err=%v", result, err)
 	}
-	if _, err := os.Stat(filepath.Join(runtimeDir, "old-only")); !os.IsNotExist(err) {
-		t.Fatalf("old runtime survived replacement: %v", err)
+	if raw, err := os.ReadFile(filepath.Join(runtimeDir, "old-only")); err != nil || string(raw) != "old" {
+		t.Fatalf("non-authoritative legacy runtime changed: %q err=%v", raw, err)
 	}
 	if got, _ := os.ReadFile(account); string(got) != "opaque-account-data" {
 		t.Fatalf("account data changed: %q", got)
 	}
 	if len(phases) < 5 || phases[len(phases)-1] != PhaseComplete {
 		t.Fatalf("progress phases=%v", phases)
+	}
+	prior, err := (integrity.Store{Root: s.GenerationStoreRoot}).Active(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	priorID := prior.ID
+	prior.Close()
+
+	// Cancellation after a different generation has been staged and checked
+	// must leave active.json and account data bound to the prior generation.
+	nativeBody = []byte("verified-second")
+	interrupted, cancel := context.WithCancel(context.Background())
+	s.authorizeStaged = func(context.Context, integrity.Store, string, TrustPolicy) error {
+		cancel()
+		return nil
+	}
+	if _, err := s.Install(interrupted, InstallRequest{Mode: InstallLocal, LocalPaths: []string{input}}, nil); ErrorKindOf(err) != ErrCanceled {
+		t.Fatalf("interrupted activation err=%v", err)
+	}
+	active, err := (integrity.Store{Root: s.GenerationStoreRoot}).Active(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer active.Close()
+	if active.ID != priorID {
+		t.Fatalf("interrupted setup activated %q, want prior %q", active.ID, priorID)
+	}
+	if got, _ := os.ReadFile(account); string(got) != "opaque-account-data" {
+		t.Fatalf("account data changed after interrupted activation: %q", got)
 	}
 }
 

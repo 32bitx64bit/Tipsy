@@ -76,6 +76,8 @@ const (
 	ErrMissingX8664      ErrorKind = "missing_x86_64"
 	ErrUntrustedSigner   ErrorKind = "untrusted_signer"
 	ErrInvalidSignature  ErrorKind = "invalid_signature"
+	ErrDowngrade         ErrorKind = "downgrade"
+	ErrPolicy            ErrorKind = "policy"
 	ErrSourceUnavailable ErrorKind = "source_unavailable"
 	ErrSourceTrust       ErrorKind = "source_trust"
 	ErrNetwork           ErrorKind = "network"
