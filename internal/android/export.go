@@ -15,11 +15,37 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"sync"
 	"sync/atomic"
 	"unsafe"
 
 	"github.com/tipsy-linux/tipsy/internal/logging"
 )
+
+var (
+	logTextMu       sync.Mutex
+	logTextObserver func(string)
+)
+
+// SetLogTextObserver is notified of liblog text that reaches Go. The text is
+// not stored. Pass nil to clear.
+func SetLogTextObserver(fn func(string)) {
+	logTextMu.Lock()
+	logTextObserver = fn
+	logTextMu.Unlock()
+}
+
+func observeLogText(text string) {
+	if text == "" {
+		return
+	}
+	logTextMu.Lock()
+	fn := logTextObserver
+	logTextMu.Unlock()
+	if fn != nil {
+		fn(text)
+	}
+}
 
 func androidLog() *slog.Logger {
 	return logging.Logger(logging.CatAndroid)
@@ -97,6 +123,7 @@ func testAndroidLogBufWrite(bufID, prio int, tag, text string) int {
 //export GoAndroid_LogWrite
 func GoAndroid_LogWrite(prio C.int, tag, text *C.char) {
 	logWriteCalls.Add(1)
+	observeLogText(C.GoString(text))
 	p := int(prio)
 	log := androidLog()
 	if p != 2 && p != 3 {

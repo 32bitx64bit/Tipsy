@@ -120,3 +120,16 @@ func TestAndroidLogDebugEnabledStillLogs(t *testing.T) {
 		t.Fatalf("enabled Debug did not log: %s", out)
 	}
 }
+
+func TestAndroidLogWriteNotifiesObserver(t *testing.T) {
+	t.Cleanup(func() { SetLogTextObserver(nil) })
+	logging.Init()
+	var got string
+	SetLogTextObserver(func(text string) { got = text })
+	if testAndroidLogPrint(4, "rbx", "Info [FLog::DataModelBindings] onGameLoaded: placeId:1818.") != 1 {
+		t.Fatal("print")
+	}
+	if got != "Info [FLog::DataModelBindings] onGameLoaded: placeId:1818." {
+		t.Fatalf("observer=%q", got)
+	}
+}
