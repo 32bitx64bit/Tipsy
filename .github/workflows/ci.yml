@@ -36,7 +36,9 @@ jobs:
       - name: Native headers
         run: |
           sudo apt-get update
-          sudo apt-get install -y gcc pkg-config libx11-dev libxext-dev libpango1.0-dev libegl1-mesa-dev libgles2-mesa-dev libxrandr-dev libxtst-dev xvfb
+          sudo apt-get install -y gcc pkg-config libx11-dev libx11-xcb-dev libxext-dev libpango1.0-dev libegl1-mesa-dev libgles2-mesa-dev libxrandr-dev libxtst-dev xvfb
+          pkg-config --exists x11 x11-xcb xrandr xext pangocairo pangoft2 cairo-xlib egl glesv2 xtst
+          test -f /usr/include/X11/Xlib-xcb.h
 
       - name: Vet
         run: go vet ./...
@@ -59,9 +61,11 @@ jobs:
         with:
           go-version: "1.27.1"
           cache: false
-      - name: Qt 6
+      - name: Qt 6 and native headers
         run: |
           sudo apt-get update
-          sudo apt-get install -y qt6-base-dev libxext-dev libpango1.0-dev pkg-config g++
+          sudo apt-get install -y qt6-base-dev g++ pkg-config libx11-dev libx11-xcb-dev libxext-dev libpango1.0-dev libegl1-mesa-dev libgles2-mesa-dev libxrandr-dev libxtst-dev
+          pkg-config --exists x11 x11-xcb xrandr xext pangocairo pangoft2 cairo-xlib egl glesv2 xtst
+          test -f /usr/include/X11/Xlib-xcb.h
       - name: Build GUI
         run: go build -o bin/tipsy-gui ./cmd/tipsy-gui

@@ -5,7 +5,7 @@ set -euo pipefail
 
 usage() {
 	cat >&2 <<USAGE
-usage: $0 --version VERSION [--output-dir DIRECTORY] [--mode developer|official]
+usage: $0 --version VERSION [--output-dir DIRECTORY] [--mode developer|official|github-signed]
   [--release-lock FILE] [--source-commit COMMIT]
 
 Builds a clean x86_64 AppDir and reproducible .tar.gz archive. The build uses
@@ -61,7 +61,7 @@ while [[ $# -gt 0 ]]; do
 done
 
 [[ "$version" =~ ^[0-9A-Za-z][0-9A-Za-z._+-]*$ ]] || fail 'VERSION must contain only release-safe characters'
-[[ "$mode" == developer || "$mode" == official ]] || fail 'mode must be developer or official'
+[[ "$mode" == developer || "$mode" == official || "$mode" == github-signed ]] || fail 'mode must be developer, official, or github-signed'
 
 repo=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 if [[ -z "$release_lock" ]]; then
@@ -82,7 +82,7 @@ source_dirty=false
 if [[ -n $(git -C "$repo" status --porcelain=v1 --untracked-files=all) ]]; then
 	source_dirty=true
 fi
-if [[ "$mode" == official ]]; then
+if [[ "$mode" != developer ]]; then
 	[[ "$source_commit" == "$head_commit" ]] || fail 'official candidate source commit does not match HEAD'
 	[[ "$source_dirty" == false ]] || fail 'official candidate requires a completely clean source tree'
 	[[ "${TIPSY_RELEASE_SOURCE_READONLY:-}" == 1 ]] || fail 'official candidate must run through the read-only isolated release builder'
@@ -121,9 +121,14 @@ required_pkg_modules=(Qt6Widgets Qt6Gui Qt6Core x11 xext pangocairo pangoft2 cai
 pkg-config --exists "${required_pkg_modules[@]}" || \
 	fail 'Qt 6, X11/Xext, or Pango/Cairo development files are missing'
 [[ $(go env GOOS) == linux ]] || fail 'the active Go toolchain is not targeting Linux'
-if [[ "$mode" == official ]]; then
-	expected_go="go$("$repo/scripts/release-lock.py" --lock "$release_lock" --mode official --get target.go)"
-	[[ $(go env GOVERSION) == "$expected_go" ]] || fail "official Go toolchain mismatch (expected $expected_go)"
+if [[ "$mode" != developer ]]; then
+	expected_go="go$("$repo/scripts/release-lock.py" --lock "$release_lock" --mode "$mode" --get target.go)"
+	actual_go=$(go env GOVERSION)
+	# GitHub's setup-go toolchain reports the exact locked version.  Permit a
+	# distributor build suffix only for the local, reproducible validation path;
+	# it must still name the same upstream Go release.
+	[[ "$actual_go" == "$expected_go" || "$actual_go" == "$expected_go"-* ]] || \
+		fail "signed Go toolchain mismatch (expected $expected_go, got $actual_go)"
 fi
 
 qt_plugins=$(qmake6 -query QT_INSTALL_PLUGINS)
@@ -136,8 +141,8 @@ fi
 [[ "$source_date_epoch" =~ ^[0-9]+$ ]] || fail 'set SOURCE_DATE_EPOCH to a non-negative integer'
 commit_epoch=$(git -C "$repo" show -s --format=%ct "$source_commit" 2>/dev/null || true)
 [[ "$commit_epoch" =~ ^[0-9]+$ ]] || fail 'source commit has no valid timestamp'
-if [[ "$mode" == official && "$source_date_epoch" != "$commit_epoch" ]]; then
-	fail 'official SOURCE_DATE_EPOCH must equal the reviewed commit timestamp'
+if [[ "$mode" != developer && "$source_date_epoch" != "$commit_epoch" ]]; then
+	fail 'signed SOURCE_DATE_EPOCH must equal the reviewed commit timestamp'
 fi
 
 umask 022
@@ -336,10 +341,11 @@ done < <(find "$appdir/usr/plugins" -type f -name '*.so' -print0)
 
 qt_version=$(pkg-config --modversion Qt6Core)
 go_version=$(go env GOVERSION)
-release_kind=development-unrestricted
-if [[ "$mode" == official ]]; then
-	release_kind=release-candidate-unsigned
-fi
+case "$mode" in
+	developer) release_kind=development-unrestricted ;;
+	official) release_kind=release-candidate-unsigned ;;
+	github-signed) release_kind=release-candidate-keyless ;;
+esac
 cat > "$appdir/usr/share/tipsy/build-info" <<BUILD_INFO
 format=tipsy.build-info.v1
 name=Tipsy

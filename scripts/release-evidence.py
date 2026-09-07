@@ -74,7 +74,11 @@ def valid_common(args: argparse.Namespace) -> None:
 def command_build_info(args: argparse.Namespace) -> None:
     valid_common(args)
     lock, canonical = read_lock(args.release_lock)
-    release_kind = "development-unrestricted" if args.mode == "developer" else "release-candidate-unsigned"
+    release_kind = {
+        "developer": "development-unrestricted",
+        "official": "release-candidate-unsigned",
+        "github-signed": "release-candidate-keyless",
+    }[args.mode]
     tree = "dirty" if args.source_dirty else "clean"
     info = {
         "architecture": "x86_64",
@@ -244,7 +248,7 @@ def common_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--source-commit", required=True)
     parser.add_argument("--source-date-epoch", required=True, type=int)
     parser.add_argument("--release-lock", required=True, type=Path)
-    parser.add_argument("--mode", choices=("developer", "official"), required=True)
+    parser.add_argument("--mode", choices=("developer", "official", "github-signed"), required=True)
 
 
 def main() -> int:

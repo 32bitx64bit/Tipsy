@@ -7,7 +7,7 @@ usage() {
 	cat >&2 <<USAGE
 usage: $0 --appdir DIRECTORY --version VERSION --tool APPIMAGETOOL \\
   --tool-sha256 SHA256 [--runtime-file FILE --runtime-sha256 SHA256] [--output FILE] \\
-  [--mode developer|official] [--release-lock FILE]
+  [--mode developer|official|github-signed] [--release-lock FILE]
 
 The appimagetool binary is never downloaded. Supply a pinned local binary and
 its independently verified SHA-256 digest. If the tool would otherwise fetch an
@@ -48,7 +48,7 @@ done
 
 [[ -d "$appdir" ]] || fail 'AppDir does not exist'
 [[ "$version" =~ ^[0-9A-Za-z][0-9A-Za-z._+-]*$ ]] || fail 'invalid version'
-[[ "$mode" == developer || "$mode" == official ]] || fail 'mode must be developer or official'
+[[ "$mode" == developer || "$mode" == official || "$mode" == github-signed ]] || fail 'mode must be developer, official, or github-signed'
 [[ -f "$tool" && -x "$tool" ]] || fail 'appimagetool is not an executable regular file'
 [[ "$tool_sha256" =~ ^[0-9a-fA-F]{64}$ ]] || fail 'tool SHA-256 must contain exactly 64 hexadecimal characters'
 
@@ -73,12 +73,12 @@ if [[ -z "$release_lock" ]]; then
 fi
 [[ -f "$release_lock" && ! -L "$release_lock" ]] || fail 'release input lock is not a regular file'
 "$repo/scripts/release-lock.py" --lock "$release_lock" --mode "$mode"
-if [[ "$mode" == official ]]; then
-	[[ "${TIPSY_RELEASE_SOURCE_READONLY:-}" == 1 ]] || fail 'official candidate must run through the isolated release builder'
-	locked_tool=$("$repo/scripts/release-lock.py" --lock "$release_lock" --mode official --get downloads.appimagetool.sha256)
+if [[ "$mode" != developer ]]; then
+	[[ "${TIPSY_RELEASE_SOURCE_READONLY:-}" == 1 ]] || fail 'signed candidate must run through the isolated release builder'
+	locked_tool=$("$repo/scripts/release-lock.py" --lock "$release_lock" --mode "$mode" --get downloads.appimagetool.sha256)
 	[[ "$actual_sha256" == "$locked_tool" ]] || fail 'appimagetool digest does not match the reviewed release input lock'
-	[[ -n "$runtime_file" ]] || fail 'official AppImage build requires a pinned explicit type-2 runtime'
-	locked_runtime=$("$repo/scripts/release-lock.py" --lock "$release_lock" --mode official --get downloads.type2-runtime.sha256)
+	[[ -n "$runtime_file" ]] || fail 'signed AppImage build requires a pinned explicit type-2 runtime'
+	locked_runtime=$("$repo/scripts/release-lock.py" --lock "$release_lock" --mode "$mode" --get downloads.type2-runtime.sha256)
 	[[ "$actual_runtime" == "$locked_runtime" ]] || fail 'runtime digest does not match the reviewed release input lock'
 fi
 "$repo/scripts/check-release-tree.sh" "$appdir"

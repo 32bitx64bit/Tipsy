@@ -93,7 +93,7 @@ def validate(value: dict[str, Any], mode: str) -> None:
         raise LockError("target.go must be one exact stable Go version")
 
     actions = object_at(value, "actions")
-    if set(actions) != {"attest", "checkout", "setup-go", "upload-artifact"}:
+    if set(actions) != {"attest", "checkout", "cosign-installer", "setup-go"}:
         raise LockError("actions must contain exactly the release workflow dependencies")
     for name, action in actions.items():
         if not isinstance(name, str) or not isinstance(action, dict) or set(action) != {"commit", "release"}:
@@ -137,8 +137,11 @@ def validate(value: dict[str, Any], mode: str) -> None:
     for name, material in downloads.items():
         if not isinstance(name, str) or not isinstance(material, dict):
             raise LockError("downloaded material entries must be objects")
-        if set(material) != {"sha256", "status"} or material["status"] not in {"pinned", "required-at-invocation"}:
+        if set(material) != {"sha256", "status", "uri"} or material["status"] not in {"pinned", "required-at-invocation"}:
             raise LockError(f"downloaded material {name} is malformed")
+        uri = material["uri"]
+        if not isinstance(uri, str) or not uri.startswith("https://github.com/") or "@" in uri.removeprefix("https://"):
+            raise LockError(f"downloaded material {name} must use a public GitHub HTTPS URL")
         digest = material["sha256"]
         if digest is not None and (not isinstance(digest, str) or not HEX64.fullmatch(digest)):
             raise LockError(f"downloaded material {name} has an invalid SHA-256")
@@ -159,6 +162,14 @@ def validate(value: dict[str, Any], mode: str) -> None:
         for name, material in downloads.items():
             if material["status"] != "pinned" or not isinstance(material["sha256"], str) or not HEX64.fullmatch(material["sha256"]):
                 raise LockError(f"official candidate requires a pinned digest for {name}")
+    if mode == "github-signed":
+        if value["status"] != "reviewed":
+            raise LockError("GitHub-signed release requires a reviewed release input lock")
+        if builder["image"] != "github-hosted/ubuntu-24.04" or builder["sha256"] is not None:
+            raise LockError("GitHub-signed release requires the declared GitHub-hosted builder")
+        for name, material in downloads.items():
+            if material["status"] != "pinned" or not isinstance(material["sha256"], str) or not HEX64.fullmatch(material["sha256"]):
+                raise LockError(f"GitHub-signed release requires a pinned digest for {name}")
 
 
 def lookup(value: Any, dotted: str) -> Any:
@@ -173,7 +184,7 @@ def lookup(value: Any, dotted: str) -> Any:
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--lock", required=True, type=Path)
-    parser.add_argument("--mode", choices=("developer", "official"), default="developer")
+    parser.add_argument("--mode", choices=("developer", "official", "github-signed"), default="developer")
     parser.add_argument("--get")
     parser.add_argument("--digest", action="store_true")
     args = parser.parse_args()

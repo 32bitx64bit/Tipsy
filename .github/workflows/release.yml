@@ -1,7 +1,8 @@
-name: Release candidate
+name: GitHub-signed release
 
-# This workflow produces a candidate plus public, unsigned evidence.  It never
-# receives a TUF key, publishes a GitHub release, or declares a channel official.
+# A protected, immutable v* tag creates exactly one public GitHub release. The
+# AppImage receives both a keyless Sigstore bundle and GitHub build provenance.
+# No workflow secret or long-lived signing key is used or accepted.
 on:
   push:
     tags:
@@ -11,19 +12,19 @@ permissions:
   contents: read
 
 concurrency:
-  group: release-candidate-${{ github.ref }}
+  group: github-signed-release-${{ github.ref }}
   cancel-in-progress: false
 
 jobs:
-  release-candidate:
-    # Configure this environment with required reviewers and tag protection in
-    # GitHub. Its approval protects OIDC attestation issuance; it is not a
-    # substitute for the offline TUF signing ceremony.
+  github-signed-release:
+    # The repository's production environment admits only v* tags and requires
+    # an explicit reviewer approval before this job receives OIDC or release
+    # publication permissions.
     environment: production
     runs-on: ubuntu-24.04
     timeout-minutes: 60
     permissions:
-      contents: read
+      contents: write
       id-token: write
       attestations: write
 
@@ -37,7 +38,7 @@ jobs:
           submodules: false
           show-progress: false
 
-      - name: Fail closed unless the reviewed release policy and exact tag agree
+      - name: Fail closed unless the reviewed tag and keyless release policy agree
         id: preflight
         shell: bash
         run: |
@@ -45,11 +46,8 @@ jobs:
 
           readonly lock=scripts/release-inputs.lock.json
           readonly lock_tool=scripts/release-lock.py
-          "$lock_tool" --lock "$lock" --mode official
+          "$lock_tool" --lock "$lock" --mode github-signed
 
-          # Keep action identities and the requested Go version mechanically
-          # tied to the reviewed lock. A lock change cannot silently retarget a
-          # mutable action reference or toolchain version.
           python3 - "$lock" .github/workflows/release.yml <<'PY'
           import json
           import sys
@@ -61,7 +59,7 @@ jobs:
               "actions/checkout": lock["actions"]["checkout"]["commit"],
               "actions/setup-go": lock["actions"]["setup-go"]["commit"],
               "actions/attest": lock["actions"]["attest"]["commit"],
-              "actions/upload-artifact": lock["actions"]["upload-artifact"]["commit"],
+              "sigstore/cosign-installer": lock["actions"]["cosign-installer"]["commit"],
           }
           for action, commit in expected.items():
               needle = f"uses: {action}@{commit}"
@@ -88,20 +86,15 @@ jobs:
           git diff --cached --no-ext-diff --quiet
           ! git config --local --get-regexp '^http\..*\.extraheader$' >/dev/null
 
-          expected_repository=$("$lock_tool" --lock "$lock" --mode official --get source.repository)
+          expected_repository=$("$lock_tool" --lock "$lock" --mode github-signed --get source.repository)
           origin=$(git remote get-url origin)
           origin=${origin%.git}
           [[ "$origin" == "$expected_repository" ]]
           [[ "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY" == "$expected_repository" ]]
 
-          builder_image=$("$lock_tool" --lock "$lock" --mode official --get builder.image)
-          builder_sha256=$("$lock_tool" --lock "$lock" --mode official --get builder.sha256)
-          [[ "$builder_image" != *[@[:space:]]* ]]
-          [[ "$builder_sha256" =~ ^[0-9a-f]{64}$ ]]
-
           printf 'version=%s\n' "$version" >> "$GITHUB_OUTPUT"
           printf 'commit=%s\n' "$checkout_commit" >> "$GITHUB_OUTPUT"
-          printf 'lock_digest=%s\n' "$("$lock_tool" --lock "$lock" --mode official --digest)" >> "$GITHUB_OUTPUT"
+          printf 'lock_digest=%s\n' "$("$lock_tool" --lock "$lock" --mode github-signed --digest)" >> "$GITHUB_OUTPUT"
 
       - name: Select the exact reviewed Go toolchain
         uses: actions/setup-go@d35c59abb061a4a6fb18e82ac0862c26744d6ab5 # v5.5.0; scripts/release-inputs.lock.json
@@ -110,134 +103,101 @@ jobs:
           check-latest: false
           cache: false
 
-      - name: Confirm the selected Go version
+      - name: Install the native build surface
         shell: bash
         run: |
           set -euo pipefail
-          expected="go$(scripts/release-lock.py --lock scripts/release-inputs.lock.json --mode official --get target.go)"
-          [[ $(go env GOVERSION) == "$expected" ]]
+          sudo apt-get update
+          sudo apt-get install -y \
+            bubblewrap ca-certificates curl file gcc git patchelf pkg-config qmake6 \
+            qt6-base-dev libegl1-mesa-dev libgles2-mesa-dev libpango1.0-dev \
+            libx11-dev libx11-xcb-dev libxext-dev libxrandr-dev libxtst-dev
+          pkg-config --exists Qt6Widgets Qt6Gui Qt6Core x11 x11-xcb xext xrandr xtst pangocairo pangoft2 cairo-xlib egl glesv2
+          test -f /usr/include/X11/Xlib-xcb.h
+          bwrap --ro-bind / / --dev /dev --proc /proc --unshare-net --new-session --cap-drop ALL true
 
-      - name: Build twice in the reviewed immutable builder
+      - name: Prime the module cache before build isolation
+        shell: bash
+        run: |
+          set -euo pipefail
+          expected="go$(scripts/release-lock.py --lock scripts/release-inputs.lock.json --mode github-signed --get target.go)"
+          [[ $(go env GOVERSION) == "$expected" ]]
+          GOTOOLCHAIN=local go mod download
+
+      - name: Download and verify the pinned AppImage inputs
+        id: inputs
+        shell: bash
+        run: |
+          set -euo pipefail
+          readonly lock=scripts/release-inputs.lock.json
+          readonly lock_tool=scripts/release-lock.py
+          readonly input_dir="$RUNNER_TEMP/tipsy-release-inputs-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          install -d -m 0700 "$input_dir"
+
+          download_checked() {
+            local name=$1 path=$2 expected=$3 uri=$4 actual
+            [[ "$uri" == https://github.com/* ]]
+            curl --fail --location --proto '=https' --tlsv1.2 --retry 3 --output "$path" "$uri"
+            actual=$(sha256sum "$path")
+            actual=${actual%% *}
+            [[ "$actual" == "$expected" ]]
+            [[ -f "$path" && ! -L "$path" ]]
+            printf '%s\n' "$name=$path" >> "$GITHUB_OUTPUT"
+          }
+
+          download_checked \
+            appimagetool "$input_dir/appimagetool" \
+            "$("$lock_tool" --lock "$lock" --mode github-signed --get downloads.appimagetool.sha256)" \
+            "$("$lock_tool" --lock "$lock" --mode github-signed --get downloads.appimagetool.uri)"
+          chmod 0755 "$input_dir/appimagetool"
+          download_checked \
+            runtime "$input_dir/type2-runtime" \
+            "$("$lock_tool" --lock "$lock" --mode github-signed --get downloads.type2-runtime.sha256)" \
+            "$("$lock_tool" --lock "$lock" --mode github-signed --get downloads.type2-runtime.uri)"
+
+      - name: Build the reproducible keyless release candidate
         id: build
         shell: bash
         run: |
           set -euo pipefail
-
+          readonly version='${{ steps.preflight.outputs.version }}'
+          readonly output="$RUNNER_TEMP/tipsy-release-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
           readonly lock=scripts/release-inputs.lock.json
           readonly lock_tool=scripts/release-lock.py
-          readonly input_root=/opt/tipsy-release-inputs
-          readonly version='${{ steps.preflight.outputs.version }}'
-          readonly expected_commit='${{ steps.preflight.outputs.commit }}'
-          readonly expected_lock_digest='${{ steps.preflight.outputs.lock_digest }}'
-          builder_image=$("$lock_tool" --lock "$lock" --mode official --get builder.image)
-          builder_sha256=$("$lock_tool" --lock "$lock" --mode official --get builder.sha256)
-          readonly builder_ref="${builder_image}@sha256:${builder_sha256}"
-
-          # The public image is addressed by the reviewed manifest digest. The
-          # mutable GitHub runner is only a dispatcher; it never compiles Tipsy.
-          docker pull "$builder_ref"
-          docker image inspect --format '{{range .RepoDigests}}{{println .}}{{end}}' "$builder_ref" | \
-            grep -Fqx -- "$builder_ref"
-
-          readonly work="$RUNNER_TEMP/tipsy-release-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
-          readonly output="$work/output"
           install -d -m 0700 "$output"
 
-          docker run --rm \
-            --network none \
-            --read-only \
-            --cap-drop ALL \
-            --security-opt no-new-privileges \
-            --user "$(id -u):$(id -g)" \
-            --tmpfs /tmp:rw,exec,nosuid,nodev,size=8g \
-            --tmpfs /home:rw,nosuid,nodev,size=64m \
-            --mount "type=bind,src=$GITHUB_WORKSPACE,dst=/src,readonly" \
-            --mount "type=bind,src=$output,dst=/out" \
-            --env "TIPSY_RELEASE_INPUT_ROOT=$input_root" \
-            --env "TIPSY_RELEASE_EXPECTED_LOCK_DIGEST=$expected_lock_digest" \
-            --env "TIPSY_RELEASE_VERSION=$version" \
-            --env "TIPSY_RELEASE_EXPECTED_COMMIT=$expected_commit" \
-            --entrypoint /bin/bash \
-            "$builder_ref" \
-            -euo pipefail -c '
-              cd /src
-              readonly lock=scripts/release-inputs.lock.json
-              readonly lock_tool=scripts/release-lock.py
-              readonly input_root="$TIPSY_RELEASE_INPUT_ROOT"
-
-              "$lock_tool" --lock "$lock" --mode official
-              [[ $("$lock_tool" --lock "$lock" --mode official --digest) == "$TIPSY_RELEASE_EXPECTED_LOCK_DIGEST" ]]
-              [[ $(git rev-parse --verify HEAD) == "$TIPSY_RELEASE_EXPECTED_COMMIT" ]]
-              [[ -z $(git status --porcelain=v1 --untracked-files=all) ]]
-
-              sha256_matches() {
-                local path=$1 expected=$2 actual
-                [[ -f "$path" && ! -L "$path" ]]
-                actual=$(sha256sum "$path")
-                actual=${actual%% *}
-                [[ "$actual" == "$expected" ]]
-              }
-
-              readonly appimagetool="$input_root/appimagetool"
-              readonly runtime="$input_root/type2-runtime"
-              readonly package_snapshot="$input_root/package-snapshot.json"
-              [[ -x "$appimagetool" ]]
-              [[ -s "$runtime" ]]
-              sha256_matches "$appimagetool" "$("$lock_tool" --lock "$lock" --mode official --get downloads.appimagetool.sha256)"
-              sha256_matches "$runtime" "$("$lock_tool" --lock "$lock" --mode official --get downloads.type2-runtime.sha256)"
-              sha256_matches "$package_snapshot" "$("$lock_tool" --lock "$lock" --mode official --get packageSnapshot.sha256)"
-
-              # package-snapshot.json is public material baked into the pinned
-              # builder. Its digest plus the OCI manifest digest bind the exact
-              # native package inventory used by the build.
-              python3 - "$lock" "$package_snapshot" <<"PY"
-              import json
-              import sys
-              from pathlib import Path
-
-              lock = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
-              snapshot = json.loads(Path(sys.argv[2]).read_text(encoding="utf-8"))
-              if snapshot.get("nativePackages") != lock["nativePackages"]:
-                  raise SystemExit("builder package snapshot does not match the reviewed native package lock")
-              PY
-
-              scripts/release-build.sh \
-                --version "$TIPSY_RELEASE_VERSION" \
-                --output-dir /out \
-                --mode official \
-                --release-lock "$lock" \
-                --appimagetool "$appimagetool" \
-                --appimagetool-sha256 "$("$lock_tool" --lock "$lock" --mode official --get downloads.appimagetool.sha256)" \
-                --runtime-file "$runtime" \
-                --runtime-sha256 "$("$lock_tool" --lock "$lock" --mode official --get downloads.type2-runtime.sha256)"
-            '
+          scripts/release-build.sh \
+            --version "$version" \
+            --output-dir "$output" \
+            --mode github-signed \
+            --release-lock "$lock" \
+            --appimagetool '${{ steps.inputs.outputs.appimagetool }}' \
+            --appimagetool-sha256 "$("$lock_tool" --lock "$lock" --mode github-signed --get downloads.appimagetool.sha256)" \
+            --runtime-file '${{ steps.inputs.outputs.runtime }}' \
+            --runtime-sha256 "$("$lock_tool" --lock "$lock" --mode github-signed --get downloads.type2-runtime.sha256)"
 
           readonly appdir="$output/Tipsy-${version}-x86_64.AppDir"
           readonly archive="$output/Tipsy-${version}-x86_64.AppDir.tar.gz"
           readonly appimage="$output/Tipsy-${version}-x86_64.AppImage"
           readonly evidence="$output/Tipsy-${version}-x86_64.evidence"
+          for item in "$archive" "$appimage"; do
+            [[ -f "$item" && ! -L "$item" && -s "$item" ]]
+          done
           [[ -d "$appdir" && ! -L "$appdir" ]]
-          [[ -f "$archive" && ! -L "$archive" ]]
-          [[ -f "$appimage" && ! -L "$appimage" ]]
           [[ -d "$evidence" && ! -L "$evidence" ]]
-          ! find "$output" -type l -print -quit | grep -q .
           scripts/check-release-tree.sh "$appdir"
           (
             cd "$output"
             sha256sum --strict --check "$evidence/release-hashes.sha256"
           )
-          grep -Fx 'release_kind=release-candidate-unsigned' "$appdir/usr/share/tipsy/build-info"
-          grep -Fx "source_commit=$expected_commit" "$appdir/usr/share/tipsy/build-info"
+          grep -Fx 'release_kind=release-candidate-keyless' "$appdir/usr/share/tipsy/build-info"
+          grep -Fx 'source_tree=clean' "$appdir/usr/share/tipsy/build-info"
+          grep -Fx 'source_commit=${{ steps.preflight.outputs.commit }}' "$appdir/usr/share/tipsy/build-info"
 
-          install -d -m 0755 dist
-          for item in "$appdir" "$archive" "$appimage" "$evidence"; do
-            target="dist/$(basename "$item")"
-            [[ ! -e "$target" ]]
-            cp -a --no-preserve=ownership "$item" "$target"
-          done
-          printf 'appimage=%s\n' "$GITHUB_WORKSPACE/dist/$(basename "$appimage")" >> "$GITHUB_OUTPUT"
-          printf 'archive=%s\n' "$GITHUB_WORKSPACE/dist/$(basename "$archive")" >> "$GITHUB_OUTPUT"
-          printf 'evidence=%s\n' "$GITHUB_WORKSPACE/dist/$(basename "$evidence")" >> "$GITHUB_OUTPUT"
+          printf 'output=%s\n' "$output" >> "$GITHUB_OUTPUT"
+          printf 'appimage=%s\n' "$appimage" >> "$GITHUB_OUTPUT"
+          printf 'archive=%s\n' "$archive" >> "$GITHUB_OUTPUT"
+          printf 'evidence=%s\n' "$evidence" >> "$GITHUB_OUTPUT"
 
       - name: Prepare checked SLSA predicate for GitHub attestation
         id: predicate
@@ -276,9 +236,7 @@ jobs:
           PY
           printf 'path=%s\n' "$predicate" >> "$GITHUB_OUTPUT"
 
-      # This is build provenance evidence only. The pinned action signs the
-      # checked predicate with GitHub OIDC but cannot make a release official.
-      - name: Attest the candidate AppImage
+      - name: Attest the AppImage build provenance
         id: attest
         uses: actions/attest@daf44fb950173508f38bd2406030372c1d1162b1 # v3.0.0; scripts/release-inputs.lock.json
         with:
@@ -287,29 +245,100 @@ jobs:
           predicate-path: ${{ steps.predicate.outputs.path }}
           show-summary: false
 
-      - name: Retain the public Sigstore bundle with candidate evidence
-        shell: bash
-        run: |
-          set -euo pipefail
-          readonly evidence='${{ steps.build.outputs.evidence }}'
-          readonly bundle="$evidence/github-attestation.sigstore.json"
-          [[ -f '${{ steps.attest.outputs.bundle-path }}' && ! -L '${{ steps.attest.outputs.bundle-path }}' ]]
-          install -m 0644 '${{ steps.attest.outputs.bundle-path }}' "$bundle"
-          sha256sum "$bundle" > "$evidence/github-attestation.sigstore.sha256"
-
-      - name: Upload release-candidate material only
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2; scripts/release-inputs.lock.json
+      - name: Install the pinned keyless signing tool
+        uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2; scripts/release-inputs.lock.json
         with:
-          name: tipsy-release-candidate-${{ github.ref_name }}-${{ github.sha }}
-          if-no-files-found: error
-          retention-days: 14
-          path: |
-            ${{ steps.build.outputs.appimage }}
-            ${{ steps.build.outputs.archive }}
-            ${{ steps.build.outputs.evidence }}
+          cosign-release: v3.1.3
 
-      - name: Hand off to the offline TUF signing ceremony
+      - name: Keylessly sign and verify the AppImage
+        id: signature
         shell: bash
         run: |
           set -euo pipefail
-          printf '%s\n' 'Perform independent offline attestation verification before the offline TUF signing ceremony; publication remains outside CI.'
+          readonly appimage='${{ steps.build.outputs.appimage }}'
+          readonly bundle="${appimage}.sigstore.json"
+          readonly identity="https://github.com/${GITHUB_REPOSITORY}/.github/workflows/release.yml@${GITHUB_REF}"
+          readonly issuer=https://token.actions.githubusercontent.com
+          cosign sign-blob --yes --bundle "$bundle" "$appimage"
+          [[ -f "$bundle" && ! -L "$bundle" && -s "$bundle" ]]
+          cosign verify-blob "$appimage" --bundle "$bundle" \
+            --certificate-identity "$identity" \
+            --certificate-oidc-issuer "$issuer"
+          printf 'bundle=%s\n' "$bundle" >> "$GITHUB_OUTPUT"
+          printf 'identity=%s\n' "$identity" >> "$GITHUB_OUTPUT"
+          printf 'issuer=%s\n' "$issuer" >> "$GITHUB_OUTPUT"
+
+      - name: Assemble public verification evidence
+        id: release_files
+        shell: bash
+        run: |
+          set -euo pipefail
+          readonly output='${{ steps.build.outputs.output }}'
+          readonly version='${{ steps.preflight.outputs.version }}'
+          readonly appimage='${{ steps.build.outputs.appimage }}'
+          readonly evidence='${{ steps.build.outputs.evidence }}'
+          readonly sigstore_bundle='${{ steps.signature.outputs.bundle }}'
+          readonly github_bundle='${{ steps.attest.outputs.bundle-path }}'
+          readonly verification="$output/Tipsy-${version}-x86_64.VERIFY.txt"
+          readonly evidence_archive="$output/Tipsy-${version}-x86_64.evidence.tar.gz"
+          readonly checksums="$output/Tipsy-${version}-x86_64.release-sha256.txt"
+          readonly notes="$output/Tipsy-${version}-x86_64.RELEASE-NOTES.md"
+          readonly identity='${{ steps.signature.outputs.identity }}'
+          readonly issuer='${{ steps.signature.outputs.issuer }}'
+
+          install -m 0644 "$github_bundle" "$evidence/github-attestation.sigstore.json"
+          install -m 0644 "$sigstore_bundle" "$evidence/$(basename "$sigstore_bundle")"
+          sha256sum "$evidence/github-attestation.sigstore.json" > "$evidence/github-attestation.sigstore.sha256"
+          sha256sum "$evidence/$(basename "$sigstore_bundle")" > "$evidence/$(basename "$sigstore_bundle").sha256"
+          tar --sort=name --owner=0 --group=0 --numeric-owner -C "$output" -czf "$evidence_archive" "$(basename "$evidence")"
+          sha256sum "$appimage" > "${appimage}.sha256"
+          sha256sum "$appimage" "${appimage}.sha256" "$sigstore_bundle" "$evidence_archive" > "$checksums"
+          printf '%s\n' \
+            'Tipsy GitHub-signed release verification' \
+            '' \
+            "Artifact: $(basename "$appimage")" \
+            "Sigstore bundle: $(basename "$sigstore_bundle")" \
+            "GitHub provenance: github-attestation.sigstore.json (inside $(basename "$evidence_archive"))" \
+            '' \
+            '1. Verify the artifact SHA-256:' \
+            "   sha256sum --strict --check $(basename "${appimage}.sha256")" \
+            '' \
+            '2. Verify the keyless Sigstore signature:' \
+            "   cosign verify-blob $(basename "$appimage") --bundle $(basename "$sigstore_bundle") --certificate-identity $identity --certificate-oidc-issuer $issuer" \
+            '' \
+            '3. Verify GitHub build provenance:' \
+            "   gh attestation verify $(basename "$appimage") --repo $GITHUB_REPOSITORY --signer-workflow .github/workflows/release.yml --source-ref $GITHUB_REF --deny-self-hosted-runners" \
+            > "$verification"
+          printf '%s\n' \
+            "Tipsy ${version}" \
+            '' \
+            'This AppImage was built from the immutable release tag, keylessly signed with GitHub Actions OIDC and Sigstore, and issued a GitHub build-provenance attestation.' \
+            'No private signing key, signing secret, or release credential is embedded in the artifact or repository.' \
+            '' \
+            'Download the AppImage, its SHA-256 file, its Sigstore bundle, and VERIFY.txt. The evidence archive contains the GitHub provenance bundle and deterministic build evidence.' \
+            > "$notes"
+          for item in "$appimage" "${appimage}.sha256" "$sigstore_bundle" "$evidence_archive" "$checksums" "$verification" "$notes"; do
+            [[ -f "$item" && ! -L "$item" && -s "$item" ]]
+          done
+          printf 'checksums=%s\n' "$checksums" >> "$GITHUB_OUTPUT"
+          printf 'evidence_archive=%s\n' "$evidence_archive" >> "$GITHUB_OUTPUT"
+          printf 'notes=%s\n' "$notes" >> "$GITHUB_OUTPUT"
+          printf 'verification=%s\n' "$verification" >> "$GITHUB_OUTPUT"
+
+      - name: Publish the signed AppImage to GitHub Releases
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          gh release create "$GITHUB_REF_NAME" \
+            '${{ steps.build.outputs.appimage }}' \
+            '${{ steps.build.outputs.appimage }}.sha256' \
+            '${{ steps.signature.outputs.bundle }}' \
+            '${{ steps.release_files.outputs.evidence_archive }}' \
+            '${{ steps.release_files.outputs.checksums }}' \
+            '${{ steps.release_files.outputs.verification }}' \
+            --repo "$GITHUB_REPOSITORY" \
+            --title "Tipsy ${{ steps.preflight.outputs.version }}" \
+            --notes-file '${{ steps.release_files.outputs.notes }}' \
+            --verify-tag

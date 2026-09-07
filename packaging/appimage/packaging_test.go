@@ -419,16 +419,19 @@ func TestReleaseGuardRejectsFileCapabilities(t *testing.T) {
 	}
 }
 
-func TestReleaseInputLockIsCanonicalAndFailClosed(t *testing.T) {
+func TestReleaseInputLockSeparatesGitHubSignedAndTUF(t *testing.T) {
 	repo := repoRoot(t)
 	script := filepath.Join(repo, "scripts", "release-lock.py")
 	lock := filepath.Join(repo, "scripts", "release-inputs.lock.json")
 	if output, err := exec.Command(script, "--lock", lock, "--mode", "developer").CombinedOutput(); err != nil {
 		t.Fatalf("developer lock validation: %v\n%s", err, output)
 	}
+	if output, err := exec.Command(script, "--lock", lock, "--mode", "github-signed").CombinedOutput(); err != nil {
+		t.Fatalf("GitHub-signed lock validation: %v\n%s", err, output)
+	}
 	output, err := exec.Command(script, "--lock", lock, "--mode", "official").CombinedOutput()
-	if err == nil || !strings.Contains(string(output), "reviewed release input lock") {
-		t.Fatalf("bootstrap lock did not block official build: %v\n%s", err, output)
+	if err == nil || !strings.Contains(string(output), "pinned builder image digest") {
+		t.Fatalf("GitHub-signed lock did not block the stricter TUF build: %v\n%s", err, output)
 	}
 	digest, err := exec.Command(script, "--lock", lock, "--mode", "developer", "--digest").Output()
 	if err != nil || !regexp.MustCompile(`^[0-9a-f]{64}\n$`).Match(digest) {
@@ -591,22 +594,29 @@ func TestReleaseWorkflowSecurityIfPresent(t *testing.T) {
 	}
 	for _, required := range []string{
 		"permissions:\n  contents: read",
+		"contents: write",
 		"id-token: write",
 		"attestations: write",
+		"environment: production",
 		"persist-credentials: false",
 		"scripts/release-build.sh",
-		"--mode official",
-		"offline TUF signing ceremony",
-		"release-candidate-unsigned",
-		"Upload release-candidate material only",
-		"cannot make a release official",
+		"--mode github-signed",
+		"release-candidate-keyless",
+		"sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6",
+		"cosign sign-blob --yes --bundle",
+		"cosign verify-blob",
+		"--certificate-oidc-issuer",
+		"gh release create",
+		"GH_TOKEN: ${{ github.token }}",
 	} {
 		if !strings.Contains(text, required) {
 			t.Errorf("release workflow is missing %q", required)
 		}
 	}
-	if strings.Contains(text, "scripts/verify-release-attestation.sh") {
-		t.Fatal("release workflow must hand candidate evidence to the independent offline attestation ceremony")
+	for _, forbidden := range []string{"workflow_dispatch:", "offline TUF signing ceremony", "release-candidate-unsigned", "Upload release-candidate material only"} {
+		if strings.Contains(text, forbidden) {
+			t.Errorf("release workflow retains the wrong publication model %q", forbidden)
+		}
 	}
 }
 
@@ -988,8 +998,8 @@ func TestAttestationScaffoldPinsVerifierAndFailsBeforeH0(t *testing.T) {
 	if err := json.Unmarshal(data, &parsed); err != nil {
 		t.Fatal(err)
 	}
-	if parsed["status"] != "bootstrap-unverified" || parsed["builderEnvironment"] != "github-hosted" {
-		t.Fatalf("unsafe bootstrap attestation policy: %s", data)
+	if parsed["status"] != "reviewed" || parsed["builderEnvironment"] != "github-hosted" {
+		t.Fatalf("unsafe GitHub-signed attestation policy: %s", data)
 	}
 	script, err := os.ReadFile(filepath.Join(repo, "scripts", "verify-release-attestation.sh"))
 	if err != nil {
