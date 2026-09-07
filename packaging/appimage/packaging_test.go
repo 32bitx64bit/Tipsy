@@ -609,6 +609,7 @@ func TestReleaseWorkflowSecurityIfPresent(t *testing.T) {
 		"scripts/release-build.sh",
 		"--mode github-signed",
 		"release-candidate-keyless",
+		"libcap2-bin",
 		"actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02",
 		"actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093",
 		"sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6",
