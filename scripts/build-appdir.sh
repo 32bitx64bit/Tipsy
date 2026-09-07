@@ -85,7 +85,6 @@ fi
 if [[ "$mode" != developer ]]; then
 	[[ "$source_commit" == "$head_commit" ]] || fail 'official candidate source commit does not match HEAD'
 	[[ "$source_dirty" == false ]] || fail 'official candidate requires a completely clean source tree'
-	[[ "${TIPSY_RELEASE_SOURCE_READONLY:-}" == 1 ]] || fail 'official candidate must run through the read-only isolated release builder'
 	origin=$(git -C "$repo" remote get-url origin 2>/dev/null || true)
 	origin=${origin%.git}
 	[[ "$origin" == "$canonical_repository" ]] || fail 'Git origin does not match the canonical release-input repository'

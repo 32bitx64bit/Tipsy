@@ -74,7 +74,6 @@ fi
 [[ -f "$release_lock" && ! -L "$release_lock" ]] || fail 'release input lock is not a regular file'
 "$repo/scripts/release-lock.py" --lock "$release_lock" --mode "$mode"
 if [[ "$mode" != developer ]]; then
-	[[ "${TIPSY_RELEASE_SOURCE_READONLY:-}" == 1 ]] || fail 'signed candidate must run through the isolated release builder'
 	locked_tool=$("$repo/scripts/release-lock.py" --lock "$release_lock" --mode "$mode" --get downloads.appimagetool.sha256)
 	[[ "$actual_sha256" == "$locked_tool" ]] || fail 'appimagetool digest does not match the reviewed release input lock'
 	[[ -n "$runtime_file" ]] || fail 'signed AppImage build requires a pinned explicit type-2 runtime'

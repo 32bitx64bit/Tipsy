@@ -9,9 +9,10 @@ usage: $0 --version VERSION --output-dir DIRECTORY [--mode developer|official|gi
   [--release-lock FILE] [--appimagetool FILE --appimagetool-sha256 SHA256
    --runtime-file FILE --runtime-sha256 SHA256]
 
-Builds the same candidate twice without network access where bubblewrap is
-available, requires byte-identical final artifacts, then emits deterministic
-unsigned P1 evidence. It never replaces an existing output.
+Builds the same candidate twice with pre-fetched dependencies, an empty
+credential environment, and network-dependent Go tooling disabled. It requires
+byte-identical final artifacts, emits deterministic unsigned P1 evidence, and
+never replaces an existing output.
 USAGE
 	exit 2
 }
@@ -101,84 +102,44 @@ cleanup() {
 	fi
 }
 trap cleanup EXIT HUP INT TERM
-mkdir -m 0700 "$work/a" "$work/b"
+mkdir -m 0700 "$work/a" "$work/b" "$work/home"
 
-isolated=false
-# GitHub-hosted Ubuntu runners deny Bubblewrap's loopback setup and unprivileged
-# UID mapping.  The host service manager can create a private network without
-# either operation. It then executes as the original unprivileged user with no
-# way to gain privilege, while Bubblewrap provides the read-only mount/PID/IPC/
-# UTS isolation. RestrictAddressFamilies prevents IP sockets even if a future
-# runner changes its private-network device setup.
-runner_uid=$(id -u)
-runner_gid=$(id -g)
-if command -v bwrap >/dev/null 2>&1 && command -v systemd-run >/dev/null 2>&1 && command -v sudo >/dev/null 2>&1 && \
-	sudo -n systemd-run --wait --pipe --quiet --collect --same-dir \
-		--uid "$runner_uid" --gid "$runner_gid" \
-		--property=PrivateNetwork=yes \
-		--property=NoNewPrivileges=yes \
-		--property=CapabilityBoundingSet= \
-		--property=RestrictAddressFamilies=AF_UNIX \
-		-- bwrap --ro-bind / / --dev /dev --proc /proc --unshare-ipc --unshare-pid --unshare-uts --unshare-cgroup-try --new-session --cap-drop ALL true >/dev/null 2>&1; then
-	isolated=true
-fi
-if [[ "$isolated" == false && "$mode" != developer ]]; then
-	fail 'signed candidate requires working bubblewrap network/source isolation'
-fi
-if [[ "$isolated" == false ]]; then
-	printf 'release-build: UNVERIFIED developer build: bubblewrap unavailable; source read-only/network isolation is not asserted\n' >&2
-fi
-
-run_isolated() {
-	local destination=$1
-	shift
-	if [[ "$isolated" == true ]]; then
-		# The read-only root already exposes the exact Go toolchain and pinned
-		# AppImage inputs at their resolved absolute paths. Remount only the
-		# pre-created pass directory at the same path as writable: creating a
-		# synthetic /release-out after a read-only root bind is not portable.
-		sudo -n systemd-run --wait --pipe --quiet --collect --same-dir \
-			--uid "$runner_uid" --gid "$runner_gid" \
-			--property=PrivateNetwork=yes \
-			--property=NoNewPrivileges=yes \
-			--property=CapabilityBoundingSet= \
-			--property=RestrictAddressFamilies=AF_UNIX \
-			-- \
-		bwrap \
-			--ro-bind / / \
-			--dev /dev \
-			--proc /proc \
-			--tmpfs /tmp \
-			--dir /tmp/home \
-			--bind "$destination" "$destination" \
-			--unshare-ipc \
-			--unshare-pid \
-			--unshare-uts \
-			--unshare-cgroup-try \
-			--new-session \
-			--cap-drop ALL \
-			--clearenv \
-			--setenv HOME /tmp/home \
-			--setenv PATH "$go_bin_dir:/usr/local/bin:/usr/bin:/bin" \
-			--setenv LC_ALL C.UTF-8 \
-			--setenv TZ UTC \
-			--setenv SOURCE_DATE_EPOCH "$source_date_epoch" \
-			--setenv TIPSY_RELEASE_SOURCE_READONLY 1 \
-			--setenv GOCACHE /tmp/go-build-cache \
-			--setenv GOMODCACHE "$module_cache" \
-			--setenv GOTOOLCHAIN local \
-			--setenv GOPROXY off \
-			--setenv GOSUMDB off \
-			"$@"
-	else
-		HOME="$work/home" GOCACHE="$work/go-cache" GOMODCACHE="$module_cache" GOTOOLCHAIN=local GOPROXY=off GOSUMDB=off \
-			LC_ALL=C.UTF-8 TZ=UTC SOURCE_DATE_EPOCH="$source_date_epoch" "$@"
-	fi
+# GitHub-hosted runners prohibit the user and network namespace operations
+# Bubblewrap needs. Do not fall back to another privileged namespace launcher.
+# Instead, this process is deliberately unprivileged and has an empty
+# environment: no GitHub token, OIDC request endpoint, proxy, credential helper,
+# or caller configuration reaches source-controlled build commands. The build
+# job itself has only contents:read; signing and release publication happen in a
+# separate job after this process has exited. No service-manager launcher is
+# invoked here.
+run_reproducible() {
+	env -i \
+		HOME="$work/home" \
+		PATH="$go_bin_dir:/usr/local/bin:/usr/bin:/bin" \
+		LC_ALL=C.UTF-8 \
+		TZ=UTC \
+		SOURCE_DATE_EPOCH="$source_date_epoch" \
+		GOCACHE="$work/go-cache" \
+		GOMODCACHE="$module_cache" \
+		GOTOOLCHAIN=local \
+		GOPROXY=off \
+		GOSUMDB=off \
+		GONOPROXY='*' \
+		GONOSUMDB='*' \
+		"$@"
 }
+
+assert_clean_source() {
+	[[ -z $(git -C "$repo" status --porcelain=v1 --untracked-files=all) ]] || fail 'release build modified the checked-out source tree'
+	git -C "$repo" diff --no-ext-diff --quiet || fail 'release build modified tracked source content'
+	git -C "$repo" diff --cached --no-ext-diff --quiet || fail 'release build modified staged source content'
+}
+
+assert_clean_source
 
 for pass in a b; do
 	pass_output="$work/$pass"
-	run_isolated "$work/$pass" \
+	run_reproducible \
 		"$repo/scripts/build-appdir.sh" \
 		--version "$version" \
 		--output-dir "$pass_output" \
@@ -198,7 +159,7 @@ if [[ "$with_appimage" == true ]]; then
 		pass_output="$work/$pass/$appimage_name"
 		pass_tool=$appimagetool
 		pass_runtime=$runtime_file
-		run_isolated "$work/$pass" \
+		run_reproducible \
 			"$repo/scripts/build-appimage.sh" \
 			--appdir "$pass_appdir" \
 			--version "$version" \
@@ -216,7 +177,9 @@ if [[ "$with_appimage" == true ]]; then
 	fi
 fi
 
-# Recheck the selected tree after both builders and the optional wrapper.
+# A clean admission happens before output creation and is rechecked after all
+# source-controlled build commands have completed.
+assert_clean_source
 "$repo/scripts/check-release-tree.sh" "$work/a/$appdir_name"
 mv -- "$work/a/$appdir_name" "$output_dir/$appdir_name"
 mv -- "$work/a/$archive_name" "$output_dir/$archive_name"

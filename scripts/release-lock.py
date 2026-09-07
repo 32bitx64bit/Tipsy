@@ -93,7 +93,7 @@ def validate(value: dict[str, Any], mode: str) -> None:
         raise LockError("target.go must be one exact stable Go version")
 
     actions = object_at(value, "actions")
-    if set(actions) != {"attest", "checkout", "cosign-installer", "setup-go"}:
+    if set(actions) != {"attest", "checkout", "cosign-installer", "download-artifact", "setup-go", "upload-artifact"}:
         raise LockError("actions must contain exactly the release workflow dependencies")
     for name, action in actions.items():
         if not isinstance(name, str) or not isinstance(action, dict) or set(action) != {"commit", "release"}:
@@ -104,8 +104,12 @@ def validate(value: dict[str, Any], mode: str) -> None:
             raise LockError(f"action {name} is not pinned by a full commit SHA")
 
     policy = object_at(value, "policy")
-    if policy != {"network": "forbidden", "sourceMount": "read-only"}:
-        raise LockError("official release policy must require a networkless build and read-only source")
+    if policy != {
+        "buildCredentials": "none",
+        "network": "dependencies-prefetched",
+        "source": "clean-checkout-verified",
+    }:
+        raise LockError("release policy must require pre-fetched dependencies, no build credentials, and a clean checked-out source")
 
     builder = object_at(value, "builder")
     snapshot = object_at(value, "packageSnapshot")

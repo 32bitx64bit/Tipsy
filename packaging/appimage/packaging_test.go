@@ -594,6 +594,9 @@ func TestReleaseWorkflowSecurityIfPresent(t *testing.T) {
 	}
 	for _, required := range []string{
 		"permissions:\n  contents: read",
+		"  build:\n",
+		"  publish:\n",
+		"needs: build",
 		"contents: write",
 		"id-token: write",
 		"attestations: write",
@@ -606,6 +609,8 @@ func TestReleaseWorkflowSecurityIfPresent(t *testing.T) {
 		"scripts/release-build.sh",
 		"--mode github-signed",
 		"release-candidate-keyless",
+		"actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02",
+		"actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093",
 		"sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6",
 		"cosign sign-blob --yes --bundle",
 		"cosign verify-blob",
@@ -969,33 +974,27 @@ func repoRootForTestBinary() string {
 	return filepath.Clean(filepath.Join(filepath.Dir(file), "..", ".."))
 }
 
-func TestReleaseBuilderUsesExistingWritableMountpoints(t *testing.T) {
+func TestReleaseBuilderUsesUnprivilegedCredentialScrubbedBuilds(t *testing.T) {
 	data, err := os.ReadFile(filepath.Join(repoRoot(t), "scripts", "release-build.sh"))
 	if err != nil {
 		t.Fatal(err)
 	}
 	text := string(data)
-	for _, forbidden := range []string{"--dir /release-out", `--bind "$destination" /release-out`} {
+	for _, forbidden := range []string{"bwrap", "unshare", "systemd-run", "sudo -n", "TIPSY_RELEASE_SOURCE_READONLY"} {
 		if strings.Contains(text, forbidden) {
-			t.Errorf("release builder creates a mountpoint after the read-only root bind: %q", forbidden)
+			t.Errorf("release builder retains a privileged or unsupported isolation dependency: %q", forbidden)
 		}
 	}
 	for _, required := range []string{
-		`--bind "$destination" "$destination"`,
-		`--dir /tmp/home`,
-		`--setenv PATH "$go_bin_dir:/usr/local/bin:/usr/bin:/bin"`,
-		`sudo -n systemd-run --wait --pipe --quiet --collect --same-dir`,
-		`--property=PrivateNetwork=yes`,
-		`--property=NoNewPrivileges=yes`,
-		`--property=CapabilityBoundingSet=`,
-		`--property=RestrictAddressFamilies=AF_UNIX`,
-		`--unshare-ipc`,
-		`--unshare-pid`,
-		`--unshare-uts`,
-		`--unshare-cgroup-try`,
+		"env -i",
+		`PATH="$go_bin_dir:/usr/local/bin:/usr/bin:/bin"`,
+		"GOPROXY=off",
+		"GOSUMDB=off",
+		"assert_clean_source",
+		"release build modified the checked-out source tree",
 	} {
 		if !strings.Contains(text, required) {
-			t.Errorf("release builder is missing isolated-build invariant %q", required)
+			t.Errorf("release builder is missing unprivileged-build invariant %q", required)
 		}
 	}
 }

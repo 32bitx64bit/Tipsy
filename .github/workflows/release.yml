@@ -1,10 +1,9 @@
 name: GitHub-signed release
 
-# A protected, immutable v* tag creates exactly one public GitHub release. The
-# AppImage receives both a keyless Sigstore bundle and GitHub build provenance.
-# No workflow secret or long-lived signing key is used or accepted. A manual
-# run builds its exact protected-main commit, then creates its immutable v* tag
-# only when the signed GitHub Release is published.
+# A protected, immutable v* tag creates exactly one public GitHub release. A
+# manual run builds its exact main commit and creates the tag only at final
+# publication. The unprivileged build job has no OIDC or release authority; a
+# separate production-gated job signs and publishes only the checked artifact.
 on:
   push:
     tags:
@@ -24,22 +23,21 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  github-signed-release:
+  build:
     # Pushes use immutable version tags. Manual runs are admitted only from the
-    # protected default branch and create a fresh immutable version tag at
-    # publication, after the reproducible build has completed.
+    # protected default branch; publication creates the fresh immutable tag.
     if: >-
       (github.event_name == 'push' && github.ref_type == 'tag' && startsWith(github.ref_name, 'v')) ||
       (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main')
-    # The production environment requires explicit approval before this job
-    # receives OIDC or release publication permissions.
-    environment: production
     runs-on: ubuntu-24.04
     timeout-minutes: 60
     permissions:
-      contents: write
-      id-token: write
-      attestations: write
+      contents: read
+    outputs:
+      commit: ${{ steps.preflight.outputs.commit }}
+      lock_digest: ${{ steps.preflight.outputs.lock_digest }}
+      tag: ${{ steps.preflight.outputs.tag }}
+      version: ${{ steps.preflight.outputs.version }}
 
     steps:
       - name: Checkout the admitted release source without credentials
@@ -71,15 +69,17 @@ jobs:
           lock = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
           workflow = Path(sys.argv[2]).read_text(encoding="utf-8")
           expected = {
-              "actions/checkout": lock["actions"]["checkout"]["commit"],
-              "actions/setup-go": lock["actions"]["setup-go"]["commit"],
-              "actions/attest": lock["actions"]["attest"]["commit"],
-              "sigstore/cosign-installer": lock["actions"]["cosign-installer"]["commit"],
+              "actions/attest": (lock["actions"]["attest"]["commit"], 1),
+              "actions/checkout": (lock["actions"]["checkout"]["commit"], 2),
+              "actions/download-artifact": (lock["actions"]["download-artifact"]["commit"], 1),
+              "actions/setup-go": (lock["actions"]["setup-go"]["commit"], 1),
+              "actions/upload-artifact": (lock["actions"]["upload-artifact"]["commit"], 1),
+              "sigstore/cosign-installer": (lock["actions"]["cosign-installer"]["commit"], 1),
           }
-          for action, commit in expected.items():
+          for action, (commit, count) in expected.items():
               needle = f"uses: {action}@{commit}"
-              if workflow.count(needle) != 1:
-                  raise SystemExit(f"release workflow does not use exactly one locked {action} commit")
+              if workflow.count(needle) != count:
+                  raise SystemExit(f"release workflow does not use exactly {count} locked {action} commit(s)")
           go_version = lock["target"]["go"]
           if workflow.count(f'go-version: "{go_version}"') != 1:
               raise SystemExit("release workflow Go version is not tied to the reviewed lock")
@@ -141,25 +141,18 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          # Native headers are not present on the base runner. This ordinary
+          # package installation is the only sudo use; the build itself uses no
+          # sudo, Bubblewrap, unshare, or systemd-run.
           sudo apt-get update
           sudo apt-get install -y \
-            bubblewrap ca-certificates curl file gcc git patchelf pkg-config qmake6 \
+            ca-certificates curl file gcc git patchelf pkg-config qmake6 \
             qt6-base-dev libegl1-mesa-dev libgles2-mesa-dev libpango1.0-dev \
             libx11-dev libx11-xcb-dev libxext-dev libxrandr-dev libxtst-dev
           pkg-config --exists Qt6Widgets Qt6Gui Qt6Core x11 x11-xcb xext xrandr xtst pangocairo pangoft2 cairo-xlib egl glesv2
           test -f /usr/include/X11/Xlib-xcb.h
-          sudo -n systemd-run --wait --pipe --quiet --collect --same-dir \
-            --uid "$(id -u)" --gid "$(id -g)" \
-            --property=PrivateNetwork=yes \
-            --property=NoNewPrivileges=yes \
-            --property=CapabilityBoundingSet= \
-            --property=RestrictAddressFamilies=AF_UNIX \
-            -- \
-            bwrap --ro-bind / / --dev /dev --proc /proc \
-              --unshare-ipc --unshare-pid --unshare-uts --unshare-cgroup-try \
-              --new-session --cap-drop ALL true
 
-      - name: Prime the module cache before build isolation
+      - name: Prefetch the exact Go modules before the credential-free build
         shell: bash
         run: |
           set -euo pipefail
@@ -242,14 +235,121 @@ jobs:
           printf 'archive=%s\n' "$archive" >> "$GITHUB_OUTPUT"
           printf 'evidence=%s\n' "$evidence" >> "$GITHUB_OUTPUT"
 
-      - name: Prepare checked SLSA predicate for GitHub attestation
-        id: predicate
+      - name: Transfer only the checked unsigned candidate to publication
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2; scripts/release-inputs.lock.json
+        with:
+          name: tipsy-release-candidate-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            ${{ steps.build.outputs.appimage }}
+            ${{ steps.build.outputs.archive }}
+            ${{ steps.build.outputs.evidence }}
+          if-no-files-found: error
+          include-hidden-files: false
+          retention-days: 1
+
+  publish:
+    needs: build
+    if: needs.build.result == 'success'
+    # Explicit production approval happens only after the unprivileged build is
+    # complete and immediately before the job obtains OIDC and release rights.
+    environment: production
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    permissions:
+      contents: write
+      id-token: write
+      attestations: write
+
+    steps:
+      - name: Checkout only the admitted commit without credentials
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2; scripts/release-inputs.lock.json
+        with:
+          ref: ${{ needs.build.outputs.commit }}
+          fetch-depth: 0
+          persist-credentials: false
+          submodules: false
+          show-progress: false
+
+      - name: Re-establish publication context without executing build source
+        id: preflight
+        env:
+          MANUAL_VERSION: ${{ inputs.version }}
         shell: bash
         run: |
           set -euo pipefail
-          readonly statement='${{ steps.build.outputs.evidence }}/provenance-input.json'
+
+          event_commit=$(git rev-parse --verify "$GITHUB_SHA^{commit}")
+          checkout_commit=$(git rev-parse --verify HEAD)
+          [[ "$checkout_commit" == '${{ needs.build.outputs.commit }}' ]]
+          release_tag=
+          case "$GITHUB_EVENT_NAME" in
+            push)
+              [[ "$GITHUB_REF_TYPE" == tag ]]
+              [[ "$GITHUB_REF" == "refs/tags/$GITHUB_REF_NAME" ]]
+              [[ "$GITHUB_REF" =~ ^refs/tags/v[0-9A-Za-z._+-]+$ ]]
+              release_tag=$GITHUB_REF_NAME
+              tag_commit=$(git rev-parse --verify "$GITHUB_REF^{commit}")
+              [[ "$tag_commit" == "$checkout_commit" ]]
+              [[ "$event_commit" == "$checkout_commit" ]]
+              ;;
+            workflow_dispatch)
+              [[ "$GITHUB_REF_TYPE" == branch ]]
+              [[ "$GITHUB_REF" == refs/heads/main ]]
+              [[ "$GITHUB_REF_NAME" == main ]]
+              version=${MANUAL_VERSION:-}
+              [[ "$version" =~ ^[0-9A-Za-z][0-9A-Za-z._+-]*$ ]]
+              release_tag="v$version"
+              ! git rev-parse --verify --quiet "refs/tags/$release_tag" >/dev/null
+              [[ "$event_commit" == "$checkout_commit" ]]
+              ;;
+            *)
+              exit 1
+              ;;
+          esac
+          version=${release_tag#v}
+          [[ "$version" == '${{ needs.build.outputs.version }}' ]]
+          [[ "$release_tag" == '${{ needs.build.outputs.tag }}' ]]
+          [[ -z $(git status --porcelain=v1 --untracked-files=all) ]]
+          git diff --no-ext-diff --quiet
+          git diff --cached --no-ext-diff --quiet
+          ! git config --local --get-regexp '^http\..*\.extraheader$' >/dev/null
+
+          printf 'version=%s\n' "$version" >> "$GITHUB_OUTPUT"
+          printf 'tag=%s\n' "$release_tag" >> "$GITHUB_OUTPUT"
+          printf 'commit=%s\n' "$checkout_commit" >> "$GITHUB_OUTPUT"
+
+      - name: Download the unprivileged build candidate
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0; scripts/release-inputs.lock.json
+        with:
+          name: tipsy-release-candidate-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/tipsy-release-candidate
+
+      - name: Verify the transferred candidate and prepare its provenance predicate
+        id: candidate
+        shell: bash
+        run: |
+          set -euo pipefail
+          readonly candidate="$RUNNER_TEMP/tipsy-release-candidate"
+          readonly version='${{ steps.preflight.outputs.version }}'
+          readonly appimage="$candidate/Tipsy-${version}-x86_64.AppImage"
+          readonly archive="$candidate/Tipsy-${version}-x86_64.AppDir.tar.gz"
+          readonly evidence="$candidate/Tipsy-${version}-x86_64.evidence"
           readonly predicate="$RUNNER_TEMP/tipsy-release-predicate-${GITHUB_RUN_ID}.json"
-          python3 - "$statement" "$predicate" '${{ steps.preflight.outputs.commit }}' '${{ steps.preflight.outputs.lock_digest }}' <<'PY'
+          readonly expected_commit='${{ steps.preflight.outputs.commit }}'
+          readonly expected_lock_digest=$(sha256sum scripts/release-inputs.lock.json | awk '{print $1}')
+
+          [[ "$expected_lock_digest" == '${{ needs.build.outputs.lock_digest }}' ]]
+
+          for item in "$appimage" "$archive"; do
+            [[ -f "$item" && ! -L "$item" && -s "$item" ]]
+          done
+          [[ -d "$evidence" && ! -L "$evidence" ]]
+          [[ -z $(find "$evidence" ! -type f ! -type d -print -quit) ]]
+          (
+            cd "$candidate"
+            sha256sum --strict --check "$evidence/release-hashes.sha256"
+          )
+          python3 - "$evidence/provenance-input.json" "$predicate" "$expected_commit" "$expected_lock_digest" <<'PY'
           import json
           import sys
           from pathlib import Path
@@ -266,7 +366,7 @@ jobs:
               "uri": "git+https://github.com/32bitx64bit/Tipsy",
               "digest": {"gitCommit": expected_commit},
           } not in dependencies:
-              raise SystemExit("release evidence is not bound to the checked-out commit")
+              raise SystemExit("release evidence is not bound to the admitted commit")
           if {
               "uri": "pkg:generic/tipsy-release-input-lock@1",
               "digest": {"sha256": expected_lock_digest},
@@ -277,15 +377,17 @@ jobs:
               encoding="utf-8",
           )
           PY
-          printf 'path=%s\n' "$predicate" >> "$GITHUB_OUTPUT"
+          printf 'appimage=%s\n' "$appimage" >> "$GITHUB_OUTPUT"
+          printf 'evidence=%s\n' "$evidence" >> "$GITHUB_OUTPUT"
+          printf 'predicate=%s\n' "$predicate" >> "$GITHUB_OUTPUT"
 
       - name: Attest the AppImage build provenance
         id: attest
         uses: actions/attest@daf44fb950173508f38bd2406030372c1d1162b1 # v3.0.0; scripts/release-inputs.lock.json
         with:
-          subject-path: ${{ steps.build.outputs.appimage }}
+          subject-path: ${{ steps.candidate.outputs.appimage }}
           predicate-type: https://slsa.dev/provenance/v1
-          predicate-path: ${{ steps.predicate.outputs.path }}
+          predicate-path: ${{ steps.candidate.outputs.predicate }}
           show-summary: false
 
       - name: Install the pinned keyless signing tool
@@ -298,7 +400,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          readonly appimage='${{ steps.build.outputs.appimage }}'
+          readonly appimage='${{ steps.candidate.outputs.appimage }}'
           readonly bundle="${appimage}.sigstore.json"
           readonly identity="https://github.com/${GITHUB_REPOSITORY}/.github/workflows/release.yml@${GITHUB_REF}"
           readonly issuer=https://token.actions.githubusercontent.com
@@ -316,10 +418,10 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          readonly output='${{ steps.build.outputs.output }}'
+          readonly appimage='${{ steps.candidate.outputs.appimage }}'
+          readonly evidence='${{ steps.candidate.outputs.evidence }}'
+          readonly output=$(dirname -- "$appimage")
           readonly version='${{ steps.preflight.outputs.version }}'
-          readonly appimage='${{ steps.build.outputs.appimage }}'
-          readonly evidence='${{ steps.build.outputs.evidence }}'
           readonly sigstore_bundle='${{ steps.signature.outputs.bundle }}'
           readonly github_bundle='${{ steps.attest.outputs.bundle-path }}'
           readonly verification="$output/Tipsy-${version}-x86_64.VERIFY.txt"
@@ -355,7 +457,7 @@ jobs:
           printf '%s\n' \
             "Tipsy ${version}" \
             '' \
-            'This AppImage was built from the immutable release tag, keylessly signed with GitHub Actions OIDC and Sigstore, and issued a GitHub build-provenance attestation.' \
+            'This AppImage was built by an unprivileged GitHub Actions job, keylessly signed with GitHub Actions OIDC and Sigstore, and issued a GitHub build-provenance attestation.' \
             'No private signing key, signing secret, or release credential is embedded in the artifact or repository.' \
             '' \
             'Download the AppImage, its SHA-256 file, its Sigstore bundle, and VERIFY.txt. The evidence archive contains the GitHub provenance bundle and deterministic build evidence.' \
@@ -381,8 +483,8 @@ jobs:
             tag_args=(--target '${{ steps.preflight.outputs.commit }}')
           fi
           gh release create "$release_tag" \
-            '${{ steps.build.outputs.appimage }}' \
-            '${{ steps.build.outputs.appimage }}.sha256' \
+            '${{ steps.candidate.outputs.appimage }}' \
+            '${{ steps.candidate.outputs.appimage }}.sha256' \
             '${{ steps.signature.outputs.bundle }}' \
             '${{ steps.release_files.outputs.evidence_archive }}' \
             '${{ steps.release_files.outputs.checksums }}' \
