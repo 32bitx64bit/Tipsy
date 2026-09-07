@@ -131,7 +131,7 @@ func TestAppDirBuilderRequiresFocusedTextNativeStack(t *testing.T) {
 	}
 	text := string(data)
 	for _, required := range []string{
-		"required_pkg_modules=(Qt6Widgets Qt6Gui Qt6Core x11 xext pangocairo pangoft2 cairo-xlib)",
+		"required_pkg_modules=(Qt6Widgets Qt6Gui Qt6Core x11 xext pangocairo pangoft2 cairo-xlib libpulse libpulse-simple)",
 		`pkg-config --exists "${required_pkg_modules[@]}"`,
 		`queue+=("$library")`,
 		`copy_package_license "$library"`,
@@ -610,6 +610,8 @@ func TestReleaseWorkflowSecurityIfPresent(t *testing.T) {
 		"--mode github-signed",
 		"release-candidate-keyless",
 		"libcap2-bin",
+		"libpulse-dev",
+		"libpulse-simple",
 		"actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02",
 		"actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093",
 		"sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6",

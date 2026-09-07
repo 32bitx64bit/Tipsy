@@ -116,9 +116,11 @@ required_commands=(go gcc pkg-config qmake6 patchelf ldd readelf file getcap ins
 for command_name in "${required_commands[@]}"; do
 	command -v "$command_name" >/dev/null 2>&1 || fail "required command is missing: $command_name"
 done
-required_pkg_modules=(Qt6Widgets Qt6Gui Qt6Core x11 xext pangocairo pangoft2 cairo-xlib)
+required_pkg_modules=(Qt6Widgets Qt6Gui Qt6Core x11 xext pangocairo pangoft2 cairo-xlib libpulse libpulse-simple)
 pkg-config --exists "${required_pkg_modules[@]}" || \
-	fail 'Qt 6, X11/Xext, or Pango/Cairo development files are missing'
+	fail 'Qt 6, X11/Xext, Pango/Cairo, or PulseAudio development files are missing'
+[[ -f /usr/include/pulse/error.h && -f /usr/include/pulse/simple.h ]] || \
+	fail 'PulseAudio development headers are missing'
 [[ $(go env GOOS) == linux ]] || fail 'the active Go toolchain is not targeting Linux'
 if [[ "$mode" != developer ]]; then
 	expected_go="go$("$repo/scripts/release-lock.py" --lock "$release_lock" --mode "$mode" --get target.go)"

@@ -146,11 +146,13 @@ jobs:
           # sudo, Bubblewrap, unshare, or systemd-run.
           sudo apt-get update
           sudo apt-get install -y \
-            ca-certificates curl file gcc git libcap2-bin patchelf pkg-config qmake6 \
+            ca-certificates curl file gcc git libcap2-bin libpulse-dev patchelf pkg-config qmake6 \
             qt6-base-dev libegl1-mesa-dev libgles2-mesa-dev libpango1.0-dev \
             libx11-dev libx11-xcb-dev libxext-dev libxrandr-dev libxtst-dev
-          pkg-config --exists Qt6Widgets Qt6Gui Qt6Core x11 x11-xcb xext xrandr xtst pangocairo pangoft2 cairo-xlib egl glesv2
+          pkg-config --exists Qt6Widgets Qt6Gui Qt6Core x11 x11-xcb xext xrandr xtst pangocairo pangoft2 cairo-xlib egl glesv2 libpulse libpulse-simple
           test -f /usr/include/X11/Xlib-xcb.h
+          test -f /usr/include/pulse/error.h
+          test -f /usr/include/pulse/simple.h
 
       - name: Prefetch the exact Go modules before the credential-free build
         shell: bash
