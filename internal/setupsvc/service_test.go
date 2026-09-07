@@ -209,6 +209,12 @@ func TestAuthorizationModesKeepDevelopmentDistinctAndCandidateCannotSelfAuthoriz
 	if _, err := AuthorizeReport(report, official); ErrorKindOf(err) != ErrPolicy {
 		t.Fatalf("official mode without authenticated policy err=%v", err)
 	}
+	keyless := official
+	keyless.ReleaseAuthenticated = true
+	keylessAuthorization, err := AuthorizeReport(report, keyless)
+	if err != nil || keylessAuthorization.Mode != OfficialVerified || !keylessAuthorization.PolicyAuthorized || keylessAuthorization.PolicySequence != 0 || keylessAuthorization.SignerLineageID != "compiled-keyless-release" {
+		t.Fatalf("keyless official authorization=%+v err=%v", keylessAuthorization, err)
+	}
 	development := official
 	development.Mode = DevelopmentUnrestricted
 	authorization, err := AuthorizeReport(report, development)

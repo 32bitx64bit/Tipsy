@@ -39,6 +39,8 @@ func TestAppRunUsesOnlyItsAppDir(t *testing.T) {
 		"$appdir/usr/bin/tipsy",
 		"$appdir/usr/lib",
 		"$appdir/usr/plugins",
+		"TIPSY_RELEASE_ARTIFACT",
+		"TIPSY_RELEASE_APPDIR",
 		"--play",
 		"--settings",
 		"integrate_pin_entries",
@@ -1122,6 +1124,27 @@ func TestAppRunDispatchesPlayAndSettings(t *testing.T) {
 		}
 		assertStubLog(t, logPath, "tipsy-gui")
 	})
+}
+
+func TestAppRunHandsOuterAppImageToReleaseVerifier(t *testing.T) {
+	appdir := fakeRunnableAppDir(t)
+	output := filepath.Join(t.TempDir(), "release-artifact")
+	stub := "#!/bin/sh\nprintf '%s\\n%s' \"$TIPSY_RELEASE_ARTIFACT\" \"$TIPSY_RELEASE_APPDIR\" > \"$TIPSY_RELEASE_TEST_OUTPUT\"\n"
+	if err := os.WriteFile(filepath.Join(appdir, "usr", "bin", "tipsy-gui"), []byte(stub), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	artifact := filepath.Join(t.TempDir(), "Tipsy-1.2.3-x86_64.AppImage")
+	command := exec.Command(filepath.Join(appdir, "AppRun"), "--settings", "--no-integrate")
+	command.Dir = appdir
+	command.Env = append(stubEnv(t, filepath.Join(t.TempDir(), "stub.log"), ""), "APPIMAGE="+artifact, "TIPSY_RELEASE_TEST_OUTPUT="+output)
+	if data, err := command.CombinedOutput(); err != nil {
+		t.Fatalf("AppRun: %v\n%s", err, data)
+	}
+	got, err := os.ReadFile(output)
+	want := artifact + "\n" + appdir
+	if err != nil || string(got) != want {
+		t.Fatalf("release artifact=%q err=%v", got, err)
+	}
 }
 
 func TestAppRunWritesPinEntries(t *testing.T) {

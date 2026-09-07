@@ -18,6 +18,7 @@ import (
 	"golang.org/x/sys/unix"
 
 	"github.com/tipsy-linux/tipsy/internal/config"
+	"github.com/tipsy-linux/tipsy/internal/keylessrelease"
 	"github.com/tipsy-linux/tipsy/internal/releasemeta"
 	"github.com/tipsy-linux/tipsy/internal/securitypolicy"
 	"github.com/tipsy-linux/tipsy/internal/setupsvc"
@@ -32,29 +33,32 @@ type authorityResolution struct {
 }
 
 type authorityDependencies struct {
-	now           func() time.Time
-	readRoot      func(string) ([]byte, error)
-	verifyRelease func(releasemeta.VerifyOptions) (releasemeta.Result, error)
-	readPolicy    func(string, releasemeta.Result, time.Time) (securitypolicy.RobloxPolicy, error)
+	now                 func() time.Time
+	verifyGitHubRelease func(context.Context) error
+	readRoot            func(string) ([]byte, error)
+	verifyRelease       func(releasemeta.VerifyOptions) (releasemeta.Result, error)
+	readPolicy          func(string, releasemeta.Result, time.Time) (securitypolicy.RobloxPolicy, error)
 }
 
 func defaultAuthorityDependencies() authorityDependencies {
 	return authorityDependencies{
-		now:           func() time.Time { return time.Now().UTC() },
+		now: func() time.Time { return time.Now().UTC() },
+		verifyGitHubRelease: func(ctx context.Context) error {
+			_, err := keylessrelease.VerifyCurrent(ctx)
+			return err
+		},
 		readRoot:      releasemeta.ReadInitialRoot,
 		verifyRelease: releasemeta.VerifyLocal,
 		readPolicy:    readAuthenticatedRobloxPolicy,
 	}
 }
 
-// resolveAuthority is the single app-level trust decision. Development is
-// reachable only through persisted explicit consent. Official is reachable
-// only after releasemeta returns its production-bound state and the exact TUF
-// authenticated Roblox policy is re-read by digest.
+// resolveAuthority is the single app-level trust decision. A public AppImage
+// must pass its compiled GitHub OIDC/Sigstore verifier before development
+// consent is considered, so an invalid public release cannot silently fall
+// back to DevelopmentUnrestricted. Legacy TUF authority remains available for
+// deployments that provide its complete authenticated policy bundle.
 func resolveAuthority(ctx context.Context, cfg *config.Config, installedVersionCode int64, deps authorityDependencies) (authorityResolution, error) {
-	if cfg != nil && cfg.DevelopmentApproved() {
-		return authorityResolution{Mode: setupsvc.DevelopmentUnrestricted, Trust: setupsvc.DevelopmentTrustPolicy()}, nil
-	}
 	if ctx == nil {
 		ctx = context.Background()
 	}
@@ -63,6 +67,16 @@ func resolveAuthority(ctx context.Context, cfg *config.Config, installedVersionC
 	}
 	if deps.now == nil || deps.readRoot == nil || deps.verifyRelease == nil || deps.readPolicy == nil {
 		return authorityResolution{}, fmt.Errorf("release authority resolver is incomplete")
+	}
+	if deps.verifyGitHubRelease != nil {
+		if err := deps.verifyGitHubRelease(ctx); err == nil {
+			return authorityResolution{Mode: setupsvc.OfficialVerified, Trust: setupsvc.KeylessReleaseTrustPolicy()}, nil
+		} else if !errors.Is(err, keylessrelease.ErrUnavailable) {
+			return authorityResolution{}, fmt.Errorf("official GitHub release verification: %w", err)
+		}
+	}
+	if cfg != nil && cfg.DevelopmentApproved() {
+		return authorityResolution{Mode: setupsvc.DevelopmentUnrestricted, Trust: setupsvc.DevelopmentTrustPolicy()}, nil
 	}
 	if cfg == nil || cfg.OfficialVerification == nil {
 		return authorityResolution{}, ErrDevelopmentConsentRequired

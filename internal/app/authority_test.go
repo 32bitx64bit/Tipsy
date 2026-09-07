@@ -17,6 +17,7 @@ import (
 
 	"github.com/tipsy-linux/tipsy/internal/config"
 	"github.com/tipsy-linux/tipsy/internal/integrity"
+	"github.com/tipsy-linux/tipsy/internal/keylessrelease"
 	"github.com/tipsy-linux/tipsy/internal/releasemeta"
 	"github.com/tipsy-linux/tipsy/internal/runtime"
 	"github.com/tipsy-linux/tipsy/internal/securitypolicy"
@@ -33,6 +34,40 @@ func TestResolveAuthorityNeverInfersOfficialFromMissingH0(t *testing.T) {
 	got, err := resolveAuthority(context.Background(), cfg, 0, defaultAuthorityDependencies())
 	if err != nil || got.Mode != setupsvc.DevelopmentUnrestricted || got.Trust.Mode != setupsvc.DevelopmentUnrestricted || got.Trust.RobloxPolicy != nil {
 		t.Fatalf("explicit development resolution = %+v, %v", got, err)
+	}
+}
+
+func TestResolveAuthorityPrefersVerifiedGitHubReleaseOverDevelopmentConsent(t *testing.T) {
+	cfg := &config.Config{}
+	cfg.ApproveDevelopment()
+	deps := defaultAuthorityDependencies()
+	deps.verifyGitHubRelease = func(context.Context) error { return nil }
+	got, err := resolveAuthority(context.Background(), cfg, 0, deps)
+	if err != nil || got.Mode != setupsvc.OfficialVerified || got.Trust.Mode != setupsvc.OfficialVerified || !got.Trust.ReleaseAuthenticated || got.Trust.RobloxPolicy != nil {
+		t.Fatalf("authority=%+v err=%v", got, err)
+	}
+}
+
+func TestResolveAuthorityRejectsBrokenGitHubReleaseInsteadOfDevelopmentFallback(t *testing.T) {
+	cfg := &config.Config{}
+	cfg.ApproveDevelopment()
+	broken := errors.New("GitHub identity mismatch")
+	deps := defaultAuthorityDependencies()
+	deps.verifyGitHubRelease = func(context.Context) error { return broken }
+	_, err := resolveAuthority(context.Background(), cfg, 0, deps)
+	if !errors.Is(err, broken) || errors.Is(err, ErrDevelopmentConsentRequired) {
+		t.Fatalf("err=%v", err)
+	}
+}
+
+func TestResolveAuthorityAllowsDevelopmentOnlyOutsideAppImage(t *testing.T) {
+	cfg := &config.Config{}
+	cfg.ApproveDevelopment()
+	deps := defaultAuthorityDependencies()
+	deps.verifyGitHubRelease = func(context.Context) error { return keylessrelease.ErrUnavailable }
+	got, err := resolveAuthority(context.Background(), cfg, 0, deps)
+	if err != nil || got.Mode != setupsvc.DevelopmentUnrestricted || got.Trust.ReleaseAuthenticated {
+		t.Fatalf("authority=%+v err=%v", got, err)
 	}
 }
 

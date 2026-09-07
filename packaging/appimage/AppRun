@@ -11,6 +11,18 @@ export LD_LIBRARY_PATH="$appdir/usr/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
 export QT_PLUGIN_PATH="$appdir/usr/plugins"
 export QT_QPA_PLATFORM_PLUGIN_PATH="$appdir/usr/plugins/platforms"
 
+# The executable verifies this outer file against the independently published
+# GitHub OIDC/Sigstore sidecar before granting OfficialVerified. APPIMAGE is
+# supplied by the AppImage runtime; source builds never receive this handoff.
+if [ -n "${APPIMAGE:-}" ]; then
+	case "$APPIMAGE" in
+		/*)
+			export TIPSY_RELEASE_ARTIFACT="$APPIMAGE"
+			export TIPSY_RELEASE_APPDIR="$appdir"
+			;;
+	esac
+fi
+
 usage() {
 	cat <<'USAGE'
 Usage: Tipsy.AppImage [--play|--settings] [--no-integrate] [arguments...]

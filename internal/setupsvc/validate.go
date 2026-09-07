@@ -44,7 +44,12 @@ func DefaultLimits() Limits {
 }
 
 type TrustPolicy struct {
-	Mode                     AuthorizationMode
+	Mode AuthorizationMode
+	// ReleaseAuthenticated is set only after Tipsy's own immutable AppImage
+	// has passed the compiled GitHub OIDC/Sigstore release verifier. It permits
+	// the compiled Roblox signer floor to authorize an official session when a
+	// separate TUF Roblox policy is intentionally not configured.
+	ReleaseAuthenticated     bool
 	PackageName              string
 	AllowedCertificateSHA256 []string
 	SupportedSplits          []string
@@ -90,6 +95,15 @@ func WithAuthenticatedRobloxPolicy(policy securitypolicy.RobloxPolicy, installed
 	trust.RobloxPolicy = &policy
 	trust.InstalledVersionCode = installedVersionCode
 	trust.MinimumPolicySequence = minimumPolicySequence
+	return trust
+}
+
+// KeylessReleaseTrustPolicy keeps the conservative compiled Roblox signer,
+// split, and minimum-version floor. It is usable only after the surrounding
+// app authority has cryptographically authenticated the exact Tipsy AppImage.
+func KeylessReleaseTrustPolicy() TrustPolicy {
+	trust := OfficialTrustPolicy()
+	trust.ReleaseAuthenticated = true
 	return trust
 }
 
@@ -351,8 +365,8 @@ func AuthorizeReport(rep *apk.Report, policy TrustPolicy) (Authorization, error)
 	if mode != OfficialVerified && mode != DevelopmentUnrestricted {
 		return Authorization{}, setupError(ErrPolicy, "validate package", "package authorization mode is invalid", nil)
 	}
-	if mode == OfficialVerified && policy.RobloxPolicy == nil {
-		return Authorization{}, setupError(ErrPolicy, "validate package", "official verification requires an authenticated Roblox policy", nil)
+	if mode == OfficialVerified && policy.RobloxPolicy == nil && !policy.ReleaseAuthenticated {
+		return Authorization{}, setupError(ErrPolicy, "validate package", "official verification requires an authenticated release or Roblox policy", nil)
 	}
 	if mode == DevelopmentUnrestricted && policy.RobloxPolicy != nil {
 		return Authorization{}, setupError(ErrPolicy, "validate package", "development authorization cannot claim authenticated policy status", nil)
@@ -443,6 +457,9 @@ func AuthorizeReport(rep *apk.Report, policy TrustPolicy) (Authorization, error)
 		policyAuthorized := false
 		if mode == DevelopmentUnrestricted {
 			ok = allowedCerts[lineage[len(lineage)-1]]
+		} else if policy.RobloxPolicy == nil && policy.ReleaseAuthenticated {
+			lineageID, policySequence, ok = "compiled-keyless-release", 0, allowedCerts[lineage[len(lineage)-1]]
+			policyAuthorized = ok
 		} else {
 			lineageID, policySequence, ok = authorizeSignerLineage(policy.RobloxPolicy, uint64(p.VersionCode), lineage)
 			policyAuthorized = ok
