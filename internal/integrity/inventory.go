@@ -22,6 +22,8 @@ const (
 	MaxInventorySize = 4 << 20
 	MaxInventoryFile = 200000
 
+	keylessReleaseSignerLineageID = "compiled-keyless-release"
+
 	OriginAPK              = "apk"
 	OriginDerived          = "derived"
 	OriginOfficialExternal = "official-external"
@@ -107,11 +109,18 @@ func validateInventory(in Inventory) error {
 	}
 	switch in.AuthorizationMode {
 	case "official-verified":
-		if !in.PolicyAuthorized || in.PolicySequence == 0 {
+		if !in.PolicyAuthorized {
+			return fmt.Errorf("integrity: official generation lacks authenticated policy")
+		}
+		if in.SignerLineageID == keylessReleaseSignerLineageID {
+			if in.PolicySequence != 0 {
+				return fmt.Errorf("integrity: keyless official generation has invalid policy sequence")
+			}
+		} else if in.PolicySequence == 0 {
 			return fmt.Errorf("integrity: official generation lacks authenticated policy")
 		}
 	case "development-unrestricted":
-		if in.PolicyAuthorized || in.PolicySequence != 0 {
+		if in.PolicyAuthorized || in.PolicySequence != 0 || in.SignerLineageID == keylessReleaseSignerLineageID {
 			return fmt.Errorf("integrity: development generation claims official policy")
 		}
 	default:

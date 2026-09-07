@@ -415,6 +415,76 @@ func TestInventoryRejectsPathsDuplicatesAndNonCanonicalData(t *testing.T) {
 	}
 }
 
+func TestInventoryAuthorizationPolicyMatrix(t *testing.T) {
+	_, development := generationFixture(t, "apk", "native", 2908)
+
+	tests := []struct {
+		name             string
+		mode             string
+		lineageID        string
+		policySequence   uint64
+		policyAuthorized bool
+		wantValid        bool
+	}{
+		{
+			name:             "authenticated keyless official policy",
+			mode:             "official-verified",
+			lineageID:        "compiled-keyless-release",
+			policyAuthorized: true,
+			wantValid:        true,
+		},
+		{
+			name:             "authenticated legacy official policy",
+			mode:             "official-verified",
+			lineageID:        "tuf-stable",
+			policySequence:   7,
+			policyAuthorized: true,
+			wantValid:        true,
+		},
+		{
+			name:             "keyless official policy with nonzero sequence",
+			mode:             "official-verified",
+			lineageID:        "compiled-keyless-release",
+			policySequence:   1,
+			policyAuthorized: true,
+		},
+		{
+			name:             "legacy official policy with zero sequence",
+			mode:             "official-verified",
+			lineageID:        "tuf-stable",
+			policyAuthorized: true,
+		},
+		{
+			name:      "keyless identity in development mode",
+			mode:      "development-unrestricted",
+			lineageID: "compiled-keyless-release",
+		},
+		{
+			name:      "unauthenticated keyless official policy",
+			mode:      "official-verified",
+			lineageID: "compiled-keyless-release",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			inventory := development
+			inventory.AuthorizationMode = tc.mode
+			inventory.SignerLineageID = tc.lineageID
+			inventory.PolicySequence = tc.policySequence
+			inventory.PolicyAuthorized = tc.policyAuthorized
+
+			_, _, err := CanonicalInventory(inventory)
+			if tc.wantValid && err != nil {
+				t.Fatalf("authenticated policy was rejected: %v", err)
+			}
+			if !tc.wantValid && err == nil {
+				t.Fatal("spoofed policy combination was accepted")
+			}
+		})
+	}
+}
+
 func FuzzDecodeInventory(f *testing.F) {
 	source := f.TempDir()
 	_, inventory := generationFixtureAtFuzz(f, source, "apk", "native", 2908)
