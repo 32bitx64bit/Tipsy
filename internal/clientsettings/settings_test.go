@@ -419,7 +419,7 @@ func TestRendererOverridesAndVulkanAvailability(t *testing.T) {
 	if _, ok := auto[flagPreferOpenGL]; ok {
 		t.Fatalf("auto must not emit PreferOpenGL: %v", auto)
 	}
-	wantAutoLen := 15 // framerate-cap gate + fourteen high-quality texture keys
+	wantAutoLen := 14 // framerate-cap gate + thirteen high-quality texture keys
 	if caps.Vulkan.Available {
 		wantAutoLen++
 	}
@@ -626,14 +626,13 @@ func TestClientLockAllowsDiscordOnlyApply(t *testing.T) {
 func assertHighTextureOverrides(t *testing.T, got map[string]any) {
 	t.Helper()
 	want := map[string]any{
-		flagTextureQualityOverrideEnabled:     "True",
-		intTextureQualityOverride:             textureQualityHigh,
+		"DFFlagTextureQualityOverrideEnabled": "True",
+		"DFIntTextureQualityOverride":         "3",
 		flagUITextureCompressionDesktop:       "True",
 		flagTCTextureCompressionDesktop:       "True",
 		intRenderTextureTotalBudgetMB:         textureBudgetHighMB,
 		intRenderTextureMipBias:               textureMipBiasHigh,
-		intTextureCompositorLowResFactor:      textureCompositorFull,
-		intAvatarTextureMemoryMax:             avatarTextureMemoryMaxHigh,
+		"DFIntDebugTc1MaxAllowedMemoryBudget": "268435456",
 		intRenderForceVideoMemorySize:         videoMemoryHighBytes,
 		flagTM2RuntimeTextureDisableStreaming: "False",
 		flagTM2SkipMipsForUnstreamable2:       "False",
@@ -652,13 +651,13 @@ func assertHighTextureOverrides(t *testing.T, got map[string]any) {
 func assertLowTextureOverrides(t *testing.T, got map[string]any) {
 	t.Helper()
 	want := map[string]any{
-		flagTextureQualityOverrideEnabled:     "True",
-		intTextureQualityOverride:             textureQualityLow,
+		"DFFlagTextureQualityOverrideEnabled": "True",
+		"DFIntTextureQualityOverride":         "1",
 		flagUITextureCompressionDesktop:       "False",
 		flagTCTextureCompressionDesktop:       "False",
 		intRenderTextureTotalBudgetMB:         textureBudgetLowMB,
 		intRenderTextureMipBias:               textureMipBiasLow,
-		intTextureCompositorLowResFactor:      textureCompositorCDN,
+		"DFIntDebugTc1MaxAllowedMemoryBudget": "50331648",
 		intRenderForceVideoMemorySize:         videoMemoryLowBytes,
 		flagTM2RuntimeTextureDisableStreaming: "True",
 		flagTM2SkipMipsForUnstreamable2:       "True",
@@ -671,17 +670,26 @@ func assertLowTextureOverrides(t *testing.T, got map[string]any) {
 			t.Fatalf("low texture %s=%v want %v in %v", key, got[key], value, got)
 		}
 	}
-	if _, ok := got[intAvatarTextureMemoryMax]; ok {
-		t.Fatalf("low texture must omit AvatarTextureMemoryMax: %v", got)
-	}
 	assertNoForbiddenTextureOverrides(t, got)
 }
 
+// assertNoForbiddenTextureOverrides keeps keys out of both texture mappings
+// that were measured to be harmful or inert on the official Android client:
+// the compositor low-res factor (Tipsy's 1 failed to fix the blur and spun
+// the compositor; the CDN owns it at 4), the unconsumed avatar texture memory
+// name, incorrect compositor-budget aliases, and the temporary compositor
+// diagnostic channel. The client's measured cap is the DFIntDebugTc1 key.
 func assertNoForbiddenTextureOverrides(t *testing.T, got map[string]any) {
 	t.Helper()
 	for _, key := range []string{
 		"FIntDebugFRMQualityLevelOverride",
 		"DFIntRenderForceVideoMemorySize",
+		"FIntTextureCompositorLowResFactor",
+		"FIntAvatarTextureMemoryMax",
+		"FIntRenderTextureCompositorBudget",
+		"DFIntRenderTextureCompositorBudget",
+		"FLogRenderTextureCompositor",
+		"FLogRenderTextureCompositorBudget",
 	} {
 		if _, ok := got[key]; ok {
 			t.Fatalf("forbidden texture override %s in %v", key, got)

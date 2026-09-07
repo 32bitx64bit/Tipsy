@@ -327,6 +327,15 @@ static void vk_scan_host_wsi(void)
 
 static void vk_init_once(void)
 {
+	/*
+	 * The Android Vulkan contract requires ETC2, while desktop RADV leaves
+	 * its conformant shader emulation opt-in on hardware without native ETC2.
+	 * Let the driver implement and advertise the format; never fabricate the
+	 * Vulkan feature bit in this adapter. Preserve an explicit user override.
+	 */
+	if (getenv("vk_require_etc2") == NULL) {
+		(void)setenv("vk_require_etc2", "true", 0);
+	}
 	lib_vulkan = dlopen("libvulkan.so.1", RTLD_NOW | RTLD_LOCAL);
 	if (lib_vulkan == NULL) {
 		lib_vulkan = dlopen("libvulkan.so", RTLD_NOW | RTLD_LOCAL);

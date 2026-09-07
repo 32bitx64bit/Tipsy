@@ -46,15 +46,21 @@ const (
 	// reenables the version-24 RenderUseTextureManager2 gate during startup.
 	// Low restores both gates so the previous high launch cannot linger in
 	// the engine flag cache. The 3/1 quality override pair remains high/low.
-	flagTextureQualityOverrideEnabled     = "DFFlagTextureQualityOverrideEnabled"
-	intTextureQualityOverride             = "DFIntTextureQualityOverride"
-	flagUITextureCompressionDesktop       = "FFlagUITextureCompressionDesktop"
-	flagTCTextureCompressionDesktop       = "FFlagTCTextureCompressionDesktop"
-	intRenderTextureTotalBudgetMB         = "FIntRenderTextureTotalBudgetMB"
-	intRenderTextureMipBias               = "FIntRenderTextureMipBias"
-	intTextureCompositorLowResFactor      = "FIntTextureCompositorLowResFactor"
-	intAvatarTextureMemoryMax             = "FIntAvatarTextureMemoryMax"
-	intRenderForceVideoMemorySize         = "FIntRenderForceVideoMemorySize"
+	flagTextureQualityOverrideEnabled = "DFFlagTextureQualityOverrideEnabled"
+	intTextureQualityOverride         = "DFIntTextureQualityOverride"
+	flagUITextureCompressionDesktop   = "FFlagUITextureCompressionDesktop"
+	flagTCTextureCompressionDesktop   = "FFlagTCTextureCompressionDesktop"
+	intRenderTextureTotalBudgetMB     = "FIntRenderTextureTotalBudgetMB"
+	intRenderTextureMipBias           = "FIntRenderTextureMipBias"
+	intRenderForceVideoMemorySize     = "FIntRenderForceVideoMemorySize"
+	// Clothing composites (TextureCompositor) live under their own byte
+	// budget: min(max(videoMemorySize/3, 8 MiB), this DFInt). The client
+	// default cap is 48 MiB, which a 45-player server can exceed, and over
+	// budget the compositor re-bakes clothing at 1/LowResFactor width
+	// (measured 229 of 916). High raises the cap so the measured populated
+	// server keeps full-width composites; low restores the default cap
+	// explicitly.
+	intDebugTc1MaxAllowedMemoryBudget     = "DFIntDebugTc1MaxAllowedMemoryBudget"
 	flagTM2RuntimeTextureDisableStreaming = "FFlagTM2RuntimeTextureDisableStreaming"
 	flagTM2SkipMipsForUnstreamable2       = "FFlagTM2SkipMipsForUnstreamable2"
 	flagUseTM1LegacyMipPackForDecal       = "FFlagUseTM1PropsetUseLegacyMipPackForDecal"
@@ -66,9 +72,9 @@ const (
 	textureBudgetLowMB                    = "64"
 	textureMipBiasHigh                    = "0"
 	textureMipBiasLow                     = "2"
-	textureCompositorFull                 = "1"
-	textureCompositorCDN                  = "4"
-	avatarTextureMemoryMaxHigh            = "33554432"
+	// 256 MiB / 48 MiB (client-default cap) in bytes.
+	compositorBudgetHighBytes = "268435456"
+	compositorBudgetLowBytes  = "50331648"
 	// 1 GiB / 64 MiB in bytes. INT32-safe; matches caps.videoMemory units.
 	videoMemoryHighBytes = "1073741824"
 	videoMemoryLowBytes  = "67108864"
@@ -148,10 +154,12 @@ type Settings struct {
 	FrameRate FrameRate `json:"frameRate"`
 	VSync     bool      `json:"vsync"`
 	// LowTextureMode requests the memory-saving texture mapping (override 1,
-	// CDN compositor 4, 64 MiB video-memory cap, TM2 skip-mips, no desktop
-	// DXT). The zero value / missing JSON field is false, so existing
-	// configs and Default() emit the high-quality mapping (override 3,
-	// 1 GiB video-memory cap, compositor 1, desktop DXT, official TM1).
+	// 64 MiB video-memory cap, 48 MiB clothing-compositor cap, TM2 skip-mips,
+	// no desktop DXT). That pair yields about 21.3 MiB of effective compositor
+	// budget. The zero value / missing JSON field is false, so existing configs
+	// and Default() emit the high-quality mapping (override 3, 1 GiB
+	// video-memory cap, 256 MiB effective compositor budget, desktop DXT,
+	// official TM1).
 	LowTextureMode bool `json:"lowTextureMode"`
 	// Display selects where Tipsy maps the launcher and Roblox windows.
 	// "primary" (default) pins them to the current main monitor, "pointer"
@@ -472,10 +480,19 @@ func Overrides(s Settings) (map[string]any, error) {
 }
 
 // applyTextureQualityOverrides writes Tipsy's named LowTextureMode mapping.
-// Desktop compression, legacy-decal, and video-memory keys are explicit so a
-// previous high launch cannot linger in the engine flag cache when Low
-// texture mode is on. Avatar texture memory is high-only so CDN/client keep
-// ownership in the low path.
+// Desktop compression, legacy-decal, video-memory, and compositor-budget keys
+// are explicit so a previous high launch cannot linger in the engine flag
+// cache when Low texture mode is on.
+//
+// FIntTextureCompositorLowResFactor is deliberately not emitted. Roblox ships
+// 4 on every platform's CDN table (desktop included); Tipsy's former 1 did not
+// produce full-resolution output and triggered pathological rebake/upsample
+// loops (one NDS job reached ~1300 requests/s; one Blacksite Zeta job queued
+// ~4000 in 90 seconds).
+// FIntAvatarTextureMemoryMax is not emitted either: changing the attempted key
+// did not move the measured compositor budget, and bounded registration
+// inspection found only the same name as a memory-tracker label, not a
+// consumed FastInt control.
 func applyTextureQualityOverrides(out map[string]any, low bool) {
 	out[flagTextureQualityOverrideEnabled] = "True"
 	if low {
@@ -484,7 +501,7 @@ func applyTextureQualityOverrides(out map[string]any, low bool) {
 		out[flagTCTextureCompressionDesktop] = "False"
 		out[intRenderTextureTotalBudgetMB] = textureBudgetLowMB
 		out[intRenderTextureMipBias] = textureMipBiasLow
-		out[intTextureCompositorLowResFactor] = textureCompositorCDN
+		out[intDebugTc1MaxAllowedMemoryBudget] = compositorBudgetLowBytes
 		out[intRenderForceVideoMemorySize] = videoMemoryLowBytes
 		out[flagTM2RuntimeTextureDisableStreaming] = "True"
 		out[flagTM2SkipMipsForUnstreamable2] = "True"
@@ -500,8 +517,7 @@ func applyTextureQualityOverrides(out map[string]any, low bool) {
 	out[flagTCTextureCompressionDesktop] = "True"
 	out[intRenderTextureTotalBudgetMB] = textureBudgetHighMB
 	out[intRenderTextureMipBias] = textureMipBiasHigh
-	out[intTextureCompositorLowResFactor] = textureCompositorFull
-	out[intAvatarTextureMemoryMax] = avatarTextureMemoryMaxHigh
+	out[intDebugTc1MaxAllowedMemoryBudget] = compositorBudgetHighBytes
 	out[intRenderForceVideoMemorySize] = videoMemoryHighBytes
 	out[flagTM2RuntimeTextureDisableStreaming] = "False"
 	out[flagTM2SkipMipsForUnstreamable2] = "False"
