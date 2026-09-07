@@ -143,12 +143,16 @@ jobs:
           set -euo pipefail
           sudo apt-get update
           sudo apt-get install -y \
-            bubblewrap ca-certificates curl file gcc git patchelf pkg-config qmake6 \
+            bubblewrap ca-certificates curl file gcc git patchelf pkg-config qmake6 util-linux \
             qt6-base-dev libegl1-mesa-dev libgles2-mesa-dev libpango1.0-dev \
             libx11-dev libx11-xcb-dev libxext-dev libxrandr-dev libxtst-dev
           pkg-config --exists Qt6Widgets Qt6Gui Qt6Core x11 x11-xcb xext xrandr xtst pangocairo pangoft2 cairo-xlib egl glesv2
           test -f /usr/include/X11/Xlib-xcb.h
-          bwrap --ro-bind / / --dev /dev --proc /proc --unshare-all --new-session --cap-drop ALL true
+          command -v unshare
+          unshare --user --map-root-user --net -- \
+            bwrap --ro-bind / / --dev /dev --proc /proc \
+              --unshare-ipc --unshare-pid --unshare-uts --unshare-cgroup-try \
+              --new-session --cap-drop ALL true
 
       - name: Prime the module cache before build isolation
         shell: bash

@@ -104,11 +104,14 @@ trap cleanup EXIT HUP INT TERM
 mkdir -m 0700 "$work/a" "$work/b"
 
 isolated=false
-# Probe the same user-plus-network namespace mode used below.  A bare network
-# namespace needs host CAP_NET_ADMIN to configure loopback on GitHub's runner;
-# --unshare-all instead grants that setup capability only inside its new user
-# namespace, then the sandboxed command drops every capability.
-if command -v bwrap >/dev/null 2>&1 && bwrap --ro-bind / / --dev /dev --proc /proc --unshare-all --new-session --cap-drop ALL true >/dev/null 2>&1; then
+# GitHub-hosted Ubuntu runners deny Bubblewrap's attempt to bring loopback up
+# in a freshly-created network namespace.  Create that user+network namespace
+# with util-linux unshare instead: it has no configured interface, route, or
+# DNS. Bubblewrap then supplies the read-only mount/PID/IPC/UTS isolation and
+# drops every capability before executing the build.
+if command -v bwrap >/dev/null 2>&1 && command -v unshare >/dev/null 2>&1 && \
+	unshare --user --map-root-user --net -- \
+		bwrap --ro-bind / / --dev /dev --proc /proc --unshare-ipc --unshare-pid --unshare-uts --unshare-cgroup-try --new-session --cap-drop ALL true >/dev/null 2>&1; then
 	isolated=true
 fi
 if [[ "$isolated" == false && "$mode" != developer ]]; then
@@ -126,6 +129,7 @@ run_isolated() {
 		# AppImage inputs at their resolved absolute paths. Remount only the
 		# pre-created pass directory at the same path as writable: creating a
 		# synthetic /release-out after a read-only root bind is not portable.
+		unshare --user --map-root-user --net -- \
 		bwrap \
 			--ro-bind / / \
 			--dev /dev \
@@ -133,7 +137,10 @@ run_isolated() {
 			--tmpfs /tmp \
 			--dir /tmp/home \
 			--bind "$destination" "$destination" \
-			--unshare-all \
+			--unshare-ipc \
+			--unshare-pid \
+			--unshare-uts \
+			--unshare-cgroup-try \
 			--new-session \
 			--cap-drop ALL \
 			--clearenv \
