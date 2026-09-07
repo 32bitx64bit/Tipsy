@@ -66,6 +66,14 @@ if [[ -n "$appimagetool" || -n "$appimagetool_sha256" || -n "$runtime_file" || -
 	runtime_file=$(readlink -f -- "$runtime_file")
 fi
 
+source_commit=$(git -C "$repo" rev-parse HEAD 2>/dev/null) || fail 'source tree has no reviewed Git commit'
+[[ "$source_commit" =~ ^[0-9a-f]{40}$ ]] || fail 'source HEAD is not a full Git commit'
+source_date_epoch=$(git -C "$repo" show -s --format=%ct "$source_commit" 2>/dev/null)
+[[ "$source_date_epoch" =~ ^[0-9]+$ ]] || fail 'source commit has no valid timestamp'
+# Source admission must happen before this script creates an output directory
+# or a candidate artifact. It audits HEAD plus every reachable historical ref.
+"$repo/scripts/check-public-source.sh" --repo "$repo" --commit "$source_commit"
+
 mkdir -p -- "$output_dir"
 output_dir=$(CDPATH= cd -- "$output_dir" && pwd -P)
 appdir_name="Tipsy-${version}-x86_64.AppDir"
@@ -79,10 +87,6 @@ if [[ "$with_appimage" == true ]]; then
 	[[ ! -e "$output_dir/$appimage_name" ]] || fail "output already exists: $output_dir/$appimage_name"
 fi
 
-source_commit=$(git -C "$repo" rev-parse HEAD 2>/dev/null) || fail 'source tree has no reviewed Git commit'
-[[ "$source_commit" =~ ^[0-9a-f]{40}$ ]] || fail 'source HEAD is not a full Git commit'
-source_date_epoch=$(git -C "$repo" show -s --format=%ct "$source_commit" 2>/dev/null)
-[[ "$source_date_epoch" =~ ^[0-9]+$ ]] || fail 'source commit has no valid timestamp'
 module_cache=$(go env GOMODCACHE)
 [[ -d "$module_cache" ]] || fail 'the read-only Go module cache is missing'
 go_command=$(command -v go) || fail 'the active Go toolchain is missing'
