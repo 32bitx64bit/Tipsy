@@ -2,11 +2,14 @@ name: GitHub-signed release
 
 # A protected, immutable v* tag creates exactly one public GitHub release. The
 # AppImage receives both a keyless Sigstore bundle and GitHub build provenance.
-# No workflow secret or long-lived signing key is used or accepted.
+# No workflow secret or long-lived signing key is used or accepted. The manual
+# control is deliberately tag-only: select an existing v* tag in GitHub's ref
+# picker; dispatching from a branch is skipped before production is entered.
 on:
   push:
     tags:
       - "v*"
+  workflow_dispatch:
 
 permissions:
   contents: read
@@ -17,6 +20,7 @@ concurrency:
 
 jobs:
   github-signed-release:
+    if: github.ref_type == 'tag' && startsWith(github.ref_name, 'v')
     # The repository's production environment admits only v* tags and requires
     # an explicit reviewer approval before this job receives OIDC or release
     # publication permissions.
@@ -29,7 +33,7 @@ jobs:
       attestations: write
 
     steps:
-      - name: Checkout the pushed tag without credentials
+      - name: Checkout the selected release tag without credentials
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2; scripts/release-inputs.lock.json
         with:
           ref: ${{ github.ref }}

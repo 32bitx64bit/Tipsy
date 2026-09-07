@@ -575,8 +575,8 @@ func TestReleaseWorkflowSecurityIfPresent(t *testing.T) {
 		t.Fatal(err)
 	}
 	text := string(data)
-	if !strings.Contains(text, "push:") || !strings.Contains(text, "tags:") || !strings.Contains(text, "v*") {
-		t.Fatal("release workflow must be triggered from version tags")
+	if !strings.Contains(text, "push:") || !strings.Contains(text, "workflow_dispatch:") || !strings.Contains(text, "tags:") || !strings.Contains(text, "v*") {
+		t.Fatal("release workflow must support dispatching a version-tag release")
 	}
 	for _, forbidden := range []string{"pull_request:", "pull_request_target:", "workflow_run:", "secrets.", "permissions: write-all", "persist-credentials: true", "ubuntu-latest"} {
 		if strings.Contains(text, forbidden) {
@@ -598,6 +598,7 @@ func TestReleaseWorkflowSecurityIfPresent(t *testing.T) {
 		"id-token: write",
 		"attestations: write",
 		"environment: production",
+		"github.ref_type == 'tag'",
 		"persist-credentials: false",
 		"scripts/release-build.sh",
 		"--mode github-signed",
@@ -613,7 +614,7 @@ func TestReleaseWorkflowSecurityIfPresent(t *testing.T) {
 			t.Errorf("release workflow is missing %q", required)
 		}
 	}
-	for _, forbidden := range []string{"workflow_dispatch:", "offline TUF signing ceremony", "release-candidate-unsigned", "Upload release-candidate material only"} {
+	for _, forbidden := range []string{"offline TUF signing ceremony", "release-candidate-unsigned", "Upload release-candidate material only"} {
 		if strings.Contains(text, forbidden) {
 			t.Errorf("release workflow retains the wrong publication model %q", forbidden)
 		}
