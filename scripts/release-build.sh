@@ -5,7 +5,7 @@ set -euo pipefail
 
 usage() {
 	cat >&2 <<USAGE
-usage: $0 --version VERSION --output-dir DIRECTORY [--mode developer|official]
+usage: $0 --version VERSION --output-dir DIRECTORY [--mode developer|official|github-signed]
   [--release-lock FILE] [--appimagetool FILE --appimagetool-sha256 SHA256
    --runtime-file FILE --runtime-sha256 SHA256]
 
@@ -46,7 +46,7 @@ done
 
 [[ "$version" =~ ^[0-9A-Za-z][0-9A-Za-z._+-]*$ ]] || fail 'invalid version'
 [[ -n "$output_dir" ]] || usage
-[[ "$mode" == developer || "$mode" == official ]] || fail 'mode must be developer or official'
+[[ "$mode" == developer || "$mode" == official || "$mode" == github-signed ]] || fail 'mode must be developer, official, or github-signed'
 repo=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd -P)
 if [[ -z "$release_lock" ]]; then
 	release_lock="$repo/scripts/release-inputs.lock.json"
@@ -107,8 +107,8 @@ isolated=false
 if command -v bwrap >/dev/null 2>&1 && bwrap --ro-bind / / --dev /dev --proc /proc --unshare-net --new-session true >/dev/null 2>&1; then
 	isolated=true
 fi
-if [[ "$isolated" == false && "$mode" == official ]]; then
-	fail 'official candidate requires working bubblewrap network/source isolation'
+if [[ "$isolated" == false && "$mode" != developer ]]; then
+	fail 'signed candidate requires working bubblewrap network/source isolation'
 fi
 if [[ "$isolated" == false ]]; then
 	printf 'release-build: UNVERIFIED developer build: bubblewrap unavailable; source read-only/network isolation is not asserted\n' >&2
@@ -216,4 +216,9 @@ if [[ "$with_appimage" == true ]]; then
 	printf 'Reproduced AppImage: %s\n' "$output_dir/$appimage_name"
 fi
 printf 'Unsigned deterministic evidence: %s\n' "$output_dir/$evidence_name"
-printf 'Integrity label: %s\n' "$([[ "$mode" == official ]] && printf release-candidate-unsigned || printf development-unrestricted)"
+case "$mode" in
+	developer) integrity_label=development-unrestricted ;;
+	official) integrity_label=release-candidate-unsigned ;;
+	github-signed) integrity_label=release-candidate-keyless ;;
+esac
+printf 'Integrity label: %s\n' "$integrity_label"
