@@ -2,14 +2,19 @@ name: GitHub-signed release
 
 # A protected, immutable v* tag creates exactly one public GitHub release. The
 # AppImage receives both a keyless Sigstore bundle and GitHub build provenance.
-# No workflow secret or long-lived signing key is used or accepted. The manual
-# control is deliberately tag-only: select an existing v* tag in GitHub's ref
-# picker; dispatching from a branch is skipped before production is entered.
+# No workflow secret or long-lived signing key is used or accepted. A manual
+# run builds its exact protected-main commit, then creates its immutable v* tag
+# only when the signed GitHub Release is published.
 on:
   push:
     tags:
       - "v*"
   workflow_dispatch:
+    inputs:
+      version:
+        description: "Release version without the v prefix (for example 1.0.0)"
+        required: true
+        type: string
 
 permissions:
   contents: read
@@ -20,10 +25,14 @@ concurrency:
 
 jobs:
   github-signed-release:
-    if: github.ref_type == 'tag' && startsWith(github.ref_name, 'v')
-    # The repository's production environment admits only v* tags and requires
-    # an explicit reviewer approval before this job receives OIDC or release
-    # publication permissions.
+    # Pushes use immutable version tags. Manual runs are admitted only from the
+    # protected default branch and create a fresh immutable version tag at
+    # publication, after the reproducible build has completed.
+    if: >-
+      (github.event_name == 'push' && github.ref_type == 'tag' && startsWith(github.ref_name, 'v')) ||
+      (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main')
+    # The production environment requires explicit approval before this job
+    # receives OIDC or release publication permissions.
     environment: production
     runs-on: ubuntu-24.04
     timeout-minutes: 60
@@ -33,7 +42,7 @@ jobs:
       attestations: write
 
     steps:
-      - name: Checkout the selected release tag without credentials
+      - name: Checkout the admitted release source without credentials
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2; scripts/release-inputs.lock.json
         with:
           ref: ${{ github.ref }}
@@ -44,6 +53,8 @@ jobs:
 
       - name: Fail closed unless the reviewed tag and keyless release policy agree
         id: preflight
+        env:
+          MANUAL_VERSION: ${{ inputs.version }}
         shell: bash
         run: |
           set -euo pipefail
@@ -74,17 +85,35 @@ jobs:
               raise SystemExit("release workflow Go version is not tied to the reviewed lock")
           PY
 
-          [[ "$GITHUB_REF_TYPE" == tag ]]
-          [[ "$GITHUB_REF" == "refs/tags/$GITHUB_REF_NAME" ]]
-          [[ "$GITHUB_REF" =~ ^refs/tags/v[0-9A-Za-z._+-]+$ ]]
-          version=${GITHUB_REF_NAME#v}
-          [[ "$version" =~ ^[0-9A-Za-z][0-9A-Za-z._+-]*$ ]]
-
-          tag_commit=$(git rev-parse --verify "$GITHUB_REF^{commit}")
           event_commit=$(git rev-parse --verify "$GITHUB_SHA^{commit}")
           checkout_commit=$(git rev-parse --verify HEAD)
-          [[ "$tag_commit" == "$checkout_commit" ]]
-          [[ "$event_commit" == "$checkout_commit" ]]
+          release_tag=
+          case "$GITHUB_EVENT_NAME" in
+            push)
+              [[ "$GITHUB_REF_TYPE" == tag ]]
+              [[ "$GITHUB_REF" == "refs/tags/$GITHUB_REF_NAME" ]]
+              [[ "$GITHUB_REF" =~ ^refs/tags/v[0-9A-Za-z._+-]+$ ]]
+              release_tag=$GITHUB_REF_NAME
+              tag_commit=$(git rev-parse --verify "$GITHUB_REF^{commit}")
+              [[ "$tag_commit" == "$checkout_commit" ]]
+              [[ "$event_commit" == "$checkout_commit" ]]
+              ;;
+            workflow_dispatch)
+              [[ "$GITHUB_REF_TYPE" == branch ]]
+              [[ "$GITHUB_REF" == refs/heads/main ]]
+              [[ "$GITHUB_REF_NAME" == main ]]
+              version=${MANUAL_VERSION:-}
+              [[ "$version" =~ ^[0-9A-Za-z][0-9A-Za-z._+-]*$ ]]
+              release_tag="v$version"
+              ! git rev-parse --verify --quiet "refs/tags/$release_tag" >/dev/null
+              [[ "$event_commit" == "$checkout_commit" ]]
+              ;;
+            *)
+              exit 1
+              ;;
+          esac
+          version=${release_tag#v}
+          [[ "$version" =~ ^[0-9A-Za-z][0-9A-Za-z._+-]*$ ]]
           [[ -z $(git status --porcelain=v1 --untracked-files=all) ]]
           git diff --no-ext-diff --quiet
           git diff --cached --no-ext-diff --quiet
@@ -97,6 +126,7 @@ jobs:
           [[ "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY" == "$expected_repository" ]]
 
           printf 'version=%s\n' "$version" >> "$GITHUB_OUTPUT"
+          printf 'tag=%s\n' "$release_tag" >> "$GITHUB_OUTPUT"
           printf 'commit=%s\n' "$checkout_commit" >> "$GITHUB_OUTPUT"
           printf 'lock_digest=%s\n' "$("$lock_tool" --lock "$lock" --mode github-signed --digest)" >> "$GITHUB_OUTPUT"
 
@@ -335,7 +365,13 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          gh release create "$GITHUB_REF_NAME" \
+          readonly release_tag='${{ steps.preflight.outputs.tag }}'
+          if [[ "$GITHUB_EVENT_NAME" == push ]]; then
+            tag_args=(--verify-tag)
+          else
+            tag_args=(--target '${{ steps.preflight.outputs.commit }}')
+          fi
+          gh release create "$release_tag" \
             '${{ steps.build.outputs.appimage }}' \
             '${{ steps.build.outputs.appimage }}.sha256' \
             '${{ steps.signature.outputs.bundle }}' \
@@ -345,4 +381,4 @@ jobs:
             --repo "$GITHUB_REPOSITORY" \
             --title "Tipsy ${{ steps.preflight.outputs.version }}" \
             --notes-file '${{ steps.release_files.outputs.notes }}' \
-            --verify-tag
+            "${tag_args[@]}"

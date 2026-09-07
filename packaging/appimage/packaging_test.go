@@ -575,8 +575,8 @@ func TestReleaseWorkflowSecurityIfPresent(t *testing.T) {
 		t.Fatal(err)
 	}
 	text := string(data)
-	if !strings.Contains(text, "push:") || !strings.Contains(text, "workflow_dispatch:") || !strings.Contains(text, "tags:") || !strings.Contains(text, "v*") {
-		t.Fatal("release workflow must support dispatching a version-tag release")
+	if !strings.Contains(text, "push:") || !strings.Contains(text, "workflow_dispatch:") || !strings.Contains(text, "version:") || !strings.Contains(text, "tags:") || !strings.Contains(text, "v*") {
+		t.Fatal("release workflow must support automatic tags and manual versioned releases")
 	}
 	for _, forbidden := range []string{"pull_request:", "pull_request_target:", "workflow_run:", "secrets.", "permissions: write-all", "persist-credentials: true", "ubuntu-latest"} {
 		if strings.Contains(text, forbidden) {
@@ -598,7 +598,10 @@ func TestReleaseWorkflowSecurityIfPresent(t *testing.T) {
 		"id-token: write",
 		"attestations: write",
 		"environment: production",
-		"github.ref_type == 'tag'",
+		"github.event_name == 'workflow_dispatch'",
+		"refs/heads/main",
+		"MANUAL_VERSION",
+		"--target '${{ steps.preflight.outputs.commit }}'",
 		"persist-credentials: false",
 		"scripts/release-build.sh",
 		"--mode github-signed",
