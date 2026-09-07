@@ -115,7 +115,7 @@ mkdir -m 0700 "$work/a" "$work/b" "$work/home"
 run_reproducible() {
 	env -i \
 		HOME="$work/home" \
-		PATH="$go_bin_dir:/usr/local/bin:/usr/bin:/bin" \
+		PATH="$go_bin_dir:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin" \
 		LC_ALL=C.UTF-8 \
 		TZ=UTC \
 		SOURCE_DATE_EPOCH="$source_date_epoch" \

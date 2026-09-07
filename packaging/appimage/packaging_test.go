@@ -988,7 +988,7 @@ func TestReleaseBuilderUsesUnprivilegedCredentialScrubbedBuilds(t *testing.T) {
 	}
 	for _, required := range []string{
 		"env -i",
-		`PATH="$go_bin_dir:/usr/local/bin:/usr/bin:/bin"`,
+		`PATH="$go_bin_dir:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"`,
 		"GOPROXY=off",
 		"GOSUMDB=off",
 		"assert_clean_source",
