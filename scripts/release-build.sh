@@ -104,14 +104,22 @@ trap cleanup EXIT HUP INT TERM
 mkdir -m 0700 "$work/a" "$work/b"
 
 isolated=false
-# GitHub-hosted Ubuntu runners deny Bubblewrap's attempt to bring loopback up
-# in a freshly-created network namespace.  Create that user+network namespace
-# with util-linux unshare instead: it has no configured interface, route, or
-# DNS. Bubblewrap then supplies the read-only mount/PID/IPC/UTS isolation and
-# drops every capability before executing the build.
-if command -v bwrap >/dev/null 2>&1 && command -v unshare >/dev/null 2>&1 && \
-	unshare --user --map-root-user --net -- \
-		bwrap --ro-bind / / --dev /dev --proc /proc --unshare-ipc --unshare-pid --unshare-uts --unshare-cgroup-try --new-session --cap-drop ALL true >/dev/null 2>&1; then
+# GitHub-hosted Ubuntu runners deny Bubblewrap's loopback setup and unprivileged
+# UID mapping.  The host service manager can create a private network without
+# either operation. It then executes as the original unprivileged user with no
+# way to gain privilege, while Bubblewrap provides the read-only mount/PID/IPC/
+# UTS isolation. RestrictAddressFamilies prevents IP sockets even if a future
+# runner changes its private-network device setup.
+runner_uid=$(id -u)
+runner_gid=$(id -g)
+if command -v bwrap >/dev/null 2>&1 && command -v systemd-run >/dev/null 2>&1 && command -v sudo >/dev/null 2>&1 && \
+	sudo -n systemd-run --wait --pipe --quiet --collect --same-dir \
+		--uid "$runner_uid" --gid "$runner_gid" \
+		--property=PrivateNetwork=yes \
+		--property=NoNewPrivileges=yes \
+		--property=CapabilityBoundingSet= \
+		--property=RestrictAddressFamilies=AF_UNIX \
+		-- bwrap --ro-bind / / --dev /dev --proc /proc --unshare-ipc --unshare-pid --unshare-uts --unshare-cgroup-try --new-session --cap-drop ALL true >/dev/null 2>&1; then
 	isolated=true
 fi
 if [[ "$isolated" == false && "$mode" != developer ]]; then
@@ -129,7 +137,13 @@ run_isolated() {
 		# AppImage inputs at their resolved absolute paths. Remount only the
 		# pre-created pass directory at the same path as writable: creating a
 		# synthetic /release-out after a read-only root bind is not portable.
-		unshare --user --map-root-user --net -- \
+		sudo -n systemd-run --wait --pipe --quiet --collect --same-dir \
+			--uid "$runner_uid" --gid "$runner_gid" \
+			--property=PrivateNetwork=yes \
+			--property=NoNewPrivileges=yes \
+			--property=CapabilityBoundingSet= \
+			--property=RestrictAddressFamilies=AF_UNIX \
+			-- \
 		bwrap \
 			--ro-bind / / \
 			--dev /dev \
