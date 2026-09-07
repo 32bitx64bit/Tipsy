@@ -148,7 +148,7 @@ jobs:
             libx11-dev libx11-xcb-dev libxext-dev libxrandr-dev libxtst-dev
           pkg-config --exists Qt6Widgets Qt6Gui Qt6Core x11 x11-xcb xext xrandr xtst pangocairo pangoft2 cairo-xlib egl glesv2
           test -f /usr/include/X11/Xlib-xcb.h
-          bwrap --ro-bind / / --dev /dev --proc /proc --unshare-net --new-session --cap-drop ALL true
+          bwrap --ro-bind / / --dev /dev --proc /proc --unshare-all --new-session --cap-drop ALL true
 
       - name: Prime the module cache before build isolation
         shell: bash

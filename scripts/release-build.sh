@@ -104,7 +104,11 @@ trap cleanup EXIT HUP INT TERM
 mkdir -m 0700 "$work/a" "$work/b"
 
 isolated=false
-if command -v bwrap >/dev/null 2>&1 && bwrap --ro-bind / / --dev /dev --proc /proc --unshare-net --new-session true >/dev/null 2>&1; then
+# Probe the same user-plus-network namespace mode used below.  A bare network
+# namespace needs host CAP_NET_ADMIN to configure loopback on GitHub's runner;
+# --unshare-all instead grants that setup capability only inside its new user
+# namespace, then the sandboxed command drops every capability.
+if command -v bwrap >/dev/null 2>&1 && bwrap --ro-bind / / --dev /dev --proc /proc --unshare-all --new-session --cap-drop ALL true >/dev/null 2>&1; then
 	isolated=true
 fi
 if [[ "$isolated" == false && "$mode" != developer ]]; then

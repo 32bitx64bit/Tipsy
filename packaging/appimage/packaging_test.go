@@ -984,6 +984,7 @@ func TestReleaseBuilderUsesExistingWritableMountpoints(t *testing.T) {
 		`--bind "$destination" "$destination"`,
 		`--dir /tmp/home`,
 		`--setenv PATH "$go_bin_dir:/usr/local/bin:/usr/bin:/bin"`,
+		`bwrap --ro-bind / / --dev /dev --proc /proc --unshare-all --new-session --cap-drop ALL true`,
 	} {
 		if !strings.Contains(text, required) {
 			t.Errorf("release builder is missing isolated-build invariant %q", required)
