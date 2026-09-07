@@ -326,7 +326,7 @@ jobs:
           name: tipsy-release-candidate-${{ github.run_id }}-${{ github.run_attempt }}
           path: ${{ runner.temp }}/tipsy-release-candidate
 
-      - name: Verify the transferred candidate and prepare its provenance predicate
+      - name: Verify the transferred candidate and its deterministic evidence
         id: candidate
         shell: bash
         run: |
@@ -336,7 +336,6 @@ jobs:
           readonly appimage="$candidate/Tipsy-${version}-x86_64.AppImage"
           readonly archive="$candidate/Tipsy-${version}-x86_64.AppDir.tar.gz"
           readonly evidence="$candidate/Tipsy-${version}-x86_64.evidence"
-          readonly predicate="$RUNNER_TEMP/tipsy-release-predicate-${GITHUB_RUN_ID}.json"
           readonly expected_commit='${{ steps.preflight.outputs.commit }}'
           readonly expected_lock_digest=$(sha256sum scripts/release-inputs.lock.json | awk '{print $1}')
 
@@ -351,7 +350,7 @@ jobs:
             cd "$candidate"
             sha256sum --strict --check "$evidence/release-hashes.sha256"
           )
-          python3 - "$evidence/provenance-input.json" "$predicate" "$expected_commit" "$expected_lock_digest" <<'PY'
+          python3 - "$evidence/provenance-input.json" "$expected_commit" "$expected_lock_digest" <<'PY'
           import json
           import sys
           from pathlib import Path
@@ -363,7 +362,7 @@ jobs:
           if not isinstance(predicate, dict):
               raise SystemExit("release evidence has no SLSA predicate")
           dependencies = predicate.get("buildDefinition", {}).get("resolvedDependencies", [])
-          expected_commit, expected_lock_digest = sys.argv[3:5]
+          expected_commit, expected_lock_digest = sys.argv[2:4]
           if {
               "uri": "git+https://github.com/32bitx64bit/Tipsy",
               "digest": {"gitCommit": expected_commit},
@@ -374,22 +373,15 @@ jobs:
               "digest": {"sha256": expected_lock_digest},
           } not in dependencies:
               raise SystemExit("release evidence is not bound to the reviewed lock")
-          Path(sys.argv[2]).write_text(
-              json.dumps(predicate, ensure_ascii=True, separators=(",", ":"), sort_keys=True) + "\n",
-              encoding="utf-8",
-          )
           PY
           printf 'appimage=%s\n' "$appimage" >> "$GITHUB_OUTPUT"
           printf 'evidence=%s\n' "$evidence" >> "$GITHUB_OUTPUT"
-          printf 'predicate=%s\n' "$predicate" >> "$GITHUB_OUTPUT"
 
       - name: Attest the AppImage build provenance
         id: attest
-        uses: actions/attest@daf44fb950173508f38bd2406030372c1d1162b1 # v3.0.0; scripts/release-inputs.lock.json
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2; scripts/release-inputs.lock.json
         with:
           subject-path: ${{ steps.candidate.outputs.appimage }}
-          predicate-type: https://slsa.dev/provenance/v1
-          predicate-path: ${{ steps.candidate.outputs.predicate }}
           show-summary: false
 
       - name: Install the pinned keyless signing tool
