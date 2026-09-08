@@ -6,7 +6,7 @@
 package x11
 
 /*
-#cgo pkg-config: x11 xrandr
+#cgo pkg-config: x11 xrandr xi
 #cgo LDFLAGS: -lX11 -pthread
 #cgo CFLAGS: -D_GNU_SOURCE
 
@@ -14,10 +14,13 @@ package x11
 #include <X11/Xatom.h>
 #include <X11/Xutil.h>
 #include <X11/XKBlib.h>
+#include <X11/extensions/XInput2.h>
 #include <X11/extensions/Xrandr.h>
 #include <errno.h>
 #include <fcntl.h>
+#include <float.h>
 #include <locale.h>
+#include <math.h>
 #include <poll.h>
 #include <pthread.h>
 #include <stdio.h>
@@ -35,6 +38,12 @@ static int tipsy_x_inited;
 static XIM tipsy_xim;
 static XIC tipsy_xic;
 static int tipsy_f11_down;
+// XI2 is optional at runtime. It is enabled only for an active pointer grab:
+// selecting RawMotion on the root all the time would wake Tipsy for unrelated
+// desktop movement while the client is idle or unfocused.
+static int tipsy_xi_opcode;
+static int tipsy_xi_available;
+static int tipsy_xi_raw_selected;
 // X11 core keycodes are bytes. Preserve the first physical down across XKB
 // repeat presses; -1 means focus loss already released the key to Android.
 static struct { int down; int repeats; int android_code; } tipsy_keys[256];
@@ -50,7 +59,7 @@ static struct { int down; int repeats; int android_code; } tipsy_keys[256];
 //        Roblox mouse path needs both forms; it computes real deltas from
 //        this ordered stream.
 //        a = 3 is captured motion: x/y remain at the stable grab anchor and
-//        b/c carry real relative dx/dy. Adjacent captured moves sum deltas.
+//        dx/dy carry the real relative delta at float precision.
 // scroll: a = horizontal detents, b = vertical detents. Core X11 encodes
 //        wheel motion as Button4..7; only ButtonPress is one detent.
 // resize:  b = width, c = height. ConfigureNotify lives in this stream so
@@ -76,6 +85,8 @@ struct tipsy_input_ev {
 	long c;
 	float x;
 	float y;
+	float dx;
+	float dy;
 	int repeat_count;
 	int text_len;
 	char text[TIPSY_INPUT_TEXT_BYTES];
@@ -128,6 +139,63 @@ void tipsy_nudge_pump(void) {
 	pthread_mutex_unlock(&tipsy_pump_wake_mu);
 }
 
+// Discover XI2 once per display. Raw motion selection itself is deliberately
+// deferred until an active pointer grab so normal desktop mouse movement cannot
+// wake this process or add any per-event work.
+static void tipsy_x11_init_xi2(Display *dpy) {
+	tipsy_xi_opcode = 0;
+	tipsy_xi_available = 0;
+	tipsy_xi_raw_selected = 0;
+	if (dpy == NULL) {
+		return;
+	}
+	int opcode = 0, event = 0, error = 0;
+	if (!XQueryExtension(dpy, "XInputExtension", &opcode, &event, &error)) {
+		return;
+	}
+	// Raw master-pointer motion while a core XGrabPointer is active requires
+	// an XI 2.1-or-newer client negotiation on Xorg/Xwayland. Merely checking
+	// that the server implements XI2 is insufficient: the server can alter
+	// event delivery according to the version this client announced. Keep the
+	// proven core MotionNotify/recenter route for an XI 2.0-only server rather
+	// than selecting a raw route which might then receive no camera samples.
+	int major = 2, minor = 1;
+	if (XIQueryVersion(dpy, &major, &minor) != Success ||
+		major < 2 || (major == 2 && minor < 1)) {
+		return;
+	}
+	tipsy_xi_opcode = opcode;
+	tipsy_xi_available = 1;
+}
+
+// XI2 raw events may only be selected on a root window. `valuators.values`
+// retains the server's transformed/accelerated floating delta, while
+// `raw_values` is the unscaled hardware delta. We use the former so the user’s
+// existing desktop sensitivity remains intact, without core MotionNotify’s
+// integer-coordinate quantization.
+static int tipsy_x11_set_raw_motion(Display *dpy, int enabled) {
+	if (dpy == NULL || !tipsy_xi_available) {
+		return 0;
+	}
+	if (!!enabled == !!tipsy_xi_raw_selected) {
+		return tipsy_xi_raw_selected;
+	}
+	unsigned char mask[XIMaskLen(XI_RawMotion)];
+	memset(mask, 0, sizeof(mask));
+	if (enabled) {
+		XISetMask(mask, XI_RawMotion);
+	}
+	XIEventMask events;
+	events.deviceid = XIAllMasterDevices;
+	events.mask_len = sizeof(mask);
+	events.mask = mask;
+	if (XISelectEvents(dpy, DefaultRootWindow(dpy), &events, 1) != Success) {
+		return 0;
+	}
+	tipsy_xi_raw_selected = enabled ? 1 : 0;
+	return tipsy_xi_raw_selected;
+}
+
 struct tipsy_pointer_capture {
 	int active;
 	int right_down;
@@ -138,6 +206,8 @@ struct tipsy_pointer_capture {
 	int last_y;
 	int ignore_warps;
 	int failed_status;
+	int raw_motion;
+	Time last_raw_motion_time;
 	Display *dpy;
 	Window win;
 };
@@ -147,20 +217,7 @@ static struct tipsy_pointer_capture tipsy_capture;
 static void tipsy_input_push_repeat(int kind, int a, long b, long c, float x, float y, int repeats) {
 	pthread_mutex_lock(&tipsy_input_mu);
 	int was_empty = (tipsy_input_head == tipsy_input_tail);
-	// Captured relative motion must sum every delta; replacing it would lose
-	// camera travel when the engine drains more slowly than the X server.
 	int last = (tipsy_input_head - 1 + TIPSY_INPUT_RING) % TIPSY_INPUT_RING;
-	if (kind == TIPSY_INPUT_POINTER && a == 3 &&
-		tipsy_input_head != tipsy_input_tail &&
-		tipsy_input_ring[last].kind == TIPSY_INPUT_POINTER &&
-		tipsy_input_ring[last].a == 3) {
-		tipsy_input_ring[last].b += b;
-		tipsy_input_ring[last].c += c;
-		tipsy_input_ring[last].x = x;
-		tipsy_input_ring[last].y = y;
-		pthread_mutex_unlock(&tipsy_input_mu);
-		return;
-	}
 	// Ordinary absolute motion coalesces to its newest real position.
 	if (kind == TIPSY_INPUT_POINTER && a == 2 &&
 		tipsy_input_head != tipsy_input_tail &&
@@ -183,8 +240,9 @@ static void tipsy_input_push_repeat(int kind, int a, long b, long c, float x, fl
 	}
 	int next = (tipsy_input_head + 1) % TIPSY_INPUT_RING;
 	if (next == tipsy_input_tail) {
-		// Ring full: drop the oldest event. Focus and key events are
-		// small and rare; motion floods are coalesced above.
+		// Ring full: this generic path retains its existing bounded behavior.
+		// Captured-pointer overflow is handled separately below so it keeps
+		// camera travel without sacrificing a low-frequency input edge.
 		tipsy_input_tail = (tipsy_input_tail + 1) % TIPSY_INPUT_RING;
 	}
 	tipsy_input_ring[tipsy_input_head].kind = kind;
@@ -193,6 +251,8 @@ static void tipsy_input_push_repeat(int kind, int a, long b, long c, float x, fl
 	tipsy_input_ring[tipsy_input_head].c = c;
 	tipsy_input_ring[tipsy_input_head].x = x;
 	tipsy_input_ring[tipsy_input_head].y = y;
+	tipsy_input_ring[tipsy_input_head].dx = 0;
+	tipsy_input_ring[tipsy_input_head].dy = 0;
 	tipsy_input_ring[tipsy_input_head].repeat_count = repeats;
 	tipsy_input_ring[tipsy_input_head].text_len = 0;
 	tipsy_input_head = next;
@@ -204,6 +264,50 @@ static void tipsy_input_push_repeat(int kind, int a, long b, long c, float x, fl
 
 static void tipsy_input_push(int kind, int a, long b, long c, float x, float y) {
 	tipsy_input_push_repeat(kind, a, b, c, x, y, 0);
+}
+
+// Every physical captured sample needs its own JNI call: summing samples in
+// the C ring preserved total travel but visibly lowered camera cadence. Keep
+// the common path lossless. If a stalled consumer fills the bounded ring,
+// retain the remaining travel in its final captured event rather than dropping
+// it or allocating/unboundedly growing during a mouse flood.
+static void tipsy_input_push_relative(float dx, float dy, float anchor_x, float anchor_y) {
+	if (dx == 0 && dy == 0) {
+		return;
+	}
+	pthread_mutex_lock(&tipsy_input_mu);
+	int was_empty = (tipsy_input_head == tipsy_input_tail);
+	int last = (tipsy_input_head - 1 + TIPSY_INPUT_RING) % TIPSY_INPUT_RING;
+	int next = (tipsy_input_head + 1) % TIPSY_INPUT_RING;
+	if (next == tipsy_input_tail) {
+		// Overflow is an exceptional stalled-consumer condition. Preserve the
+		// full remaining displacement in one event; never overwrite a button,
+		// focus, resize, or key edge just to retain a finer mouse cadence.
+		if (tipsy_input_ring[last].kind == TIPSY_INPUT_POINTER &&
+			tipsy_input_ring[last].a == 3) {
+			tipsy_input_ring[last].dx += dx;
+			tipsy_input_ring[last].dy += dy;
+			pthread_mutex_unlock(&tipsy_input_mu);
+			return;
+		}
+		tipsy_input_tail = (tipsy_input_tail + 1) % TIPSY_INPUT_RING;
+	}
+	struct tipsy_input_ev *slot = &tipsy_input_ring[tipsy_input_head];
+	slot->kind = TIPSY_INPUT_POINTER;
+	slot->a = 3;
+	slot->b = 0;
+	slot->c = 0;
+	slot->x = anchor_x;
+	slot->y = anchor_y;
+	slot->dx = dx;
+	slot->dy = dy;
+	slot->repeat_count = 0;
+	slot->text_len = 0;
+	tipsy_input_head = next;
+	pthread_mutex_unlock(&tipsy_input_mu);
+	if (was_empty) {
+		tipsy_wake_go();
+	}
 }
 
 static void tipsy_release_keys(void) {
@@ -241,6 +345,18 @@ static int tipsy_is_recenter_motion(int x, int y) {
 	return dx <= 2 && dy <= 2;
 }
 
+// Raw XI2 motion has already established that the physical pointer moved, so
+// avoid the XQueryPointer round trip in the core fallback helper. The next
+// core recenter event is harmless because raw capture does not select core
+// PointerMotionMask on its grab.
+static void tipsy_warp_to_anchor_force(Display *dpy, Window win) {
+	XWarpPointer(dpy, None, win, 0, 0, 0, 0,
+		tipsy_capture.anchor_x, tipsy_capture.anchor_y);
+	tipsy_capture.ignore_warps = 1;
+	tipsy_capture.last_x = tipsy_capture.anchor_x;
+	tipsy_capture.last_y = tipsy_capture.anchor_y;
+}
+
 static void tipsy_warp_to_anchor(Display *dpy, Window win) {
 	Window root = 0, child = 0;
 	int root_x = 0, root_y = 0, x = 0, y = 0;
@@ -252,11 +368,45 @@ static void tipsy_warp_to_anchor(Display *dpy, Window win) {
 		tipsy_capture.last_y = tipsy_capture.anchor_y;
 		return;
 	}
-	XWarpPointer(dpy, None, win, 0, 0, 0, 0,
-		tipsy_capture.anchor_x, tipsy_capture.anchor_y);
-	tipsy_capture.ignore_warps = 1;
-	tipsy_capture.last_x = tipsy_capture.anchor_x;
-	tipsy_capture.last_y = tipsy_capture.anchor_y;
+	tipsy_warp_to_anchor_force(dpy, win);
+}
+
+static void tipsy_handle_raw_motion(Display *dpy, Window win,
+	const XIRawEvent *raw) {
+	if (!tipsy_capture.active || !tipsy_capture.raw_motion ||
+		tipsy_capture.dpy != dpy || tipsy_capture.win != win ||
+		raw == NULL || raw->valuators.mask == NULL ||
+		raw->valuators.values == NULL || raw->valuators.mask_len <= 0) {
+		return;
+	}
+	double dx = 0, dy = 0;
+	int have_x = 0, have_y = 0;
+	const double *values = raw->valuators.values;
+	for (int axis = 0; axis < raw->valuators.mask_len * 8; ++axis) {
+		if (!XIMaskIsSet(raw->valuators.mask, axis)) {
+			continue;
+		}
+		double value = *values++;
+		if (axis == 0) {
+			dx = value;
+			have_x = 1;
+		} else if (axis == 1) {
+			dy = value;
+			have_y = 1;
+		}
+	}
+	if ((!have_x && !have_y) || !isfinite(dx) || !isfinite(dy) ||
+		fabs(dx) > FLT_MAX || fabs(dy) > FLT_MAX) {
+		return;
+	}
+	tipsy_input_push_relative((float)dx, (float)dy,
+		(float)tipsy_capture.anchor_x, (float)tipsy_capture.anchor_y);
+	// A normal core MotionNotify produced by this same physical sample has the
+	// same server timestamp. Keep it selected as an active-capture fallback,
+	// but use this marker to avoid delivering the coarse coordinate delta in
+	// addition to the precise XI2 value.
+	tipsy_capture.last_raw_motion_time = raw->time;
+	tipsy_warp_to_anchor_force(dpy, win);
 }
 
 // End an acquired grab exactly once. A focus/close cancellation also emits
@@ -286,6 +436,10 @@ static int tipsy_pointer_unlock(Display *dpy, Window win, int notify,
 	tipsy_capture.ignore_warps = 0;
 	XUngrabPointer(dpy, CurrentTime);
 	tipsy_capture.active = 0;
+	if (tipsy_capture.raw_motion) {
+		tipsy_capture.raw_motion = 0;
+		(void)tipsy_x11_set_raw_motion(dpy, 0);
+	}
 	if (notify) tipsy_capture_event(0, GrabSuccess);
 	return 1;
 }
@@ -326,13 +480,24 @@ static int tipsy_x11_set_pointer_lock(uintptr_t dpy_ptr, unsigned long xid,
 	}
 	anchor_x = tipsy_clamp_coord(anchor_x, attr.width);
 	anchor_y = tipsy_clamp_coord(anchor_y, attr.height);
-	int status = XGrabPointer(dpy, win, False,
-		ButtonPressMask | ButtonReleaseMask | PointerMotionMask,
+	// XI2 raw events are selected only while this grab is live. Also retain
+	// PointerMotionMask for this grabbed window: some X server/input-device
+	// combinations can accept RawMotion selection yet provide no raw master
+	// stream under a core grab. Matching-timestamp core events are suppressed
+	// below whenever raw is flowing, while a quiet/misconfigured raw stream
+	// falls back to the established captured-recenter route.
+	int raw_motion = tipsy_x11_set_raw_motion(dpy, 1);
+	unsigned long event_mask = ButtonPressMask | ButtonReleaseMask |
+		PointerMotionMask;
+	int status = XGrabPointer(dpy, win, False, event_mask,
 		GrabModeAsync, GrabModeAsync, win, None, CurrentTime);
 	// XGrabPointer replaces an implicit or explicit grab already owned by this
 	// X client. AlreadyGrabbed therefore remains an honest competing-client
 	// failure and must not be treated as capture success.
 	if (status != GrabSuccess) {
+		if (raw_motion) {
+			(void)tipsy_x11_set_raw_motion(dpy, 0);
+		}
 		tipsy_capture.failed_status = status + 1;
 		if (out_status != NULL) *out_status = status;
 		tipsy_capture_event(2, status);
@@ -347,6 +512,8 @@ static int tipsy_x11_set_pointer_lock(uintptr_t dpy_ptr, unsigned long xid,
 	tipsy_capture.last_x = anchor_x;
 	tipsy_capture.last_y = anchor_y;
 	tipsy_capture.have_last = 1;
+	tipsy_capture.raw_motion = raw_motion;
+	tipsy_capture.last_raw_motion_time = CurrentTime;
 	tipsy_warp_to_anchor(dpy, win);
 	tipsy_capture_event(1, GrabSuccess);
 	result = 1;
@@ -721,6 +888,7 @@ int tipsy_x11_open(const char *title, int width, int height,
 		return -1;
 	}
 	XSetIOErrorExitHandler(dpy, tipsy_xioexit, NULL);
+	tipsy_x11_init_xi2(dpy);
 	// Per-client XKB option: a held key produces repeated KeyPress events
 	// and one physical KeyRelease. Servers without it use the pair fallback
 	// in the pump; this does not change the desktop's autorepeat settings.
@@ -893,6 +1061,15 @@ int tipsy_x11_pump(uintptr_t dpy_ptr, unsigned long xid, unsigned long wm_delete
 	while (XPending(dpy) > 0) {
 		XEvent ev;
 		XNextEvent(dpy, &ev);
+		if (ev.type == GenericEvent && ev.xcookie.extension == tipsy_xi_opcode &&
+			tipsy_xi_opcode != 0 && XGetEventData(dpy, &ev.xcookie)) {
+			if (ev.xcookie.evtype == XI_RawMotion) {
+				tipsy_handle_raw_motion(dpy, win,
+					(const XIRawEvent *)ev.xcookie.data);
+			}
+			XFreeEventData(dpy, &ev.xcookie);
+			continue;
+		}
 		if (randr_event_base != 0 &&
 			(ev.type == randr_event_base + RRScreenChangeNotify ||
 			 ev.type == randr_event_base + RRNotify)) {
@@ -1067,6 +1244,15 @@ int tipsy_x11_pump(uintptr_t dpy_ptr, unsigned long xid, unsigned long wm_delete
 						tipsy_capture.last_y = tipsy_capture.anchor_y;
 						break;
 					}
+					// RawMotion and the corresponding core motion have one server
+					// timestamp. Prefer the XI2 float valuators for that sample;
+					// otherwise this core motion is the necessary compatibility
+					// fallback when an enabled raw stream is quiet or unusable.
+					if (tipsy_capture.raw_motion &&
+						tipsy_capture.last_raw_motion_time != CurrentTime &&
+						ev.xmotion.time == tipsy_capture.last_raw_motion_time) {
+						break;
+					}
 					int move_x = ev.xmotion.x;
 					int move_y = ev.xmotion.y;
 					XEvent newer;
@@ -1088,8 +1274,7 @@ int tipsy_x11_pump(uintptr_t dpy_ptr, unsigned long xid, unsigned long wm_delete
 					int dx = move_x - tipsy_capture.last_x;
 					int dy = move_y - tipsy_capture.last_y;
 					if (dx != 0 || dy != 0) {
-						tipsy_input_push(TIPSY_INPUT_POINTER, 3,
-							(long)dx, (long)dy,
+						tipsy_input_push_relative((float)dx, (float)dy,
 							(float)tipsy_capture.anchor_x,
 							(float)tipsy_capture.anchor_y);
 						tipsy_warp_to_anchor(dpy, win);
@@ -1609,8 +1794,8 @@ func (w *Window) drainInputLocked() ([]InputEvent, bool) {
 			ev := InputEvent{Kind: InputPointer, PointerAction: action, Button: int32(r.b), X: float32(r.x), Y: float32(r.y), Relative: relative}
 			if relative {
 				ev.Button = 0
-				ev.DeltaX = float32(r.b)
-				ev.DeltaY = float32(r.c)
+				ev.DeltaX = float32(r.dx)
+				ev.DeltaY = float32(r.dy)
 			}
 			evs = append(evs, ev)
 		case C.TIPSY_INPUT_SCROLL:

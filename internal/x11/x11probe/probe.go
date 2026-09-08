@@ -167,6 +167,16 @@ int probe_warp_pointer(unsigned long xid, int x, int y) {
 	return 0;
 }
 
+// probe_relative_motion emits a real relative XTEST motion edge. It exercises
+// the XI2 RawMotion route used by pointer lock, unlike XSendEvent MotionNotify
+// (which is intentionally only a core-event decoder test).
+int probe_relative_motion(int dx, int dy) {
+	if (probe_dpy == NULL) return -1;
+	if (!XTestFakeRelativeMotionEvent(probe_dpy, dx, dy, CurrentTime)) return -1;
+	XSync(probe_dpy, False);
+	return 0;
+}
+
 int probe_query_pointer(unsigned long xid, int *out_x, int *out_y) {
 	if (probe_dpy == NULL) return -1;
 	Window root = 0, child = 0;
@@ -483,6 +493,18 @@ func WarpPointer(xid uintptr, x, y int) error {
 		return err
 	}
 	if C.probe_warp_pointer(C.ulong(xid), C.int(x), C.int(y)) != 0 {
+		return ErrProbe
+	}
+	return nil
+}
+
+// RelativeMotion emits one real relative pointer movement through XTEST.
+// It is limited to X11 integration tests and never inspects user input.
+func RelativeMotion(dx, dy int) error {
+	if err := mustOpen(); err != nil {
+		return err
+	}
+	if C.probe_relative_motion(C.int(dx), C.int(dy)) != 0 {
 		return ErrProbe
 	}
 	return nil

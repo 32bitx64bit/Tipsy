@@ -165,6 +165,22 @@ func TestDirectCapturedMouseMoveAccumulatesLogicalAndExplicitDelta(t *testing.T)
 	}
 }
 
+func TestDirectCapturedMouseMovePreservesFractionalDelta(t *testing.T) {
+	wireRecordingDirectTarget(t, 0x1234, 0x5678)
+	if !DispatchRobloxDirectPointer(motionActionDown, 20, 22, 3) {
+		t.Fatal("secondary DOWN was not delivered")
+	}
+	if !DispatchRobloxDirectPointerDelta(20, 22, 0.25, -0.125) {
+		t.Fatal("fractional captured move was not delivered")
+	}
+	if x, y := testDirectRecMoveFloat(0), testDirectRecMoveFloat(1); x != 20.25 || y != 21.875 {
+		t.Fatalf("fractional captured absolute = (%v,%v), want (20.25,21.875)", x, y)
+	}
+	if dx, dy := testDirectRecMoveFloat(2), testDirectRecMoveFloat(3); dx != 0.25 || dy != -0.125 {
+		t.Fatalf("fractional captured delta = (%v,%v), want (0.25,-0.125)", dx, dy)
+	}
+}
+
 func TestMainWindowMouseLockGetterABI(t *testing.T) {
 	wireRecordingDirectTarget(t, 0x1234, 0x5678)
 	before := RobloxDirectInputStats()

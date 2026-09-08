@@ -652,6 +652,86 @@ func TestPointerLockKeepsPressAnchorAndDeliversRelativeMotion(t *testing.T) {
 	}
 }
 
+func TestPointerLockPreservesEachQueuedRelativeSample(t *testing.T) {
+	w := openInputWindowSize(t, 320, 180)
+	c := collectInput(t)
+	requireProbe(t)
+	requirePointerGrabAvailable(t, w)
+	c.clearAndSettle(t, w)
+
+	const anchorX, anchorY = 80, 60
+	if err := x11probe.Button(w.XID(), anchorX, anchorY, button3, true); err != nil {
+		t.Fatalf("secondary down: %v", err)
+	}
+	_ = c.nextPointerEdge(t, w, PointerDown, 3)
+	if changed, err := SetPointerLock(true); err != nil || !changed {
+		t.Fatalf("SetPointerLock(true) = changed %t, err %v", changed, err)
+	}
+	ev := c.next(t, w)
+	if ev.Kind != InputPointerCapture || !ev.Captured {
+		t.Fatalf("capture event = %+v", ev)
+	}
+
+	// Queue three genuine relative source samples before Tipsy's X reader runs.
+	// The old core path collapsed this burst to one final-coordinate delta;
+	// XI2's float-valuator path must retain three ordered camera moves.
+	for i := 0; i < 3; i++ {
+		if err := x11probe.RelativeMotion(1, 0); err != nil {
+			t.Fatalf("relative motion %d: %v", i, err)
+		}
+	}
+	for i := 0; i < 3; i++ {
+		ev = c.next(t, w)
+		if ev.Kind != InputPointer || ev.PointerAction != PointerMove || !ev.Relative ||
+			ev.X != anchorX || ev.Y != anchorY || ev.DeltaX == 0 || ev.DeltaY != 0 {
+			t.Fatalf("relative sample %d = %+v, want separate horizontal captured move", i, ev)
+		}
+	}
+	select {
+	case extra := <-c.ch:
+		if extra.Kind == InputPointer && extra.Relative {
+			t.Fatalf("unexpected fourth captured sample: %+v", extra)
+		}
+	default:
+	}
+	waitPointerPosition(t, w, anchorX, anchorY)
+}
+
+func TestPointerLockFallsBackToCoreMotionWhenRawStreamIsQuiet(t *testing.T) {
+	w := openInputWindowSize(t, 320, 180)
+	c := collectInput(t)
+	requireProbe(t)
+	requirePointerGrabAvailable(t, w)
+	c.clearAndSettle(t, w)
+
+	const anchorX, anchorY = 20, 22
+	if err := x11probe.Button(w.XID(), anchorX, anchorY, button3, true); err != nil {
+		t.Fatalf("secondary down: %v", err)
+	}
+	_ = c.nextPointerEdge(t, w, PointerDown, 3)
+	if changed, err := SetPointerLock(true); err != nil || !changed {
+		t.Fatalf("SetPointerLock(true) = changed %t, err %v", changed, err)
+	}
+	ev := c.next(t, w)
+	if ev.Kind != InputPointerCapture || !ev.Captured {
+		t.Fatalf("capture event = %+v", ev)
+	}
+
+	// XSendEvent creates only the core stream. RawMotion remains selected for
+	// a real hardware source, but a server that accepts that selection and then
+	// supplies no raw master events must still move the camera through the
+	// proven relative/recenter fallback.
+	if err := x11probe.Motion(w.XID(), 80, anchorY, 0); err != nil {
+		t.Fatalf("quiet-raw core motion: %v", err)
+	}
+	ev = c.next(t, w)
+	if ev.Kind != InputPointer || ev.PointerAction != PointerMove || !ev.Relative ||
+		ev.X != anchorX || ev.Y != anchorY || ev.DeltaX != 60 || ev.DeltaY != 0 {
+		t.Fatalf("quiet-raw fallback event = %+v, want anchored relative (60,0)", ev)
+	}
+	waitPointerPosition(t, w, anchorX, anchorY)
+}
+
 func TestPointerLockQueuedRecenterDoesNotCancelDelta(t *testing.T) {
 	w := openInputWindowSize(t, 320, 180)
 	c := collectInput(t)
