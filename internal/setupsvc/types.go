@@ -50,8 +50,21 @@ type SourceAvailability struct {
 	Explanation string
 }
 
+// ReadinessState is deliberately narrower than runtime playability. Static
+// package and generation validation can prove that the authenticated launch
+// inputs are present and structurally compatible; only a live launch can
+// prove rendering, networking, input, audio, or successful gameplay.
+type ReadinessState string
+
+const (
+	ReadinessNotInstalled ReadinessState = "not-installed"
+	ReadinessRejected     ReadinessState = "rejected"
+	ReadinessLaunchInputs ReadinessState = "authenticated-launch-inputs"
+)
+
 type InstallSnapshot struct {
 	Installed     bool
+	Readiness     ReadinessState
 	RuntimeDir    string
 	PackageName   string
 	VersionName   string
@@ -76,6 +89,7 @@ const (
 	ErrMissingX8664      ErrorKind = "missing_x86_64"
 	ErrUntrustedSigner   ErrorKind = "untrusted_signer"
 	ErrInvalidSignature  ErrorKind = "invalid_signature"
+	ErrCompatibility     ErrorKind = "compatibility"
 	ErrDowngrade         ErrorKind = "downgrade"
 	ErrPolicy            ErrorKind = "policy"
 	ErrSourceUnavailable ErrorKind = "source_unavailable"

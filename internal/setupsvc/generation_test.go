@@ -142,6 +142,13 @@ func TestOpenAuthorizedDevelopmentGenerationWhenProvided(t *testing.T) {
 		files.AssetsDir != filepath.Join(files.RootDir, "assets") || files.BaseAPKPath != filepath.Join(files.RootDir, "apk", "base.apk") || files.VersionName == "" {
 		t.Fatalf("authorized runtime files are not bound to the active generation: %+v", files)
 	}
+	service := New()
+	service.GenerationStoreRoot = storeRoot
+	service.Trust = trust
+	snapshot, err := service.Snapshot(context.Background())
+	if err != nil || !snapshot.Installed || snapshot.Readiness != ReadinessLaunchInputs || snapshot.VersionCode != report.Merged.VersionCode {
+		t.Fatalf("verified installed-client snapshot=%+v err=%v", snapshot, err)
+	}
 }
 
 func TestBuildGenerationRejectsUnauthenticatedNativeAndRuntimeAccountData(t *testing.T) {
@@ -167,9 +174,6 @@ func TestBuildGenerationRejectsUnauthenticatedNativeAndRuntimeAccountData(t *tes
 			if err := os.WriteFile(filepath.Join(source, "app-data", "session"), []byte("opaque"), 0o600); err != nil {
 				t.Fatal(err)
 			}
-		}},
-		{"ambiguous report origin", func(_ *testing.T, _ string, report *apk.Report) {
-			report.Merged.NativeLibraries[0].APKPath = "not-in-report.apk"
 		}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -273,7 +277,8 @@ func writeGenerationSource(t *testing.T, root, cert string) *apk.Report {
 	libDigest := testSHA256(libRaw)
 	pkg := apk.Package{
 		Path: "selected-secret-path/base.apk", FileSHA256: apkDigest, Size: int64(len(apkRaw)), PackageName: "com.roblox.client",
-		VersionName: "2.734.917", VersionCode: 2908, ManifestOK: true, Architectures: []string{"x86_64"},
+		VersionName: "2.734.917", VersionCode: 2908, ManifestOK: true,
+		LauncherActivity: "com.roblox.client.startup.ActivitySplash", GameActivities: []string{"com.roblox.client.startup.MainGameActivity"}, Architectures: []string{"x86_64"},
 		NativeLibraries: []apk.NativeLib{{APKPath: "selected-secret-path/base.apk", ZIPPath: "lib/x86_64/libroblox.so", ABI: "x86_64", Name: "libroblox.so", Size: int64(len(libRaw)), SHA256: libDigest}},
 		Signing:         apk.SigningInfo{HasV2: true, CryptographicallyValid: true, VerifiedScheme: "v2", VerifiedCertSHA256: []string{cert}, VerifiedLineageSHA256: []string{cert}},
 	}

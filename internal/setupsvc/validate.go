@@ -12,6 +12,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strings"
 
@@ -401,6 +402,8 @@ func AuthorizeReport(rep *apk.Report, policy TrustPolicy) (Authorization, error)
 		allowedCerts[strings.ToLower(cert)] = true
 	}
 	baseCount := 0
+	baseManifestReady := false
+	baseVersionName := ""
 	version := int64(0)
 	seenSplits := make(map[string]struct{}, len(rep.Packages))
 	var signerSet string
@@ -417,6 +420,8 @@ func AuthorizeReport(rep *apk.Report, policy TrustPolicy) (Authorization, error)
 		}
 		if p.SplitName == "" && !p.IsSplit {
 			baseCount++
+			baseManifestReady = p.LauncherActivity != "" && slices.Contains(p.GameActivities, "com.roblox.client.startup.MainGameActivity")
+			baseVersionName = p.VersionName
 		}
 		splitIdentity := p.SplitName
 		if splitIdentity == "" {
@@ -482,17 +487,33 @@ func AuthorizeReport(rep *apk.Report, policy TrustPolicy) (Authorization, error)
 			return Authorization{}, setupError(ErrUntrustedSigner, "validate package", "APK splits do not share one verified signer lineage", nil)
 		}
 	}
-	if baseCount != 1 || rep.Merged.VersionName == "" || rep.Merged.VersionCode <= 0 {
+	if baseCount != 1 || rep.Merged.VersionName == "" || rep.Merged.VersionCode <= 0 ||
+		version != rep.Merged.VersionCode || baseVersionName != rep.Merged.VersionName {
 		return Authorization{}, setupError(ErrInvalidArchive, "validate package", "the package must contain one versioned base APK", nil)
 	}
-	foundABI, foundRoblox := false, false
+	if !baseManifestReady {
+		return Authorization{}, setupError(ErrInvalidArchive, "validate package", "the base APK manifest has no launcher and GameActivity contract", nil)
+	}
+	foundABI := false
 	for _, abi := range rep.Merged.Architectures {
 		foundABI = foundABI || abi == "x86_64"
 	}
-	for _, lib := range rep.Merged.NativeLibraries {
-		foundRoblox = foundRoblox || lib.ABI == "x86_64" && lib.Name == "libroblox.so"
+	packagePaths := make(map[string]struct{}, len(rep.Packages))
+	for _, pkg := range rep.Packages {
+		packagePaths[pkg.Path] = struct{}{}
 	}
-	if !foundABI || !foundRoblox {
+	rootCount := 0
+	for _, lib := range rep.Merged.NativeLibraries {
+		if lib.ABI != "x86_64" || lib.Name != "libroblox.so" {
+			continue
+		}
+		rootCount++
+		_, knownPackage := packagePaths[lib.APKPath]
+		if lib.ZIPPath != "lib/x86_64/libroblox.so" || lib.Size <= 0 || !validUniqueDigests([]string{lib.SHA256}) || !knownPackage {
+			return Authorization{}, setupError(ErrMissingX8664, "validate package", "the x86-64 libroblox payload metadata is incomplete or inconsistent", nil)
+		}
+	}
+	if !foundABI || rootCount != 1 {
 		return Authorization{}, setupError(ErrMissingX8664, "validate package", "the selected package does not include x86_64 libroblox.so", nil)
 	}
 	return authorized, nil

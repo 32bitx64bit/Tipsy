@@ -12,6 +12,7 @@ import (
 
 	"github.com/tipsy-linux/tipsy/internal/apk"
 	"github.com/tipsy-linux/tipsy/internal/integrity"
+	"github.com/tipsy-linux/tipsy/internal/logging"
 	"github.com/tipsy-linux/tipsy/internal/runtime"
 )
 
@@ -32,6 +33,8 @@ type Service struct {
 	extract         func(context.Context, []string, string) (*apk.ExtractResult, error)
 	prepare         func() error
 	authorizeStaged func(context.Context, integrity.Store, string, TrustPolicy) error
+	compatibility   func(context.Context, string) error
+	snapshot        func(context.Context, string, TrustPolicy) (InstallSnapshot, error)
 }
 
 func New() *Service {
@@ -63,33 +66,34 @@ func (s *Service) Snapshot(ctx context.Context) (InstallSnapshot, error) {
 		ctx = context.Background()
 	}
 	storeRoot := s.generationStoreRoot()
-	snapshot := InstallSnapshot{RuntimeDir: storeRoot, Automatic: s.AutomaticAvailability(ctx)}
+	snapshot := InstallSnapshot{RuntimeDir: storeRoot, Readiness: ReadinessNotInstalled, Automatic: s.AutomaticAvailability(ctx)}
 	if err := ctx.Err(); err != nil {
 		return snapshot, setupError(ErrCanceled, "installation status", "operation canceled", err)
 	}
-	generation, err := (integrity.Store{Root: storeRoot}).Active(ctx)
+	verified, err := s.snapshotFn()(ctx, storeRoot, s.trust())
 	if errors.Is(err, os.ErrNotExist) {
 		return snapshot, nil
 	}
 	if err != nil {
-		return snapshot, setupError(ErrIntegrity, "installation status", "active authenticated generation is unavailable", err)
-	}
-	defer generation.Close()
-	snapshot.RuntimeDir = filepath.Join(storeRoot, "generations", generation.ID)
-	hasRoot := false
-	for _, record := range generation.Inventory.Files {
-		if record.Path == "lib/x86_64/libroblox.so" && record.Executable && record.Origin == integrity.OriginAPK {
-			hasRoot = true
-			break
+		kind := ErrorKindOf(err)
+		if kind == "" {
+			kind = ErrIntegrity
 		}
+		if kind != ErrCanceled {
+			snapshot.Readiness = ReadinessRejected
+			logging.Logger(logging.CatAPK).Error("installed Roblox client readiness verification failed",
+				"kind", string(kind), "readiness", string(snapshot.Readiness))
+		}
+		return snapshot, setupError(kind, "installation status", snapshotFailureDetail(kind), err)
 	}
-	snapshot.Installed = generation.Inventory.PackageName == "com.roblox.client" && generation.Inventory.VersionCode > 0 && hasRoot
-	snapshot.PackageName = generation.Inventory.PackageName
-	snapshot.VersionName = generation.Inventory.VersionName
-	snapshot.VersionCode = generation.Inventory.VersionCode
-	if snapshot.Installed {
-		snapshot.Architectures = []string{"x86_64"}
+	if !verified.Installed || verified.Readiness != ReadinessLaunchInputs {
+		snapshot.Readiness = ReadinessRejected
+		logging.Logger(logging.CatAPK).Error("installed Roblox client readiness verification returned an incomplete verdict",
+			"kind", string(ErrIntegrity), "readiness", string(snapshot.Readiness))
+		return snapshot, setupError(ErrIntegrity, "installation status", "active client verification returned an incomplete verdict", nil)
 	}
+	verified.Automatic = snapshot.Automatic
+	snapshot = verified
 	return snapshot, nil
 }
 
@@ -170,6 +174,21 @@ func (s *Service) Install(ctx context.Context, req InstallRequest, progress Prog
 	}
 	if err := ctx.Err(); err != nil {
 		return nil, setupError(ErrCanceled, "setup", "operation canceled", err)
+	}
+	report(progress, PhaseExtracting, 0, 0, "Checking loader compatibility without pinning a Roblox version")
+	if err := s.compatibilityFn()(ctx, stagedRuntime); err != nil {
+		kind := ErrorKindOf(err)
+		if kind == "" {
+			kind = ErrCompatibility
+		}
+		if kind != ErrCanceled {
+			logging.Logger(logging.CatAPK).Error("Roblox client loader compatibility validation failed",
+				"kind", string(kind))
+		}
+		if ErrorKindOf(err) != "" {
+			return nil, err
+		}
+		return nil, setupError(ErrCompatibility, "check client compatibility", "the verified client does not satisfy the loader's named startup contract", err)
 	}
 	if err := s.prepareFn()(); err != nil {
 		return nil, setupError(ErrInstall, "preserve account data", "persistent account storage could not be prepared", err)
@@ -313,5 +332,36 @@ func (s *Service) authorizeStagedFn() func(context.Context, integrity.Store, str
 			return fmt.Errorf("setup: staged authorization changed generation identity")
 		}
 		return authorized.Close()
+	}
+}
+
+func (s *Service) compatibilityFn() func(context.Context, string) error {
+	if s != nil && s.compatibility != nil {
+		return s.compatibility
+	}
+	return ValidateExtractedClientCompatibility
+}
+
+func (s *Service) snapshotFn() func(context.Context, string, TrustPolicy) (InstallSnapshot, error) {
+	if s != nil && s.snapshot != nil {
+		return s.snapshot
+	}
+	return verifyInstalledClientSnapshot
+}
+
+func snapshotFailureDetail(kind ErrorKind) string {
+	switch kind {
+	case ErrWrongPackage:
+		return "the active package is not the official Roblox client"
+	case ErrInvalidSignature, ErrUntrustedSigner:
+		return "the retained Roblox package signing identity could not be authenticated"
+	case ErrMissingX8664:
+		return "the active package does not contain a verified x86-64 libroblox payload"
+	case ErrCompatibility:
+		return "the active client does not satisfy the loader's named startup contract"
+	case ErrCanceled:
+		return "operation canceled"
+	default:
+		return "the active client failed authenticated package or generation integrity verification"
 	}
 }

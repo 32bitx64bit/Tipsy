@@ -26,14 +26,19 @@ import (
 
 func validReport(cert string) *apk.Report {
 	pkg := apk.Package{
-		Path:            "base.apk",
-		PackageName:     "com.roblox.client",
-		VersionName:     "2.734.917",
-		VersionCode:     2908,
-		ManifestOK:      true,
-		Architectures:   []string{"x86_64"},
-		NativeLibraries: []apk.NativeLib{{ABI: "x86_64", Name: "libroblox.so", ZIPPath: "lib/x86_64/libroblox.so"}},
-		Signing:         apk.SigningInfo{HasV2: true, CryptographicallyValid: true, VerifiedScheme: "v2", VerifiedCertSHA256: []string{cert}, VerifiedLineageSHA256: []string{cert}},
+		Path:             "base.apk",
+		PackageName:      "com.roblox.client",
+		VersionName:      "2.734.917",
+		VersionCode:      2908,
+		ManifestOK:       true,
+		LauncherActivity: "com.roblox.client.startup.ActivitySplash",
+		GameActivities:   []string{"com.roblox.client.startup.MainGameActivity"},
+		Architectures:    []string{"x86_64"},
+		NativeLibraries: []apk.NativeLib{{
+			APKPath: "base.apk", ABI: "x86_64", Name: "libroblox.so", ZIPPath: "lib/x86_64/libroblox.so", Size: 1,
+			SHA256: "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+		}},
+		Signing: apk.SigningInfo{HasV2: true, CryptographicallyValid: true, VerifiedScheme: "v2", VerifiedCertSHA256: []string{cert}, VerifiedLineageSHA256: []string{cert}},
 	}
 	return &apk.Report{
 		Packages: []apk.Package{pkg},
@@ -87,6 +92,12 @@ func TestValidateReportRejectsPackageABIAndSignature(t *testing.T) {
 	}{
 		{"package", func(r *apk.Report) { r.Merged.PackageName = "example.invalid" }, ErrWrongPackage},
 		{"abi", func(r *apk.Report) { r.Merged.Architectures = nil; r.Merged.NativeLibraries = nil }, ErrMissingX8664},
+		{"merged version", func(r *apk.Report) { r.Merged.VersionCode++ }, ErrInvalidArchive},
+		{"manifest startup", func(r *apk.Report) { r.Packages[0].GameActivities = []string{"com.roblox.client.OtherGameActivity"} }, ErrInvalidArchive},
+		{"root payload path", func(r *apk.Report) { r.Merged.NativeLibraries[0].ZIPPath = "lib/x86_64/not-libroblox.so" }, ErrMissingX8664},
+		{"root payload source", func(r *apk.Report) { r.Merged.NativeLibraries[0].APKPath = "not-in-report.apk" }, ErrMissingX8664},
+		{"root payload size", func(r *apk.Report) { r.Merged.NativeLibraries[0].Size = 0 }, ErrMissingX8664},
+		{"root payload digest", func(r *apk.Report) { r.Merged.NativeLibraries[0].SHA256 = "abcd" }, ErrMissingX8664},
 		{"signature", func(r *apk.Report) { r.Packages[0].Signing.CryptographicallyValid = false }, ErrInvalidSignature},
 		{"signer", func(r *apk.Report) { r.Packages[0].Signing.VerifiedCertSHA256 = []string{"bbbb"} }, ErrUntrustedSigner},
 		{"split", func(r *apk.Report) { r.Packages[0].SplitName = "config.arm64_v8a" }, ErrUnsupportedSplit},
@@ -451,7 +462,25 @@ func TestInstallStagesThenAtomicallyActivatesGeneration(t *testing.T) {
 	}
 	s.verify = func(context.Context, *apk.Report) error { return nil }
 	s.prepare = func() error { return nil }
-	s.authorizeStaged = func(context.Context, integrity.Store, string, TrustPolicy) error { return nil }
+	compatibilityChecked := false
+	s.authorizeStaged = func(context.Context, integrity.Store, string, TrustPolicy) error {
+		if !compatibilityChecked {
+			return errors.New("staged authorization ran before compatibility validation")
+		}
+		return nil
+	}
+	s.compatibility = func(context.Context, string) error {
+		compatibilityChecked = true
+		return nil
+	}
+	s.snapshot = func(_ context.Context, storeRoot string, _ TrustPolicy) (InstallSnapshot, error) {
+		return InstallSnapshot{
+			Installed: true, Readiness: ReadinessLaunchInputs,
+			RuntimeDir:  filepath.Join(storeRoot, "generations", "synthetic"),
+			PackageName: "com.roblox.client", VersionName: "2.734.917", VersionCode: 2908,
+			Architectures: []string{"x86_64"},
+		}, nil
+	}
 	s.extract = func(_ context.Context, selected []string, dest string) (*apk.ExtractResult, error) {
 		if err := os.MkdirAll(filepath.Join(dest, "apk"), 0o700); err != nil {
 			return nil, err
