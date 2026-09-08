@@ -38,6 +38,11 @@ static int tipsy_x_inited;
 static XIM tipsy_xim;
 static XIC tipsy_xic;
 static int tipsy_f11_down;
+// Roblox has a verified resize-storm crash below this floor. The values are
+// provided by Go only for the Roblox window; ordinary X11 test windows retain
+// their requested geometry.
+static int tipsy_window_min_width = 1;
+static int tipsy_window_min_height = 1;
 // XI2 is optional at runtime. It is enabled only for an active pointer grab:
 // selecting RawMotion on the root all the time would wake Tipsy for unrelated
 // desktop movement while the client is idle or unfocused.
@@ -872,6 +877,7 @@ int tipsy_x11_list_outputs(tipsy_xrr_output *out, int max) {
 }
 
 int tipsy_x11_open(const char *title, int width, int height,
+	int min_width, int min_height,
 	int place_x, int place_y, int use_position,
 	const unsigned long *icon, int icon_len,
 	uintptr_t *out_dpy, unsigned long *out_xid, unsigned long *out_delete,
@@ -880,6 +886,8 @@ int tipsy_x11_open(const char *title, int width, int height,
 	tipsy_x_error_code = 0;
 	tipsy_x_io_error = 0;
 	tipsy_f11_down = 0;
+	tipsy_window_min_width = min_width > 0 ? min_width : 1;
+	tipsy_window_min_height = min_height > 0 ? min_height : 1;
 	memset(tipsy_keys, 0, sizeof(tipsy_keys));
 	memset(&tipsy_capture, 0, sizeof(tipsy_capture));
 
@@ -917,6 +925,10 @@ int tipsy_x11_open(const char *title, int width, int height,
 	swa.background_pixel = black;
 	swa.border_pixel = black;
 	swa.colormap = DefaultColormap(dpy, screen);
+	// WM_NORMAL_HINTS below is the X11 standard governing interactive title-bar
+	// resizes. Direct foreign XResizeWindow requests are intentionally not
+	// redirected here: ResizeRedirectMask also blocks the window manager's
+	// legitimate fullscreen, restore, and ordinary valid-resize requests.
 	swa.event_mask = ExposureMask | StructureNotifyMask |
 		FocusChangeMask | KeyPressMask | KeyReleaseMask |
 		ButtonPressMask | ButtonReleaseMask | PointerMotionMask;
@@ -960,8 +972,8 @@ int tipsy_x11_open(const char *title, int width, int height,
 		sh->flags = PSize | PMinSize;
 		sh->width = width;
 		sh->height = height;
-		sh->min_width = 1;
-		sh->min_height = 1;
+		sh->min_width = tipsy_window_min_width;
+		sh->min_height = tipsy_window_min_height;
 		if (use_position) {
 			sh->flags |= USPosition | PPosition;
 			sh->x = create_x;
@@ -1290,6 +1302,20 @@ int tipsy_x11_pump(uintptr_t dpy_ptr, unsigned long xid, unsigned long wm_delete
 			break;
 		case ConfigureNotify:
 			if (ev.xconfigure.window == win) {
+				// A compliant window manager honors WM_NORMAL_HINTS before this
+				// point. Retain this filter for direct X11 configuration requests:
+				// even if a foreign client transiently creates an unsafe drawable,
+				// never forward it into Android/GameActivity.
+				if (ev.xconfigure.width < tipsy_window_min_width ||
+					ev.xconfigure.height < tipsy_window_min_height) {
+					int width = ev.xconfigure.width < tipsy_window_min_width ?
+						tipsy_window_min_width : ev.xconfigure.width;
+					int height = ev.xconfigure.height < tipsy_window_min_height ?
+						tipsy_window_min_height : ev.xconfigure.height;
+					XResizeWindow(dpy, win, (unsigned)width, (unsigned)height);
+					XFlush(dpy);
+					break;
+				}
 				atomic_fetch_add_explicit(&tipsy_refresh_version, 1, memory_order_relaxed);
 				if (tipsy_capture.active) {
 					int ax = tipsy_clamp_coord(tipsy_capture.anchor_x, ev.xconfigure.width);
@@ -1601,8 +1627,19 @@ func OpenOnDisplay(title string, width, height int, display string) (*Window, er
 	if width < 1 || height < 1 {
 		return nil, ErrInvalidSize
 	}
+	robloxWindow := title == "Roblox" || title == RobloxWindowTitle
 	if title == "Roblox" {
 		title = RobloxWindowTitle
+	}
+	minWidth, minHeight := 1, 1
+	if robloxWindow {
+		minWidth, minHeight = RobloxMinimumWidth, RobloxMinimumHeight
+		if width < minWidth {
+			width = minWidth
+		}
+		if height < minHeight {
+			height = minHeight
+		}
 	}
 	placeX, placeY, usePosition := 0, 0, 0
 	outputs, err := ListOutputs()
@@ -1631,6 +1668,7 @@ func OpenOnDisplay(title string, width, height int, display string) (*Window, er
 	var xid, del C.ulong
 	var randrEventBase C.int
 	rc := C.tipsy_x11_open(ctitle, C.int(width), C.int(height),
+		C.int(minWidth), C.int(minHeight),
 		C.int(placeX), C.int(placeY), C.int(usePosition),
 		iconPtr, C.int(len(icon)), &dpy, &xid, &del, &randrEventBase)
 	if rc != 0 || dpy == 0 || xid == 0 {

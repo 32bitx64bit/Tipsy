@@ -30,6 +30,15 @@ var (
 // it is hosted by Tipsy.
 const RobloxWindowTitle = "Roblox - Tipsy"
 
+// RobloxMinimumWidth and RobloxMinimumHeight are the minimum logical X11
+// client pixels accepted for the official Android client. A real resize storm
+// below this floor re-enters its native presenter and can crash it; these are
+// X11 client pixels because the desktop Android contract uses density 1.
+const (
+	RobloxMinimumWidth  = 1280
+	RobloxMinimumHeight = 720
+)
+
 // Window is a mapped native X11 InputOutput window.
 type Window struct {
 	mu              sync.Mutex

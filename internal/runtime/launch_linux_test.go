@@ -907,6 +907,117 @@ func TestSurfaceResizeIgnoresInvalidSizes(t *testing.T) {
 	}
 }
 
+// TestSurfaceResizeDebouncerDeliversOnlyTheSettledDragSize models a title-bar
+// resize drag. The X11 window may receive every intermediate ConfigureNotify,
+// but the Android/GameActivity lifecycle must receive only the final stable
+// geometry: repeating the full V2 update for every 10ms drag rectangle
+// crashes the current official client. This generic unit deliberately has no
+// Roblox floor; the production floor is covered separately below.
+func TestSurfaceResizeDebouncerDeliversOnlyTheSettledDragSize(t *testing.T) {
+	s := newSeededResize(1280, 720)
+	var d surfaceResizeDebouncer
+	for _, size := range [][2]int{
+		{1200, 675}, {1120, 630}, {1040, 585}, {960, 540},
+		{880, 495}, {800, 450}, {720, 405}, {640, 360},
+	} {
+		if !d.queue(size[0], size[1]) {
+			t.Fatalf("queue(%dx%d) rejected a valid drag size", size[0], size[1])
+		}
+	}
+	if w, h, ok := d.take(); !ok || w != 640 || h != 360 {
+		t.Fatalf("settled drag geometry = %dx%d ok=%t, want 640x360 true", w, h, ok)
+	} else {
+		s.observe(w, h)
+	}
+	if _, _, ok := d.take(); ok {
+		t.Fatal("empty debouncer produced a second surface update")
+	}
+	want := []string{
+		"buffers 640x360",
+		"display 640x360",
+		"cmd3",
+		"cmd4",
+		"v2surface 640x360",
+		"cmd5",
+		"onContentRectChangedNative 0,0,640,360",
+		"onWindowInsetsChangedNative",
+	}
+	if got := recordingSink(s).events; fmt.Sprint(got) != fmt.Sprint(want) {
+		t.Fatalf("settled drag events = %v, want %v", got, want)
+	}
+}
+
+func TestClampRobloxSurfaceSize(t *testing.T) {
+	tests := []struct {
+		inW, inH, wantW, wantH int
+	}{
+		{640, 360, x11.RobloxMinimumWidth, x11.RobloxMinimumHeight},
+		{1280, 720, 1280, 720},
+		{1600, 900, 1600, 900},
+	}
+	for _, tt := range tests {
+		gotW, gotH := clampRobloxSurfaceSize(tt.inW, tt.inH)
+		if gotW != tt.wantW || gotH != tt.wantH {
+			t.Fatalf("clampRobloxSurfaceSize(%d,%d) = %dx%d, want %dx%d",
+				tt.inW, tt.inH, gotW, gotH, tt.wantW, tt.wantH)
+		}
+	}
+}
+
+// TestRobloxSurfaceResizeMinimumNeverReachesNativeCallbacks is the final
+// defense if a window manager or extension configures the X11 client directly.
+// A sub-minimum geometry must not touch ANativeWindow, DisplayMetrics, or the
+// official V2/content-rect callbacks. A valid size still propagates normally.
+func TestRobloxSurfaceResizeMinimumNeverReachesNativeCallbacks(t *testing.T) {
+	s := &surfaceResize{
+		sink:     &recordingResizeSink{},
+		seeded:   true,
+		width:    x11.RobloxMinimumWidth,
+		height:   x11.RobloxMinimumHeight,
+		minWidth: x11.RobloxMinimumWidth, minHeight: x11.RobloxMinimumHeight,
+	}
+	s.observe(640, 360)
+	if got := recordingSink(s).events; len(got) != 0 {
+		t.Fatalf("sub-minimum resize reached native callbacks: %v", got)
+	}
+	if s.width != x11.RobloxMinimumWidth || s.height != x11.RobloxMinimumHeight {
+		t.Fatalf("sub-minimum resize replaced accepted geometry with %dx%d", s.width, s.height)
+	}
+
+	s.observe(1600, 900)
+	got := recordingSink(s).events
+	if len(got) == 0 || got[0] != "buffers 1600x900" {
+		t.Fatalf("valid resize did not reach native callbacks: %v", got)
+	}
+}
+
+// TestRobloxSurfaceResizeStormSettlesAtAValidGeometry proves a normal
+// interactive drag that remains at or above the 1280x720 minimum still
+// delivers its final size through the Android/V2 path.
+func TestRobloxSurfaceResizeStormSettlesAtAValidGeometry(t *testing.T) {
+	s := &surfaceResize{
+		sink:     &recordingResizeSink{},
+		seeded:   true,
+		width:    x11.RobloxMinimumWidth,
+		height:   x11.RobloxMinimumHeight,
+		minWidth: x11.RobloxMinimumWidth, minHeight: x11.RobloxMinimumHeight,
+	}
+	d := surfaceResizeDebouncer{minWidth: x11.RobloxMinimumWidth, minHeight: x11.RobloxMinimumHeight}
+	for _, size := range [][2]int{{1280, 720}, {1366, 768}, {1440, 810}, {1600, 900}} {
+		if !d.queue(size[0], size[1]) {
+			t.Fatalf("queue(%dx%d) rejected a valid Roblox drag size", size[0], size[1])
+		}
+	}
+	w, h, ok := d.take()
+	if !ok || w != 1600 || h != 900 {
+		t.Fatalf("settled valid drag geometry = %dx%d ok=%t, want 1600x900 true", w, h, ok)
+	}
+	s.observe(w, h)
+	if got := recordingSink(s).events; len(got) == 0 || got[0] != "buffers 1600x900" {
+		t.Fatalf("valid storm did not reach native callbacks: %v", got)
+	}
+}
+
 // TestSurfaceResizeDeliversOncePerDeltaInOrder pins the exact per-delta
 // delivery: one genuine delta runs buffers → DisplayMetrics → cmds 3,4 →
 // V2 surface bridge → cmd 5 → content-rect callback {0,0,w,h} →

@@ -174,6 +174,62 @@ func TestRobloxWindowBrandingProperties(t *testing.T) {
 	}
 }
 
+// TestRobloxWindowMinimumGeometry applies the floor at the actual X11
+// boundary. WM_NORMAL_HINTS is the protocol consulted by the window manager
+// for the user's title-bar drag. The valid resize storm confirms the hint does
+// not turn this production window into a fixed-size one.
+func TestRobloxWindowMinimumGeometry(t *testing.T) {
+	ensureDisplay(t)
+	requireProbe(t)
+	w, err := Open("Roblox", 96, 80)
+	if err != nil {
+		if errors.Is(err, ErrUnavailable) || errors.Is(err, ErrNoDisplay) {
+			t.Skip(err)
+		}
+		t.Fatalf("Open: %v", err)
+	}
+	defer w.Close()
+
+	if width, height := w.Size(); width != RobloxMinimumWidth || height != RobloxMinimumHeight {
+		t.Fatalf("initial Roblox size = %dx%d, want %dx%d", width, height, RobloxMinimumWidth, RobloxMinimumHeight)
+	}
+	if width, height, err := x11probe.WindowMinimumSize(w.XID()); err != nil {
+		t.Fatalf("WM_NORMAL_HINTS: %v", err)
+	} else if width != RobloxMinimumWidth || height != RobloxMinimumHeight {
+		t.Fatalf("WM_NORMAL_HINTS min = %dx%d, want %dx%d", width, height, RobloxMinimumWidth, RobloxMinimumHeight)
+	}
+
+	for _, size := range [][2]int{{1280, 720}, {1366, 768}, {1440, 810}, {1600, 900}} {
+		if err := x11probe.Resize(w.XID(), size[0], size[1]); err != nil {
+			t.Fatalf("valid resize %dx%d: %v", size[0], size[1], err)
+		}
+		if err := w.Pump(); err != nil {
+			t.Fatalf("Pump valid resize %dx%d: %v", size[0], size[1], err)
+		}
+	}
+	waitWindowSize(t, w, 1600, 900)
+}
+
+func waitWindowSize(t *testing.T, w *Window, wantWidth, wantHeight int) {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Second)
+	var gotWidth, gotHeight int
+	for time.Now().Before(deadline) {
+		if err := w.Pump(); err != nil && !errors.Is(err, ErrClosed) {
+			t.Fatalf("Pump waiting for %dx%d: %v", wantWidth, wantHeight, err)
+		}
+		width, height, err := x11probe.WindowSize(w.XID())
+		if err == nil {
+			gotWidth, gotHeight = width, height
+			if width == wantWidth && height == wantHeight {
+				return
+			}
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatalf("server geometry = %dx%d, want %dx%d", gotWidth, gotHeight, wantWidth, wantHeight)
+}
+
 func TestFullscreenRoundTripWithEWMHWindowManager(t *testing.T) {
 	ensureDisplay(t)
 	requireProbe(t)

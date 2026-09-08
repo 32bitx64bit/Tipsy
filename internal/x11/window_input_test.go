@@ -421,6 +421,45 @@ func TestResizePrecedesFollowingPointerDelivery(t *testing.T) {
 	}
 }
 
+// TestResizeStormPreservesEveryConfigureBeforeFollowingPointer reproduces the
+// event order from a manual title-bar drag through multiple sub-720p client
+// rectangles. X11 must retain the real ConfigureNotify stream and must not
+// let a later pointer coordinate overtake it; runtime is responsible for
+// coalescing only the expensive Android/V2 lifecycle work at the settled size.
+func TestResizeStormPreservesEveryConfigureBeforeFollowingPointer(t *testing.T) {
+	w := openInputWindow(t)
+	c := collectInput(t)
+	requireProbe(t)
+	c.clearAndSettle(t, w)
+
+	storm := [][2]int{
+		{1200, 675}, {1120, 630}, {1040, 585}, {960, 540},
+		{880, 495}, {800, 450}, {720, 405}, {640, 360},
+	}
+	for _, size := range storm {
+		if err := x11probe.Resize(w.XID(), size[0], size[1]); err != nil {
+			t.Fatalf("probe resize %dx%d: %v", size[0], size[1], err)
+		}
+	}
+	if err := x11probe.Motion(w.XID(), 63, 35, 0); err != nil {
+		t.Fatalf("probe motion after resize storm: %v", err)
+	}
+	drainPump(w, t)
+	for _, size := range storm {
+		ev := c.next(t, w)
+		if ev.Kind != InputResize || ev.Width != size[0] || ev.Height != size[1] {
+			t.Fatalf("storm event = %+v, want resize %dx%d", ev, size[0], size[1])
+		}
+	}
+	ev := c.next(t, w)
+	if ev.Kind != InputPointer || ev.PointerAction != PointerMove || ev.X != 63 || ev.Y != 35 {
+		t.Fatalf("event after resize storm = %+v, want following pointer", ev)
+	}
+	if width, height := w.Size(); width != 640 || height != 360 {
+		t.Fatalf("Size() after resize storm = %dx%d, want 640x360", width, height)
+	}
+}
+
 func TestBackgroundPumpResizeWakesAndUpdatesSize(t *testing.T) {
 	w := openInputWindow(t)
 	c := collectInput(t)

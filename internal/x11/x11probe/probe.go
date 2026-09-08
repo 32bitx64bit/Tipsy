@@ -269,6 +269,26 @@ int probe_resize(unsigned long xid, unsigned int width, unsigned int height) {
 	return -2;
 }
 
+int probe_window_size(unsigned long xid, int *out_width, int *out_height) {
+	if (probe_dpy == NULL || out_width == NULL || out_height == NULL) return -1;
+	XWindowAttributes attr;
+	if (XGetWindowAttributes(probe_dpy, (Window)xid, &attr) == 0) return -2;
+	*out_width = attr.width;
+	*out_height = attr.height;
+	return 0;
+}
+
+int probe_window_min_size(unsigned long xid, int *out_width, int *out_height) {
+	if (probe_dpy == NULL || out_width == NULL || out_height == NULL) return -1;
+	XSizeHints hints;
+	long supplied = 0;
+	if (!XGetWMNormalHints(probe_dpy, (Window)xid, &hints, &supplied) ||
+		!(hints.flags & PMinSize)) return -2;
+	*out_width = hints.min_width;
+	*out_height = hints.min_height;
+	return 0;
+}
+
 int probe_wm_delete(unsigned long xid) {
 	if (probe_dpy == NULL) return -1;
 	XEvent ev;
@@ -559,6 +579,30 @@ func Resize(xid uintptr, width, height int) error {
 		return ErrProbe
 	}
 	return nil
+}
+
+// WindowSize reports the current server-side client geometry in X11 pixels.
+func WindowSize(xid uintptr) (width, height int, err error) {
+	if err = mustOpen(); err != nil {
+		return 0, 0, err
+	}
+	var w, h C.int
+	if C.probe_window_size(C.ulong(xid), &w, &h) != 0 {
+		return 0, 0, ErrProbe
+	}
+	return int(w), int(h), nil
+}
+
+// WindowMinimumSize reports the WM_NORMAL_HINTS minimum client geometry.
+func WindowMinimumSize(xid uintptr) (width, height int, err error) {
+	if err = mustOpen(); err != nil {
+		return 0, 0, err
+	}
+	var w, h C.int
+	if C.probe_window_min_size(C.ulong(xid), &w, &h) != 0 {
+		return 0, 0, ErrProbe
+	}
+	return int(w), int(h), nil
 }
 
 // WMDelete sends the standards-defined ICCCM request used by a window

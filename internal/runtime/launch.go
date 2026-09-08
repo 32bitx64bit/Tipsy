@@ -519,6 +519,11 @@ func Launch(ctx context.Context, opt LaunchOptions) error {
 	if opt.Height <= 0 {
 		opt.Height = 720
 	}
+	// The official client can survive an isolated small rectangle, but a real
+	// native X11/Vulkan resize drag through sub-720p rectangles reproducibly
+	// crashes before GameActivity can settle its surface update. Keep every
+	// construction boundary on the same X11 logical-pixel floor.
+	opt.Width, opt.Height = clampRobloxSurfaceSize(opt.Width, opt.Height)
 	started := &launchStartedAck{fn: opt.Started}
 	dir, err := filepath.Abs(runtimeFiles.RootDir)
 	if err != nil {
@@ -673,6 +678,47 @@ func Launch(ctx context.Context, opt LaunchOptions) error {
 		refreshPublication.version = 0
 	}
 	resize := session.resize
+	// A window-manager drag can emit a dense ConfigureNotify sequence. Vulkan
+	// observes its native X11 window directly, but replaying GameActivity's
+	// full ANativeWindow/V2/content-rect lifecycle for every intermediate drag
+	// size re-enters the official client before its prior surface update has
+	// settled. Keep only the latest positive geometry until the drag quiesces.
+	// This timer exists only while a resize is pending; the normal event-driven
+	// input path remains timer-free.
+	resizeDebouncer := surfaceResizeDebouncer{
+		minWidth: x11.RobloxMinimumWidth, minHeight: x11.RobloxMinimumHeight,
+	}
+	var resizeSettleTimer *time.Timer
+	var resizeSettleC <-chan time.Time
+	scheduleSurfaceResize := func(w, h int) {
+		if !resizeDebouncer.queue(w, h) {
+			return
+		}
+		if resizeSettleTimer == nil {
+			resizeSettleTimer = time.NewTimer(surfaceResizeSettleDelay)
+			resizeSettleC = resizeSettleTimer.C
+			return
+		}
+		if !resizeSettleTimer.Stop() {
+			select {
+			case <-resizeSettleTimer.C:
+			default:
+			}
+		}
+		resizeSettleTimer.Reset(surfaceResizeSettleDelay)
+		resizeSettleC = resizeSettleTimer.C
+	}
+	flushSurfaceResize := func() {
+		resizeSettleC = nil
+		if w, h, ok := resizeDebouncer.take(); ok {
+			resize.observe(w, h)
+		}
+	}
+	defer func() {
+		if resizeSettleTimer != nil {
+			resizeSettleTimer.Stop()
+		}
+	}()
 	focusedTextSync := newFocusedTextOverlaySync(focusedTextOverlay, assets)
 	textOverlayTicker := time.NewTicker(focusedTextOverlayPollInterval)
 	defer textOverlayTicker.Stop()
@@ -709,11 +755,12 @@ func Launch(ctx context.Context, opt LaunchOptions) error {
 	defer jni.ClearRobloxTextInputTarget()
 	defer jni.ClearGameActivityInputTarget()
 	// ConfigureNotify enters the same ordered X11 stream as pointer events.
-	// When a resize and a later pointer move are drained together, this
-	// handler runs before the JNI bridge delivers that move to Roblox.
+	// Update the X11-owned size immediately, but settle the engine-facing
+	// lifecycle after a short quiet period so one manual drag cannot re-enter
+	// V2 for every intermediate rectangle.
 	cancelResizeInput := x11.OnInput(func(ev x11.InputEvent) {
 		if ev.Kind == x11.InputResize {
-			resize.observe(ev.Width, ev.Height)
+			scheduleSurfaceResize(ev.Width, ev.Height)
 		}
 	})
 	defer cancelResizeInput()
@@ -776,6 +823,8 @@ func Launch(ctx context.Context, opt LaunchOptions) error {
 				"textInfoNull", textInfo.NullResult, "textInfoStale", textInfo.StaleSession)
 		case now := <-textOverlayTicker.C:
 			refreshFocusedText(now)
+		case <-resizeSettleC:
+			flushSurfaceResize()
 		case <-win.InputReady():
 			if err := win.Pump(); err != nil {
 				if err == x11.ErrClosed {
@@ -788,11 +837,6 @@ func Launch(ctx context.Context, opt LaunchOptions) error {
 				}
 				return err
 			}
-			// ConfigureNotify always enters the input ring on this X11 backend,
-			// so Size() cannot change without InputResize. observe after drain
-			// is the same dedup as before, now on the wake path rather than 4ms.
-			w, h := win.Size()
-			resize.observe(w, h)
 			// XIM commits and editor-navigation keys mutate the focused snapshot
 			// while Pump notifies subscribers. Paint that version in the same
 			// launch-loop turn rather than waiting for the bounded poll fallback.
@@ -990,8 +1034,59 @@ func dispatchGameActivityLifecycle(ctx context.Context, vm *jni.VM, mod *loader.
 				gl: gl, surface: surface, platform: platform,
 			},
 			seeded: true, width: width, height: height,
+			minWidth: x11.RobloxMinimumWidth, minHeight: x11.RobloxMinimumHeight,
 		},
 	}
+}
+
+// surfaceResizeSettleDelay bounds GameActivity/V2 surface-update re-entry
+// during a manual X11 resize drag. It is deliberately short enough that a
+// completed resize remains responsive, yet longer than the dense intermediate
+// ConfigureNotify burst that otherwise reaches the official client as a chain
+// of overlapping surface transitions.
+const surfaceResizeSettleDelay = 75 * time.Millisecond
+
+// clampRobloxSurfaceSize keeps GameActivity's initial display metrics aligned
+// with the X11 Roblox window's WM minimum. These are X11 client pixels; the
+// Android density remains one in this desktop adapter.
+func clampRobloxSurfaceSize(width, height int) (int, int) {
+	if width < x11.RobloxMinimumWidth {
+		width = x11.RobloxMinimumWidth
+	}
+	if height < x11.RobloxMinimumHeight {
+		height = x11.RobloxMinimumHeight
+	}
+	return width, height
+}
+
+// surfaceResizeDebouncer holds only the most recent positive X11 rectangle
+// from a resize burst. The X11 Window continues to track each real
+// ConfigureNotify for input and presentation; this type coalesces only the
+// Android/GameActivity lifecycle work that must not be re-entered per pixel of
+// a title-bar drag. It is owned by the Launch goroutine.
+type surfaceResizeDebouncer struct {
+	pending             bool
+	width, height       int
+	minWidth, minHeight int
+}
+
+func (d *surfaceResizeDebouncer) queue(w, h int) bool {
+	if d == nil || w <= 0 || h <= 0 ||
+		(d.minWidth > 0 && w < d.minWidth) ||
+		(d.minHeight > 0 && h < d.minHeight) {
+		return false
+	}
+	d.pending, d.width, d.height = true, w, h
+	return true
+}
+
+func (d *surfaceResizeDebouncer) take() (w, h int, ok bool) {
+	if d == nil || !d.pending {
+		return 0, 0, false
+	}
+	w, h = d.width, d.height
+	d.pending = false
+	return w, h, true
 }
 
 // surfaceResize propagates genuine X11 size deltas into the surface-geometry
@@ -1004,8 +1099,9 @@ func dispatchGameActivityLifecycle(ctx context.Context, vm *jni.VM, mod *loader.
 type surfaceResize struct {
 	sink resizeSink
 
-	seeded        bool
-	width, height int
+	seeded              bool
+	width, height       int
+	minWidth, minHeight int
 }
 
 // resizeSink is the engine-facing update surface, factored out so tests can
@@ -1068,7 +1164,9 @@ func (s *engineResizeSink) callNative(name, sig string, extra ...uintptr) {
 // the delivery honestly instead of delivering a surface size the native
 // window does not have.
 func (s *surfaceResize) observe(w, h int) {
-	if s == nil || w <= 0 || h <= 0 {
+	if s == nil || w <= 0 || h <= 0 ||
+		(s.minWidth > 0 && w < s.minWidth) ||
+		(s.minHeight > 0 && h < s.minHeight) {
 		return
 	}
 	if s.seeded && s.width == w && s.height == h {
