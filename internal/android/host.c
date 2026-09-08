@@ -6,6 +6,8 @@
 #include "android_bridge.h"
 
 #include <dlfcn.h>
+#include <link.h>
+#include <pthread.h>
 #include <string.h>
 #include <stdlib.h>
 #include <stdint.h>
@@ -20,6 +22,7 @@ static void *lib_libm;
 static void *lib_libz;
 static void *lib_egl;
 static void *lib_gles;
+static pthread_once_t host_abi_once = PTHREAD_ONCE_INIT;
 
 typedef void *EGLDisplay;
 typedef void *EGLConfig;
@@ -55,6 +58,46 @@ static void *open_lib(const char *name)
 	return dlopen(name, RTLD_NOW | RTLD_LOCAL);
 }
 
+static void open_host_abi_libraries(void)
+{
+	lib_libc = open_lib("libc.so.6");
+	lib_libm = open_lib("libm.so.6");
+	lib_libz = open_lib("libz.so.1");
+}
+
+/* Resolve from one exact host ELF object. dlsym(handle, ...) also searches an
+ * object's dependencies, so confirm the returned address belongs to the
+ * requested object's own link_map before treating it as an owned Android ABI
+ * capability. */
+void *tipsy_host_dlsym_library(const char *lib, const char *name)
+{
+	void *handle = NULL;
+	void *p;
+	Dl_info info;
+	struct link_map *map = NULL;
+
+	if (lib == NULL || name == NULL) {
+		return NULL;
+	}
+	pthread_once(&host_abi_once, open_host_abi_libraries);
+	if (strcmp(lib, "libc.so") == 0) {
+		handle = lib_libc;
+	} else if (strcmp(lib, "libm.so") == 0) {
+		handle = lib_libm;
+	} else if (strcmp(lib, "libz.so") == 0) {
+		handle = lib_libz;
+	}
+	if (handle == NULL) {
+		return NULL;
+	}
+	p = dlsym(handle, name);
+	if (p == NULL || dlinfo(handle, RTLD_DI_LINKMAP, &map) != 0 || map == NULL ||
+	    dladdr(p, &info) == 0 || info.dli_fbase != (void *)map->l_addr) {
+		return NULL;
+	}
+	return p;
+}
+
 void *tipsy_host_dlsym(const char *name)
 {
 	void *p;
@@ -66,15 +109,7 @@ void *tipsy_host_dlsym(const char *name)
 	if (p != NULL) {
 		return p;
 	}
-	if (lib_libc == NULL) {
-		lib_libc = open_lib("libc.so.6");
-	}
-	if (lib_libm == NULL) {
-		lib_libm = open_lib("libm.so.6");
-	}
-	if (lib_libz == NULL) {
-		lib_libz = open_lib("libz.so.1");
-	}
+	pthread_once(&host_abi_once, open_host_abi_libraries);
 	if (lib_libc != NULL) {
 		p = dlsym(lib_libc, name);
 		if (p != NULL) {

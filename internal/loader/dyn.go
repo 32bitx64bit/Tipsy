@@ -32,12 +32,22 @@ type dynInfo struct {
 	needed []string
 	soname string
 
-	symtab  uint64
-	strtab  uint64
-	strsz   uint64
-	syment  uint64
-	hash    uint64
-	gnuHash uint64
+	symtab        uint64
+	strtab        uint64
+	strsz         uint64
+	syment        uint64
+	hash          uint64
+	gnuHash       uint64
+	versym        uint64
+	verneed       uint64
+	verneedNum    uint64
+	verdef        uint64
+	verdefNum     uint64
+	hasVersym     bool
+	hasVerneed    bool
+	hasVerneedNum bool
+	hasVerdef     bool
+	hasVerdefNum  bool
 
 	rela     uint64
 	relasz   uint64
@@ -66,6 +76,7 @@ type dynInfo struct {
 
 func parseDyn(ents []dynEnt, strtab []byte) (*dynInfo, error) {
 	d := &dynInfo{syment: 24, relaent: 24, relent: 16}
+	seenVersionTag := make(map[elf.DynTag]struct{}, 5)
 	str := func(off uint64) string {
 		if off >= uint64(len(strtab)) {
 			return ""
@@ -77,6 +88,13 @@ func parseDyn(ents []dynEnt, strtab []byte) (*dynInfo, error) {
 		return string(strtab[off:i])
 	}
 	for _, e := range ents {
+		switch e.Tag {
+		case elf.DT_VERSYM, elf.DT_VERNEED, elf.DT_VERNEEDNUM, elf.DT_VERDEF, elf.DT_VERDEFNUM:
+			if _, duplicate := seenVersionTag[e.Tag]; duplicate {
+				return nil, fmt.Errorf("loader: duplicate GNU version dynamic tag %s", e.Tag)
+			}
+			seenVersionTag[e.Tag] = struct{}{}
+		}
 		switch e.Tag {
 		case elf.DT_NEEDED:
 			if n := str(e.Val); n != "" {
@@ -96,6 +114,21 @@ func parseDyn(ents []dynEnt, strtab []byte) (*dynInfo, error) {
 			d.hash = e.Val
 		case elf.DT_GNU_HASH:
 			d.gnuHash = e.Val
+		case elf.DT_VERSYM:
+			d.versym = e.Val
+			d.hasVersym = true
+		case elf.DT_VERNEED:
+			d.verneed = e.Val
+			d.hasVerneed = true
+		case elf.DT_VERNEEDNUM:
+			d.verneedNum = e.Val
+			d.hasVerneedNum = true
+		case elf.DT_VERDEF:
+			d.verdef = e.Val
+			d.hasVerdef = true
+		case elf.DT_VERDEFNUM:
+			d.verdefNum = e.Val
+			d.hasVerdefNum = true
 		case elf.DT_RELA:
 			d.rela = e.Val
 		case elf.DT_RELASZ:

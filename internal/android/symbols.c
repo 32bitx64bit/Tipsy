@@ -10,6 +10,8 @@
 #include <string.h>
 #include <stddef.h>
 #include <sys/types.h>
+#include <sys/time.h>
+#include <time.h>
 
 /* ndk.c */
 extern int tipsy_android_log_print(int, const char *, const char *, ...);
@@ -225,6 +227,18 @@ struct sym {
 	void *addr;
 };
 
+/* glibc may return vDSO addresses for these names. Keep the Android provider
+ * owner exact by routing through small Tipsy-owned ABI-compatible wrappers. */
+static time_t tipsy_time(time_t *result)
+{
+	return time(result);
+}
+
+static int tipsy_gettimeofday(struct timeval *value, void *timezone_value)
+{
+	return gettimeofday(value, (struct timezone *)timezone_value);
+}
+
 static const struct sym table[] = {
 	{ "liblog.so", "__android_log_print", (void *)tipsy_android_log_print },
 	{ "liblog.so", "__android_log_write", (void *)tipsy_android_log_write },
@@ -236,6 +250,8 @@ static const struct sym table[] = {
 	{ "libc.so", "__errno", (void *)tipsy_errno_fn },
 	{ "libc.so", "arc4random_buf", (void *)tipsy_arc4random_buf },
 	{ "libc.so", "gettid", (void *)tipsy_gettid },
+	{ "libc.so", "time", (void *)tipsy_time },
+	{ "libc.so", "gettimeofday", (void *)tipsy_gettimeofday },
 	{ "libc.so", "__strlen_chk", (void *)tipsy_strlen_chk },
 	{ "libc.so", "__strchr_chk", (void *)tipsy_strchr_chk },
 	{ "libc.so", "__strncpy_chk2", (void *)tipsy_strncpy_chk2 },

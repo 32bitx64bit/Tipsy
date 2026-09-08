@@ -143,6 +143,7 @@ typedef struct TipsyBionicSyncStats {
 } TipsyBionicSyncStats;
 
 void *tipsy_host_dlsym(const char *name);
+void *tipsy_host_dlsym_library(const char *lib, const char *name);
 void *tipsy_android_lookup(const char *lib, const char *name);
 
 /* Android EGL presentation policy. VSync off requests interval zero and

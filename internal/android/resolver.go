@@ -29,6 +29,8 @@ import (
 // Resolver is loader.Resolver (Lookup(lib, sym string) (uintptr, error)).
 type Resolver = loader.Resolver
 
+var _ loader.VersionedResolver = (*provider)(nil)
+
 // LookupFunc resolves a single symbol inside a registered module.
 type LookupFunc func(sym string) (uintptr, error)
 
@@ -376,6 +378,17 @@ func hostDlsym(name string) uintptr {
 	cs := C.CString(name)
 	defer C.free(unsafe.Pointer(cs))
 	return uintptr(C.tipsy_host_dlsym(cs))
+}
+
+func hostDlsymLibrary(library, symbol string) uintptr {
+	if library == "" || symbol == "" {
+		return 0
+	}
+	cLibrary := C.CString(library)
+	cSymbol := C.CString(symbol)
+	defer C.free(unsafe.Pointer(cLibrary))
+	defer C.free(unsafe.Pointer(cSymbol))
+	return uintptr(C.tipsy_host_dlsym_library(cLibrary, cSymbol))
 }
 
 var errMissing = errors.New("missing native symbol")

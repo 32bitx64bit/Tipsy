@@ -36,12 +36,15 @@ const (
 	vaGuard    = 0x4028 // byte set by vaCtor
 	vaBSSCheck = 0x5000 // first BSS byte page (filesz ends at 0x5000)
 
-	vaDynsym = 0x4100
-	vaDynstr = 0x4200
-	vaHash   = 0x4300
-	vaRela   = 0x4340
-	vaAPS2   = 0x4400
-	vaDyn    = 0x4500
+	vaDynsym  = 0x4100
+	vaDynstr  = 0x4200
+	vaHash    = 0x4300
+	vaRela    = 0x4340
+	vaAPS2    = 0x4400
+	vaDyn     = 0x4500
+	vaVersym  = 0x4700
+	vaVerdef  = 0x4800
+	vaVerneed = 0x4900
 )
 
 type mapRes map[string]uintptr // key "lib|sym" or "|sym"
@@ -322,10 +325,27 @@ func TestCallJNIOnLoadTrampoline(t *testing.T) {
 type synthOpts struct {
 	needed        []string
 	imports       []string
+	soname        string
+	versionNeeds  []synthVersionNeed
+	versionDefs   []synthVersionDef
 	withAPS2      bool
 	withIRel      bool
 	withTextReloc bool
 	writableExec  bool
+}
+
+type synthVersionNeed struct {
+	library string
+	version string
+	imports []string
+	flags   uint16
+}
+
+type synthVersionDef struct {
+	version string
+	exports []string
+	flags   uint16
+	hidden  bool
 }
 
 func buildSynthELF(opt synthOpts) []byte {
@@ -370,6 +390,20 @@ func buildSynthELF(opt synthOpts) []byte {
 	for i, n := range opt.needed {
 		neededOff[i] = addStr(n)
 	}
+	sonameOff := uint32(0)
+	if opt.soname != "" {
+		sonameOff = addStr(opt.soname)
+	}
+	versionNeedNameOff := make([]uint32, len(opt.versionNeeds))
+	versionNeedLibraryOff := make([]uint32, len(opt.versionNeeds))
+	for i, need := range opt.versionNeeds {
+		versionNeedLibraryOff[i] = addStr(need.library)
+		versionNeedNameOff[i] = addStr(need.version)
+	}
+	versionDefNameOff := make([]uint32, len(opt.versionDefs))
+	for i, def := range opt.versionDefs {
+		versionDefNameOff[i] = addStr(def.version)
+	}
 
 	// Dynsym at vaDynsym
 	symRaw := make([]byte, 24*len(syms))
@@ -399,6 +433,65 @@ func buildSynthELF(opt synthOpts) []byte {
 	}
 	copy(buf[vaDynsym:], symRaw)
 	copy(buf[vaDynstr:], dynstr)
+
+	if len(opt.versionNeeds) > 0 || len(opt.versionDefs) > 0 {
+		versyms := make([]uint16, len(syms))
+		for i := 1; i < len(versyms); i++ {
+			versyms[i] = 1
+		}
+		nextVersionIndex := uint16(2)
+		for i, def := range opt.versionDefs {
+			idx := nextVersionIndex
+			nextVersionIndex++
+			for symIdx, sym := range syms {
+				for _, name := range def.exports {
+					if sym.name == name && sym.shndx != 0 {
+						versyms[symIdx] = idx
+						if def.hidden {
+							versyms[symIdx] |= gnuVersionHidden
+						}
+					}
+				}
+			}
+			record := vaVerdef + i*28
+			binary.LittleEndian.PutUint16(buf[record:], gnuVersionCurrent)
+			binary.LittleEndian.PutUint16(buf[record+2:], def.flags)
+			binary.LittleEndian.PutUint16(buf[record+4:], idx)
+			binary.LittleEndian.PutUint16(buf[record+6:], 1)
+			binary.LittleEndian.PutUint32(buf[record+8:], uint32(0x1000+i))
+			binary.LittleEndian.PutUint32(buf[record+12:], 20)
+			if i+1 < len(opt.versionDefs) {
+				binary.LittleEndian.PutUint32(buf[record+16:], 28)
+			}
+			binary.LittleEndian.PutUint32(buf[record+20:], versionDefNameOff[i])
+		}
+		for i, need := range opt.versionNeeds {
+			idx := nextVersionIndex
+			nextVersionIndex++
+			for symIdx, sym := range syms {
+				for _, name := range need.imports {
+					if sym.name == name && sym.shndx == 0 {
+						versyms[symIdx] = idx
+					}
+				}
+			}
+			record := vaVerneed + i*32
+			binary.LittleEndian.PutUint16(buf[record:], gnuVersionCurrent)
+			binary.LittleEndian.PutUint16(buf[record+2:], 1)
+			binary.LittleEndian.PutUint32(buf[record+4:], versionNeedLibraryOff[i])
+			binary.LittleEndian.PutUint32(buf[record+8:], 16)
+			if i+1 < len(opt.versionNeeds) {
+				binary.LittleEndian.PutUint32(buf[record+12:], 32)
+			}
+			binary.LittleEndian.PutUint32(buf[record+16:], uint32(0x2000+i))
+			binary.LittleEndian.PutUint16(buf[record+20:], need.flags)
+			binary.LittleEndian.PutUint16(buf[record+22:], idx)
+			binary.LittleEndian.PutUint32(buf[record+24:], versionNeedNameOff[i])
+		}
+		for i, value := range versyms {
+			binary.LittleEndian.PutUint16(buf[vaVersym+i*2:], value)
+		}
+	}
 
 	// SysV hash: nchain = nsyms
 	binary.LittleEndian.PutUint32(buf[vaHash:], 1)                   // nbucket
@@ -462,11 +555,25 @@ func buildSynthELF(opt synthOpts) []byte {
 	for i := range opt.needed {
 		put(elf.DT_NEEDED, uint64(neededOff[i]))
 	}
+	if opt.soname != "" {
+		put(elf.DT_SONAME, uint64(sonameOff))
+	}
 	put(elf.DT_HASH, vaHash)
 	put(elf.DT_STRTAB, vaDynstr)
 	put(elf.DT_SYMTAB, vaDynsym)
 	put(elf.DT_STRSZ, uint64(len(dynstr)))
 	put(elf.DT_SYMENT, 24)
+	if len(opt.versionNeeds) > 0 || len(opt.versionDefs) > 0 {
+		put(elf.DT_VERSYM, vaVersym)
+	}
+	if len(opt.versionDefs) > 0 {
+		put(elf.DT_VERDEF, vaVerdef)
+		put(elf.DT_VERDEFNUM, uint64(len(opt.versionDefs)))
+	}
+	if len(opt.versionNeeds) > 0 {
+		put(elf.DT_VERNEED, vaVerneed)
+		put(elf.DT_VERNEEDNUM, uint64(len(opt.versionNeeds)))
+	}
 	put(elf.DT_RELA, vaRela)
 	put(elf.DT_RELASZ, uint64(len(relaRaw)))
 	put(elf.DT_RELAENT, 24)

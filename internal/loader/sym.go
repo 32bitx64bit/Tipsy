@@ -19,11 +19,13 @@ const (
 )
 
 type dynSym struct {
-	name  string
-	value uint64
-	size  uint64
-	info  byte
-	shndx uint16
+	name    string
+	value   uint64
+	size    uint64
+	info    byte
+	other   byte
+	shndx   uint16
+	version symbolVersion
 }
 
 func (s dynSym) bind() byte { return s.info >> 4 }
@@ -64,6 +66,7 @@ func loadDynsym(ef *elf.File, d *dynInfo) ([]dynSym, []byte, error) {
 		}
 		nameOff := binary.LittleEndian.Uint32(b[0:4])
 		info := b[4]
+		other := b[5]
 		shndx := binary.LittleEndian.Uint16(b[6:8])
 		value := binary.LittleEndian.Uint64(b[8:16])
 		size := binary.LittleEndian.Uint64(b[16:24])
@@ -75,7 +78,7 @@ func loadDynsym(ef *elf.File, d *dynInfo) ([]dynSym, []byte, error) {
 			}
 			name = string(strtab[nameOff:j])
 		}
-		out[i] = dynSym{name: name, value: value, size: size, info: info, shndx: shndx}
+		out[i] = dynSym{name: name, value: value, size: size, info: info, other: other, shndx: shndx}
 	}
 	return out, strtab, nil
 }
@@ -161,7 +164,7 @@ func (m *Module) lookupDef(name string) (dynSym, bool) {
 		if i == 0 {
 			continue
 		}
-		if s.name == name && s.defined() && s.bind() != stbLocal {
+		if s.name == name && s.defined() && s.bind() != stbLocal && !s.version.hidden {
 			return s, true
 		}
 	}
@@ -192,19 +195,22 @@ func (m *Module) symbolValue(idx uint32) (uint64, error) {
 }
 
 func (m *Module) resolveUndef(s dynSym) (uint64, error) {
+	if s.version.requirement != nil {
+		return m.resolveVersionedUndef(s, *s.version.requirement)
+	}
 	if addr, ok := m.lookupLoaded(s.name); ok {
 		return uint64(addr), nil
 	}
 	if m.resolver != nil {
-		addr, err := m.resolver.Lookup("", s.name)
-		if err == nil && addr != 0 {
-			return uint64(addr), nil
-		}
 		for _, lib := range m.Needed {
-			addr, err := m.resolver.Lookup(lib, s.name)
+			addr, err := m.resolver.Lookup(neededBase(lib), s.name)
 			if err == nil && addr != 0 {
 				return uint64(addr), nil
 			}
+		}
+		addr, err := m.resolver.Lookup("", s.name)
+		if err == nil && addr != 0 {
+			return uint64(addr), nil
 		}
 	}
 	if s.bind() == stbWeak {

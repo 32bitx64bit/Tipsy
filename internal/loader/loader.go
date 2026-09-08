@@ -22,6 +22,14 @@ type Resolver interface {
 	Lookup(lib, sym string) (uintptr, error)
 }
 
+// VersionedResolver is the optional authenticated extension for providers
+// that can prove a symbol belongs to one exact DT_NEEDED object and GNU
+// version namespace. Implementations must not satisfy a request from a global
+// or same-name symbol in another object.
+type VersionedResolver interface {
+	LookupVersion(lib, sym, version string) (uintptr, error)
+}
+
 // Module is one mapped Android x86-64 ET_DYN.
 type Module struct {
 	Path   string
@@ -44,10 +52,12 @@ type Module struct {
 	relro      []loadSeg
 	tlsPresent bool
 
-	dyn    *dynInfo
-	syms   []dynSym
-	deps   []*Module
-	soname string
+	dyn           *dynInfo
+	syms          []dynSym
+	versions      *versionInfo
+	deps          []*Module
+	soname        string
+	authenticated bool
 
 	missing []string
 	missSet map[string]struct{}
@@ -167,9 +177,10 @@ func openFile(key, display string, f *os.File, authenticated bool, r Resolver, s
 	}
 
 	m := &Module{
-		Path:     display,
-		resolver: r,
-		ef:       ef,
+		Path:          display,
+		resolver:      r,
+		ef:            ef,
+		authenticated: authenticated,
 	}
 	if !authenticated {
 		m.file = f
@@ -223,11 +234,19 @@ func openFile(key, display string, f *os.File, authenticated bool, r Resolver, s
 		return fail(fmt.Errorf("loader: authenticated descriptor %s declares SONAME %s", display, d.soname))
 	}
 
-	syms, _, err := loadDynsym(ef, d)
+	syms, dynstr, err := loadDynsym(ef, d)
 	if err != nil {
 		return fail(err)
 	}
+	versions, err := loadSymbolVersions(ef, d, syms, dynstr)
+	if err != nil {
+		return fail(fmt.Errorf("loader: GNU symbol versions %s: %w", display, err))
+	}
+	for i := range syms {
+		syms[i].version = versions.symbols[i]
+	}
 	m.syms = syms
+	m.versions = versions
 
 	dir := filepath.Dir(display)
 	for _, n := range m.Needed {
