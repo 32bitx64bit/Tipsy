@@ -54,12 +54,14 @@ type mainWindow struct {
 	doctorSummary           *qt.QLabel
 	doctorDetails           *qt.QPlainTextEdit
 	settingsProfile         *qt.QLabel
+	settingsClientStatus    *qt.QLabel
 	pageEntry               []*qt.QWidget
 	wizardScrolls           map[*qt.QWizardPage]*qt.QScrollArea
 
-	lastLaunchState guimodel.LaunchState
-	launchTimer     *qt.QTimer
-	launcherHidden  bool
+	installReadiness setupsvc.ReadinessState
+	lastLaunchState  guimodel.LaunchState
+	launchTimer      *qt.QTimer
+	launcherHidden   bool
 }
 
 func newMainWindow(service guimodel.Service, icon *qt.QIcon) *mainWindow {
@@ -124,7 +126,7 @@ func (w *mainWindow) startInMode(mode, uri string) {
 }
 
 func (w *mainWindow) FirstRun() bool {
-	return w.setupLoadErr != nil || !w.setup.View().Snapshot.Installed
+	return w.setupLoadErr != nil || !w.setup.View().Snapshot.LaunchReady()
 }
 
 func (w *mainWindow) buildShell() {
@@ -251,36 +253,102 @@ func (w *mainWindow) addMenuBar() {
 func (w *mainWindow) refreshSnapshot() {
 	if err := w.setup.Load(context.Background()); err != nil {
 		w.setupLoadErr = err
-		w.setInstallText(false, "Unavailable", "Installation status could not be read.")
+		w.setInstallText("", "Unavailable", "Installation verification is unavailable. Open Setup and check the privacy-safe logs before trying again.")
 		return
 	}
 	w.setupLoadErr = nil
 	snapshot := w.setup.View().Snapshot
 	versionText := snapshot.Version
-	if versionText == "" {
-		versionText = "Not installed"
-	}
 	detail := snapshot.Status
-	if detail == "" && snapshot.Installed {
-		detail = "The official Android x86-64 client is ready."
-	} else if detail == "" {
-		detail = "Run setup to install an official Roblox package."
+	readiness := snapshot.Readiness
+	switch readiness {
+	case setupsvc.ReadinessLaunchInputs:
+		if versionText == "" {
+			versionText = "Authenticated client"
+		}
+		if detail == "" {
+			detail = guiLaunchInputsStatus
+		}
+	case setupsvc.ReadinessRejected:
+		if versionText == "" {
+			versionText = "Verification rejected"
+		}
+		if detail == "" {
+			detail = rejectedReadinessMessage(setupsvc.ErrIntegrity)
+		}
+	case setupsvc.ReadinessNotInstalled:
+		if versionText == "" {
+			versionText = "Not installed"
+		}
+		if detail == "" {
+			detail = guiNotInstalledStatus
+		}
+	default:
+		versionText = "Unavailable"
+		detail = "Installation verification is unavailable. Open Setup and check the privacy-safe logs before trying again."
 	}
-	w.setInstallText(snapshot.Installed, versionText, detail)
+	w.setInstallText(readiness, versionText, detail)
 }
 
-func (w *mainWindow) setInstallText(installed bool, versionText, detail string) {
+type installUIPresentation struct {
+	badge         string
+	badgeStyle    string
+	playTooltip   string
+	idleText      string
+	settingsText  string
+	settingsStyle string
+}
+
+func installPresentation(readiness setupsvc.ReadinessState) installUIPresentation {
+	switch readiness {
+	case setupsvc.ReadinessLaunchInputs:
+		return installUIPresentation{
+			badge:         "LAUNCH READY",
+			badgeStyle:    "statusReady",
+			playTooltip:   "Attempt a live launch using the authenticated official Roblox client",
+			idleText:      "Authenticated launch inputs are ready; live Home rendering is checked only after launch",
+			settingsText:  "Client status: authenticated launch inputs. Settings can be saved; live Home and gameplay remain separate runtime results.",
+			settingsStyle: "noticeSuccess",
+		}
+	case setupsvc.ReadinessRejected:
+		return installUIPresentation{
+			badge:         "REJECTED",
+			badgeStyle:    "statusRejected",
+			playTooltip:   "Repair the rejected client verification in Setup before launching",
+			idleText:      "Launch is disabled because the active client did not pass verification",
+			settingsText:  "Client status: rejected. Settings can be saved, but Play stays disabled until Setup repairs and revalidates the client.",
+			settingsStyle: "noticeError",
+		}
+	case setupsvc.ReadinessNotInstalled:
+		return installUIPresentation{
+			badge:         "NOT INSTALLED",
+			badgeStyle:    "statusWarning",
+			playTooltip:   "Install and authenticate an official Roblox client before launching",
+			idleText:      "Install an official Android x86-64 client before launching",
+			settingsText:  "Client status: not installed. Settings can be saved now, then applied when an authenticated client is installed.",
+			settingsStyle: "noticeWarning",
+		}
+	default:
+		return installUIPresentation{
+			badge:         "UNAVAILABLE",
+			badgeStyle:    "statusNeutral",
+			playTooltip:   "Resolve installation verification before launching",
+			idleText:      "Launch is disabled until installation verification is available",
+			settingsText:  "Client status is unavailable. Settings can be saved, but Play stays disabled until verification succeeds.",
+			settingsStyle: "noticeWarning",
+		}
+	}
+}
+
+func (w *mainWindow) setInstallText(readiness setupsvc.ReadinessState, versionText, detail string) {
+	w.installReadiness = readiness
+	presentation := installPresentation(readiness)
 	for _, badge := range []*qt.QLabel{w.installBadge, w.installPageBadge} {
 		if badge == nil {
 			continue
 		}
-		if installed {
-			badge.SetText("READY")
-			setObjectName(badge.QObject, "statusReady")
-		} else {
-			badge.SetText("SETUP NEEDED")
-			setObjectName(badge.QObject, "statusWarning")
-		}
+		badge.SetText(presentation.badge)
+		setObjectName(badge.QObject, presentation.badgeStyle)
 		refreshStyle(badge.QWidget)
 	}
 	for _, label := range []*qt.QLabel{w.installVersion, w.installPageVer} {
@@ -294,12 +362,19 @@ func (w *mainWindow) setInstallText(installed bool, versionText, detail string) 
 		}
 	}
 	if w.playButton != nil {
-		w.playButton.SetEnabled(installed)
-		if installed {
-			w.playButton.SetToolTip("Launch the installed official Roblox client")
-		} else {
-			w.playButton.SetToolTip("Install Roblox before launching")
+		w.playButton.SetEnabled(readiness == setupsvc.ReadinessLaunchInputs)
+		w.playButton.SetToolTip(presentation.playTooltip)
+	}
+	if w.playState != nil {
+		state := w.launch.View().State
+		if state != guimodel.LaunchStarting && state != guimodel.LaunchRunning {
+			w.playState.SetText(presentation.idleText)
 		}
+	}
+	if w.settingsClientStatus != nil {
+		w.settingsClientStatus.SetText(presentation.settingsText)
+		setObjectName(w.settingsClientStatus.QObject, presentation.settingsStyle)
+		refreshStyle(w.settingsClientStatus.QWidget)
 	}
 }
 
@@ -392,7 +467,7 @@ func (w *mainWindow) refreshLaunchState() {
 	}
 	if w.playButton != nil {
 		running := view.State == guimodel.LaunchStarting || view.State == guimodel.LaunchRunning
-		w.playButton.SetEnabled(!running && w.setup.View().Snapshot.Installed)
+		w.playButton.SetEnabled(!running && w.setup.View().Snapshot.LaunchReady())
 		if view.State == guimodel.LaunchStarting {
 			w.playButton.SetText("Launching…")
 			w.playState.SetText("Starting the official client in its own X11 window")
@@ -401,7 +476,7 @@ func (w *mainWindow) refreshLaunchState() {
 			w.playState.SetText("The Tipsy launcher closes while Roblox is running")
 		} else {
 			w.playButton.SetText("Play Roblox")
-			w.playState.SetText("Your Roblox sign-in remains in the client, not in Tipsy")
+			w.playState.SetText(installPresentation(w.installReadiness).idleText)
 		}
 	}
 	if view.State == guimodel.LaunchFailed && w.lastLaunchState != guimodel.LaunchFailed {

@@ -16,6 +16,7 @@ import (
 	qt "github.com/mappu/miqt/qt6"
 
 	guimodel "github.com/tipsy-linux/tipsy/internal/gui"
+	"github.com/tipsy-linux/tipsy/internal/setupsvc"
 )
 
 // TestOffscreenVisualProof constructs the real shell with synthetic data. It
@@ -65,10 +66,27 @@ func TestOffscreenVisualProof(t *testing.T) {
 		t.Fatalf("save offscreen visual proof to %s", path)
 	}
 
+	win.setInstallText(setupsvc.ReadinessRejected, "Verification rejected", rejectedReadinessMessage(setupsvc.ErrCompatibility))
+	qt.QCoreApplication_ProcessEvents()
+	if win.installBadge.Text() != "REJECTED" || win.installPageBadge.Text() != "REJECTED" || win.playButton.IsEnabled() {
+		t.Fatalf("rejected readiness did not disable Play on both status surfaces: home=%q install=%q enabled=%v", win.installBadge.Text(), win.installPageBadge.Text(), win.playButton.IsEnabled())
+	}
+	if !strings.Contains(win.installDetail.Text(), "Update Tipsy") || strings.Contains(win.installDetail.Text(), "could not be read") {
+		t.Fatalf("rejected readiness was not actionable: %q", win.installDetail.Text())
+	}
+	if !strings.Contains(win.settingsClientStatus.Text(), "rejected") || !strings.Contains(win.settingsClientStatus.Text(), "Play stays disabled") {
+		t.Fatalf("settings did not present rejected readiness: %q", win.settingsClientStatus.Text())
+	}
+	win.refreshSnapshot()
+	qt.QCoreApplication_ProcessEvents()
+
 	win.selectPage(2)
 	qt.QCoreApplication_ProcessEvents()
 	if win.settingsVSync == nil || win.settingsVSync.IsChecked() || win.settingsVSync.AccessibleName() != "VSync" {
 		t.Fatalf("VSync control did not render unchecked and accessible: %#v", win.settingsVSync)
+	}
+	if win.settingsClientStatus == nil || !strings.Contains(win.settingsClientStatus.Text(), "authenticated launch inputs") || !strings.Contains(win.settingsClientStatus.Text(), "live Home") {
+		t.Fatalf("settings client readiness was not truthful and visible: %#v", win.settingsClientStatus)
 	}
 	if win.settingsLowTexture == nil || win.settingsLowTexture.IsChecked() || win.settingsLowTexture.AccessibleName() != "Low texture mode" {
 		t.Fatalf("Low texture mode control did not render unchecked and accessible: %#v", win.settingsLowTexture)
@@ -371,8 +389,9 @@ func (s *secureVisualService) approvalCalls() []bool {
 func (visualService) Snapshot(context.Context) (guimodel.InstallSnapshot, error) {
 	return guimodel.InstallSnapshot{
 		Installed: true,
+		Readiness: setupsvc.ReadinessLaunchInputs,
 		Version:   "2.734.917 · synthetic",
-		Status:    "Verified official Android x86-64 client ready.",
+		Status:    guiLaunchInputsStatus,
 	}, nil
 }
 

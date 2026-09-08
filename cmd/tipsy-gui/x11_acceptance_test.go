@@ -16,6 +16,7 @@ import (
 	qt "github.com/mappu/miqt/qt6"
 
 	guimodel "github.com/tipsy-linux/tipsy/internal/gui"
+	"github.com/tipsy-linux/tipsy/internal/setupsvc"
 )
 
 // TestX11Acceptance is an opt-in, window-only acceptance pass. It must be run
@@ -159,10 +160,10 @@ func testWizardSurface(t *testing.T, win *mainWindow, service *acceptanceService
 	pumpEvents()
 	captureAtSizes(t, wizard.QWidget, "wizard-install-error")
 
-	phase.SetText("Ready")
-	message.SetText("Roblox is installed and ready to launch.")
+	phase.SetText("Launch inputs authenticated")
+	message.SetText("Roblox is installed with authenticated launch inputs.")
 	progress.SetValue(100)
-	errorLabel.SetText("Package identity verified. Installation is ready.")
+	errorLabel.SetText("Package identity and launch inputs authenticated. A live launch is still required to verify Home rendering and gameplay.")
 	setObjectName(errorLabel.QObject, "noticeSuccess")
 	refreshStyle(errorLabel.QWidget)
 	errorLabel.Show()
@@ -213,7 +214,7 @@ func testWizardSurface(t *testing.T, win *mainWindow, service *acceptanceService
 		t.Fatal(err)
 	}
 	waitForSetup(t, win.setup)
-	if view := win.setup.View(); view.State != guimodel.SetupComplete || !view.Snapshot.Installed {
+	if view := win.setup.View(); view.State != guimodel.SetupComplete || !view.Snapshot.LaunchReady() {
 		t.Fatalf("retry did not complete: %+v", view)
 	}
 	wizard.Close()
@@ -238,7 +239,7 @@ func testMainSurface(t *testing.T, win *mainWindow, service *acceptanceService) 
 	if !strings.Contains(win.doctorDetails.ToPlainText(), "X11 display") || !strings.Contains(win.doctorDetails.ToPlainText(), "intentionally long synthetic diagnostic") {
 		t.Fatal("Diagnostics did not render doctor details")
 	}
-	if win.installPageBadge.Text() != "READY" || !strings.Contains(win.installPageVer.Text(), "2.734.917") || !strings.Contains(win.installPageDetail.Text(), "Verified synthetic") {
+	if win.installPageBadge.Text() != "LAUNCH READY" || !strings.Contains(win.installPageVer.Text(), "2.734.917") || !strings.Contains(win.installPageDetail.Text(), "Authenticated launch inputs") {
 		t.Fatalf("Installation page status did not refresh: badge=%q version=%q detail=%q", win.installPageBadge.Text(), win.installPageVer.Text(), win.installPageDetail.Text())
 	}
 
@@ -535,7 +536,7 @@ type acceptanceService struct {
 
 func newAcceptanceService() *acceptanceService {
 	return &acceptanceService{
-		snapshot: guimodel.InstallSnapshot{Status: "No official Roblox client is installed."},
+		snapshot: guimodel.InstallSnapshot{Readiness: setupsvc.ReadinessNotInstalled, Status: guiNotInstalledStatus},
 		settings: guimodel.DefaultSettings(),
 		behavior: installFails,
 	}
@@ -576,7 +577,7 @@ func (s *acceptanceService) Install(ctx context.Context, request guimodel.Instal
 		return ctx.Err()
 	case installSucceeds:
 		s.mu.Lock()
-		s.snapshot = guimodel.InstallSnapshot{Installed: true, Version: "2.734.917 · synthetic", Status: "Verified synthetic client ready."}
+		s.snapshot = guimodel.InstallSnapshot{Installed: true, Readiness: setupsvc.ReadinessLaunchInputs, Version: "2.734.917 · synthetic", Status: guiLaunchInputsStatus}
 		s.mu.Unlock()
 		return nil
 	default:

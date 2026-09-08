@@ -20,13 +20,19 @@ import (
 // values into presentation-neutral GUI values and owns no package, settings,
 // or compatibility policy.
 type productionService struct {
-	installer *setupsvc.Service
+	installer setupBackend
 	settings  *clientsettings.Service
 
 	launchMu       sync.Mutex
 	launchBackend  authorizedLaunchBackend
 	preparedLaunch authorizedLaunchSession
 	launchActive   bool
+}
+
+type setupBackend interface {
+	Snapshot(context.Context) (setupsvc.InstallSnapshot, error)
+	AutomaticAvailability(context.Context) setupsvc.SourceAvailability
+	Install(context.Context, setupsvc.InstallRequest, setupsvc.ProgressFunc) (*setupsvc.InstallResult, error)
 }
 
 var _ guimodel.Service = (*productionService)(nil)
@@ -52,19 +58,67 @@ func newProductionService() guimodel.Service {
 }
 
 func (s *productionService) Snapshot(ctx context.Context) (guimodel.InstallSnapshot, error) {
+	if s == nil || s.installer == nil {
+		return guimodel.InstallSnapshot{}, fmt.Errorf("installation verification service is unavailable")
+	}
 	snapshot, err := s.installer.Snapshot(ctx)
 	if err != nil {
+		kind := setupsvc.ErrorKindOf(err)
+		if !errors.Is(err, context.Canceled) && kind != setupsvc.ErrCanceled && (snapshot.Readiness == setupsvc.ReadinessRejected || kind != "") {
+			return rejectedInstallSnapshot(kind), nil
+		}
 		return guimodel.InstallSnapshot{}, err
 	}
+	return guiInstallSnapshot(snapshot), nil
+}
+
+const (
+	guiNotInstalledStatus = "Not installed — no authenticated official Roblox client is active. Run Setup with an official Android x86-64 package."
+	guiLaunchInputsStatus = "Authenticated launch inputs verified. Play can attempt a live launch; Home rendering, input, audio, and gameplay are separate runtime results."
+)
+
+func guiInstallSnapshot(snapshot setupsvc.InstallSnapshot) guimodel.InstallSnapshot {
 	version := snapshot.VersionName
 	if version == "" && snapshot.VersionCode != 0 {
 		version = fmt.Sprintf("Version %d", snapshot.VersionCode)
 	}
-	statusText := "No official Roblox client is installed."
-	if snapshot.Installed {
-		statusText = "Verified official Android x86-64 client ready."
+	switch {
+	case snapshot.Readiness == setupsvc.ReadinessLaunchInputs && snapshot.Installed:
+		if version == "" {
+			version = "Authenticated client"
+		}
+		return guimodel.InstallSnapshot{Installed: true, Readiness: setupsvc.ReadinessLaunchInputs, Version: version, Status: guiLaunchInputsStatus}
+	case snapshot.Readiness == setupsvc.ReadinessRejected:
+		return rejectedInstallSnapshot("")
+	case snapshot.Readiness == setupsvc.ReadinessNotInstalled && !snapshot.Installed:
+		return guimodel.InstallSnapshot{Readiness: setupsvc.ReadinessNotInstalled, Version: "Not installed", Status: guiNotInstalledStatus}
+	default:
+		// A partial or contradictory positive verdict is never launch authority.
+		return rejectedInstallSnapshot(setupsvc.ErrIntegrity)
 	}
-	return guimodel.InstallSnapshot{Installed: snapshot.Installed, Version: version, Status: statusText}, nil
+}
+
+func rejectedInstallSnapshot(kind setupsvc.ErrorKind) guimodel.InstallSnapshot {
+	return guimodel.InstallSnapshot{
+		Readiness: setupsvc.ReadinessRejected,
+		Version:   "Verification rejected",
+		Status:    rejectedReadinessMessage(kind),
+	}
+}
+
+func rejectedReadinessMessage(kind setupsvc.ErrorKind) string {
+	switch kind {
+	case setupsvc.ErrCompatibility:
+		return "Rejected — the client's native interface is not compatible with this Tipsy build. Update Tipsy or reinstall a supported official client; launch remains disabled."
+	case setupsvc.ErrWrongPackage, setupsvc.ErrUntrustedSigner, setupsvc.ErrInvalidSignature:
+		return "Rejected — the installed package could not be authenticated as an authorized official Roblox client. Reinstall it from an authorized source; launch remains disabled."
+	case setupsvc.ErrMissingX8664, setupsvc.ErrUnsupportedSplit:
+		return "Rejected — the installed package is incomplete or lacks the required x86-64 client. Reinstall the complete official package set; launch remains disabled."
+	case setupsvc.ErrInvalidArchive, setupsvc.ErrIntegrity, setupsvc.ErrPolicy, setupsvc.ErrDowngrade:
+		return "Rejected — the active client failed integrity or authorization revalidation. Open Setup to repair it from an authorized official package; launch remains disabled."
+	default:
+		return "Rejected — the active client did not pass launch-input verification. Open Setup to repair it from an authorized official package; launch remains disabled."
+	}
 }
 
 func (s *productionService) AutomaticAvailability(ctx context.Context) guimodel.AutomaticAvailability {
@@ -78,7 +132,7 @@ func (s *productionService) AutomaticAvailability(ctx context.Context) guimodel.
 
 func (s *productionService) Install(ctx context.Context, request guimodel.InstallRequest, progress func(guimodel.InstallProgress)) error {
 	backendRequest := setupsvc.InstallRequest{Mode: setupsvc.InstallMode(request.Mode), LocalPaths: request.LocalPaths}
-	_, err := s.installer.Install(ctx, backendRequest, func(update setupsvc.InstallProgress) {
+	result, err := s.installer.Install(ctx, backendRequest, func(update setupsvc.InstallProgress) {
 		percent := phasePercent(update)
 		progress(guimodel.InstallProgress{Phase: phaseTitle(update.Phase), Message: update.Message, Percent: percent})
 	})
@@ -87,6 +141,9 @@ func (s *productionService) Install(ctx context.Context, request guimodel.Instal
 			return context.Canceled
 		}
 		return friendlySetupError(err)
+	}
+	if result == nil || !result.Snapshot.Installed || result.Snapshot.Readiness != setupsvc.ReadinessLaunchInputs {
+		return errors.New("installation finished without authenticated launch inputs; open Setup to retry with an authorized official package")
 	}
 	return nil
 }
@@ -315,7 +372,7 @@ func phaseTitle(phase setupsvc.ProgressPhase) string {
 	case setupsvc.PhaseCommitting:
 		return "Finishing installation"
 	case setupsvc.PhaseComplete:
-		return "Ready"
+		return "Launch inputs authenticated"
 	default:
 		return "Preparing"
 	}
@@ -364,6 +421,8 @@ func friendlySetupError(err error) error {
 		return fmt.Errorf("the split set is incomplete or unsupported; select the base APK and every required split: %w", err)
 	case setupsvc.ErrInvalidArchive, setupsvc.ErrIntegrity:
 		return fmt.Errorf("the package is damaged or failed integrity checks: %w", err)
+	case setupsvc.ErrCompatibility:
+		return errors.New("this client changed a required native Android interface and is not compatible with this Tipsy build; update Tipsy or choose a supported official client package")
 	case setupsvc.ErrSourceUnavailable, setupsvc.ErrSourceTrust:
 		return fmt.Errorf("automatic download is unavailable; choose an APK or bundle: %w", err)
 	default:

@@ -13,6 +13,8 @@ import (
 	"slices"
 	"strings"
 	"sync"
+
+	"github.com/tipsy-linux/tipsy/internal/setupsvc"
 )
 
 type Renderer string
@@ -216,9 +218,36 @@ type DoctorSummary struct {
 
 type InstallSnapshot struct {
 	Installed       bool
+	Readiness       setupsvc.ReadinessState
 	Version         string
 	UpdateAvailable bool
 	Status          string
+}
+
+// LaunchReady is deliberately narrower than playability. It means only that
+// the backend authenticated the static inputs required to attempt a launch.
+func (s InstallSnapshot) LaunchReady() bool {
+	return s.Installed && s.Readiness == setupsvc.ReadinessLaunchInputs
+}
+
+func normalizeInstallSnapshot(snapshot InstallSnapshot) InstallSnapshot {
+	switch {
+	case snapshot.Readiness == setupsvc.ReadinessLaunchInputs && snapshot.Installed:
+		return snapshot
+	case snapshot.Readiness == setupsvc.ReadinessNotInstalled && !snapshot.Installed:
+		return snapshot
+	case snapshot.Readiness == setupsvc.ReadinessRejected && !snapshot.Installed:
+		return snapshot
+	default:
+		// Missing, unknown, or contradictory authority never becomes a
+		// launch-ready boolean through the presentation model.
+		snapshot.Installed = false
+		snapshot.Readiness = setupsvc.ReadinessRejected
+		snapshot.Version = ""
+		snapshot.UpdateAvailable = false
+		snapshot.Status = ""
+		return snapshot
+	}
 }
 
 type AutomaticAvailability struct {
@@ -328,6 +357,7 @@ func NewSetupModel(service Service) *SetupModel {
 		State:    SetupIdle,
 		Request:  InstallRequest{Mode: InstallAutomatic},
 		Progress: InstallProgress{Percent: 0},
+		Snapshot: InstallSnapshot{Readiness: setupsvc.ReadinessNotInstalled},
 	}}
 }
 
@@ -341,7 +371,7 @@ func (m *SetupModel) Load(ctx context.Context) error {
 	}
 	automatic := m.service.AutomaticAvailability(ctx)
 	m.mu.Lock()
-	m.view.Snapshot = snapshot
+	m.view.Snapshot = normalizeInstallSnapshot(snapshot)
 	m.view.Automatic = automatic
 	if !automatic.Available {
 		m.view.Request.Mode = InstallLocal
@@ -405,15 +435,31 @@ func (m *SetupModel) Start(ctx context.Context) error {
 			}
 			m.mu.Unlock()
 		})
+		var snapshot InstallSnapshot
+		var snapshotErr error
+		if err == nil {
+			snapshot, snapshotErr = m.service.Snapshot(context.Background())
+			if snapshotErr == nil {
+				snapshot = normalizeInstallSnapshot(snapshot)
+			}
+		}
+
 		m.mu.Lock()
 		defer m.mu.Unlock()
 		m.cancel = nil
-		if err == nil {
+		if err == nil && snapshotErr != nil {
+			m.view.State = SetupFailed
+			m.view.Error = "Installation finished, but launch-input verification could not be completed. Open Setup and try again."
+			m.view.Progress.Message = "Verification unavailable"
+		} else if err == nil && !snapshot.LaunchReady() {
+			m.view.Snapshot = snapshot
+			m.view.State = SetupFailed
+			m.view.Error = "Installation finished, but authenticated launch inputs were not verified. Open Setup and try again."
+			m.view.Progress.Message = "Verification rejected"
+		} else if err == nil {
 			m.view.State = SetupComplete
-			m.view.Progress = InstallProgress{Phase: "Ready", Message: "Roblox is installed and ready to launch.", Percent: 100}
-			if snapshot, snapshotErr := m.service.Snapshot(context.Background()); snapshotErr == nil {
-				m.view.Snapshot = snapshot
-			}
+			m.view.Progress = InstallProgress{Phase: "Launch inputs authenticated", Message: "Roblox is installed with authenticated launch inputs.", Percent: 100}
+			m.view.Snapshot = snapshot
 		} else if errors.Is(err, context.Canceled) || errors.Is(workerCtx.Err(), context.Canceled) {
 			m.view.State = SetupCancelled
 			m.view.Error = "Installation cancelled. No account information was changed."
@@ -489,7 +535,7 @@ func AdvanceWizard(step WizardStep, setup SetupView) (WizardStep, error) {
 		}
 		return WizardInstall, nil
 	case WizardInstall:
-		if setup.State != SetupComplete {
+		if setup.State != SetupComplete || !setup.Snapshot.LaunchReady() {
 			return step, errors.New("finish installation before continuing")
 		}
 		return WizardReady, nil

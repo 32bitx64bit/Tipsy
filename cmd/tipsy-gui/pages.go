@@ -24,7 +24,7 @@ func (w *mainWindow) buildHomePage() *qt.QWidget {
 	copyLayout := qt.NewQVBoxLayout(copy)
 	copyLayout.SetContentsMargins(0, 0, 0, 0)
 	copyLayout.SetSpacing(8)
-	eyebrow := qt.NewQLabel3("READY WHEN YOU ARE")
+	eyebrow := qt.NewQLabel3("AUTHENTICATED BEFORE LAUNCH")
 	setObjectName(eyebrow.QObject, "heroEyebrow")
 	copyLayout.AddWidget(eyebrow.QWidget)
 	title := qt.NewQLabel3("Roblox on Linux.\nWithout the beige launcher.")
@@ -151,7 +151,7 @@ func (w *mainWindow) buildInstallPage() *qt.QWidget {
 	setObjectName(w.installPageDetail.QObject, "mutedText")
 	w.installPageDetail.SetWordWrap(true)
 	cardLayout.AddWidget(w.installPageDetail.QWidget)
-	description := qt.NewQLabel3("Tipsy verifies package identity and architecture before extraction. Account data is kept separately, so updating the client does not replace your sign-in storage.")
+	description := qt.NewQLabel3("Tipsy authenticates package identity, signing lineage, architecture, extracted bytes, and required native launch interfaces before enabling Play. This launch-ready check does not claim that a live Home frame or gameplay has succeeded.")
 	setObjectName(description.QObject, "bodyText")
 	description.SetWordWrap(true)
 	cardLayout.AddWidget(description.QWidget)
@@ -188,6 +188,12 @@ func (w *mainWindow) buildInstallPage() *qt.QWidget {
 
 func (w *mainWindow) buildSettingsPage() *qt.QWidget {
 	page, layout, scroll := newPage("Settings", "Tune the official client without hand-editing XML or launch flags.")
+
+	w.settingsClientStatus = qt.NewQLabel3("Client launch readiness is being checked.")
+	w.settingsClientStatus.SetWordWrap(true)
+	w.settingsClientStatus.SetAccessibleName("Client launch readiness")
+	setObjectName(w.settingsClientStatus.QObject, "noticeInfo")
+	layout.AddWidget(w.settingsClientStatus.QWidget)
 
 	card, cardLayout := newVerticalCard("card")
 	cardLayout.AddWidget(sectionLabel("Graphics and performance").QWidget)

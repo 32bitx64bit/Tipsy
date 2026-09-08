@@ -92,11 +92,12 @@ QLabel#wizardInfoCard, QLabel#wizardCheck {
 }
 QLabel#wizardOptionDetail { color: #66758f; margin-left: 24px; }
 QLabel#wizardProgressTitle { color: #10203f; font-size: 22px; font-weight: 800; }
-QLabel#statusReady, QLabel#statusWarning, QLabel#statusNeutral {
+QLabel#statusReady, QLabel#statusWarning, QLabel#statusRejected, QLabel#statusNeutral {
   border-radius: 8px; padding: 5px 9px; font-size: 10px; font-weight: 800;
 }
 QLabel#statusReady { background: #def7e9; color: #137353; }
 QLabel#statusWarning { background: #fff0c9; color: #805800; }
+QLabel#statusRejected { background: #ffe3ea; color: #a52647; }
 QLabel#statusNeutral { background: #e8edf5; color: #576681; }
 QLabel#noticeInfo, QLabel#noticeSuccess, QLabel#noticeWarning, QLabel#noticeError {
   border-radius: 9px; padding: 11px 13px;

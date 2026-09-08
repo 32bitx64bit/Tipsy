@@ -7,33 +7,41 @@ import (
 	"context"
 	"errors"
 	"slices"
+	"strings"
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/tipsy-linux/tipsy/internal/setupsvc"
 )
 
 type fakeService struct {
-	mu             sync.Mutex
-	snapshot       InstallSnapshot
-	doctor         DoctorSummary
-	automatic      AutomaticAvailability
-	settings       Settings
-	renderers      []RendererOption
-	installErr     error
-	installStarted chan struct{}
-	waitForCancel  bool
-	installCalls   []InstallRequest
-	applyCalls     []Settings
-	noRestart      bool
-	launches       int
-	launchReq      LaunchRequest
-	launchErr      error
-	launchStarted  bool
-	launchDone     chan struct{}
+	mu              sync.Mutex
+	snapshot        InstallSnapshot
+	doctor          DoctorSummary
+	automatic       AutomaticAvailability
+	settings        Settings
+	renderers       []RendererOption
+	installErr      error
+	installSnapshot *InstallSnapshot
+	installStarted  chan struct{}
+	waitForCancel   bool
+	installCalls    []InstallRequest
+	applyCalls      []Settings
+	noRestart       bool
+	launches        int
+	launchReq       LaunchRequest
+	launchErr       error
+	launchStarted   bool
+	launchDone      chan struct{}
 }
 
-func (f *fakeService) Snapshot(context.Context) (InstallSnapshot, error) { return f.snapshot, nil }
-func (f *fakeService) Doctor(context.Context) (DoctorSummary, error)     { return f.doctor, nil }
+func (f *fakeService) Snapshot(context.Context) (InstallSnapshot, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.snapshot, nil
+}
+func (f *fakeService) Doctor(context.Context) (DoctorSummary, error) { return f.doctor, nil }
 func (f *fakeService) AutomaticAvailability(context.Context) AutomaticAvailability {
 	return f.automatic
 }
@@ -43,6 +51,7 @@ func (f *fakeService) Install(ctx context.Context, req InstallRequest, progress 
 	started := f.installStarted
 	wait := f.waitForCancel
 	err := f.installErr
+	installSnapshot := f.installSnapshot
 	f.mu.Unlock()
 	if started != nil {
 		close(started)
@@ -53,7 +62,13 @@ func (f *fakeService) Install(ctx context.Context, req InstallRequest, progress 
 		return ctx.Err()
 	}
 	if err == nil {
-		f.snapshot = InstallSnapshot{Installed: true, Version: "2.0", Status: "Ready"}
+		snapshot := InstallSnapshot{Installed: true, Readiness: setupsvc.ReadinessLaunchInputs, Version: "2.0", Status: "Authenticated launch inputs"}
+		if installSnapshot != nil {
+			snapshot = *installSnapshot
+		}
+		f.mu.Lock()
+		f.snapshot = snapshot
+		f.mu.Unlock()
 	}
 	return err
 }
@@ -113,6 +128,10 @@ func TestWizardTransitionsAndSourceValidation(t *testing.T) {
 		t.Fatal("installation page advanced before success")
 	}
 	view.State = SetupComplete
+	if _, err := AdvanceWizard(step, view); err == nil {
+		t.Fatal("untyped complete snapshot advanced to the final page")
+	}
+	view.Snapshot = InstallSnapshot{Installed: true, Readiness: setupsvc.ReadinessLaunchInputs}
 	if got, err := AdvanceWizard(step, view); err != nil || got != WizardReady {
 		t.Fatalf("complete advance: step=%v err=%v", got, err)
 	}
@@ -120,6 +139,66 @@ func TestWizardTransitionsAndSourceValidation(t *testing.T) {
 	view.Request = InstallRequest{Mode: InstallLocal}
 	if _, err := AdvanceWizard(WizardSource, view); err == nil {
 		t.Fatal("empty local selection accepted")
+	}
+}
+
+func TestInstallSnapshotLaunchReadyRequiresExactTypedPositive(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name     string
+		snapshot InstallSnapshot
+		want     bool
+	}{
+		{name: "authenticated launch inputs", snapshot: InstallSnapshot{Installed: true, Readiness: setupsvc.ReadinessLaunchInputs}, want: true},
+		{name: "missing readiness", snapshot: InstallSnapshot{Installed: true}},
+		{name: "unknown readiness", snapshot: InstallSnapshot{Installed: true, Readiness: setupsvc.ReadinessState("future-value")}},
+		{name: "rejected positive", snapshot: InstallSnapshot{Installed: true, Readiness: setupsvc.ReadinessRejected}},
+		{name: "incomplete launch inputs", snapshot: InstallSnapshot{Readiness: setupsvc.ReadinessLaunchInputs}},
+		{name: "not installed", snapshot: InstallSnapshot{Readiness: setupsvc.ReadinessNotInstalled}},
+	}
+	for _, tt := range tests {
+		tt := tt
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			if got := tt.snapshot.LaunchReady(); got != tt.want {
+				t.Fatalf("LaunchReady()=%v for %+v, want %v", got, tt.snapshot, tt.want)
+			}
+		})
+	}
+}
+
+func TestSetupLoadNormalizesUnknownAndContradictoryReadiness(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name     string
+		snapshot InstallSnapshot
+		want     setupsvc.ReadinessState
+	}{
+		{name: "unknown false", snapshot: InstallSnapshot{Readiness: setupsvc.ReadinessState("future-value"), Status: "private raw detail"}, want: setupsvc.ReadinessRejected},
+		{name: "legacy untyped positive", snapshot: InstallSnapshot{Installed: true, Status: "legacy ready"}, want: setupsvc.ReadinessRejected},
+		{name: "incomplete positive", snapshot: InstallSnapshot{Readiness: setupsvc.ReadinessLaunchInputs}, want: setupsvc.ReadinessRejected},
+		{name: "contradictory not installed", snapshot: InstallSnapshot{Installed: true, Readiness: setupsvc.ReadinessNotInstalled}, want: setupsvc.ReadinessRejected},
+		{name: "contradictory rejection", snapshot: InstallSnapshot{Installed: true, Readiness: setupsvc.ReadinessRejected, Status: "private raw detail"}, want: setupsvc.ReadinessRejected},
+		{name: "explicit rejection", snapshot: InstallSnapshot{Readiness: setupsvc.ReadinessRejected, Status: "fixed presentation"}, want: setupsvc.ReadinessRejected},
+		{name: "explicit absence", snapshot: InstallSnapshot{Readiness: setupsvc.ReadinessNotInstalled}, want: setupsvc.ReadinessNotInstalled},
+	}
+	for _, tt := range tests {
+		tt := tt
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			model := NewSetupModel(&fakeService{snapshot: tt.snapshot})
+			if err := model.Load(context.Background()); err != nil {
+				t.Fatal(err)
+			}
+			got := model.View().Snapshot
+			if got.Readiness != tt.want || got.LaunchReady() {
+				t.Fatalf("normalized snapshot=%+v, want readiness %q and not launch-ready", got, tt.want)
+			}
+			validExplicitRejection := tt.snapshot.Readiness == setupsvc.ReadinessRejected && !tt.snapshot.Installed
+			if !validExplicitRejection && tt.want == setupsvc.ReadinessRejected && (got.Status != "" || got.Version != "") {
+				t.Fatalf("unknown verdict retained untrusted presentation content: %+v", got)
+			}
+		})
 	}
 }
 
@@ -137,7 +216,7 @@ func TestSetupSuccessProgressAndRetryableError(t *testing.T) {
 	}
 	waitForModel(t, model)
 	view := model.View()
-	if view.State != SetupComplete || view.Progress.Percent != 100 || !view.Snapshot.Installed {
+	if view.State != SetupComplete || view.Progress.Percent != 100 || !view.Snapshot.LaunchReady() {
 		t.Fatalf("unexpected completed view: %+v", view)
 	}
 	if len(fake.installCalls) != 1 || fake.installCalls[0].Mode != InstallAutomatic {
@@ -152,6 +231,44 @@ func TestSetupSuccessProgressAndRetryableError(t *testing.T) {
 	view = model.View()
 	if view.State != SetupFailed || view.Error == "" {
 		t.Fatalf("actionable failure missing: %+v", view)
+	}
+}
+
+func TestSetupCompletionRejectsNonAuthenticatedPostInstallSnapshot(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name     string
+		snapshot InstallSnapshot
+	}{
+		{name: "missing readiness", snapshot: InstallSnapshot{Installed: true, Status: "raw package detail"}},
+		{name: "unknown positive", snapshot: InstallSnapshot{Installed: true, Readiness: setupsvc.ReadinessState("future-value"), Status: "raw package detail"}},
+		{name: "typed rejected", snapshot: InstallSnapshot{Readiness: setupsvc.ReadinessRejected, Status: "content-free rejected state"}},
+		{name: "incomplete launch inputs", snapshot: InstallSnapshot{Readiness: setupsvc.ReadinessLaunchInputs}},
+	}
+	for _, tt := range tests {
+		tt := tt
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			fake := &fakeService{
+				automatic:       AutomaticAvailability{Available: true},
+				installSnapshot: &tt.snapshot,
+			}
+			model := NewSetupModel(fake)
+			if err := model.Load(context.Background()); err != nil {
+				t.Fatal(err)
+			}
+			if err := model.Start(context.Background()); err != nil {
+				t.Fatal(err)
+			}
+			waitForModel(t, model)
+			view := model.View()
+			if view.State != SetupFailed || view.Snapshot.LaunchReady() || !strings.Contains(view.Error, "authenticated launch inputs were not verified") {
+				t.Fatalf("non-authenticated completion view=%+v", view)
+			}
+			if strings.Contains(view.Error, "raw package detail") || strings.Contains(view.Error, "content-free rejected state") {
+				t.Fatalf("completion error copied backend status: %q", view.Error)
+			}
+		})
 	}
 }
 

@@ -13,7 +13,7 @@ import (
 )
 
 func (w *mainWindow) ShowSetupWizard(firstRun bool) {
-	_ = w.setup.Load(context.Background())
+	w.refreshSnapshot()
 	wizard := qt.NewQWizard(w.win.QWidget)
 	wizard.SetWindowTitle("Set up Tipsy")
 	wizard.SetWindowIcon(w.icon)
@@ -118,13 +118,20 @@ func (w *mainWindow) ShowSetupWizard(firstRun bool) {
 			retry.Show()
 			wizard.Button(qt.QWizard__BackButton).SetEnabled(true)
 		case guimodel.SetupComplete:
-			errorLabel.SetText("Package identity verified. Installation is ready.")
-			setObjectName(errorLabel.QObject, "noticeSuccess")
+			if view.Snapshot.LaunchReady() {
+				errorLabel.SetText("Package identity and launch inputs authenticated. A live launch is still required to verify Home rendering and gameplay.")
+				setObjectName(errorLabel.QObject, "noticeSuccess")
+				retry.Hide()
+				wizard.Button(qt.QWizard__BackButton).SetEnabled(false)
+			} else {
+				errorLabel.SetText("Installation finished, but launch-input revalidation was rejected. Retry Setup before launching.")
+				setObjectName(errorLabel.QObject, "noticeError")
+				retry.Show()
+				wizard.Button(qt.QWizard__BackButton).SetEnabled(true)
+			}
 			refreshStyle(errorLabel.QWidget)
 			errorLabel.Show()
 			cancelInstall.Hide()
-			retry.Hide()
-			wizard.Button(qt.QWizard__BackButton).SetEnabled(false)
 		}
 		if view.State != lastState {
 			lastState = view.State
@@ -146,7 +153,8 @@ func (w *mainWindow) ShowSetupWizard(firstRun bool) {
 		startInstall()
 	})
 	install.OnIsComplete(func(_ func() bool) bool {
-		return w.setup.View().State == guimodel.SetupComplete
+		view := w.setup.View()
+		return view.State == guimodel.SetupComplete && view.Snapshot.LaunchReady()
 	})
 	cancelInstall.OnClicked(func() {
 		cancelInstall.SetEnabled(false)
@@ -217,7 +225,7 @@ func (w *mainWindow) buildWizardSide(firstRun bool) wizardSidebar {
 	layout.AddWidget(title.QWidget)
 	layout.AddSpacing(10)
 	var stepLabels []*qt.QLabel
-	for index, text := range []string{"Welcome", "System check", "Roblox package", "Install", "Ready"} {
+	for index, text := range []string{"Welcome", "System check", "Roblox package", "Install", "Launch ready"} {
 		stepLabel := qt.NewQLabel3(fmt.Sprintf("%02d   %s", index+1, text))
 		setObjectName(stepLabel.QObject, "wizardStep")
 		stepLabel.SetAccessibleName("Setup step: " + text)
@@ -264,6 +272,16 @@ func (w *mainWindow) buildWelcomeWizardPage(firstRun bool) *qt.QWizardPage {
 	text.SetWordWrap(true)
 	setObjectName(text.QObject, "wizardLead")
 	layout.AddWidget(text.QWidget)
+	current := installPresentation(w.installReadiness)
+	status := w.setup.View().Snapshot.Status
+	if status == "" {
+		status = "Installation verification is unavailable. Check the privacy-safe logs before continuing."
+	}
+	clientStatus := qt.NewQLabel3("<b>Current client status: " + html.EscapeString(current.badge) + "</b><br>" + html.EscapeString(status))
+	clientStatus.SetTextFormat(qt.RichText)
+	clientStatus.SetWordWrap(true)
+	setObjectName(clientStatus.QObject, current.settingsStyle)
+	layout.AddWidget(clientStatus.QWidget)
 	card := qt.NewQLabel3("<b>What Tipsy does</b><br><br>• Runs local readiness checks<br>• Accepts APK, APKM, XAPK, ZIP, or split packages<br>• Verifies the package before extraction<br>• Keeps Roblox sign-in inside the official client")
 	card.SetTextFormat(qt.RichText)
 	card.SetWordWrap(true)
@@ -397,7 +415,7 @@ func (w *mainWindow) buildInstallWizardPage() (*qt.QWizardPage, *qt.QProgressBar
 
 func (w *mainWindow) buildReadyWizardPage(wizard *qt.QWizard) *qt.QWizardPage {
 	page := qt.NewQWizardPage2()
-	layout := w.newWizardPageLayout(page, "Tipsy is ready", "The official client is installed. You can launch now or adjust settings first.")
+	layout := w.newWizardPageLayout(page, "Authenticated launch inputs", "The official client package is installed and authenticated for launch. Live Home rendering remains a separate launch result.")
 	page.SetFinalPage(true)
 	layout.SetSpacing(16)
 	mark := qt.NewQLabel2()
@@ -405,7 +423,7 @@ func (w *mainWindow) buildReadyWizardPage(wizard *qt.QWizard) *qt.QWizardPage {
 	mark.SetFixedSize2(112, 112)
 	mark.SetAccessibleName("Tipsy logo")
 	layout.AddWidget(mark.QWidget)
-	ready := qt.NewQLabel3("<b>Installation complete.</b><br>Your persistent Roblox app data is stored separately from files replaced by client updates.")
+	ready := qt.NewQLabel3("<b>Installation and static compatibility checks passed.</b><br>Play can now attempt a live launch. Rendering, networking, input, audio, and gameplay are verified only by the running client. Persistent Roblox app data remains separate from files replaced by updates.")
 	ready.SetTextFormat(qt.RichText)
 	ready.SetWordWrap(true)
 	setObjectName(ready.QObject, "noticeSuccess")
