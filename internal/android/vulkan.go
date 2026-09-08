@@ -9,12 +9,6 @@ package android
 #cgo LDFLAGS: -lX11 -lX11-xcb -lxcb -ldl -pthread
 #include "android_bridge.h"
 #include <stdlib.h>
-void *tipsy_dlopen(const char *filename, int flags);
-void *tipsy_dlsym(void *handle, const char *symbol);
-uint64_t tipsy_vk_set_present_timing(int enabled);
-uint32_t tipsy_vk_present_timing_snapshot(uint64_t after, uint64_t *out_ns,
-	uint32_t capacity, uint64_t *out_cursor, uint64_t *out_overwritten);
-void tipsy_test_vk_note_present_result(int32_t result, uint64_t now_ns);
 */
 import "C"
 

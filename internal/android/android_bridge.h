@@ -182,11 +182,15 @@ void tipsy_vk_set_vsync(int enabled);
 int tipsy_vk_vsync_enabled(void);
 void tipsy_vk_set_present_stats(int enabled);
 int tipsy_vk_present_stats_enabled(void);
+uint64_t tipsy_vk_set_present_timing(int enabled);
+uint32_t tipsy_vk_present_timing_snapshot(uint64_t after, uint64_t *out_ns,
+	uint32_t capacity, uint64_t *out_cursor, uint64_t *out_overwritten);
 void tipsy_vk_present_stats(uint64_t *successful_presents, uint64_t *first_ns,
                             uint64_t *last_ns);
 void tipsy_vk_reset_present_stats(void);
 void tipsy_test_vk_record_present(uint64_t now_ns);
 void tipsy_test_vk_note_present_success(void);
+void tipsy_test_vk_note_present_result(int32_t result, uint64_t now_ns);
 int tipsy_test_vk_proc_is_wrapped(const char *name);
 int tipsy_test_vk_proc_is_host_passthrough(const char *name);
 int tipsy_test_vk_android_surface_advertised(const char **host_names, uint32_t n);
@@ -281,6 +285,10 @@ int tipsy_test_glibc_bionic_ai_addr_null(void);
 AAssetManager *tipsy_AAssetManager_singleton(void);
 AAsset *tipsy_AAsset_from_buffer(void *buf, int64_t len, int owned, int fd);
 
+void *tipsy_dlopen(const char *filename, int flags);
+void *tipsy_dlsym(void *handle, const char *symbol);
+int tipsy_dlclose(void *handle);
+char *tipsy_dlerror(void);
 void *tipsy_dlhandle_new(const char *soname);
 const char *tipsy_dlhandle_soname(void *handle);
 int tipsy_dlhandle_valid(void *handle);
