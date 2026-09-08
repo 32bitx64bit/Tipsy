@@ -45,6 +45,7 @@ type mainWindow struct {
 	settingsDiscordPresence *qt.QCheckBox
 	settingsDiscordJoin     *qt.QCheckBox
 	settingsDisplay         *qt.QComboBox
+	settingsStartFullscreen *qt.QCheckBox
 	settingsDisplayKeys     []string
 	settingsSyncing         bool
 	settingsApply           *qt.QPushButton

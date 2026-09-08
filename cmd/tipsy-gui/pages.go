@@ -267,9 +267,16 @@ func (w *mainWindow) buildSettingsPage() *qt.QWidget {
 	w.settingsDisplay.SetToolTip("Main monitor is the default. Follow mouse restores the previous pointer-based window-manager placement.")
 	w.settingsDisplay.SetMaximumWidth(560)
 	form.AddRow3("Default monitor", w.settingsDisplay.QWidget)
+
+	w.settingsStartFullscreen = qt.NewQCheckBox3(startFullscreenToggleText(false))
+	setObjectName(w.settingsStartFullscreen.QObject, "vsyncToggle")
+	w.settingsStartFullscreen.SetAccessibleName("Start Roblox fullscreen")
+	w.settingsStartFullscreen.SetAccessibleDescription("When enabled, Tipsy asks the desktop to fullscreen each new Roblox window. This is a Tipsy host startup preference; it does not mirror or change Roblox's in-app fullscreen toggle.")
+	w.settingsStartFullscreen.SetToolTip("Off by default. Applies to the next Roblox window and does not mirror Roblox's in-app fullscreen toggle.")
+	form.AddRow3("Start Roblox fullscreen", w.settingsStartFullscreen.QWidget)
 	cardLayout.AddLayout(form.QLayout)
 
-	w.settingsHint = qt.NewQLabel3("Roblox must be restarted before renderer, frame-rate, VSync, or texture quality changes take effect. Discord Rich Presence applies while Roblox is running. The default monitor applies to the next Tipsy or Roblox window.")
+	w.settingsHint = qt.NewQLabel3("Roblox must be restarted before renderer, frame-rate, VSync, or texture quality changes take effect. Discord Rich Presence applies while Roblox is running. The default monitor applies to the next Tipsy or Roblox window; Start Roblox fullscreen applies to the next Roblox window.")
 	w.settingsHint.SetWordWrap(true)
 	setObjectName(w.settingsHint.QObject, "noticeInfo")
 	cardLayout.AddWidget(w.settingsHint.QWidget)
@@ -278,12 +285,12 @@ func (w *mainWindow) buildSettingsPage() *qt.QWidget {
 	actions.AddStretch()
 	w.settingsReset = qt.NewQPushButton3("Reset defaults")
 	setObjectName(w.settingsReset.QObject, "secondaryButton")
-	w.settingsReset.SetAccessibleDescription("Restore automatic renderer and frame-rate defaults with VSync disabled, high-quality textures, Discord Rich Presence on, Join button off, and windows on the main monitor")
+	w.settingsReset.SetAccessibleDescription("Restore automatic renderer and frame-rate defaults with VSync disabled, high-quality textures, Discord Rich Presence on, Join button off, new Roblox windows windowed, and windows on the main monitor")
 	w.settingsReset.OnClicked(w.resetSettings)
 	actions.AddWidget(w.settingsReset.QWidget)
 	w.settingsApply = qt.NewQPushButton3("Apply changes")
 	setObjectName(w.settingsApply.QObject, "primaryButton")
-	w.settingsApply.SetAccessibleDescription("Save renderer, frame-rate, VSync, texture quality, Discord, and default-monitor settings")
+	w.settingsApply.SetAccessibleDescription("Save renderer, frame-rate, VSync, texture quality, Discord, default-monitor, and Tipsy fullscreen-start settings")
 	w.settingsApply.OnClicked(w.applySettings)
 	actions.AddWidget(w.settingsApply.QWidget)
 	cardLayout.AddLayout(actions.QLayout)
@@ -300,6 +307,7 @@ func (w *mainWindow) buildSettingsPage() *qt.QWidget {
 		w.settingsDiscordPresence.SetEnabled(false)
 		w.settingsDiscordJoin.SetEnabled(false)
 		w.settingsDisplay.SetEnabled(false)
+		w.settingsStartFullscreen.SetEnabled(false)
 		w.settingsApply.SetEnabled(false)
 		w.settingsReset.SetEnabled(false)
 		w.populateDisplayChoices(guimodel.DisplayPrimary)
@@ -325,6 +333,10 @@ func (w *mainWindow) buildSettingsPage() *qt.QWidget {
 			w.settingsEdited()
 		})
 		w.settingsDisplay.OnCurrentIndexChanged(func(int) { w.settingsEdited() })
+		w.settingsStartFullscreen.OnToggled(func(enabled bool) {
+			w.settingsStartFullscreen.SetText(startFullscreenToggleText(enabled))
+			w.settingsEdited()
+		})
 		w.updateSettingsControls()
 	}
 
@@ -375,6 +387,8 @@ func (w *mainWindow) bindSettings(settings guimodel.Settings) {
 	w.settingsDiscordJoin.SetChecked(settings.DiscordJoinButton)
 	w.settingsDiscordJoin.SetText(discordJoinToggleText(settings.DiscordJoinButton))
 	w.populateDisplayChoices(settings.Display)
+	w.settingsStartFullscreen.SetChecked(settings.StartFullscreen)
+	w.settingsStartFullscreen.SetText(startFullscreenToggleText(settings.StartFullscreen))
 }
 
 func (w *mainWindow) populateDisplayChoices(selected string) {
@@ -396,7 +410,7 @@ func (w *mainWindow) populateDisplayChoices(selected string) {
 }
 
 func (w *mainWindow) settingsEdited() {
-	if w.settingsRenderer == nil || w.settingsVSync == nil || w.settingsLowTexture == nil || w.settingsDiscordPresence == nil || w.settingsDiscordJoin == nil || w.settingsSyncing {
+	if w.settingsRenderer == nil || w.settingsVSync == nil || w.settingsLowTexture == nil || w.settingsDiscordPresence == nil || w.settingsDiscordJoin == nil || w.settingsStartFullscreen == nil || w.settingsSyncing {
 		return
 	}
 	renderer := guimodel.RendererAuto
@@ -418,7 +432,7 @@ func (w *mainWindow) settingsEdited() {
 			display = w.settingsDisplayKeys[idx]
 		}
 	}
-	w.settings.Edit(guimodel.Settings{Renderer: renderer, FPSMode: fpsMode, FrameRate: w.settingsFPS.Value(), VSync: w.settingsVSync.IsChecked(), LowTextureMode: w.settingsLowTexture.IsChecked(), Display: display, DiscordRichPresence: w.settingsDiscordPresence.IsChecked(), DiscordJoinButton: w.settingsDiscordJoin.IsChecked()})
+	w.settings.Edit(guimodel.Settings{Renderer: renderer, FPSMode: fpsMode, FrameRate: w.settingsFPS.Value(), VSync: w.settingsVSync.IsChecked(), LowTextureMode: w.settingsLowTexture.IsChecked(), Display: display, StartFullscreen: w.settingsStartFullscreen.IsChecked(), DiscordRichPresence: w.settingsDiscordPresence.IsChecked(), DiscordJoinButton: w.settingsDiscordJoin.IsChecked()})
 	w.updateSettingsControls()
 }
 
@@ -456,7 +470,7 @@ func (w *mainWindow) updateSettingsControls() {
 		w.settingsHint.SetText("Changes saved. Restart Roblox to apply them.")
 		setObjectName(w.settingsHint.QObject, "noticeSuccess")
 	} else {
-		w.settingsHint.SetText("Roblox must be restarted before renderer, frame-rate, VSync, or texture quality changes take effect. Discord Rich Presence applies while Roblox is running. The default monitor applies to the next Tipsy or Roblox window.")
+		w.settingsHint.SetText("Roblox must be restarted before renderer, frame-rate, VSync, or texture quality changes take effect. Discord Rich Presence applies while Roblox is running. The default monitor applies to the next Tipsy or Roblox window; Start Roblox fullscreen applies to the next Roblox window.")
 		setObjectName(w.settingsHint.QObject, "noticeInfo")
 	}
 	refreshStyle(w.settingsHint.QWidget)
@@ -621,7 +635,7 @@ func (w *mainWindow) runDoctor() {
 }
 
 func settingsProfileText(settings guimodel.Settings) string {
-	return rendererDisplay(settings.Renderer) + " · " + fpsDisplay(settings) + " · " + vsyncDisplay(settings) + " · " + textureDisplay(settings) + " · " + discordDisplay(settings) + " · " + displayTargetDisplay(settings)
+	return rendererDisplay(settings.Renderer) + " · " + fpsDisplay(settings) + " · " + vsyncDisplay(settings) + " · " + textureDisplay(settings) + " · " + discordDisplay(settings) + " · " + displayTargetDisplay(settings) + " · " + fullscreenStartDisplay(settings)
 }
 
 func rendererDisplay(renderer guimodel.Renderer) string {
@@ -707,6 +721,20 @@ func discordJoinToggleText(enabled bool) string {
 		return "✓ Join button — opens the public Roblox experience page"
 	}
 	return "Join button off — Discord activity has no Join control"
+}
+
+func fullscreenStartDisplay(settings guimodel.Settings) string {
+	if settings.StartFullscreen {
+		return "Fullscreen on launch"
+	}
+	return "Windowed on launch"
+}
+
+func startFullscreenToggleText(enabled bool) string {
+	if enabled {
+		return "✓ Start Roblox fullscreen — Tipsy asks the desktop to fullscreen new Roblox windows"
+	}
+	return "Start Roblox fullscreen off — new Roblox windows open windowed"
 }
 
 func displayTargetDisplay(settings guimodel.Settings) string {

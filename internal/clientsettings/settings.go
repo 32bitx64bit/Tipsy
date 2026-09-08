@@ -166,6 +166,11 @@ type Settings struct {
 	// restores window-manager mouse placement, and any other value is an
 	// XRandR/Qt output name. A missing output falls back to primary at spawn.
 	Display string `json:"display,omitempty"`
+	// StartFullscreen is a Tipsy-owned window preference. When enabled, Tipsy
+	// asks the desktop window manager to fullscreen a newly created Roblox
+	// window. It does not read, change, or mirror Roblox's in-app fullscreen
+	// setting. The missing JSON field keeps existing installations windowed.
+	StartFullscreen bool `json:"startFullscreen"`
 	// DiscordRichPresence shows the current experience on Discord. Missing
 	// JSON defaults on; DiscordJoinButton stays off unless explicitly enabled.
 	DiscordRichPresence bool `json:"discordRichPresence"`
@@ -271,17 +276,20 @@ func NormalizeDisplay(display string) string {
 	return display
 }
 
-// discordOnlyChange reports a draft that differs from saved settings only in
-// Discord Rich Presence toggles, which apply while Roblox is running and
-// must not take the client lock.
-func discordOnlyChange(draft, saved Settings) bool {
+// settingsDocumentOnlyChange reports a draft that differs only in host-side
+// startup preferences or Discord Rich Presence. Neither changes Roblox's XML
+// nor a live client, so it is safe to save while Roblox holds the client lock.
+func settingsDocumentOnlyChange(draft, saved Settings) bool {
 	draft = normalized(draft)
 	saved = normalized(saved)
-	if draft.DiscordRichPresence == saved.DiscordRichPresence && draft.DiscordJoinButton == saved.DiscordJoinButton {
+	if draft.DiscordRichPresence == saved.DiscordRichPresence &&
+		draft.DiscordJoinButton == saved.DiscordJoinButton &&
+		draft.StartFullscreen == saved.StartFullscreen {
 		return false
 	}
 	draft.DiscordRichPresence, draft.DiscordJoinButton = false, false
 	saved.DiscordRichPresence, saved.DiscordJoinButton = false, false
+	draft.StartFullscreen, saved.StartFullscreen = false, false
 	return draft == saved
 }
 
@@ -310,7 +318,7 @@ func (s *Service) Apply(ctx context.Context, wanted Settings) (ApplyResult, erro
 	if err != nil {
 		return ApplyResult{}, err
 	}
-	if discordOnlyChange(wanted, oldDoc.Settings) {
+	if settingsDocumentOnlyChange(wanted, oldDoc.Settings) {
 		return s.applyLocked(ctx, wanted)
 	}
 	release, err := AcquireClientLock()
@@ -381,6 +389,7 @@ func (s *Service) applyLocked(ctx context.Context, wanted Settings) (ApplyResult
 
 	graphicsChanged := oldDoc.Renderer != wanted.Renderer || oldDoc.FrameRate != wanted.FrameRate || oldDoc.VSync != wanted.VSync || oldDoc.LowTextureMode != wanted.LowTextureMode
 	placementChanged := oldDoc.Display != wanted.Display
+	fullscreenChanged := oldDoc.StartFullscreen != wanted.StartFullscreen
 	discordChanged := oldDoc.DiscordRichPresence != wanted.DiscordRichPresence || oldDoc.DiscordJoinButton != wanted.DiscordJoinButton
 	docChanged := oldDoc != newDoc
 	if xmlChanged {
@@ -400,7 +409,10 @@ func (s *Service) applyLocked(ctx context.Context, wanted Settings) (ApplyResult
 	if placementChanged && !graphicsChanged && !xmlChanged {
 		applyNote = noteForDisplay(wanted.Display)
 	}
-	if discordChanged && !graphicsChanged && !xmlChanged && !placementChanged {
+	if fullscreenChanged && !graphicsChanged && !xmlChanged && !placementChanged {
+		applyNote = noteForStartFullscreen(wanted.StartFullscreen)
+	}
+	if discordChanged && !graphicsChanged && !xmlChanged && !placementChanged && !fullscreenChanged {
 		applyNote = noteForDiscord(wanted)
 	}
 	return ApplyResult{
@@ -560,6 +572,13 @@ func noteForDisplay(display string) string {
 	}
 }
 
+func noteForStartFullscreen(enabled bool) string {
+	if enabled {
+		return "The next Roblox window will ask the desktop to start fullscreen."
+	}
+	return "The next Roblox window will start windowed."
+}
+
 func noteForDiscord(s Settings) string {
 	if !s.DiscordRichPresence {
 		return "Discord Rich Presence is off. The change applies while Roblox is running."
@@ -605,6 +624,7 @@ type persistedWire struct {
 	VSync               bool      `json:"vsync"`
 	LowTextureMode      bool      `json:"lowTextureMode"`
 	Display             string    `json:"display,omitempty"`
+	StartFullscreen     bool      `json:"startFullscreen"`
 	DiscordRichPresence *bool     `json:"discordRichPresence"`
 	DiscordJoinButton   bool      `json:"discordJoinButton"`
 	FPSOwned            bool      `json:"fpsOwned,omitempty"`
@@ -631,6 +651,7 @@ func decodePersisted(data []byte, got *persistedSettings) error {
 			VSync:               wire.VSync,
 			LowTextureMode:      wire.LowTextureMode,
 			Display:             wire.Display,
+			StartFullscreen:     wire.StartFullscreen,
 			DiscordRichPresence: presence,
 			DiscordJoinButton:   wire.DiscordJoinButton,
 		},

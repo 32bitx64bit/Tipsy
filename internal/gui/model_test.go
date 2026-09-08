@@ -241,6 +241,33 @@ func TestLowTextureModeDefaultsOffAndResetsToHighQuality(t *testing.T) {
 	}
 }
 
+func TestStartFullscreenDefaultsOffPersistsAndResets(t *testing.T) {
+	defaults := DefaultSettings()
+	if defaults.StartFullscreen {
+		t.Fatal("StartFullscreen defaulted on")
+	}
+	fake := &fakeService{settings: defaults, noRestart: true}
+	model := NewSettingsModel(fake)
+	if err := model.Load(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+
+	want := defaults
+	want.StartFullscreen = true
+	view := model.Edit(want)
+	if !view.Dirty || view.ValidationError != "" || !view.Draft.StartFullscreen {
+		t.Fatalf("start fullscreen edit=%+v", view)
+	}
+	result, err := model.Apply(context.Background())
+	if err != nil || result.RestartRequired || len(fake.applyCalls) != 1 || !fake.applyCalls[0].StartFullscreen {
+		t.Fatalf("start fullscreen apply result=%+v err=%v calls=%+v", result, err, fake.applyCalls)
+	}
+	reset, err := model.Reset(context.Background())
+	if err != nil || reset.StartFullscreen || model.View().Dirty {
+		t.Fatalf("start fullscreen reset=%+v err=%v view=%+v", reset, err, model.View())
+	}
+}
+
 func TestDiscordPresenceDefaultsOnAndDoesNotRestart(t *testing.T) {
 	defaults := DefaultSettings()
 	if !defaults.DiscordRichPresence || defaults.DiscordJoinButton {

@@ -170,6 +170,46 @@ func TestVSyncDefaultsOffAndMigratesExistingSettings(t *testing.T) {
 	}
 }
 
+func TestStartFullscreenDefaultsOffPersistsAndResets(t *testing.T) {
+	s := testService(t)
+	writeXML(t, s, "-1")
+	if err := os.MkdirAll(filepath.Dir(s.Path), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	old := []byte(`{"renderer":"auto","frameRate":{"mode":"auto"}}`)
+	if err := os.WriteFile(s.Path, old, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := s.Load(context.Background())
+	if err != nil || got.StartFullscreen {
+		t.Fatalf("old config fullscreen=%+v err=%v", got, err)
+	}
+	unchanged, err := os.ReadFile(s.Path)
+	if err != nil || !bytes.Equal(unchanged, old) {
+		t.Fatalf("load rewrote old config=%q err=%v", unchanged, err)
+	}
+
+	got.StartFullscreen = true
+	result, err := s.Apply(context.Background(), got)
+	if err != nil || result.RestartRequired || !result.Settings.StartFullscreen || !strings.Contains(result.FrameRateNote, "next Roblox window") {
+		t.Fatalf("enable start fullscreen result=%+v err=%v", result, err)
+	}
+	reloaded, err := s.Load(context.Background())
+	if err != nil || !reloaded.StartFullscreen {
+		t.Fatalf("reloaded start fullscreen=%+v err=%v", reloaded, err)
+	}
+	raw, err := os.ReadFile(s.Path)
+	if err != nil || !bytes.Contains(raw, []byte(`"startFullscreen": true`)) {
+		t.Fatalf("persisted start fullscreen=%q err=%v", raw, err)
+	}
+
+	reset, err := s.Reset(context.Background())
+	if err != nil || reset.StartFullscreen || reset != Default() {
+		t.Fatalf("reset start fullscreen=%+v err=%v", reset, err)
+	}
+}
+
 func TestDisplayDefaultsToPrimaryAndPointerDoesNotRestart(t *testing.T) {
 	s := testService(t)
 	writeXML(t, s, "-1")
@@ -594,7 +634,7 @@ func TestClientLockBlocksApply(t *testing.T) {
 	}
 }
 
-func TestClientLockAllowsDiscordOnlyApply(t *testing.T) {
+func TestClientLockAllowsSettingsDocumentOnlyApply(t *testing.T) {
 	s := testService(t)
 	if _, err := s.Apply(context.Background(), Default()); err != nil {
 		t.Fatal(err)
@@ -616,6 +656,11 @@ func TestClientLockAllowsDiscordOnlyApply(t *testing.T) {
 	got, err := s.Load(context.Background())
 	if err != nil || !got.DiscordJoinButton || !got.DiscordRichPresence {
 		t.Fatalf("loaded=%+v err=%v", got, err)
+	}
+	wanted.StartFullscreen = true
+	result, err = s.Apply(context.Background(), wanted)
+	if err != nil || result.RestartRequired || !wanted.StartFullscreen || !strings.Contains(result.FrameRateNote, "start fullscreen") {
+		t.Fatalf("fullscreen-only apply=%+v err=%v", result, err)
 	}
 	wanted.VSync = true
 	if _, err := s.Apply(context.Background(), wanted); err == nil || !strings.Contains(err.Error(), "running") {

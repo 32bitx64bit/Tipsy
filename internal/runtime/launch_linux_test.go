@@ -67,6 +67,69 @@ func TestInputDispatchInterval(t *testing.T) {
 	}
 }
 
+type recordingFullscreenWindow struct {
+	requests []bool
+	err      error
+	order    *[]string
+}
+
+func (w *recordingFullscreenWindow) SetFullscreen(enabled bool) error {
+	w.requests = append(w.requests, enabled)
+	if w.order != nil {
+		*w.order = append(*w.order, "ewmh-fullscreen")
+	}
+	return w.err
+}
+
+func TestStartFullscreenPolicyDefaultIsWindowed(t *testing.T) {
+	if (LaunchOptions{}).StartFullscreen {
+		t.Fatal("zero LaunchOptions unexpectedly requests fullscreen")
+	}
+	if startFullscreenRequested(LaunchOptions{}, clientsettings.Default()) {
+		t.Fatal("default launch policy and settings unexpectedly request fullscreen")
+	}
+	w := &recordingFullscreenWindow{}
+	if err := requestStartFullscreen(w, false); err != nil {
+		t.Fatalf("disabled fullscreen policy: %v", err)
+	}
+	if len(w.requests) != 0 {
+		t.Fatalf("disabled fullscreen policy sent requests %#v", w.requests)
+	}
+}
+
+func TestStartFullscreenPolicyUsesExplicitOrPersistedHostSetting(t *testing.T) {
+	settings := clientsettings.Default()
+	settings.StartFullscreen = true
+	if !startFullscreenRequested(LaunchOptions{}, settings) {
+		t.Fatal("persisted host fullscreen setting was ignored")
+	}
+	if !startFullscreenRequested(LaunchOptions{StartFullscreen: true}, clientsettings.Default()) {
+		t.Fatal("explicit host fullscreen launch policy was ignored")
+	}
+}
+
+func TestStartFullscreenPolicyRequestsEWMHBeforeClientLifecycle(t *testing.T) {
+	var order []string
+	w := &recordingFullscreenWindow{order: &order}
+	if err := requestStartFullscreen(w, true); err != nil {
+		t.Fatalf("start fullscreen request: %v", err)
+	}
+	order = append(order, "client-lifecycle")
+	if got, want := w.requests, []bool{true}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("fullscreen requests = %#v, want %#v", got, want)
+	}
+	if got, want := order, []string{"ewmh-fullscreen", "client-lifecycle"}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("launch order = %#v, want %#v", got, want)
+	}
+}
+
+func TestStartFullscreenPolicyPropagatesEWMHError(t *testing.T) {
+	w := &recordingFullscreenWindow{err: x11.ErrFullscreen}
+	if err := requestStartFullscreen(w, true); !errors.Is(err, x11.ErrFullscreen) {
+		t.Fatalf("start fullscreen error = %v, want %v", err, x11.ErrFullscreen)
+	}
+}
+
 type recordingFocusedTextOverlay struct {
 	frames []x11.FocusedTextSnapshot
 	err    error

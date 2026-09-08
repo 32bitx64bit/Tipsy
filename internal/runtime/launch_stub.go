@@ -29,6 +29,7 @@ type AuthorizedGeneration interface {
 // LaunchOptions controls tipsy launch.
 type LaunchOptions struct {
 	Probe                bool
+	StartFullscreen      bool
 	Width                int
 	Height               int
 	Started              func()

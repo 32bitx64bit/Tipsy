@@ -85,6 +85,12 @@ func TestOffscreenVisualProof(t *testing.T) {
 	if win.settingsDisplay == nil || win.settingsDisplay.AccessibleName() != "Default monitor" || win.settingsDisplay.CurrentIndex() != 0 {
 		t.Fatalf("default monitor control did not render on the main monitor: %#v", win.settingsDisplay)
 	}
+	if win.settingsStartFullscreen == nil || win.settingsStartFullscreen.IsChecked() || win.settingsStartFullscreen.AccessibleName() != "Start Roblox fullscreen" {
+		t.Fatalf("start fullscreen control did not render unchecked and accessible: %#v", win.settingsStartFullscreen)
+	}
+	if description := win.settingsStartFullscreen.AccessibleDescription(); !strings.Contains(description, "Tipsy host startup preference") || !strings.Contains(description, "does not mirror") {
+		t.Fatalf("start fullscreen accessibility copy is not honest: %q", description)
+	}
 	if got := win.settingsDisplay.CurrentText(); got != "Main monitor (default)" {
 		t.Fatalf("default monitor text=%q", got)
 	}
@@ -99,6 +105,9 @@ func TestOffscreenVisualProof(t *testing.T) {
 	}
 	if got := win.settingsDiscordJoin.Text(); got != discordJoinToggleText(false) {
 		t.Fatalf("unchecked Discord join text=%q, want %q", got, discordJoinToggleText(false))
+	}
+	if got := win.settingsStartFullscreen.Text(); got != startFullscreenToggleText(false) {
+		t.Fatalf("unchecked start fullscreen text=%q, want %q", got, startFullscreenToggleText(false))
 	}
 	if description := win.settingsFPSMode.AccessibleDescription(); !strings.Contains(description, "experimental uncapped request") || !strings.Contains(description, "no frame rate is guaranteed") {
 		t.Fatalf("Unlimited accessibility copy is not honest: %q", description)
@@ -174,8 +183,8 @@ func TestOffscreenVisualProof(t *testing.T) {
 		t.Fatalf("Unlimited state copy=%q limitEnabled=%v", win.settingsHint.Text(), win.settingsFPS.IsEnabled())
 	}
 	compactSettings := win.win.Grab()
-	if compactSettings.IsNull() || !win.settingsVSync.IsVisible() || !win.settingsLowTexture.IsVisible() || !win.settingsDiscordPresence.IsVisible() || !win.settingsDiscordJoin.IsVisible() {
-		t.Fatal("compact settings page did not keep the VSync and low-texture controls in the scrollable layout")
+	if compactSettings.IsNull() || !win.settingsVSync.IsVisible() || !win.settingsLowTexture.IsVisible() || !win.settingsDiscordPresence.IsVisible() || !win.settingsDiscordJoin.IsVisible() || !win.settingsStartFullscreen.IsVisible() {
+		t.Fatal("compact settings page did not keep the settings controls in the scrollable layout")
 	}
 	if path := os.Getenv("TIPSY_GUI_SCREENSHOT"); path != "" {
 		ext := filepath.Ext(path)

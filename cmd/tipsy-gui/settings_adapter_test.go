@@ -75,6 +75,28 @@ func TestVSyncSettingsAdapterDefaultsOff(t *testing.T) {
 	}
 }
 
+func TestStartFullscreenSettingsAdapterRoundTrip(t *testing.T) {
+	backend := clientsettings.Settings{
+		Renderer:        clientsettings.RendererAuto,
+		FrameRate:       clientsettings.FrameRate{Mode: clientsettings.FrameRateAuto},
+		Display:         clientsettings.DisplayPrimary,
+		StartFullscreen: true,
+	}
+	gui := guiSettings(backend)
+	if !gui.StartFullscreen {
+		t.Fatalf("backend fullscreen start=%+v", gui)
+	}
+	if got := backendSettings(gui); got != backend {
+		t.Fatalf("GUI fullscreen-start round trip=%+v want=%+v", got, backend)
+	}
+	if got := guiSettings(clientsettings.Default()); got.StartFullscreen {
+		t.Fatalf("backend default unexpectedly starts fullscreen: %+v", got)
+	}
+	if got := backendSettings(guimodel.DefaultSettings()); got.StartFullscreen {
+		t.Fatalf("GUI default unexpectedly persists fullscreen start: %+v", got)
+	}
+}
+
 func TestDiscordSettingsAdapterRoundTrip(t *testing.T) {
 	backend := clientsettings.Default()
 	backend.DiscordJoinButton = true

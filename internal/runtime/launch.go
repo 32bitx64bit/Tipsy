@@ -31,7 +31,11 @@ import (
 )
 
 type LaunchOptions struct {
-	Probe                bool
+	Probe bool
+	// StartFullscreen asks the host X11 window manager for standard EWMH
+	// fullscreen immediately after the window maps. It is a Tipsy-owned launch
+	// policy, not a guessed Roblox Android preference.
+	StartFullscreen      bool
 	Width                int
 	Height               int
 	Started              func()
@@ -115,6 +119,33 @@ type gameActivitySession struct {
 }
 
 const gracefulShutdownDeadline = 2 * time.Second
+
+// fullscreenWindow gives the host launch policy a narrow unit-test seam while
+// retaining X11 as the sole owner of the EWMH implementation.
+type fullscreenWindow interface {
+	SetFullscreen(enabled bool) error
+}
+
+// requestStartFullscreen runs after OpenOnDisplay has mapped the X11 window
+// and before any presenter, JNI, or Roblox lifecycle work can interact with
+// it. A disabled policy deliberately sends no remove request, preserving the
+// window manager's normal startup behavior.
+func requestStartFullscreen(w fullscreenWindow, enabled bool) error {
+	if !enabled {
+		return nil
+	}
+	if w == nil {
+		return x11.ErrClosed
+	}
+	return w.SetFullscreen(true)
+}
+
+// startFullscreenRequested resolves the explicit launch policy together with
+// the persisted, Tipsy-owned setting. Either is an affirmative host request;
+// a default LaunchOptions and a default settings document remain windowed.
+func startFullscreenRequested(opt LaunchOptions, settings clientsettings.Settings) bool {
+	return opt.StartFullscreen || settings.StartFullscreen
+}
 
 func stutterDiagnosticsRequested(getenv func(string) string) bool {
 	return getenv != nil && getenv("TIPSY_STUTTER_DIAG") == "1"
@@ -591,6 +622,13 @@ func Launch(ctx context.Context, opt LaunchOptions) error {
 		return fmt.Errorf("x11: %w", err)
 	}
 	defer win.Close()
+	// The mapped X11 window is the complete host-owned fullscreen boundary.
+	// Queue the standard EWMH request before binding a presenter or starting
+	// any Android/JNI/Roblox lifecycle work; later ConfigureNotify geometry
+	// continues through the established resize path.
+	if err := requestStartFullscreen(win, startFullscreenRequested(opt, settings)); err != nil {
+		return fmt.Errorf("x11 start fullscreen: %w", err)
+	}
 	presenter, err := bindClientPresenter(win, settings)
 	if err != nil {
 		return fmt.Errorf("renderer: %w", err)

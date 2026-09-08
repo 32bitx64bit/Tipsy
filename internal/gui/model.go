@@ -37,6 +37,7 @@ type Settings struct {
 	VSync               bool
 	LowTextureMode      bool
 	Display             string
+	StartFullscreen     bool
 	DiscordRichPresence bool
 	DiscordJoinButton   bool
 }
@@ -58,7 +59,7 @@ const (
 )
 
 func DefaultSettings() Settings {
-	return Settings{Renderer: RendererAuto, FPSMode: FPSAuto, VSync: false, LowTextureMode: false, Display: DisplayPrimary, DiscordRichPresence: true}
+	return Settings{Renderer: RendererAuto, FPSMode: FPSAuto, VSync: false, LowTextureMode: false, Display: DisplayPrimary, StartFullscreen: false, DiscordRichPresence: true}
 }
 
 func ValidateSettings(settings Settings, renderers []RendererOption) error {
