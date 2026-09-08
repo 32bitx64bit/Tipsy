@@ -17,7 +17,6 @@ import (
 	"syscall"
 	"testing"
 	"time"
-	"unsafe"
 
 	"github.com/tipsy-linux/tipsy/internal/android"
 	"github.com/tipsy-linux/tipsy/internal/clientsettings"
@@ -1146,28 +1145,24 @@ func TestSurfaceResizeFailedGeometryAbortsDelivery(t *testing.T) {
 	}
 }
 
-// TestSurfaceResizePipeDeliversCommandBytes runs the production sink's
-// command path against a fake engine pipe: one delta writes exactly the
-// three command bytes 3,4,5 once, an unchanged size writes nothing, and a
-// second delta writes them again — through the real postAndroidAppCmd
-// msgwrite and the real ANativeWindow resize.
-func TestSurfaceResizePipeDeliversCommandBytes(t *testing.T) {
-	page := 0x7000000
-	buf, err := syscall.Mmap(-1, 0, page, syscall.PROT_READ|syscall.PROT_WRITE, syscall.MAP_PRIVATE|syscall.MAP_ANONYMOUS)
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = syscall.Munmap(buf) })
-	base := uintptr(unsafe.Pointer(&buf[0]))
-	handle := base + 0x2000
+type pipeCommandWriter struct{ fd int }
 
+func (w pipeCommandWriter) WriteCommand(cmd byte) error {
+	_, err := syscall.Write(w.fd, []byte{cmd})
+	return err
+}
+
+// TestSurfaceResizePipeDeliversCommandBytes runs the production sink through
+// its owned command-writer interface: one delta writes exactly command bytes
+// 3,4,5 once, an unchanged size writes nothing, and a second delta writes them
+// again. internal/android separately pins descriptor validation.
+func TestSurfaceResizePipeDeliversCommandBytes(t *testing.T) {
 	var pipeFDs [2]int
 	if err := syscall.Pipe2(pipeFDs[:], syscall.O_CLOEXEC|syscall.O_NONBLOCK); err != nil {
 		t.Fatal(err)
 	}
 	rfd, wfd := os.NewFile(uintptr(pipeFDs[0]), "cmd-r"), os.NewFile(uintptr(pipeFDs[1]), "cmd-w")
 	t.Cleanup(func() { rfd.Close(); wfd.Close() })
-	*(*int32)(unsafe.Pointer(handle + 0x154)) = int32(pipeFDs[1])
 
 	vm, err := jni.NewVM()
 	if err != nil {
@@ -1175,7 +1170,7 @@ func TestSurfaceResizePipeDeliversCommandBytes(t *testing.T) {
 	}
 	aw := android.NewWindow(1280, 720, nil)
 	s := &surfaceResize{
-		sink:   &engineResizeSink{handle: handle, vm: vm, aw: aw},
+		sink:   &engineResizeSink{commands: pipeCommandWriter{fd: pipeFDs[1]}, vm: vm, aw: aw},
 		seeded: true, width: 1280, height: 720,
 	}
 
@@ -1223,26 +1218,18 @@ func TestSurfaceResizePipeDeliversCommandBytes(t *testing.T) {
 	}
 }
 
-func TestPostAndroidAppCmdWritesHandlePipe(t *testing.T) {
-	buf, err := syscall.Mmap(-1, 0, 0x200, syscall.PROT_READ|syscall.PROT_WRITE, syscall.MAP_PRIVATE|syscall.MAP_ANONYMOUS)
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = syscall.Munmap(buf) })
-	handle := uintptr(unsafe.Pointer(&buf[0]))
+func TestPostAndroidAppCmdUsesOwnedWriter(t *testing.T) {
 	var pipeFDs [2]int
 	if err := syscall.Pipe2(pipeFDs[:], syscall.O_CLOEXEC|syscall.O_NONBLOCK); err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = syscall.Close(pipeFDs[0]); _ = syscall.Close(pipeFDs[1]) })
-	*(*int32)(unsafe.Pointer(handle + 0x154)) = int32(pipeFDs[1])
-	postAndroidAppCmd(handle, appCmdInitWindow)
+	postAndroidAppCmd(pipeCommandWriter{fd: pipeFDs[1]}, appCmdInitWindow)
 	b := make([]byte, 1)
 	n, err := syscall.Read(pipeFDs[0], b)
 	if err != nil || n != 1 || b[0] != appCmdInitWindow {
 		t.Fatalf("pipe read n=%d err=%v b=%v", n, err, b[:n])
 	}
-	postAndroidAppCmd(0, appCmdStart)
 }
 
 func TestDisplayRefreshPublicationInvalidationAndRetry(t *testing.T) {

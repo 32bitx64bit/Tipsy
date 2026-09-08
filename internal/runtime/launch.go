@@ -17,7 +17,6 @@ import (
 	"sync"
 	"syscall"
 	"time"
-	"unsafe"
 
 	"github.com/tipsy-linux/tipsy/internal/android"
 	"github.com/tipsy-linux/tipsy/internal/clientsettings"
@@ -482,13 +481,11 @@ const (
 	//   J, Ljava/lang/String;, Z, I)V
 	// The caller is focus-gated by the engine's own showKeyboard textbox
 	// handle. Its text comes only from the X11 input method's committed UTF-8.
-	nativePassTextSym       = "Java_com_roblox_engine_jni_NativeGLInterface_nativePassText"
-	nativePassTextSig       = "(JLjava/lang/String;ZI)V"
-	nativeReturnPressedSym  = "Java_com_roblox_engine_jni_NativeGLInterface_nativeReturnPressedFromOnScreenKeyboard"
-	syncTextboxSelectionSym = "Java_com_roblox_engine_jni_NativeGLInterface_syncTextboxTextAndCursorPosition2"
-	nativeGetTextBoxInfoSym = "Java_com_roblox_engine_jni_NativeGLInterface_nativeGetTextBoxInfo"
-	lsmSingletonVA          = 0x74d74f0
-
+	nativePassTextSym        = "Java_com_roblox_engine_jni_NativeGLInterface_nativePassText"
+	nativePassTextSig        = "(JLjava/lang/String;ZI)V"
+	nativeReturnPressedSym   = "Java_com_roblox_engine_jni_NativeGLInterface_nativeReturnPressedFromOnScreenKeyboard"
+	syncTextboxSelectionSym  = "Java_com_roblox_engine_jni_NativeGLInterface_syncTextboxTextAndCursorPosition2"
+	nativeGetTextBoxInfoSym  = "Java_com_roblox_engine_jni_NativeGLInterface_nativeGetTextBoxInfo"
 	appCmdInitWindow         = 1
 	appCmdWindowResized      = 3
 	appCmdWindowRedraw       = 4
@@ -908,6 +905,16 @@ func startGameActivity(ctx context.Context, vm *jni.VM, mod *loader.Module, aw *
 	if handle == 0 {
 		return nil, fmt.Errorf("initializeNativeCode returned 0")
 	}
+	writeCommand, _ := mod.Lookup(android.GameActivityWriteCommandSymbol)
+	commands, err := android.NewGameActivityCommandWriter(uintptr(handle), writeCommand)
+	if err != nil {
+		logging.Logger(logging.CatGameActivity).Error("GameActivity command bridge unavailable", "err", err)
+		// initializeNativeCode owns a native app thread. Let its registered
+		// termination method destroy and join that thread before the caller
+		// closes the authenticated module after this compatibility failure.
+		callGameActivityNative(vm, env, activity, uintptr(handle), "terminateNativeCode", "(J)V")
+		return nil, fmt.Errorf("GameActivity command bridge: %w", err)
+	}
 	jni.SetGameActivityInputTarget(env.Raw(), activity, uintptr(handle))
 	// Text-input handshake (§88): hand the Tipsy-owned InputConnection to
 	// the engine immediately after the input target, on this same
@@ -919,7 +926,7 @@ func startGameActivity(ctx context.Context, vm *jni.VM, mod *loader.Module, aw *
 	wireRobloxDirectInput(mod, env)
 	wireRobloxDirectKey(mod, env)
 	wireRobloxTextInput(mod, env)
-	return dispatchGameActivityLifecycle(ctx, vm, mod, env, activity, uintptr(handle), files, cache, preferences, assets, version,
+	return dispatchGameActivityLifecycle(ctx, vm, mod, env, activity, uintptr(handle), commands, files, cache, preferences, assets, version,
 		width, height, currentRefreshHz, supportedRefreshHz, aw, req), nil
 }
 
@@ -1013,7 +1020,7 @@ func wireRobloxTextInput(mod *loader.Module, env *jni.Env) {
 	jni.SetRobloxTextInputTarget(env, class, passFn, returnFn, syncFn, getInfoFn, loader.CallP8)
 }
 
-func dispatchGameActivityLifecycle(ctx context.Context, vm *jni.VM, mod *loader.Module, env *jni.Env, activity, handle uintptr, files, cache, preferences, assets, version string, width, height int, currentRefreshHz float32, supportedRefreshHz []float32, aw *android.Window, req rbxuri.Request) *gameActivitySession {
+func dispatchGameActivityLifecycle(ctx context.Context, vm *jni.VM, mod *loader.Module, env *jni.Env, activity, handle uintptr, commands appCommandWriter, files, cache, preferences, assets, version string, width, height int, currentRefreshHz float32, supportedRefreshHz []float32, aw *android.Window, req rbxuri.Request) *gameActivitySession {
 	call := func(name, sig string, extra ...uintptr) {
 		callGameActivityNative(vm, env, activity, handle, name, sig, extra...)
 	}
@@ -1048,11 +1055,11 @@ func dispatchGameActivityLifecycle(ctx context.Context, vm *jni.VM, mod *loader.
 	callRobloxJNI(mod, env.Raw(), gl, "Java_com_roblox_engine_jni_NativeGLInterface_nativeAppBridgeV2StartAppWithParams", startParams)
 	startWebsiteGame(mod, env, gl, activity, platform, device, surface, req)
 	for _, cmd := range []byte{appCmdInitWindow, appCmdStart, appCmdResume, appCmdGainedFocus, appCmdWindowResized, appCmdWindowRedraw} {
-		postAndroidAppCmd(handle, cmd)
+		postAndroidAppCmd(commands, cmd)
 	}
 	// X11 supplies the first real surface geometry. Deliver it once via the
 	// registered GameActivity contract after lifecycle and surface setup.
-	deliverInitialContentRect(mod, vm, env, activity, handle, width, height)
+	deliverInitialContentRect(mod, vm, env, activity, handle, commands, width, height)
 	for _, n := range [][2]string{
 		{"onWindowFocusChangedNative", "(JZ)V"},
 		{"onKeyDownNative", "(JLandroid/view/KeyEvent;)Z"},
@@ -1068,7 +1075,7 @@ func dispatchGameActivityLifecycle(ctx context.Context, vm *jni.VM, mod *loader.
 		shutdownDeadline: gracefulShutdownDeadline,
 		resize: &surfaceResize{
 			sink: &engineResizeSink{
-				mod: mod, vm: vm, env: env, activity: activity, handle: handle, aw: aw,
+				mod: mod, vm: vm, env: env, activity: activity, handle: handle, commands: commands, aw: aw,
 				gl: gl, surface: surface, platform: platform,
 			},
 			seeded: true, width: width, height: height,
@@ -1159,6 +1166,7 @@ type engineResizeSink struct {
 	env      *jni.Env
 	activity uintptr
 	handle   uintptr
+	commands appCommandWriter
 	aw       *android.Window
 	gl       uintptr
 	surface  uintptr
@@ -1175,7 +1183,7 @@ func (s *engineResizeSink) setDisplaySize(width, height int) {
 	jni.SetRbxTextOverlayViewport(width, height, 1)
 }
 
-func (s *engineResizeSink) postAppCmd(cmd byte) { postAndroidAppCmd(s.handle, cmd) }
+func (s *engineResizeSink) postAppCmd(cmd byte) { postAndroidAppCmd(s.commands, cmd) }
 
 func (s *engineResizeSink) updateSurface(width, height int) {
 	if s == nil || s.mod == nil || s.env == nil || s.gl == 0 || s.surface == 0 || s.platform == 0 {
@@ -1429,25 +1437,25 @@ func startLoggedOutAppBridge(mod *loader.Module, env *jni.Env) {
 		env.NewStringUTF(""), env.NewStringUTF(""), env.NewStringUTF(""))
 }
 
-func postAndroidAppCmd(handle uintptr, cmd byte) {
-	const androidAppMsgWriteOff = 0x154
-	if handle < 0x10000 {
+type appCommandWriter interface {
+	WriteCommand(byte) error
+}
+
+func postAndroidAppCmd(commands appCommandWriter, cmd byte) {
+	if commands == nil {
+		logging.Logger(logging.CatGameActivity).Error("GameActivity app command failed", "command", cmd, "err", "command bridge is unavailable")
 		return
 	}
-	// initializeNativeCode returns this GameActivity android_app object and
-	// stores the command-pipe write fd at +0x154 (msgread at +0x150). Do not
-	// walk a version-pinned Roblox engine BSS singleton to find it.
-	fd := int(*(*int32)(unsafe.Pointer(handle + androidAppMsgWriteOff)))
-	if fd >= 3 && fd < 1<<20 {
-		_, _ = syscall.Write(fd, []byte{cmd})
+	if err := commands.WriteCommand(cmd); err != nil {
+		logging.Logger(logging.CatGameActivity).Error("GameActivity app command failed", "command", cmd, "err", err)
 	}
 }
 
-func deliverInitialContentRect(mod *loader.Module, vm *jni.VM, env *jni.Env, activity, handle uintptr, width, height int) {
+func deliverInitialContentRect(mod *loader.Module, vm *jni.VM, env *jni.Env, activity, handle uintptr, commands appCommandWriter, width, height int) {
 	if width <= 0 || height <= 0 {
 		return
 	}
-	postAndroidAppCmd(handle, appCmdContentRectChanged)
+	postAndroidAppCmd(commands, appCmdContentRectChanged)
 	callGameActivityNative(vm, env, activity, handle, "onContentRectChangedNative", "(JIIII)V", 0, 0, uintptr(width), uintptr(height))
 	callGameActivityNative(vm, env, activity, handle, "onWindowInsetsChangedNative", "(J)V")
 }
