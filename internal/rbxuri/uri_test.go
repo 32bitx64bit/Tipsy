@@ -96,6 +96,68 @@ func TestParseRobloxDeepLinkAndWebURL(t *testing.T) {
 	}
 }
 
+func TestParsePrivateServerLinksPreservesOpaqueJoinFields(t *testing.T) {
+	t.Parallel()
+	const fakeCode = "SYNTHETIC-PRIVATE-SERVER-CODE"
+	cases := []struct {
+		name  string
+		raw   string
+		want  string
+		share bool
+	}{
+		{
+			name: "legacy web link code",
+			raw:  "https://www.roblox.com/games/1818/Classic-Crossroads?privateServerLinkCode=" + fakeCode,
+			want: "roblox://experiences/start?linkCode=" + fakeCode + "&placeId=1818",
+		},
+		{
+			name:  "current browser share link",
+			raw:   "https://www.roblox.com/share?code=" + fakeCode + "&type=Server",
+			want:  "roblox://navigation/share_links?code=" + fakeCode + "&type=Server",
+			share: true,
+		},
+		{
+			name:  "browser protocol handoff",
+			raw:   "roblox://navigation/share_links?code=" + fakeCode + "&type=Server",
+			want:  "roblox://navigation/share_links?code=" + fakeCode + "&type=Server",
+			share: true,
+		},
+	}
+	for _, test := range cases {
+		t.Run(test.name, func(t *testing.T) {
+			req, err := Parse(test.raw)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got := req.AndroidDeepLink; got != test.want {
+				t.Fatalf("handoff=%q want %q", got, test.want)
+			}
+			if strings.Contains(req.Summary(), fakeCode) {
+				t.Fatalf("summary leaked private-server code: %s", req.Summary())
+			}
+			if test.share {
+				if !req.IsPrivateServerShare() || req.PlaceID != 0 || req.ShareCode != fakeCode {
+					t.Fatalf("share request=%+v", req)
+				}
+			} else if req.LinkCode != fakeCode || req.PlaceID != 1818 {
+				t.Fatalf("legacy request=%+v", req)
+			}
+		})
+	}
+}
+
+func TestParseRejectsIncompletePrivateServerShare(t *testing.T) {
+	t.Parallel()
+	for _, raw := range []string{
+		"https://www.roblox.com/share?type=Server",
+		"roblox://navigation/share_links?code=SYNTHETIC-PRIVATE-SERVER-CODE&type=Experience",
+	} {
+		if _, err := Parse(raw); err == nil || strings.Contains(err.Error(), "SYNTHETIC") {
+			t.Fatalf("Parse(%q) error=%v", raw, err)
+		}
+	}
+}
+
 func TestParseRejectsStudioAndJunk(t *testing.T) {
 	t.Parallel()
 	cases := []struct {
@@ -134,6 +196,9 @@ func TestParseEmptyAndLooksLike(t *testing.T) {
 	}
 	if !LooksLike("https://www.roblox.com/games/1/name") {
 		t.Fatal("LooksLike rejected an official experience URL")
+	}
+	if !LooksLike("https://www.roblox.com/share?code=SYNTHETIC-PRIVATE-SERVER-CODE&type=Server") || !LooksLike("roblox://navigation/share_links?code=SYNTHETIC-PRIVATE-SERVER-CODE&type=Server") {
+		t.Fatal("LooksLike rejected an official private-server URI")
 	}
 }
 

@@ -56,3 +56,17 @@ func TestWebLoginURIOmitsTicketAfterRedeem(t *testing.T) {
 		t.Fatalf("redeemed uri=%q", got)
 	}
 }
+
+func TestPrivateServerShareUsesOfficialNavigationHandoff(t *testing.T) {
+	const fakeCode = "SYNTHETIC-PRIVATE-SERVER-CODE"
+	req, err := rbxuri.Parse("roblox://navigation/share_links?code=" + fakeCode + "&type=Server")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if req.PlaceID != 0 {
+		t.Fatalf("share link place=%d, want no guessed place", req.PlaceID)
+	}
+	if got, want := req.WebLoginURI(), "roblox://navigation/share_links?code="+fakeCode+"&type=Server"; got != want {
+		t.Fatalf("native handoff=%q want %q", got, want)
+	}
+}

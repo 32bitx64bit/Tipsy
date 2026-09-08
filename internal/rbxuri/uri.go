@@ -25,6 +25,8 @@ type Request struct {
 	AccessCode         string
 	ReservedServerCode string
 	LinkCode           string
+	ShareCode          string
+	ShareType          string
 	LaunchData         string
 	ReferralPage       string
 	BrowserTrackerID   string
@@ -105,6 +107,12 @@ func (r Request) HasTicket() bool {
 	return r.Ticket != ""
 }
 
+// IsPrivateServerShare reports whether r is Roblox's current private-server
+// share-link route without requiring callers to inspect its opaque code.
+func (r Request) IsPrivateServerShare() bool {
+	return r.ShareCode != "" && strings.EqualFold(r.ShareType, "Server")
+}
+
 // WebLoginURI is the string handed to JNIWebLoginProtocol. After a successful
 // Go redeem, that is the Android deep link (the ticket is one-shot and must
 // not be replayed). If redeem failed, the original roblox-player: URI is kept
@@ -150,7 +158,7 @@ func (r Request) Summary() string {
 	if r.GameInstanceID != "" {
 		b.WriteString(" instance=present")
 	}
-	if r.AccessCode != "" || r.ReservedServerCode != "" {
+	if r.AccessCode != "" || r.ReservedServerCode != "" || r.LinkCode != "" || r.ShareCode != "" {
 		b.WriteString(" private-server=present")
 	}
 	return b.String()
@@ -167,7 +175,7 @@ func isRobloxWebURL(u *url.URL) bool {
 		return false
 	}
 	path := strings.ToLower(u.EscapedPath())
-	return strings.HasPrefix(path, "/games") || strings.HasPrefix(path, "/experiences")
+	return strings.HasPrefix(path, "/games") || strings.HasPrefix(path, "/experiences") || path == "/share"
 }
 
 func parsePlayerProtocol(raw string) (Request, error) {
@@ -190,9 +198,9 @@ func parsePlayerProtocol(raw string) (Request, error) {
 		BrowserTrackerID:   firstValue(values, "browsertrackerid"),
 		PlaceLauncherURL:   firstValue(values, "placelauncherurl", "placeLauncherUrl"),
 		LaunchData:         firstValue(values, "launchdata", "launchData"),
-		AccessCode:         firstValue(values, "accesscode", "reservedserveraccesscode"),
+		AccessCode:         firstValue(values, "accesscode"),
 		ReservedServerCode: firstValue(values, "reservedserveraccesscode"),
-		LinkCode:           firstValue(values, "linkcode"),
+		LinkCode:           firstValue(values, "linkcode", "privateserverlinkcode"),
 		GameInstanceID:     firstValue(values, "gameinstanceid", "gameid"),
 		ReferralPage:       firstValue(values, "referralpage"),
 		hasWebsiteLaunch:   true,
@@ -227,6 +235,8 @@ func parseRobloxDeepLink(raw string) (Request, error) {
 	path := strings.ToLower(strings.Trim(u.Path, "/"))
 	opaque := strings.ToLower(u.Opaque)
 	switch {
+	case host == "navigation" && path == "share_links":
+		return privateServerShareRequest("roblox", q)
 	case host == "experiences" && (path == "start" || strings.HasPrefix(path, "start/")):
 	case path == "experiences/start" || strings.HasPrefix(path, "experiences/start/"):
 	case strings.Contains(host, "placeid=") || strings.HasPrefix(opaque, "placeid="):
@@ -249,7 +259,7 @@ func parseRobloxDeepLink(raw string) (Request, error) {
 	req.GameInstanceID = firstQuery(q, "gameinstanceid", "gameInstanceId", "gameid")
 	req.AccessCode = firstQuery(q, "accesscode", "accessCode")
 	req.ReservedServerCode = firstQuery(q, "reservedserveraccesscode", "reservedServerAccessCode")
-	req.LinkCode = firstQuery(q, "linkcode", "linkCode")
+	req.LinkCode = firstQuery(q, "linkcode", "linkCode", "privateserverlinkcode", "privateServerLinkCode")
 	req.LaunchData = firstQuery(q, "launchdata", "launchData")
 	req.ReferralPage = firstQuery(q, "referralpage", "referralPage")
 	if req.PlaceID == 0 {
@@ -260,12 +270,16 @@ func parseRobloxDeepLink(raw string) (Request, error) {
 }
 
 func parseWebURL(u *url.URL) (Request, error) {
+	if strings.EqualFold(u.EscapedPath(), "/share") {
+		return privateServerShareRequest("https", u.Query())
+	}
 	req := Request{Scheme: "https", LaunchMode: "play", hasWebsiteLaunch: true}
 	q := u.Query()
 	req.PlaceID, _ = parseInt64(firstQuery(q, "placeid", "placeId"))
 	req.GameInstanceID = firstQuery(q, "gameinstanceid", "gameInstanceId")
-	req.AccessCode = firstQuery(q, "accesscode", "accessCode", "reservedserveraccesscode")
-	req.LinkCode = firstQuery(q, "linkcode", "linkCode")
+	req.AccessCode = firstQuery(q, "accesscode", "accessCode")
+	req.ReservedServerCode = firstQuery(q, "reservedserveraccesscode", "reservedServerAccessCode")
+	req.LinkCode = firstQuery(q, "linkcode", "linkCode", "privateserverlinkcode", "privateServerLinkCode")
 	req.LaunchData = firstQuery(q, "launchdata", "launchData")
 	if req.PlaceID == 0 {
 		req.PlaceID = placeIDFromPath(u.Path)
@@ -277,7 +291,29 @@ func parseWebURL(u *url.URL) (Request, error) {
 	return req, nil
 }
 
+func privateServerShareRequest(scheme string, q url.Values) (Request, error) {
+	code := firstQuery(q, "code")
+	if code == "" || !strings.EqualFold(firstQuery(q, "type"), "Server") {
+		return Request{}, errors.New("Roblox private server share link is incomplete or unsupported")
+	}
+	req := Request{
+		Scheme:           scheme,
+		LaunchMode:       "play",
+		ShareCode:        code,
+		ShareType:        "Server",
+		hasWebsiteLaunch: true,
+	}
+	req.AndroidDeepLink = req.androidDeepLink()
+	return req, nil
+}
+
 func (r Request) androidDeepLink() string {
+	if r.IsPrivateServerShare() {
+		q := url.Values{}
+		q.Set("code", r.ShareCode)
+		q.Set("type", "Server")
+		return "roblox://navigation/share_links?" + q.Encode()
+	}
 	if r.PlaceID == 0 {
 		return ""
 	}
@@ -385,6 +421,7 @@ var playerFieldKeys = map[string]struct{}{
 	"gameinstanceid":           {},
 	"accesscode":               {},
 	"linkcode":                 {},
+	"privateserverlinkcode":    {},
 	"launchdata":               {},
 	"referredbyplayerid":       {},
 	"referralpage":             {},
