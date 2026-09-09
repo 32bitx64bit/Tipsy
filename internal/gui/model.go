@@ -61,7 +61,7 @@ const (
 )
 
 func DefaultSettings() Settings {
-	return Settings{Renderer: RendererAuto, FPSMode: FPSAuto, VSync: false, LowTextureMode: false, Display: DisplayPrimary, StartFullscreen: false, DiscordRichPresence: true}
+	return Settings{Renderer: RendererAuto, FPSMode: FPSAuto, VSync: false, LowTextureMode: false, Display: DisplayPrimary, StartFullscreen: false}
 }
 
 func ValidateSettings(settings Settings, renderers []RendererOption) error {

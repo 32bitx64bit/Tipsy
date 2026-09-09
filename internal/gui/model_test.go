@@ -385,9 +385,9 @@ func TestStartFullscreenDefaultsOffPersistsAndResets(t *testing.T) {
 	}
 }
 
-func TestDiscordPresenceDefaultsOnAndDoesNotRestart(t *testing.T) {
+func TestDiscordPresenceDefaultsOffAndDoesNotRestart(t *testing.T) {
 	defaults := DefaultSettings()
-	if !defaults.DiscordRichPresence || defaults.DiscordJoinButton {
+	if defaults.DiscordRichPresence || defaults.DiscordJoinButton {
 		t.Fatalf("discord defaults=%+v", defaults)
 	}
 	fake := &fakeService{settings: defaults, noRestart: true}

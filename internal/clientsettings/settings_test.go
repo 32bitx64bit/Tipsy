@@ -260,7 +260,7 @@ func TestDisplayDefaultsToPrimaryAndPointerDoesNotRestart(t *testing.T) {
 	}
 }
 
-func TestDiscordPresenceDefaultsOnAndJoinOffWithoutRestart(t *testing.T) {
+func TestDiscordPresenceDefaultsOffAndJoinOffWithoutRestart(t *testing.T) {
 	s := testService(t)
 	writeXML(t, s, "-1")
 	if err := os.MkdirAll(filepath.Dir(s.Path), 0o700); err != nil {
@@ -272,17 +272,18 @@ func TestDiscordPresenceDefaultsOnAndJoinOffWithoutRestart(t *testing.T) {
 	}
 
 	got, err := s.Load(context.Background())
-	if err != nil || !got.DiscordRichPresence || got.DiscordJoinButton {
+	if err != nil || got.DiscordRichPresence || got.DiscordJoinButton {
 		t.Fatalf("old config discord=%+v err=%v", got, err)
 	}
 	unchanged, err := os.ReadFile(s.Path)
 	if err != nil || !bytes.Equal(unchanged, old) {
 		t.Fatalf("load rewrote old config=%q err=%v", unchanged, err)
 	}
-	if d := Default(); !d.DiscordRichPresence || d.DiscordJoinButton {
+	if d := Default(); d.DiscordRichPresence || d.DiscordJoinButton {
 		t.Fatalf("Default discord=%+v", d)
 	}
 
+	got.DiscordRichPresence = true
 	got.DiscordJoinButton = true
 	result, err := s.Apply(context.Background(), got)
 	if err != nil || result.RestartRequired || !result.Settings.DiscordJoinButton || !strings.Contains(result.FrameRateNote, "Join button") {
@@ -298,7 +299,7 @@ func TestDiscordPresenceDefaultsOnAndJoinOffWithoutRestart(t *testing.T) {
 		t.Fatalf("reloaded discord=%+v err=%v", reloaded, err)
 	}
 	reset, err := s.Reset(context.Background())
-	if err != nil || !reset.DiscordRichPresence || reset.DiscordJoinButton || reset != Default() {
+	if err != nil || reset.DiscordRichPresence || reset.DiscordJoinButton || reset != Default() {
 		t.Fatalf("reset discord=%+v err=%v", reset, err)
 	}
 }
@@ -645,6 +646,7 @@ func TestClientLockAllowsSettingsDocumentOnlyApply(t *testing.T) {
 	}
 	defer release()
 	wanted := Default()
+	wanted.DiscordRichPresence = true
 	wanted.DiscordJoinButton = true
 	result, err := s.Apply(context.Background(), wanted)
 	if err != nil {

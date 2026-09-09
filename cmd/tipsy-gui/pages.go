@@ -286,11 +286,11 @@ func (w *mainWindow) buildSettingsPage() *qt.QWidget {
 	w.settingsLowTexture.SetToolTip("Off by default (high-quality textures). Enable to use lower-resolution textures and save memory/VRAM. Changing this requires a Roblox restart.")
 	form.AddRow3("Low texture mode", w.settingsLowTexture.QWidget)
 
-	w.settingsDiscordPresence = qt.NewQCheckBox3(discordPresenceToggleText(true))
+	w.settingsDiscordPresence = qt.NewQCheckBox3(discordPresenceToggleText(false))
 	setObjectName(w.settingsDiscordPresence.QObject, "vsyncToggle")
 	w.settingsDiscordPresence.SetAccessibleName("Discord Rich Presence")
-	w.settingsDiscordPresence.SetAccessibleDescription("Shows the current Roblox experience on Discord as Game name - Tipsy. Enabled by default. Applies while Roblox is running.")
-	w.settingsDiscordPresence.SetToolTip("Enabled by default. Friends see the experience name with Tipsy branding. Applies without restarting Roblox.")
+	w.settingsDiscordPresence.SetAccessibleDescription("Shows the current Roblox experience on Discord as Game name - Tipsy. Disabled by default. Applies while Roblox is running.")
+	w.settingsDiscordPresence.SetToolTip("Off by default. Friends see the experience name with Tipsy branding. Applies without restarting Roblox.")
 	form.AddRow3("Discord Rich Presence", w.settingsDiscordPresence.QWidget)
 
 	w.settingsDiscordJoin = qt.NewQCheckBox3(discordJoinToggleText(false))
@@ -324,7 +324,7 @@ func (w *mainWindow) buildSettingsPage() *qt.QWidget {
 	actions.AddStretch()
 	w.settingsReset = qt.NewQPushButton3("Reset defaults")
 	setObjectName(w.settingsReset.QObject, "secondaryButton")
-	w.settingsReset.SetAccessibleDescription("Restore automatic renderer and frame-rate defaults with VSync disabled, high-quality textures, Discord Rich Presence on, Join button off, new Roblox windows windowed, and windows on the main monitor")
+	w.settingsReset.SetAccessibleDescription("Restore automatic renderer and frame-rate defaults with VSync disabled, high-quality textures, Discord Rich Presence off, Join button off, new Roblox windows windowed, and windows on the main monitor")
 	w.settingsReset.OnClicked(w.resetSettings)
 	actions.AddWidget(w.settingsReset.QWidget)
 	w.settingsApply = qt.NewQPushButton3("Apply changes")
@@ -381,7 +381,7 @@ func (w *mainWindow) buildSettingsPage() *qt.QWidget {
 
 	limits, limitsLayout := newVerticalCard("subtleCard")
 	limitsLayout.AddWidget(sectionLabel("Graphics and performance notes").QWidget)
-	limitsText := qt.NewQLabel3("<b>Auto</b> leaves Roblox's frame-rate choice alone. <b>Limited</b> supports 30–240 FPS. <b>Unlimited</b> sends an experimental uncapped request. Actual FPS depends on the client, CPU, GPU, and driver; no particular frame rate is guaranteed. Higher rates can increase power use and instability.<br><br><b>VSync</b> is disabled by default and is independent of the frame-rate cap. Enabling it synchronizes presentation to the active monitor refresh rate. Leaving it disabled permits above-refresh presentation but can cause visible tearing.<br><br><b>Low texture mode</b> is off by default so Roblox loads high-quality textures. Enable it to use lower-resolution textures and save memory/VRAM. Changing texture quality requires a Roblox restart.<br><br><b>Discord Rich Presence</b> is on by default and shows the current experience as Game name - Tipsy, with Tipsy branding on the artwork. The optional Join button opens the public Roblox experience page. Both apply while Roblox is running and never include account cookies or join tickets.<br><br><b>Default monitor</b> pins the Tipsy launcher and Roblox windows to the current main display. Choose a named monitor to keep them there even if the desktop primary changes. <b>Follow mouse</b> restores the previous window-manager placement from the pointer.<br><br><b>Vulkan</b> is visible for future compatibility but disabled until Tipsy has a Vulkan bridge and a working host driver.")
+	limitsText := qt.NewQLabel3("<b>Auto</b> leaves Roblox's frame-rate choice alone. <b>Limited</b> supports 30–240 FPS. <b>Unlimited</b> sends an experimental uncapped request. Actual FPS depends on the client, CPU, GPU, and driver; no particular frame rate is guaranteed. Higher rates can increase power use and instability.<br><br><b>VSync</b> is disabled by default and is independent of the frame-rate cap. Enabling it synchronizes presentation to the active monitor refresh rate. Leaving it disabled permits above-refresh presentation but can cause visible tearing.<br><br><b>Low texture mode</b> is off by default so Roblox loads high-quality textures. Enable it to use lower-resolution textures and save memory/VRAM. Changing texture quality requires a Roblox restart.<br><br><b>Discord Rich Presence</b> is off by default. When enabled it shows the current experience as Game name - Tipsy, with Tipsy branding on the artwork. The optional Join button opens the public Roblox experience page. Both apply while Roblox is running and never include account cookies or join tickets.<br><br><b>Default monitor</b> pins the Tipsy launcher and Roblox windows to the current main display. Choose a named monitor to keep them there even if the desktop primary changes. <b>Follow mouse</b> restores the previous window-manager placement from the pointer.<br><br><b>Vulkan</b> is visible for future compatibility but disabled until Tipsy has a Vulkan bridge and a working host driver.")
 	limitsText.SetTextFormat(qt.RichText)
 	limitsText.SetWordWrap(true)
 	setObjectName(limitsText.QObject, "mutedText")

@@ -111,11 +111,11 @@ func TestOffscreenVisualProof(t *testing.T) {
 	if win.settingsLowTexture == nil || win.settingsLowTexture.IsChecked() || win.settingsLowTexture.AccessibleName() != "Low texture mode" {
 		t.Fatalf("Low texture mode control did not render unchecked and accessible: %#v", win.settingsLowTexture)
 	}
-	if win.settingsDiscordPresence == nil || !win.settingsDiscordPresence.IsChecked() || win.settingsDiscordPresence.AccessibleName() != "Discord Rich Presence" {
-		t.Fatalf("Discord Rich Presence control did not render checked and accessible: %#v", win.settingsDiscordPresence)
+	if win.settingsDiscordPresence == nil || win.settingsDiscordPresence.IsChecked() || win.settingsDiscordPresence.AccessibleName() != "Discord Rich Presence" {
+		t.Fatalf("Discord Rich Presence control did not render unchecked and accessible: %#v", win.settingsDiscordPresence)
 	}
-	if win.settingsDiscordJoin == nil || win.settingsDiscordJoin.IsChecked() || win.settingsDiscordJoin.AccessibleName() != "Show Join button" || !win.settingsDiscordJoin.IsEnabled() {
-		t.Fatalf("Join button control did not render unchecked and enabled: %#v", win.settingsDiscordJoin)
+	if win.settingsDiscordJoin == nil || win.settingsDiscordJoin.IsChecked() || win.settingsDiscordJoin.AccessibleName() != "Show Join button" || win.settingsDiscordJoin.IsEnabled() {
+		t.Fatalf("Join button control did not render unchecked and disabled: %#v", win.settingsDiscordJoin)
 	}
 	if description := win.settingsLowTexture.AccessibleDescription(); !strings.Contains(strings.ToLower(description), "memory") || !strings.Contains(description, "VRAM") {
 		t.Fatalf("Low texture mode accessibility copy is not honest: %q", description)
@@ -138,8 +138,8 @@ func TestOffscreenVisualProof(t *testing.T) {
 	if got := win.settingsLowTexture.Text(); got != lowTextureToggleText(false) {
 		t.Fatalf("unchecked low texture state text=%q, want %q", got, lowTextureToggleText(false))
 	}
-	if got := win.settingsDiscordPresence.Text(); got != discordPresenceToggleText(true) {
-		t.Fatalf("checked Discord presence text=%q, want %q", got, discordPresenceToggleText(true))
+	if got := win.settingsDiscordPresence.Text(); got != discordPresenceToggleText(false) {
+		t.Fatalf("unchecked Discord presence text=%q, want %q", got, discordPresenceToggleText(false))
 	}
 	if got := win.settingsDiscordJoin.Text(); got != discordJoinToggleText(false) {
 		t.Fatalf("unchecked Discord join text=%q, want %q", got, discordJoinToggleText(false))

@@ -99,6 +99,7 @@ func TestStartFullscreenSettingsAdapterRoundTrip(t *testing.T) {
 
 func TestDiscordSettingsAdapterRoundTrip(t *testing.T) {
 	backend := clientsettings.Default()
+	backend.DiscordRichPresence = true
 	backend.DiscordJoinButton = true
 	gui := guiSettings(backend)
 	if !gui.DiscordRichPresence || !gui.DiscordJoinButton {
@@ -107,10 +108,10 @@ func TestDiscordSettingsAdapterRoundTrip(t *testing.T) {
 	if got := backendSettings(gui); got != backend {
 		t.Fatalf("GUI discord round trip=%+v want=%+v", got, backend)
 	}
-	if got := guiSettings(clientsettings.Settings{}); !got.DiscordRichPresence && got.DiscordJoinButton {
-		t.Fatalf("zero backend unexpectedly enabled join: %+v", got)
+	if got := guiSettings(clientsettings.Settings{}); got.DiscordRichPresence || got.DiscordJoinButton {
+		t.Fatalf("zero backend unexpectedly enabled discord: %+v", got)
 	}
-	if got := backendSettings(guimodel.DefaultSettings()); !got.DiscordRichPresence || got.DiscordJoinButton {
+	if got := backendSettings(guimodel.DefaultSettings()); got.DiscordRichPresence || got.DiscordJoinButton {
 		t.Fatalf("GUI default discord=%+v", got)
 	}
 }

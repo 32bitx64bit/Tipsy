@@ -172,7 +172,8 @@ type Settings struct {
 	// setting. The missing JSON field keeps existing installations windowed.
 	StartFullscreen bool `json:"startFullscreen"`
 	// DiscordRichPresence shows the current experience on Discord. Missing
-	// JSON defaults on; DiscordJoinButton stays off unless explicitly enabled.
+	// JSON and Default() leave it off. DiscordJoinButton stays off unless
+	// explicitly enabled.
 	DiscordRichPresence bool `json:"discordRichPresence"`
 	DiscordJoinButton   bool `json:"discordJoinButton"`
 }
@@ -218,10 +219,9 @@ func RobloxSettingsPath() string {
 
 func Default() Settings {
 	return Settings{
-		Renderer:            RendererAuto,
-		FrameRate:           FrameRate{Mode: FrameRateAuto},
-		Display:             DisplayPrimary,
-		DiscordRichPresence: true,
+		Renderer:  RendererAuto,
+		FrameRate: FrameRate{Mode: FrameRateAuto},
+		Display:   DisplayPrimary,
 	}
 }
 
@@ -640,7 +640,7 @@ func decodePersisted(data []byte, got *persistedSettings) error {
 	if err := json.Unmarshal(data, &wire); err != nil {
 		return err
 	}
-	presence := true
+	presence := false
 	if wire.DiscordRichPresence != nil {
 		presence = *wire.DiscordRichPresence
 	}
