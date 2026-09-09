@@ -1,0 +1,42 @@
+# Tipsy Flatpak manifest (requires first-build validation; see build-flatpak.sh).
+# Bump `runtime-version` to the current stable KDE runtime before release.
+app-id: io.github.tipsy_linux.Tipsy
+runtime: org.kde.Platform
+runtime-version: '6.8'
+sdk: org.kde.Sdk
+command: tipsy-gui
+finish-args:
+  - --share=ipc
+  - --share=network
+  - --socket=x11
+  - --socket=pulseaudio
+  - --device=dri
+  - --filesystem=xdg-data/tipsy:create
+  - --filesystem=xdg-config/tipsy:create
+  - --talk-name=org.freedesktop.Notifications
+  # No --socket=wayland: Tipsy is X11-first by design.
+modules:
+  - name: tipsy
+    buildsystem: simple
+    build-options:
+      append-path: /usr/lib/sdk/golang/bin
+    sources:
+      # The publish workflow rewrites `tag` to the release tag being built.
+      - type: git
+        url: https://github.com/32bitx64bit/Tipsy.git
+        tag: main
+    build-commands:
+      - export GOAMD64=v2 CGO_ENABLED=1
+      - go build -buildvcs=false -mod=readonly -trimpath
+          -ldflags "-buildid= -s -w" -o /app/bin/tipsy ./cmd/tipsy
+      - go build -buildvcs=false -mod=readonly -trimpath
+          -ldflags "-buildid= -s -w" -o /app/bin/tipsy-gui ./cmd/tipsy-gui
+      - install -Dm0644 share/applications/io.github.tipsy_linux.Tipsy.Play.desktop
+          /app/share/applications/io.github.tipsy_linux.Tipsy.Play.desktop
+      - install -Dm0644 share/applications/io.github.tipsy_linux.Tipsy.Settings.desktop
+          /app/share/applications/io.github.tipsy_linux.Tipsy.Settings.desktop
+      - install -Dm0644 share/metainfo/io.github.tipsy_linux.Tipsy.metainfo.xml
+          /app/share/metainfo/io.github.tipsy_linux.Tipsy.metainfo.xml
+      - install -Dm0644 tipsy.png /app/share/icons/hicolor/512x512/apps/tipsy.png
+      - install -Dm0644 LICENSE /app/share/licenses/tipsy/LICENSE
+      - install -Dm0644 NOTICE /app/share/licenses/tipsy/NOTICE

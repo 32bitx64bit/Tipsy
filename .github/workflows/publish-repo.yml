@@ -1,0 +1,317 @@
+name: Publish Linux repositories
+
+# After release.yml publishes a Tipsy GitHub Release, this workflow builds the
+# native Linux packages and publishes them to the separate Tipsy-repo
+# distribution repository (APT + RPM + Flatpak + latest.json via Pages).
+#
+# Required secrets in THIS repository (Settings -> Secrets and variables ->
+# Actions); see Tipsy-repo docs/SIGNING.md for setup:
+#   TIPSY_REPO_TOKEN      fine-grained PAT, Contents read+write, Tipsy-repo only
+#   TIPSY_GPG_PRIVATE_KEY ASCII-armored release-signing private key
+#   TIPSY_GPG_KEY_ID      signing key id / fingerprint
+#   TIPSY_GPG_PASSPHRASE  key passphrase (empty value allowed if key has none)
+#
+# Design: Tipsy owns source+builds; Tipsy-repo owns hosting. APT/DNF/Flatpak
+# updates are owned by those package managers; only AppImage uses latest.json.
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Release version without the v prefix (for example 1.2.3)"
+        required: true
+        type: string
+      flatpak:
+        description: "Also build the Flatpak bundle (enable after first-build validation)"
+        required: false
+        default: false
+        type: boolean
+
+permissions:
+  contents: read
+
+concurrency:
+  group: publish-linux-repos-${{ github.event.release.tag_name || inputs.version }}
+  cancel-in-progress: false
+
+env:
+  SOURCE_REPO: 32bitx64bit/Tipsy
+  DISTRO_REPO: 32bitx64bit/Tipsy-repo
+  PAGES_BASE: https://32bitx64bit.github.io/Tipsy-repo
+  GO_VERSION: "1.27.1"
+
+jobs:
+  prepare:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    outputs:
+      version: ${{ steps.resolve.outputs.version }}
+      tag: ${{ steps.resolve.outputs.tag }}
+      do_publish: ${{ steps.resolve.outputs.do_publish }}
+    steps:
+      - name: Resolve version and stable gate
+        id: resolve
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ "${{ github.event_name }}" == release ]]; then
+            tag='${{ github.event.release.tag_name }}'
+            prerelease='${{ github.event.release.prerelease }}'
+          else
+            tag="v${{ inputs.version }}"
+            prerelease=false
+          fi
+          [[ "$tag" =~ ^v[0-9A-Za-z][0-9A-Za-z._+-]*$ ]] || { echo "bad tag: $tag" >&2; exit 1; }
+          version=${tag#v}
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          # Stable repos and latest.json advance only on full releases.
+          if [[ "$prerelease" == true ]]; then
+            echo "do_publish=false" >> "$GITHUB_OUTPUT"
+            echo "Prerelease $tag: stable repositories stay on the previous version." >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "do_publish=true" >> "$GITHUB_OUTPUT"
+          fi
+
+  packages:
+    needs: prepare
+    if: needs.prepare.outputs.do_publish == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - name: Checkout release tag
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          ref: ${{ needs.prepare.outputs.tag }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Require cross-repository credentials
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ -n "${TIPSY_REPO_TOKEN:-}" ]] || {
+            echo "::error::TIPSY_REPO_TOKEN is not configured. See Tipsy-repo docs/SIGNING.md."; exit 1; }
+          [[ -n "${TIPSY_GPG_PRIVATE_KEY:-}" ]] || {
+            echo "::error::TIPSY_GPG_PRIVATE_KEY is not configured. See Tipsy-repo docs/SIGNING.md."; exit 1; }
+          [[ -n "${TIPSY_GPG_KEY_ID:-}" ]] || {
+            echo "::error::TIPSY_GPG_KEY_ID is not configured. See Tipsy-repo docs/SIGNING.md."; exit 1; }
+        env:
+          TIPSY_REPO_TOKEN: ${{ secrets.TIPSY_REPO_TOKEN }}
+          TIPSY_GPG_PRIVATE_KEY: ${{ secrets.TIPSY_GPG_PRIVATE_KEY }}
+          TIPSY_GPG_KEY_ID: ${{ secrets.TIPSY_GPG_KEY_ID }}
+
+      - name: Select Go toolchain
+        uses: actions/setup-go@d35c59abb061a4a6fb18e82ac0862c26744d6ab5 # v5.5.0
+        with:
+          go-version: "1.27.1"
+          check-latest: false
+          cache: false
+
+      - name: Install native and packaging tools
+        shell: bash
+        run: |
+          set -euo pipefail
+          scripts/ci-install-native.sh
+          sudo apt-get install -y --no-install-recommends \
+            dpkg-dev rpm createrepo_c gnupg lintian
+          command -v dpkg-deb && command -v rpmbuild && command -v createrepo_c
+
+      - name: Download the signed AppImage from the Tipsy release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          gh release download '${{ needs.prepare.outputs.tag }}' \
+            --repo "$SOURCE_REPO" \
+            --dir dist \
+            --pattern 'Tipsy-*-x86_64.AppImage'
+          ls dist/Tipsy-*-x86_64.AppImage
+
+      - name: Build .deb and .rpm
+        shell: bash
+        run: |
+          set -euo pipefail
+          export GOAMD64=v2 CGO_ENABLED=1
+          bash packaging/deb/build-deb.sh \
+            --version '${{ needs.prepare.outputs.version }}' --output-dir dist
+          bash packaging/rpm/build-rpm.sh \
+            --version '${{ needs.prepare.outputs.version }}' --output-dir dist
+          ls -la dist/
+
+      - name: Optionally build the Flatpak bundle
+        if: inputs.flatpak == true
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get install -y --no-install-recommends flatpak-builder
+          bash packaging/flatpak/build-flatpak.sh \
+            --version '${{ needs.prepare.outputs.version }}' --output-dir dist
+
+      - name: Write SHA256SUMS and stage publish set
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd dist
+          sha256sum Tipsy-*-x86_64.AppImage tipsy_*_amd64.deb tipsy-*.rpm Tipsy-*.flatpak 2>/dev/null > SHA256SUMS || \
+            sha256sum Tipsy-*-x86_64.AppImage tipsy_*_amd64.deb tipsy-*.rpm > SHA256SUMS
+          sha256sum --strict --check SHA256SUMS
+          cat SHA256SUMS
+          mkdir -p ../publish
+          cp Tipsy-*-x86_64.AppImage tipsy_*_amd64.deb tipsy-*.rpm SHA256SUMS ../publish/
+          cp Tipsy-*.flatpak ../publish/ 2>/dev/null || \
+            echo "NOTICE: no Flatpak bundle (first-build validation pending; repo structure still published)."
+
+      - name: Create or update the Tipsy-repo Release (idempotent)
+        env:
+          GH_TOKEN: ${{ secrets.TIPSY_REPO_TOKEN }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          tag='${{ needs.prepare.outputs.tag }}'
+          version='${{ needs.prepare.outputs.version }}'
+          if ! gh release view "$tag" --repo "$DISTRO_REPO" >/dev/null 2>&1; then
+            gh release create "$tag" --repo "$DISTRO_REPO" \
+              --title "Tipsy $version (Linux repositories)" \
+              --notes "Official Linux distribution artifacts for Tipsy $version. Install via APT, DNF, Flatpak, or AppImage; see the repository README."
+          fi
+          # --clobber is intentional: reruns replace same-named rebuilt assets.
+          gh release upload "$tag" publish/* --clobber --repo "$DISTRO_REPO"
+
+      - name: Hand the publish set to the repository job
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: tipsy-distro-publish-${{ needs.prepare.outputs.version }}
+          path: publish/
+          if-no-files-found: error
+          retention-days: 7
+
+  publish:
+    needs: [prepare, packages]
+    if: needs.prepare.outputs.do_publish == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - name: Checkout Tipsy-repo with publish credentials
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          repository: 32bitx64bit/Tipsy-repo
+          token: ${{ secrets.TIPSY_REPO_TOKEN }}
+          path: Tipsy-repo
+
+      - name: Download the publish set
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: tipsy-distro-publish-${{ needs.prepare.outputs.version }}
+          path: publish
+
+      - name: Install repository tooling
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            dpkg-dev apt createrepo_c rpm gnupg ostree flatpak
+          command -v dpkg-scanpackages && command -v createrepo_c
+
+      - name: Import the release-signing key (never logged)
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ -n "${TIPSY_GPG_PRIVATE_KEY:-}" ]] || {
+            echo "::error::TIPSY_GPG_PRIVATE_KEY is not configured."; exit 1; }
+          gpg --batch --import <<<"$TIPSY_GPG_PRIVATE_KEY"
+          gpg --batch --list-secret-keys "$TIPSY_GPG_KEY_ID" >/dev/null || {
+            echo "::error::TIPSY_GPG_KEY_ID does not match the imported key."; exit 1; }
+        env:
+          TIPSY_GPG_PRIVATE_KEY: ${{ secrets.TIPSY_GPG_PRIVATE_KEY }}
+          TIPSY_GPG_KEY_ID: ${{ secrets.TIPSY_GPG_KEY_ID }}
+
+      - name: Update APT, RPM, and Flatpak repositories
+        shell: bash
+        run: |
+          set -euo pipefail
+          version='${{ needs.prepare.outputs.version }}'
+          repo=Tipsy-repo
+          deb=(publish/tipsy_*_amd64.deb)
+          rpm=(publish/tipsy-*.rpm)
+          [[ -f "${deb[0]}" ]] || { echo "::error::missing .deb"; exit 1; }
+          [[ -f "${rpm[0]}" ]] || { echo "::error::missing .rpm"; exit 1; }
+          bash "$repo/scripts/update-apt-repo.sh" --repo-root "$repo" \
+            --deb "${deb[0]}" --key-id "$TIPSY_GPG_KEY_ID"
+          bash "$repo/scripts/update-rpm-repo.sh" --repo-root "$repo" \
+            --rpm "${rpm[0]}" --key-id "$TIPSY_GPG_KEY_ID"
+          bundle_args=()
+          if ls publish/Tipsy-*.flatpak >/dev/null 2>&1; then
+            bundle_args=(--bundle publish/Tipsy-"$version".flatpak)
+          else
+            echo "NOTICE: re-indexing Flatpak repo without a new bundle."
+          fi
+          bash "$repo/scripts/update-flatpak-repo.sh" --repo-root "$repo" \
+            --gpg-key "$TIPSY_GPG_KEY_ID" "${bundle_args[@]}"
+          bash "$repo/scripts/prune-old-packages.sh" --repo-root "$repo" --keep 3
+        env:
+          TIPSY_GPG_KEY_ID: ${{ secrets.TIPSY_GPG_KEY_ID }}
+          TIPSY_GPG_PASSPHRASE: ${{ secrets.TIPSY_GPG_PASSPHRASE }}
+
+      - name: Generate and sign latest.json (only after all builds validated)
+        shell: bash
+        run: |
+          set -euo pipefail
+          version='${{ needs.prepare.outputs.version }}'
+          tag='${{ needs.prepare.outputs.tag }}'
+          appimage=(publish/Tipsy-*-x86_64.AppImage)
+          deb=(publish/tipsy_*_amd64.deb)
+          rpm=(publish/tipsy-*.rpm)
+          asset_args=(
+            --asset "linux-x86_64-appimage=${appimage[0]}"
+            --asset "linux-x86_64-deb=${deb[0]}"
+            --asset "linux-x86_64-rpm=${rpm[0]}"
+          )
+          if ls publish/Tipsy-*.flatpak >/dev/null 2>&1; then
+            asset_args+=(--asset "linux-x86_64-flatpak=publish/Tipsy-$version.flatpak")
+          fi
+          python3 Tipsy-repo/scripts/generate-latest-manifest.py \
+            --version "$version" --tag "$tag" --owner 32bitx64bit \
+            --pages-base "$PAGES_BASE" "${asset_args[@]}" \
+            --output Tipsy-repo/public/latest.json
+          # Detached signature for the in-app updater (passphrase via fd, never argv).
+          if [[ -n "${TIPSY_GPG_PASSPHRASE:-}" ]]; then
+            gpg --batch --yes --pinentry-mode loopback --local-user "$TIPSY_GPG_KEY_ID" \
+              --passphrase-fd 3 --armor --detach-sign \
+              -o Tipsy-repo/public/latest.json.sig Tipsy-repo/public/latest.json 3<<<"$TIPSY_GPG_PASSPHRASE"
+          else
+            gpg --batch --yes --pinentry-mode loopback --local-user "$TIPSY_GPG_KEY_ID" \
+              --armor --detach-sign \
+              -o Tipsy-repo/public/latest.json.sig Tipsy-repo/public/latest.json
+          fi
+          gpg --verify Tipsy-repo/public/latest.json.sig Tipsy-repo/public/latest.json
+        env:
+          TIPSY_GPG_KEY_ID: ${{ secrets.TIPSY_GPG_KEY_ID }}
+          TIPSY_GPG_PASSPHRASE: ${{ secrets.TIPSY_GPG_PASSPHRASE }}
+
+      - name: Verify repositories strictly before pushing
+        shell: bash
+        run: |
+          set -euo pipefail
+          bash Tipsy-repo/scripts/verify-repositories.sh --repo-root Tipsy-repo \
+            --version '${{ needs.prepare.outputs.version }}' --strict
+
+      - name: Commit and push (Pages deploys automatically)
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd Tipsy-repo
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add -A public
+          if git diff --cached --quiet; then
+            echo "Nothing changed; skipping push."
+          else
+            git commit -m "repo: publish ${{ needs.prepare.outputs.version }}"
+            git push origin HEAD:main
+          fi
