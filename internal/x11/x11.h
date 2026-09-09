@@ -28,7 +28,9 @@ extern "C" {
  *        the Android surface is resized before subsequent pointer events.
  * text: committed UTF-8 from X11's input method. It follows the originating
  *        physical KeyPress and is never logged. This preserves the host
- *        keyboard layout instead of reconstructing text from a keycode. */
+ *        keyboard layout instead of reconstructing text from a keycode.
+ *        UTF-8 lives in the parallel tipsy_input_text side ring, not in
+ *        this slot, so pointer/key copies stay a small ABI. */
 #define TIPSY_INPUT_FOCUS 0
 #define TIPSY_INPUT_KEY 1
 #define TIPSY_INPUT_POINTER 2
@@ -51,7 +53,6 @@ struct tipsy_input_ev {
 	float dy;
 	int repeat_count;
 	int text_len;
-	char text[TIPSY_INPUT_TEXT_BYTES];
 };
 
 typedef struct {
@@ -68,7 +69,12 @@ void tipsy_x11_wake_ack(void);
 void tipsy_nudge_pump(void);
 int tipsy_x11_set_pointer_lock(uintptr_t dpy_ptr, unsigned long xid,
 	int locked, int *out_x, int *out_y, int *out_status);
-int tipsy_x11_input_drain(struct tipsy_input_ev *out, int max);
+int tipsy_x11_input_drain(struct tipsy_input_ev *out, char *text_out, int max);
+void tipsy_x11_input_test_clear(void);
+void tipsy_x11_input_test_push(int kind, int a, long b, long c, float x, float y);
+void tipsy_x11_input_test_push_text(const char *text, int len);
+int tipsy_x11_input_test_text_slots_clean(void);
+int tipsy_x11_input_ev_size(void);
 int tipsy_x11_io_error(void);
 int tipsy_x11_request_fullscreen(uintptr_t dpy_ptr, unsigned long win, int enabled);
 int tipsy_x11_list_outputs(tipsy_xrr_output *out, int max);

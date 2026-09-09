@@ -24,6 +24,8 @@
 #include <stdlib.h>
 #include <unistd.h>
 
+_Static_assert(sizeof(struct tipsy_input_ev) <= 48, "tipsy_input_ev must stay a small pointer slot");
+
 extern void GoX11_Notify(void);
 
 static int tipsy_x_error_code;
@@ -47,7 +49,11 @@ static int tipsy_xi_raw_selected;
 // repeat presses; -1 means focus loss already released the key to Android.
 static struct { int down; int repeats; int android_code; } tipsy_keys[256];
 
+// Pointer/key/motion slots stay small. Committed IME text is rare and lives
+// in a side ring indexed by the same head/tail as the event. Overflow drops
+// wipe that slot so secrets do not linger after a discarded text event.
 static struct tipsy_input_ev tipsy_input_ring[TIPSY_INPUT_RING];
+static char tipsy_input_text[TIPSY_INPUT_RING][TIPSY_INPUT_TEXT_BYTES];
 static int tipsy_input_head;
 static int tipsy_input_tail;
 static pthread_mutex_t tipsy_input_mu = PTHREAD_MUTEX_INITIALIZER;
@@ -169,6 +175,14 @@ struct tipsy_pointer_capture {
 
 static struct tipsy_pointer_capture tipsy_capture;
 
+static void tipsy_input_drop_oldest_locked(void) {
+	if (tipsy_input_ring[tipsy_input_tail].kind == TIPSY_INPUT_TEXT &&
+		tipsy_input_ring[tipsy_input_tail].text_len > 0) {
+		memset(tipsy_input_text[tipsy_input_tail], 0, TIPSY_INPUT_TEXT_BYTES);
+	}
+	tipsy_input_tail = (tipsy_input_tail + 1) % TIPSY_INPUT_RING;
+}
+
 static void tipsy_input_push_repeat(int kind, int a, long b, long c, float x, float y, int repeats) {
 	pthread_mutex_lock(&tipsy_input_mu);
 	int was_empty = (tipsy_input_head == tipsy_input_tail);
@@ -198,7 +212,7 @@ static void tipsy_input_push_repeat(int kind, int a, long b, long c, float x, fl
 		// Ring full: this generic path retains its existing bounded behavior.
 		// Captured-pointer overflow is handled separately below so it keeps
 		// camera travel without sacrificing a low-frequency input edge.
-		tipsy_input_tail = (tipsy_input_tail + 1) % TIPSY_INPUT_RING;
+		tipsy_input_drop_oldest_locked();
 	}
 	tipsy_input_ring[tipsy_input_head].kind = kind;
 	tipsy_input_ring[tipsy_input_head].a = a;
@@ -245,7 +259,7 @@ static void tipsy_input_push_relative(float dx, float dy, float anchor_x, float 
 			pthread_mutex_unlock(&tipsy_input_mu);
 			return;
 		}
-		tipsy_input_tail = (tipsy_input_tail + 1) % TIPSY_INPUT_RING;
+		tipsy_input_drop_oldest_locked();
 	}
 	struct tipsy_input_ev *slot = &tipsy_input_ring[tipsy_input_head];
 	slot->kind = TIPSY_INPUT_POINTER;
@@ -493,13 +507,24 @@ static void tipsy_input_push_text(const char *text, int len) {
 	int was_empty = (tipsy_input_head == tipsy_input_tail);
 	int next = (tipsy_input_head + 1) % TIPSY_INPUT_RING;
 	if (next == tipsy_input_tail) {
-		tipsy_input_tail = (tipsy_input_tail + 1) % TIPSY_INPUT_RING;
+		tipsy_input_drop_oldest_locked();
 	}
 	struct tipsy_input_ev *slot = &tipsy_input_ring[tipsy_input_head];
-	memset(slot, 0, sizeof(*slot));
 	slot->kind = TIPSY_INPUT_TEXT;
-	memcpy(slot->text, text, (size_t)len);
+	slot->a = 0;
+	slot->b = 0;
+	slot->c = 0;
+	slot->x = 0;
+	slot->y = 0;
+	slot->dx = 0;
+	slot->dy = 0;
+	slot->repeat_count = 0;
 	slot->text_len = len;
+	memcpy(tipsy_input_text[tipsy_input_head], text, (size_t)len);
+	if (len < TIPSY_INPUT_TEXT_BYTES) {
+		memset(tipsy_input_text[tipsy_input_head] + len, 0,
+			(size_t)(TIPSY_INPUT_TEXT_BYTES - len));
+	}
 	tipsy_input_head = next;
 	pthread_mutex_unlock(&tipsy_input_mu);
 	if (was_empty) {
@@ -507,7 +532,7 @@ static void tipsy_input_push_text(const char *text, int len) {
 	}
 }
 
-int tipsy_x11_input_drain(struct tipsy_input_ev *out, int max) {
+int tipsy_x11_input_drain(struct tipsy_input_ev *out, char *text_out, int max) {
 	if (out == NULL || max <= 0) {
 		return 0;
 	}
@@ -515,11 +540,58 @@ int tipsy_x11_input_drain(struct tipsy_input_ev *out, int max) {
 	int n = 0;
 	while (tipsy_input_tail != tipsy_input_head && n < max) {
 		out[n] = tipsy_input_ring[tipsy_input_tail];
+		if (out[n].kind == TIPSY_INPUT_TEXT && out[n].text_len > 0) {
+			int len = out[n].text_len;
+			if (len > TIPSY_INPUT_TEXT_BYTES) {
+				len = TIPSY_INPUT_TEXT_BYTES;
+			}
+			if (text_out != NULL) {
+				memcpy(text_out + (size_t)n * TIPSY_INPUT_TEXT_BYTES,
+					tipsy_input_text[tipsy_input_tail], (size_t)len);
+			}
+			memset(tipsy_input_text[tipsy_input_tail], 0, TIPSY_INPUT_TEXT_BYTES);
+		}
 		tipsy_input_tail = (tipsy_input_tail + 1) % TIPSY_INPUT_RING;
 		n++;
 	}
 	pthread_mutex_unlock(&tipsy_input_mu);
 	return n;
+}
+
+void tipsy_x11_input_test_clear(void) {
+	pthread_mutex_lock(&tipsy_input_mu);
+	memset(tipsy_input_ring, 0, sizeof(tipsy_input_ring));
+	memset(tipsy_input_text, 0, sizeof(tipsy_input_text));
+	tipsy_input_head = 0;
+	tipsy_input_tail = 0;
+	pthread_mutex_unlock(&tipsy_input_mu);
+}
+
+void tipsy_x11_input_test_push(int kind, int a, long b, long c, float x, float y) {
+	tipsy_input_push(kind, a, b, c, x, y);
+}
+
+void tipsy_x11_input_test_push_text(const char *text, int len) {
+	tipsy_input_push_text(text, len);
+}
+
+int tipsy_x11_input_test_text_slots_clean(void) {
+	int clean = 1;
+	pthread_mutex_lock(&tipsy_input_mu);
+	for (int i = 0; i < TIPSY_INPUT_RING && clean; i++) {
+		for (int j = 0; j < TIPSY_INPUT_TEXT_BYTES; j++) {
+			if (tipsy_input_text[i][j] != 0) {
+				clean = 0;
+				break;
+			}
+		}
+	}
+	pthread_mutex_unlock(&tipsy_input_mu);
+	return clean;
+}
+
+int tipsy_x11_input_ev_size(void) {
+	return (int)sizeof(struct tipsy_input_ev);
 }
 
 // tipsy_android_keycode maps the physical keys the desktop client can

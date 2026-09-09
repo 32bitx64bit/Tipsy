@@ -368,6 +368,41 @@ func TestFocusedTextSurfaceWrapExposeResizeAndAlphaZero(t *testing.T) {
 	}
 }
 
+func TestOverlayPixelDiagnosticsDefaultOff(t *testing.T) {
+	if os.Getenv("TIPSY_OVERLAY_PIXEL_DIAG") == "1" {
+		t.Skip("TIPSY_OVERLAY_PIXEL_DIAG=1 forces paint-path measurement")
+	}
+	win, _, closeWindow, err := newUnfocusedWindowForFocusedOverlayTest(320, 180)
+	if err != nil {
+		t.Fatalf("open unfocused test window: %v", err)
+	}
+	defer closeWindow()
+	overlay, err := NewFocusedTextOverlay(win)
+	if err != nil {
+		t.Fatalf("NewFocusedTextOverlay: %v", err)
+	}
+	defer overlay.Close()
+	s := validFocusedTextSnapshot()
+	s.X, s.Y, s.Width, s.Height = 11, 23, 180, 36
+	s.Editable, s.CursorVisible = false, false
+	if _, ok := overlay.fillParentAndSampleForTest(11, 23, 180, 36); !ok {
+		t.Fatal("could not seed parent background")
+	}
+	settleFocusedTextSurfaceForTest(t, overlay, &s)
+	diag := overlay.Diagnostics()
+	if !diag.Mapped {
+		t.Fatal("overlay paint did not map without pixel diagnostics")
+	}
+	if diag.GlyphMaskPixels != 0 || diag.PaintedPixels != 0 ||
+		diag.AntialiasedPixels != 0 || diag.BrightGlyphPixels != 0 {
+		t.Fatalf("paint-path measured pixels without TIPSY_OVERLAY_PIXEL_DIAG: %+v", diag)
+	}
+	state := overlay.queryForTest()
+	if state.GlyphMaskPixels == 0 || state.AntialiasedPixels == 0 {
+		t.Fatalf("on-demand test measurement produced no ink: %+v", state)
+	}
+}
+
 func TestFocusedTextSurfaceRejectsMissingOfficialFont(t *testing.T) {
 	win, _, closeWindow, err := newUnfocusedWindowForFocusedOverlayTest(240, 120)
 	if err != nil {

@@ -160,8 +160,20 @@ type focusedTextOverlayTestState struct {
 	baselineY           int
 }
 
-// queryForTest returns aggregate render health only.
+// queryForTest returns aggregate render health, measuring pixels on demand
+// so existing focused-text tests pass without TIPSY_OVERLAY_PIXEL_DIAG.
 func (o *FocusedTextOverlay) queryForTest() focusedTextOverlayTestState {
+	return o.queryOverlayState(true)
+}
+
+// Diagnostics exposes content-free surface health for live validation.
+// Pixel counts are populated only when paint ran with TIPSY_OVERLAY_PIXEL_DIAG=1;
+// this path does not perform XGetImage readbacks.
+func (o *FocusedTextOverlay) Diagnostics() FocusedTextOverlayDiagnostics {
+	return o.queryOverlayState(false).FocusedTextOverlayDiagnostics
+}
+
+func (o *FocusedTextOverlay) queryOverlayState(measure bool) focusedTextOverlayTestState {
 	var state focusedTextOverlayTestState
 	if o == nil {
 		return state
@@ -175,6 +187,9 @@ func (o *FocusedTextOverlay) queryForTest() focusedTextOverlayTestState {
 	defer o.window.mu.Unlock()
 	if o.window.closed || o.window.display == 0 {
 		return state
+	}
+	if measure {
+		_ = C.tipsy_focused_overlay_measure_for_test(C.uintptr_t(o.native))
 	}
 	var cx, cy, cw, ch, origin, top, boxHeight, baseline C.int
 	var painted, glyphs, caret, antialiased, bright, background, inputShape C.ulong
@@ -206,11 +221,6 @@ func (o *FocusedTextOverlay) queryForTest() focusedTextOverlayTestState {
 		BackgroundPixels:  uint64(background),
 	}
 	return state
-}
-
-// Diagnostics exposes content-free surface health for live validation.
-func (o *FocusedTextOverlay) Diagnostics() FocusedTextOverlayDiagnostics {
-	return o.queryForTest().FocusedTextOverlayDiagnostics
 }
 
 func (o *FocusedTextOverlay) fillParentAndSampleForTest(x, y, width, height int) (uint64, bool) {

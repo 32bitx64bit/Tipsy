@@ -20,6 +20,7 @@ int tipsy_focused_overlay_update(uintptr_t ptr, int visible,
 	int multiline, int wrapped, int editable, int cursor_visible,
 	const unsigned char *text, int text_len, int cursor_byte);
 void tipsy_focused_overlay_free(uintptr_t ptr);
+int tipsy_focused_overlay_measure_for_test(uintptr_t ptr);
 int tipsy_focused_overlay_query(uintptr_t ptr, int *x, int *y,
 	int *width, int *height, unsigned long *painted_pixels,
 	int *background_preserved, uint32_t *requested_argb,

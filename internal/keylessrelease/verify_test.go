@@ -69,6 +69,42 @@ func TestVerifyCurrentBindsExactArtifactBeforeOfficialResult(t *testing.T) {
 	}
 }
 
+func TestVerifyCurrentTreatsDevelopmentPayloadAsUnavailable(t *testing.T) {
+	_, err := verifyCurrent(context.Background(), dependencies{
+		artifactPath:    func() string { return "/tmp/Tipsy.AppImage" },
+		validateProcess: func() error { return nil },
+		payloadKind:     func() string { return "development-unrestricted" },
+		releaseVersion:  func() string { return "1.0.2" },
+		hashArtifact: func(string) ([]byte, error) {
+			t.Fatal("hash called")
+			return nil, nil
+		},
+		loadBundle: func(context.Context, string, string, []byte) ([]byte, string, error) {
+			t.Fatal("bundle called")
+			return nil, "", nil
+		},
+		verifyBundle: func(context.Context, []byte, []byte) error { t.Fatal("verify called"); return nil },
+	})
+	if !errors.Is(err, ErrUnavailable) {
+		t.Fatalf("err=%v", err)
+	}
+}
+
+func TestPayloadReleaseKindReadsDevelopmentBuildInfo(t *testing.T) {
+	appDir := t.TempDir()
+	path := filepath.Join(appDir, "usr", "share", "tipsy", "build-info.json")
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte(`{"format":"tipsy.build-info.v1","releaseKind":"development-unrestricted"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv(appDirEnvironment, appDir)
+	if got := payloadReleaseKind(); got != "development-unrestricted" {
+		t.Fatalf("kind=%q", got)
+	}
+}
+
 func TestVerifyCurrentDoesNotTreatVerificationFailureAsOfficial(t *testing.T) {
 	want := errors.New("identity mismatch")
 	_, err := verifyCurrent(context.Background(), dependencies{

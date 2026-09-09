@@ -318,6 +318,17 @@ static unsigned long tipsy_overlay_solid_pixel(struct tipsy_focused_overlay *o,
 	return pixel;
 }
 
+static int tipsy_overlay_pixel_diag_enabled(void) {
+	static int ready;
+	static int enabled;
+	if (!ready) {
+		const char *e = getenv("TIPSY_OVERLAY_PIXEL_DIAG");
+		enabled = (e != NULL && e[0] == '1' && e[1] == '\0');
+		ready = 1;
+	}
+	return enabled;
+}
+
 static int tipsy_overlay_measure_pixels(struct tipsy_focused_overlay *o,
 	uint32_t argb) {
 	XImage *bg = XGetImage(o->dpy, o->background, 0, 0,
@@ -463,7 +474,11 @@ static int tipsy_overlay_paint(struct tipsy_focused_overlay *o,
 	cairo_restore(o->cr);
 	cairo_surface_flush(o->surface);
 	o->requested_argb = argb;
-	if (tipsy_overlay_measure_pixels(o, argb) != 0) return -1;
+	// Full-field XGetImage + pixel scan is diagnostic-only. Default off so
+	// ordinary focused-text paints stay composition-only (~4 Hz while a
+	// textbox is focused). Enable with TIPSY_OVERLAY_PIXEL_DIAG=1.
+	if (tipsy_overlay_pixel_diag_enabled() &&
+		tipsy_overlay_measure_pixels(o, argb) != 0) return -1;
 	XSetWindowBackgroundPixmap(o->dpy, o->child, o->backing);
 	if (!o->mapped) {
 		XMapRaised(o->dpy, o->child);
@@ -544,6 +559,14 @@ void tipsy_focused_overlay_free(uintptr_t ptr) {
 	XFlush(o->dpy);
 	memset(o, 0, sizeof(*o));
 	free(o);
+}
+
+int tipsy_focused_overlay_measure_for_test(uintptr_t ptr) {
+	struct tipsy_focused_overlay *o = (struct tipsy_focused_overlay *)ptr;
+	if (o == NULL || o->dpy == NULL || o->child == None ||
+		o->background == None || o->backing == None ||
+		o->width <= 0 || o->height <= 0) return -1;
+	return tipsy_overlay_measure_pixels(o, o->requested_argb);
 }
 
 int tipsy_focused_overlay_query(uintptr_t ptr, int *x, int *y,

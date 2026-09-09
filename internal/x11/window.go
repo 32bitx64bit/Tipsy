@@ -56,6 +56,10 @@ type Window struct {
 	pointerCaptured bool
 	pointerAnchorX  int
 	pointerAnchorY  int
+	// inputScratch is a reused C drain buffer (*inputDrainScratch on
+	// linux+cgo). It lives on Window so escape analysis cannot allocate a
+	// 256-wide event array on every InputReady wake.
+	inputScratch any
 }
 
 // InputKind classifies a captured window input event.
@@ -144,6 +148,7 @@ type InputEvent struct {
 var (
 	inputMu    sync.RWMutex
 	inputSubs  = map[int]func(InputEvent){}
+	inputFns   []func(InputEvent) // snapshot, sorted by subscribe id
 	inputSeq   int
 	inputDrops uint64 // keys with no Android physical mapping, counted not logged
 )
@@ -199,11 +204,26 @@ func OnInput(fn func(InputEvent)) (cancel func()) {
 	id := inputSeq
 	inputSeq++
 	inputSubs[id] = fn
+	rebuildInputFnsLocked()
 	return func() {
 		inputMu.Lock()
 		defer inputMu.Unlock()
 		delete(inputSubs, id)
+		rebuildInputFnsLocked()
 	}
+}
+
+func rebuildInputFnsLocked() {
+	ids := make([]int, 0, len(inputSubs))
+	for id := range inputSubs {
+		ids = append(ids, id)
+	}
+	sort.Ints(ids)
+	fns := make([]func(InputEvent), len(ids))
+	for i, id := range ids {
+		fns[i] = inputSubs[id]
+	}
+	inputFns = fns
 }
 
 // InputDroppedKeys reports how many real key events lacked an Android
@@ -234,15 +254,7 @@ func notifyInput(evs []InputEvent) {
 		return
 	}
 	inputMu.RLock()
-	fns := make([]func(InputEvent), 0, len(inputSubs))
-	ids := make([]int, 0, len(inputSubs))
-	for id := range inputSubs {
-		ids = append(ids, id)
-	}
-	sort.Ints(ids)
-	for _, id := range ids {
-		fns = append(fns, inputSubs[id])
-	}
+	fns := inputFns
 	inputMu.RUnlock()
 	for _, ev := range evs {
 		for _, fn := range fns {

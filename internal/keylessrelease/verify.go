@@ -10,6 +10,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -35,6 +36,7 @@ const (
 	appDirEnvironment   = "TIPSY_RELEASE_APPDIR"
 	maxArtifactBytes    = int64(1 << 30)
 	maxBundleBytes      = int64(4 << 20)
+	maxBuildInfoBytes   = int64(16 << 10)
 
 	productionOIDCIssuer = "https://token.actions.githubusercontent.com"
 	productionIdentity   = `^https://github\.com/32bitx64bit/Tipsy/\.github/workflows/release\.yml@refs/(?:heads/main|tags/v[0-9A-Za-z._+-]+)$`
@@ -57,6 +59,7 @@ type Result struct {
 type dependencies struct {
 	artifactPath    func() string
 	validateProcess func() error
+	payloadKind     func() string
 	releaseVersion  func() string
 	hashArtifact    func(string) ([]byte, error)
 	loadBundle      func(context.Context, string, string, []byte) ([]byte, string, error)
@@ -67,6 +70,7 @@ func defaultDependencies() dependencies {
 	return dependencies{
 		artifactPath:    func() string { return os.Getenv(artifactEnvironment) },
 		validateProcess: validateAppImageProcess,
+		payloadKind:     payloadReleaseKind,
 		releaseVersion:  version.String,
 		hashArtifact:    hashArtifact,
 		loadBundle:      loadBundle,
@@ -99,6 +103,12 @@ func verifyCurrent(ctx context.Context, deps dependencies) (Result, error) {
 	}
 	if err := deps.validateProcess(); err != nil {
 		return Result{}, fmt.Errorf("validate AppImage process: %w", err)
+	}
+	if deps.payloadKind != nil && deps.payloadKind() == "development-unrestricted" {
+		// Local developer wraps are AppImages, but they are not GitHub
+		// releases. Do not fetch a missing Sigstore sidecar or block
+		// explicit --development consent on HTTP 404.
+		return Result{}, ErrUnavailable
 	}
 	digest, err := deps.hashArtifact(artifactPath)
 	if err != nil {
@@ -140,6 +150,27 @@ func validateAppImageProcess() error {
 		return errors.New("running executable is outside the AppImage payload")
 	}
 	return nil
+}
+
+type payloadBuildInfo struct {
+	Format      string `json:"format"`
+	ReleaseKind string `json:"releaseKind"`
+}
+
+func payloadReleaseKind() string {
+	appDir := strings.TrimSpace(os.Getenv(appDirEnvironment))
+	if appDir == "" || !filepath.IsAbs(appDir) {
+		return ""
+	}
+	raw, err := readRegularFile(filepath.Join(appDir, "usr", "share", "tipsy", "build-info.json"), maxBuildInfoBytes)
+	if err != nil {
+		return ""
+	}
+	var info payloadBuildInfo
+	if json.Unmarshal(raw, &info) != nil || info.Format != "tipsy.build-info.v1" {
+		return ""
+	}
+	return info.ReleaseKind
 }
 
 func hashArtifact(path string) ([]byte, error) {

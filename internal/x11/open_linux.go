@@ -28,6 +28,61 @@ const maxListedOutputs = 32
 // process-wide; Tipsy owns one Roblox window per process.
 const TIPSYInputRingLen = 256
 
+// inputTextCap is the committed-UTF-8 cap, matching TIPSY_INPUT_TEXT_BYTES.
+const inputTextCap = 256
+
+// inputDrainScratch is the once-per-window C drain buffer. Event slots are
+// ~40 B; IME text lives in a parallel array and is wiped after decode.
+type inputDrainScratch struct {
+	evs   [TIPSYInputRingLen]C.struct_tipsy_input_ev
+	texts [TIPSYInputRingLen][inputTextCap]byte
+}
+
+func (w *Window) inputDrainScratch() *inputDrainScratch {
+	if s, ok := w.inputScratch.(*inputDrainScratch); ok && s != nil {
+		return s
+	}
+	s := new(inputDrainScratch)
+	w.inputScratch = s
+	return s
+}
+
+func wipeInputScratch(w *Window) {
+	if w == nil {
+		return
+	}
+	if s, ok := w.inputScratch.(*inputDrainScratch); ok && s != nil {
+		for i := range s.texts {
+			clear(s.texts[i][:])
+		}
+	}
+}
+
+func testClearInputRing() {
+	C.tipsy_x11_input_test_clear()
+}
+
+func testPushPointer(action int32, button int32, x, y float32) {
+	C.tipsy_x11_input_test_push(C.TIPSY_INPUT_POINTER, C.int(action), C.long(button), 0, C.float(x), C.float(y))
+}
+
+func testPushText(s string) {
+	if s == "" {
+		return
+	}
+	p := C.CString(s)
+	defer C.free(unsafe.Pointer(p))
+	C.tipsy_x11_input_test_push_text(p, C.int(len(s)))
+}
+
+func testInputTextSlotsClean() bool {
+	return C.tipsy_x11_input_test_text_slots_clean() != 0
+}
+
+func inputABISizes() (evBytes, textBytes int) {
+	return int(C.tipsy_x11_input_ev_size()), int(C.TIPSY_INPUT_TEXT_BYTES)
+}
+
 // ListOutputs reports connected XRandR outputs on the current DISPLAY.
 func ListOutputs() ([]Output, error) {
 	var raw [maxListedOutputs]C.tipsy_xrr_output
@@ -234,17 +289,18 @@ func (w *Window) Pump() error {
 }
 
 // drainInputLocked moves captured events from the C ring into Go events
-// and applies focus state. Called with w.mu held.
+// and applies focus state. Called with w.mu held. Reuses window scratch so
+// the ~40 B slots do not escape to a new 80 KiB heap allocation per wake.
 func (w *Window) drainInputLocked() ([]InputEvent, bool) {
-	var raw [TIPSYInputRingLen]C.struct_tipsy_input_ev
-	n := int(C.tipsy_x11_input_drain(&raw[0], C.int(len(raw))))
+	s := w.inputDrainScratch()
+	n := int(C.tipsy_x11_input_drain(&s.evs[0], (*C.char)(unsafe.Pointer(&s.texts[0][0])), C.int(len(s.evs))))
 	if n == 0 {
 		return nil, false
 	}
 	evs := make([]InputEvent, 0, n)
 	closeRequested := false
 	for i := 0; i < n; i++ {
-		r := &raw[i]
+		r := &s.evs[i]
 		switch r.kind {
 		case C.TIPSY_INPUT_FOCUS:
 			gained := r.a != 0
@@ -289,11 +345,13 @@ func (w *Window) drainInputLocked() ([]InputEvent, bool) {
 			}
 			evs = append(evs, InputEvent{Kind: InputResize, Width: width, Height: height})
 		case C.TIPSY_INPUT_TEXT:
-			n := int(r.text_len)
-			if n <= 0 || n > C.TIPSY_INPUT_TEXT_BYTES {
+			ntext := int(r.text_len)
+			if ntext <= 0 || ntext > inputTextCap {
+				clear(s.texts[i][:])
 				continue
 			}
-			text := C.GoStringN((*C.char)(unsafe.Pointer(&r.text[0])), C.int(n))
+			text := C.GoStringN((*C.char)(unsafe.Pointer(&s.texts[i][0])), C.int(ntext))
+			clear(s.texts[i][:])
 			if text == "" {
 				continue
 			}
@@ -389,6 +447,7 @@ func (w *Window) Close() error {
 	_ = w.stopBackgroundPumpLocked()
 	if w.display == 0 {
 		w.closed = true
+		wipeInputScratch(w)
 		return nil
 	}
 	if w.cursor != 0 {
@@ -402,6 +461,7 @@ func (w *Window) Close() error {
 	w.closed = true
 	w.dismissed = true
 	w.pointerCaptured = false
+	wipeInputScratch(w)
 	return nil
 }
 
