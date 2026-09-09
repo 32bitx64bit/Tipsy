@@ -18,6 +18,7 @@ func resetArgCaptureForTest() {
 }
 
 func TestFindClassNameDiagnostic(t *testing.T) {
+	t.Setenv("TIPSY_DIAG", "1")
 	vm, err := NewVM()
 	if err != nil {
 		t.Fatal(err)
@@ -55,6 +56,7 @@ func TestFindClassNameDiagnostic(t *testing.T) {
 }
 
 func TestLifecycleHandleDiagnostic(t *testing.T) {
+	t.Setenv("TIPSY_DIAG", "1")
 	vm, err := NewVM()
 	if err != nil {
 		t.Fatal(err)

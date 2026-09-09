@@ -16,6 +16,7 @@ import (
 // entry; and totals accumulate across events. Only known method
 // identities and counts are recorded — no event payload.
 func TestGetterTracePerEventAttribution(t *testing.T) {
+	t.Setenv("TIPSY_DIAG", "1")
 	resetGetterTrace()
 	vm, err := NewVM()
 	if err != nil {
@@ -73,6 +74,7 @@ func TestGetterTracePerEventAttribution(t *testing.T) {
 // for a key event carries the consumed getter identities and never event
 // data such as keycodes or coordinates.
 func TestGetterTraceKeyDispatchLine(t *testing.T) {
+	t.Setenv("TIPSY_DIAG", "1")
 	resetGetterTrace()
 	vm := inputTestVM(t, map[string]uintptr{
 		methodLogName(gameActivityClass, "onKeyDownNative", "(JLandroid/view/KeyEvent;)Z"): testRecordKeyFn(),
@@ -99,6 +101,7 @@ func TestGetterTraceKeyDispatchLine(t *testing.T) {
 // TestGetterTraceRingBound proves the per-event trace ring stays bounded
 // (never grows with event count).
 func TestGetterTraceRingBound(t *testing.T) {
+	t.Setenv("TIPSY_DIAG", "1")
 	resetGetterTrace()
 	for i := int64(1); i <= getterTraceCap+10; i++ {
 		noteGetterCall(i, "getAction", "()I")

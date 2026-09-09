@@ -43,7 +43,7 @@ var getterTraceState struct {
 // event object. Called only from the handled MotionEvent/KeyEvent getter
 // paths in dispatchInput.
 func noteGetterCall(objID int64, name, sig string) {
-	if objID == 0 {
+	if !diagnosticsEnabled() || objID == 0 {
 		return
 	}
 	identity := name + sig
@@ -143,6 +143,9 @@ func motionActionName(action int32) string {
 // reading it. Identities and counts only — never coordinates, times, or
 // text.
 func traceEventGetterLine(kind string, action int32, objID int64) {
+	if !diagnosticsEnabled() {
+		return
+	}
 	hits := drainEventGetterTrace(objID)
 	joined := "none"
 	if len(hits) > 0 {

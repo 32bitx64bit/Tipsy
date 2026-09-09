@@ -36,7 +36,7 @@ func packJlong(v int64) *C.jvalue {
 // the next launch proves which classes the ClassLoader path is asked for.
 // No other argument data is captured.
 func logFindClassName(name string) {
-	if name == "" {
+	if !diagnosticsEnabled() || name == "" {
 		return
 	}
 	key := "findClass|" + name
@@ -64,6 +64,9 @@ func OrientationAnnouncements() uint64 {
 // captured: in particular no NativeUserJavaInterface data, no object
 // references, and no strings. Values repeat verbatim what native passed.
 func logLifecycleStubArgs(class, name, sig string, args *C.jvalue) {
+	if !diagnosticsEnabled() {
+		return
+	}
 	// NativeHelper.gameActivity_onScreenOrientationChanged(IZ)V: the
 	// engine pushes its orientation request to Java here. Observation
 	// only: the orientation enum int and the boolean flag are safe

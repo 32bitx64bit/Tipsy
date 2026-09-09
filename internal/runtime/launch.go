@@ -676,11 +676,6 @@ func Launch(ctx context.Context, opt LaunchOptions) error {
 	if err := mod.Init(); err != nil {
 		return fmt.Errorf("init: %w", err)
 	}
-	if os.Getenv("TIPSY_CRASH_DIAG") == "1" {
-		if err := installCrashDiagHandler(); err != nil {
-			logging.Logger(logging.CatRuntime).Info("crash diag", "err", err)
-		}
-	}
 	onload, err := mod.Lookup("JNI_OnLoad")
 	if err != nil {
 		return fmt.Errorf("JNI_OnLoad: %w", err)
@@ -768,7 +763,7 @@ func Launch(ctx context.Context, opt LaunchOptions) error {
 			textOverlayErrorLogged = true
 		} else if updated && err == nil {
 			textOverlayErrorLogged = false
-			if focusedTextSync.active && focusedTextSync.seen != textOverlayDiagnosticsVersion {
+			if focusedTextSync.active && focusedTextSync.seen != textOverlayDiagnosticsVersion && os.Getenv("TIPSY_DIAG") == "1" {
 				diag := focusedTextOverlay.Diagnostics()
 				// Aggregate ink booleans and raw Android color are safe to log;
 				// editor content and glyph identities never enter diagnostics.
@@ -805,7 +800,7 @@ func Launch(ctx context.Context, opt LaunchOptions) error {
 	// Everything needed by the in-process client loop is live: X11 and the
 	// exclusive EGL or Vulkan presenter plus its pump were established above,
 	// GameActivity startup succeeded, input targets are wired, and the launch
-	// loop waits on the X11 input wake plus the 2s stats ticker. Immediate
+	// loop waits on the X11 input wake plus a 2s refresh-rate ticker. Immediate
 	// failures and --probe return before this boundary.
 	started.signal()
 	shutdownClient := func(reason string) {
@@ -833,7 +828,6 @@ func Launch(ctx context.Context, opt LaunchOptions) error {
 			}); err != nil {
 				logging.Logger(logging.CatGraphics).Error("republish Android display refresh rates", "err", err)
 			}
-			presenter.logPresentStats()
 			if presentTiming {
 				batch := android.VulkanPresentTimingSnapshot(presentTimingCursor)
 				logVulkanPresentTiming(batch)
@@ -842,20 +836,23 @@ func Launch(ctx context.Context, opt LaunchOptions) error {
 			if stutterDiag {
 				logStutterDiagnostics(android.StutterWaitSnapshot(true), jni.StutterSnapshot(true), android.BionicSyncSnapshot(true))
 			}
-			s := jni.InputDeliveryStats()
-			d := jni.RobloxDirectInputStats()
-			textPass, textReturn, textSync, textDrop := jni.RbxTextDeliveryStats()
-			textInfo := jni.RbxTextInfoRefreshStats()
-			logging.Logger(logging.CatRuntime).Info("input delivery",
-				"path", jni.PointerInputPath().String(),
-				"focus", s.FocusDelivered, "gameActivityKeys", s.KeyDelivered, "gameActivityPointers", s.PointerDelivered,
-				"gameActivityConsumed", s.KeyConsumed+s.PointerConsumed, "gameActivityDropped", s.Dropped,
-				"directKeys", d.KeyDelivered, "directButtons", d.ButtonDelivered, "directMoves", d.MoveDelivered, "directWheels", d.WheelDelivered, "directDropped", d.Dropped,
-				"pointerLockQueries", d.LockQueries, "pointerLockTrue", d.LockTrue,
-				"textPass", textPass, "textReturn", textReturn, "textSync", textSync, "textDropped", textDrop,
-				"textInfoRequested", textInfo.Requested, "textInfoAttempted", textInfo.Attempted,
-				"textInfoApplied", textInfo.Applied, "textInfoMissing", textInfo.MissingTarget,
-				"textInfoNull", textInfo.NullResult, "textInfoStale", textInfo.StaleSession)
+			if os.Getenv("TIPSY_DIAG") == "1" {
+				presenter.logPresentStats()
+				s := jni.InputDeliveryStats()
+				d := jni.RobloxDirectInputStats()
+				textPass, textReturn, textSync, textDrop := jni.RbxTextDeliveryStats()
+				textInfo := jni.RbxTextInfoRefreshStats()
+				logging.Logger(logging.CatRuntime).Info("input delivery",
+					"path", jni.PointerInputPath().String(),
+					"focus", s.FocusDelivered, "gameActivityKeys", s.KeyDelivered, "gameActivityPointers", s.PointerDelivered,
+					"gameActivityConsumed", s.KeyConsumed+s.PointerConsumed, "gameActivityDropped", s.Dropped,
+					"directKeys", d.KeyDelivered, "directButtons", d.ButtonDelivered, "directMoves", d.MoveDelivered, "directWheels", d.WheelDelivered, "directDropped", d.Dropped,
+					"pointerLockQueries", d.LockQueries, "pointerLockTrue", d.LockTrue,
+					"textPass", textPass, "textReturn", textReturn, "textSync", textSync, "textDropped", textDrop,
+					"textInfoRequested", textInfo.Requested, "textInfoAttempted", textInfo.Attempted,
+					"textInfoApplied", textInfo.Applied, "textInfoMissing", textInfo.MissingTarget,
+					"textInfoNull", textInfo.NullResult, "textInfoStale", textInfo.StaleSession)
+			}
 		case now := <-textOverlayTicker.C:
 			refreshFocusedText(now)
 		case <-resizeSettleC:
@@ -878,14 +875,6 @@ func Launch(ctx context.Context, opt LaunchOptions) error {
 			refreshFocusedText(time.Now())
 		}
 	}
-}
-
-// installCrashDiagHandler remains opt-in. The stripped base deliberately does
-// not alter process signals or Roblox memory unless diagnostics are explicitly
-// requested; the loader's normal core-dump path remains intact.
-func installCrashDiagHandler() error {
-	logging.Logger(logging.CatRuntime).Info("crash diagnostics requested; using normal core-dump path")
-	return nil
 }
 
 func startGameActivity(ctx context.Context, vm *jni.VM, mod *loader.Module, aw *android.Window, files, cache, preferences, obb, assets, version string, width, height int, currentRefreshHz float32, supportedRefreshHz []float32, req rbxuri.Request) (*gameActivitySession, error) {
