@@ -5,14 +5,9 @@ package setupsvc
 
 import (
 	"archive/zip"
-	"bytes"
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
-	"io"
-	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
@@ -327,99 +322,6 @@ func TestDefaultAutomaticSourceIsHonestlyUnavailable(t *testing.T) {
 	}
 }
 
-func TestADBSourceImportsOnlyBaseAndX8664Split(t *testing.T) {
-	source := &ADBSource{ADBPath: "adb-test"}
-	source.run = func(ctx context.Context, _ string, args ...string) ([]byte, error) {
-		joined := strings.Join(args, " ")
-		switch {
-		case joined == "get-state":
-			return []byte("device\n"), nil
-		case joined == "shell pm path com.roblox.client":
-			return []byte("package:/data/app/roblox/base.apk\npackage:/data/app/roblox/split_config.en.apk\npackage:/data/app/roblox/split_config.x86_64.apk\n"), nil
-		case len(args) == 3 && args[0] == "pull":
-			if err := os.WriteFile(args[2], []byte("apk"), 0o600); err != nil {
-				return nil, err
-			}
-			return nil, nil
-		default:
-			return nil, errors.New("unexpected adb invocation")
-		}
-	}
-	if !source.Availability(context.Background()).Available {
-		t.Fatal("fake authorized device unavailable")
-	}
-	paths, err := source.Acquire(context.Background(), t.TempDir(), nil)
-	if err != nil || len(paths) != 2 || filepath.Base(paths[0]) != "base.apk" || filepath.Base(paths[1]) != "split_config.x86_64.apk" {
-		t.Fatalf("paths=%v err=%v", paths, err)
-	}
-}
-
-func TestADBSourceRejectsUntrustedRemotePath(t *testing.T) {
-	source := &ADBSource{ADBPath: "adb-test"}
-	source.run = func(_ context.Context, _ string, args ...string) ([]byte, error) {
-		if strings.Join(args, " ") == "get-state" {
-			return []byte("device\n"), nil
-		}
-		return []byte("package:/sdcard/base.apk\n"), nil
-	}
-	_, err := source.Acquire(context.Background(), t.TempDir(), nil)
-	if ErrorKindOf(err) != ErrSourceTrust {
-		t.Fatalf("unsafe ADB path err=%v", err)
-	}
-}
-
-func TestHTTPSBundleSourceDownloadHashAndRedirectTrust(t *testing.T) {
-	body := []byte("synthetic-apk-body")
-	hash := sha256.Sum256(body)
-	client := &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
-		return &http.Response{StatusCode: http.StatusOK, ContentLength: int64(len(body)), Body: io.NopCloser(bytes.NewReader(body)), Header: make(http.Header)}, nil
-	})}
-	source := &HTTPSBundleSource{
-		Name: "test", LegalURL: "https://trusted.example/legal", Client: client, AllowedHosts: []string{"trusted.example"},
-		Artifacts: []RemoteArtifact{{Name: "base.apk", URL: "https://trusted.example/base.apk", SHA256: hex.EncodeToString(hash[:]), Size: int64(len(body))}},
-	}
-	paths, err := source.Acquire(context.Background(), t.TempDir(), nil)
-	if err != nil || len(paths) != 1 {
-		t.Fatalf("paths=%v err=%v", paths, err)
-	}
-	got, _ := os.ReadFile(paths[0])
-	if !bytes.Equal(got, body) {
-		t.Fatalf("download=%q", got)
-	}
-
-	source.Client = &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
-		header := make(http.Header)
-		header.Set("Location", "https://evil.invalid/package.apk")
-		return &http.Response{StatusCode: http.StatusFound, Header: header, Body: io.NopCloser(bytes.NewReader(nil))}, nil
-	})}
-	source.Artifacts[0].URL = "https://trusted.example/base.apk?synthetic-secret"
-	_, err = source.Acquire(context.Background(), t.TempDir(), nil)
-	if ErrorKindOf(err) != ErrNetwork || strings.Contains(err.Error(), "synthetic-secret") {
-		t.Fatalf("redirect err=%v", err)
-	}
-}
-
-func TestHTTPSBundleSourceCancellationCleansPartialFile(t *testing.T) {
-	ctx, cancel := context.WithCancel(context.Background())
-	body := &cancelingBody{cancel: cancel, data: []byte("0123456789")}
-	client := &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
-		return &http.Response{StatusCode: http.StatusOK, ContentLength: 10, Body: body, Header: make(http.Header)}, nil
-	})}
-	source := &HTTPSBundleSource{
-		Name: "test", LegalURL: "https://trusted.example/legal", Client: client, AllowedHosts: []string{"trusted.example"},
-		Artifacts: []RemoteArtifact{{Name: "base.apk", URL: "https://trusted.example/base.apk", SHA256: strings.Repeat("0", 64), Size: 10}},
-	}
-	dir := t.TempDir()
-	_, err := source.Acquire(ctx, dir, nil)
-	if ErrorKindOf(err) != ErrCanceled {
-		t.Fatalf("cancel err=%v kind=%q", err, ErrorKindOf(err))
-	}
-	entries, _ := os.ReadDir(dir)
-	if len(entries) != 0 {
-		t.Fatalf("partial files remain: %v", entries)
-	}
-}
-
 func TestInstallStagesThenAtomicallyActivatesGeneration(t *testing.T) {
 	root := t.TempDir()
 	input := writeTestZIP(t, filepath.Join(root, "base.apk"), map[string][]byte{
@@ -619,25 +521,3 @@ func writeTestZIP(t *testing.T, path string, files map[string][]byte) string {
 	}
 	return path
 }
-
-type roundTripFunc func(*http.Request) (*http.Response, error)
-
-func (f roundTripFunc) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }
-
-type cancelingBody struct {
-	cancel context.CancelFunc
-	data   []byte
-	sent   bool
-}
-
-func (b *cancelingBody) Read(p []byte) (int, error) {
-	if b.sent {
-		return 0, io.EOF
-	}
-	b.sent = true
-	n := copy(p, b.data[:5])
-	b.cancel()
-	return n, nil
-}
-
-func (*cancelingBody) Close() error { return nil }

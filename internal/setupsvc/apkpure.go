@@ -315,4 +315,12 @@ func apkpureStatusError(status int) error {
 	return setupError(ErrNetwork, apkpureOp, fmt.Sprintf("APKPure returned HTTP %d", status), nil)
 }
 
+func mustHostname(origin string) string {
+	u, err := url.Parse(origin)
+	if err != nil {
+		return ""
+	}
+	return u.Hostname()
+}
+
 var _ Source = (*APKPureSource)(nil)

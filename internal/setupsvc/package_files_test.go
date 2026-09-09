@@ -4,6 +4,8 @@
 package setupsvc
 
 import (
+	"archive/zip"
+	"bytes"
 	"os"
 	"path/filepath"
 	"strings"
@@ -71,4 +73,23 @@ func TestKeepX86FromSplitDirectoryDropsLanguageAndARM(t *testing.T) {
 	if filepath.Base(paths[0]) != "base.apk" || filepath.Base(paths[1]) != "split_config.x86_64.apk" {
 		t.Fatalf("paths=%v", paths)
 	}
+}
+
+func zipBytes(t *testing.T, files map[string]string) []byte {
+	t.Helper()
+	var buf bytes.Buffer
+	zw := zip.NewWriter(&buf)
+	for name, body := range files {
+		fw, err := zw.Create(name)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := fw.Write([]byte(body)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := zw.Close(); err != nil {
+		t.Fatal(err)
+	}
+	return buf.Bytes()
 }
