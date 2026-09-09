@@ -121,6 +121,42 @@ func TestRedact(t *testing.T) {
 			notContain: redacted,
 			contain:    "",
 		},
+		{
+			name:       "mixed-case password",
+			in:         "PASSWORD=hunter2",
+			notContain: "hunter2",
+			contain:    redacted,
+		},
+		{
+			name:       "passwd equals",
+			in:         "passwd=hunter2",
+			notContain: "hunter2",
+			contain:    redacted,
+		},
+		{
+			name:       "pwd equals",
+			in:         "pwd=hunter2",
+			notContain: "hunter2",
+			contain:    redacted,
+		},
+		{
+			name:       "lowercase roblo security",
+			in:         ".roblosecurity=synthetic-not-a-real-cookie",
+			notContain: "synthetic-not-a-real-cookie",
+			contain:    redacted,
+		},
+		{
+			name:       "mixed-case gameinfo",
+			in:         "GAMEINFO:SYNTHETIC-NOT-A-REAL-TICKET",
+			notContain: "SYNTHETIC-NOT-A-REAL-TICKET",
+			contain:    redacted,
+		},
+		{
+			name:       "json cookie",
+			in:         `{"cookie":"synthetic-json-cookie"}`,
+			notContain: "synthetic-json-cookie",
+			contain:    redacted,
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -200,6 +236,43 @@ func TestLoggerReusesTaggedInstance(t *testing.T) {
 	}
 }
 
+func TestRedactPrefilterDoesNotSkipProtectedForms(t *testing.T) {
+	t.Parallel()
+	for _, in := range []string{
+		"login failed password=hunter2 for user",
+		"password: supersecret",
+		`{"password":"hunter2","user":"x"}`,
+		".ROBLOSECURITY=_|WARNING:-DO-NOT-SHARE-THIS.--abc",
+		"Cookie: session=abc; .ROBLOSECURITY=xyz",
+		"Set-Cookie: .ROBLOSECURITY=tok123; Path=/",
+		"Authorization: Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.aa",
+		"authorization: Basic dXNlcjpwYXNz",
+		"token Bearer abcdef123456",
+		"roblox-player:1+launchmode:play+gameinfo:SUPER-SECRET-TICKET+placeId:1818",
+		"RBX-Authentication-Ticket: SUPER-SECRET-TICKET",
+		"refresh_token=rrrr-secret",
+		"access_token=aaaa-secret",
+		"oauth_token=oooo-secret",
+		`{"refresh_token":"keep-me-secret"}`,
+		"PASSWORD=hunter2",
+		"passwd=hunter2",
+		"pwd=hunter2",
+		".roblosecurity=synthetic-not-a-real-cookie",
+		"GAMEINFO:SYNTHETIC-NOT-A-REAL-TICKET",
+		`{"cookie":"synthetic-json-cookie"}`,
+	} {
+		if !mayContainSecret(in) {
+			t.Fatalf("prefilter would skip protected form %q", in)
+		}
+	}
+	if mayContainSecret(benchRedactHot) {
+		t.Fatalf("hot bench fixture must skip regex: %q", benchRedactHot)
+	}
+	if !mayContainSecret(benchRedactSecret) {
+		t.Fatal("secret bench fixture must enter regex")
+	}
+}
+
 func TestParseLevel(t *testing.T) {
 	t.Parallel()
 	if parseLevel("debug") != slog.LevelDebug {
@@ -254,4 +327,31 @@ func TestDebugEnabledHonorsAndroidCategory(t *testing.T) {
 	if DebugEnabled() {
 		t.Fatal("android category filtered: DebugEnabled must be false")
 	}
+}
+
+// Synthetic fixtures only. The secret case is not a real cookie, ticket, or
+// .ROBLOSECURITY value.
+const (
+	benchRedactHot    = "[FLog::Graphics] Vulkan present ok frames=240 renderer=radv"
+	benchRedactSecret = "Cookie: session=synthetic-fixture-not-a-real-cookie; .ROBLOSECURITY=SYNTHETIC_NOT_A_REAL_COOKIE_VALUE"
+)
+
+func BenchmarkRedact(b *testing.B) {
+	b.Run("hot", func(b *testing.B) {
+		b.ReportAllocs()
+		for i := 0; i < b.N; i++ {
+			if Redact(benchRedactHot) != benchRedactHot {
+				b.Fatal("hot line must be unchanged")
+			}
+		}
+	})
+	b.Run("secret", func(b *testing.B) {
+		b.ReportAllocs()
+		for i := 0; i < b.N; i++ {
+			got := Redact(benchRedactSecret)
+			if got == benchRedactSecret {
+				b.Fatal("secret fixture must redact")
+			}
+		}
+	})
 }

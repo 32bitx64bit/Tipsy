@@ -58,9 +58,63 @@ var redactPatterns = []struct {
 	},
 }
 
+// ASCII-insensitive needles that must catch every TestRedact secret form.
+// "pwd" is extra so the password regex cannot be skipped. Fail-closed: if a
+// protected line might not contain one of these, do not skip the regexes.
+var redactNeedles = []string{
+	"pass",
+	"pwd",
+	"cookie",
+	"token",
+	"authorization",
+	"bearer",
+	"roblosecurity",
+	"gameinfo:",
+	"rbx-authentication",
+}
+
+func asciiFold(c byte) byte {
+	if c >= 'A' && c <= 'Z' {
+		return c + ('a' - 'A')
+	}
+	return c
+}
+
+func asciiContainsFold(s, sub string) bool {
+	n, m := len(s), len(sub)
+	if m == 0 {
+		return true
+	}
+	if m > n {
+		return false
+	}
+	for i := 0; i+m <= n; i++ {
+		ok := true
+		for j := 0; j < m; j++ {
+			if asciiFold(s[i+j]) != asciiFold(sub[j]) {
+				ok = false
+				break
+			}
+		}
+		if ok {
+			return true
+		}
+	}
+	return false
+}
+
+func mayContainSecret(s string) bool {
+	for _, n := range redactNeedles {
+		if asciiContainsFold(s, n) {
+			return true
+		}
+	}
+	return false
+}
+
 // Redact never leak cookies/tokens/passwords.
 func Redact(s string) string {
-	if s == "" {
+	if s == "" || !mayContainSecret(s) {
 		return s
 	}
 	for _, p := range redactPatterns {
