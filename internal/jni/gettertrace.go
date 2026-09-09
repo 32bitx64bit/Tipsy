@@ -7,11 +7,31 @@ package jni
 
 import (
 	"fmt"
+	"os"
 	"strings"
 	"sync"
+	"sync/atomic"
 
 	"github.com/tipsy-linux/tipsy/internal/logging"
 )
+
+var getterTraceEnabled atomic.Bool
+
+func init() {
+	if os.Getenv("TIPSY_JNI_GETTER_TRACE") == "1" {
+		getterTraceEnabled.Store(true)
+	}
+}
+
+// SetGetterTrace enables or disables MotionEvent/KeyEvent getter consumption
+// tracing. Default is off (no alloc, mutex, or Info log on the input path).
+func SetGetterTrace(enabled bool) {
+	getterTraceEnabled.Store(enabled)
+}
+
+func getterTraceOn() bool {
+	return getterTraceEnabled.Load()
+}
 
 // Observation-only MotionEvent/KeyEvent getter-consumption trace.
 //
@@ -43,7 +63,7 @@ var getterTraceState struct {
 // event object. Called only from the handled MotionEvent/KeyEvent getter
 // paths in dispatchInput.
 func noteGetterCall(objID int64, name, sig string) {
-	if !diagnosticsEnabled() || objID == 0 {
+	if objID == 0 || !getterTraceOn() {
 		return
 	}
 	identity := name + sig
@@ -76,6 +96,9 @@ func noteGetterCall(objID int64, name, sig string) {
 // first-call order, and releases the entry. An empty result means native
 // consumed no getters for the event — equally valid evidence.
 func drainEventGetterTrace(objID int64) []string {
+	if !getterTraceOn() {
+		return nil
+	}
 	getterTraceState.mu.Lock()
 	defer getterTraceState.mu.Unlock()
 	e := getterTraceState.events[objID]
@@ -99,6 +122,9 @@ func drainEventGetterTrace(objID int64) []string {
 // GetterConsumptionTotals snapshots cumulative per-identity getter
 // consumption counts (known method identities only, never event data).
 func GetterConsumptionTotals() map[string]uint64 {
+	if !getterTraceOn() {
+		return map[string]uint64{}
+	}
 	getterTraceState.mu.Lock()
 	defer getterTraceState.mu.Unlock()
 	out := make(map[string]uint64, len(getterTraceState.totals))
@@ -143,7 +169,7 @@ func motionActionName(action int32) string {
 // reading it. Identities and counts only — never coordinates, times, or
 // text.
 func traceEventGetterLine(kind string, action int32, objID int64) {
-	if !diagnosticsEnabled() {
+	if !getterTraceOn() {
 		return
 	}
 	hits := drainEventGetterTrace(objID)

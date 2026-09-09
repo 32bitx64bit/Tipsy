@@ -16,6 +16,11 @@ import (
 // entry; and totals accumulate across events. Only known method
 // identities and counts are recorded — no event payload.
 func TestGetterTracePerEventAttribution(t *testing.T) {
+	SetGetterTrace(true)
+	t.Cleanup(func() {
+		SetGetterTrace(false)
+		resetGetterTrace()
+	})
 	t.Setenv("TIPSY_DIAG", "1")
 	resetGetterTrace()
 	vm, err := NewVM()
@@ -74,6 +79,11 @@ func TestGetterTracePerEventAttribution(t *testing.T) {
 // for a key event carries the consumed getter identities and never event
 // data such as keycodes or coordinates.
 func TestGetterTraceKeyDispatchLine(t *testing.T) {
+	SetGetterTrace(true)
+	t.Cleanup(func() {
+		SetGetterTrace(false)
+		resetGetterTrace()
+	})
 	t.Setenv("TIPSY_DIAG", "1")
 	resetGetterTrace()
 	vm := inputTestVM(t, map[string]uintptr{
@@ -101,6 +111,11 @@ func TestGetterTraceKeyDispatchLine(t *testing.T) {
 // TestGetterTraceRingBound proves the per-event trace ring stays bounded
 // (never grows with event count).
 func TestGetterTraceRingBound(t *testing.T) {
+	SetGetterTrace(true)
+	t.Cleanup(func() {
+		SetGetterTrace(false)
+		resetGetterTrace()
+	})
 	t.Setenv("TIPSY_DIAG", "1")
 	resetGetterTrace()
 	for i := int64(1); i <= getterTraceCap+10; i++ {
@@ -117,4 +132,16 @@ func TestGetterTraceRingBound(t *testing.T) {
 		t.Fatalf("newest event trace = %v, want one identity", hits)
 	}
 	resetGetterTrace()
+}
+
+func TestGetterTraceDisabledByDefault(t *testing.T) {
+	SetGetterTrace(false)
+	resetGetterTrace()
+	noteGetterCall(1, "getAction", "()I")
+	if len(getterTraceState.ring) != 0 || getterTraceState.events != nil {
+		t.Fatal("disabled getter trace allocated state")
+	}
+	if hits := drainEventGetterTrace(1); hits != nil {
+		t.Fatalf("disabled drain = %v", hits)
+	}
 }
