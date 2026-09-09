@@ -71,6 +71,49 @@ func TestResolveAuthorityAllowsDevelopmentOnlyOutsideAppImage(t *testing.T) {
 	}
 }
 
+func TestPackageAuthorizationTrustUsesDevelopmentWhenOfficialReleaseIsUnavailable(t *testing.T) {
+	xdg := t.TempDir()
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(xdg, "config"))
+	t.Setenv("XDG_DATA_HOME", filepath.Join(xdg, "data"))
+	deps := defaultAuthorityDependencies()
+	deps.verifyGitHubRelease = func(context.Context) error { return keylessrelease.ErrUnavailable }
+
+	trust, err := packageAuthorizationTrust(context.Background(), false, deps)
+	if err != nil || trust.Mode != setupsvc.DevelopmentUnrestricted || trust.ReleaseAuthenticated || trust.RobloxPolicy != nil || trust.PackageName != "com.roblox.client" {
+		t.Fatalf("unavailable official authority without consent = %+v, %v", trust, err)
+	}
+
+	trust, err = packageAuthorizationTrust(context.Background(), true, deps)
+	if err != nil || trust.Mode != setupsvc.DevelopmentUnrestricted || trust.ReleaseAuthenticated {
+		t.Fatalf("unavailable official authority with consent = %+v, %v", trust, err)
+	}
+}
+
+func TestPackageAuthorizationTrustKeepsVerifiedGitHubReleaseOfficial(t *testing.T) {
+	xdg := t.TempDir()
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(xdg, "config"))
+	t.Setenv("XDG_DATA_HOME", filepath.Join(xdg, "data"))
+	deps := defaultAuthorityDependencies()
+	deps.verifyGitHubRelease = func(context.Context) error { return nil }
+	trust, err := packageAuthorizationTrust(context.Background(), true, deps)
+	if err != nil || trust.Mode != setupsvc.OfficialVerified || !trust.ReleaseAuthenticated || trust.RobloxPolicy != nil {
+		t.Fatalf("verified GitHub package trust = %+v, %v", trust, err)
+	}
+}
+
+func TestPackageAuthorizationTrustRejectsBrokenGitHubReleaseInsteadOfDevelopmentFallback(t *testing.T) {
+	xdg := t.TempDir()
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(xdg, "config"))
+	t.Setenv("XDG_DATA_HOME", filepath.Join(xdg, "data"))
+	broken := errors.New("GitHub identity mismatch")
+	deps := defaultAuthorityDependencies()
+	deps.verifyGitHubRelease = func(context.Context) error { return broken }
+	trust, err := packageAuthorizationTrust(context.Background(), true, deps)
+	if !errors.Is(err, broken) || trust.Mode == setupsvc.DevelopmentUnrestricted {
+		t.Fatalf("broken official package trust = %+v, %v", trust, err)
+	}
+}
+
 func TestResolveAuthorityRequiresProductionBoundReleaseAndPassesPolicy(t *testing.T) {
 	now := time.Date(2026, 9, 6, 12, 0, 0, 0, time.UTC)
 	policy := testRobloxPolicy(now)

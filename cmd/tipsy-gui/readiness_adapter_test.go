@@ -14,10 +14,16 @@ import (
 )
 
 type readinessBackendFixture struct {
-	snapshot    setupsvc.InstallSnapshot
-	snapshotErr error
-	install     *setupsvc.InstallResult
-	installErr  error
+	snapshot     setupsvc.InstallSnapshot
+	snapshotErr  error
+	install      *setupsvc.InstallResult
+	installErr   error
+	installCalls int
+	trust        setupsvc.TrustPolicy
+}
+
+func (f *readinessBackendFixture) SetPackageTrust(trust setupsvc.TrustPolicy) {
+	f.trust = trust
 }
 
 func (f *readinessBackendFixture) Snapshot(context.Context) (setupsvc.InstallSnapshot, error) {
@@ -29,6 +35,7 @@ func (*readinessBackendFixture) AutomaticAvailability(context.Context) setupsvc.
 }
 
 func (f *readinessBackendFixture) Install(context.Context, setupsvc.InstallRequest, setupsvc.ProgressFunc) (*setupsvc.InstallResult, error) {
+	f.installCalls++
 	return f.install, f.installErr
 }
 
@@ -181,6 +188,70 @@ func TestProductionInstallRequiresAuthenticatedLaunchInputs(t *testing.T) {
 	backend := &readinessBackendFixture{install: &setupsvc.InstallResult{Snapshot: positive}}
 	if err := (&productionService{installer: backend}).Install(context.Background(), guimodel.InstallRequest{}, func(guimodel.InstallProgress) {}); err != nil {
 		t.Fatalf("positive install result=%v", err)
+	}
+}
+
+func TestProductionInstallBindsDevelopmentPackageTrustBeforeBackendInstall(t *testing.T) {
+	t.Parallel()
+	positive := setupsvc.InstallSnapshot{Installed: true, Readiness: setupsvc.ReadinessLaunchInputs}
+	backend := &readinessBackendFixture{install: &setupsvc.InstallResult{Snapshot: positive}}
+	service := &productionService{
+		installer: backend,
+		packageTrust: func(context.Context) (setupsvc.TrustPolicy, error) {
+			return setupsvc.DevelopmentTrustPolicy(), nil
+		},
+	}
+	if err := service.Install(context.Background(), guimodel.InstallRequest{}, func(guimodel.InstallProgress) {}); err != nil {
+		t.Fatalf("development install=%v", err)
+	}
+	if backend.installCalls != 1 {
+		t.Fatalf("install calls=%d", backend.installCalls)
+	}
+	if backend.trust.Mode != setupsvc.DevelopmentUnrestricted || backend.trust.ReleaseAuthenticated || backend.trust.RobloxPolicy != nil {
+		t.Fatalf("bound trust=%+v", backend.trust)
+	}
+}
+
+func TestProductionInstallAppliesDevelopmentTrustToLiveSetupService(t *testing.T) {
+	t.Parallel()
+	inner := setupsvc.New()
+	if inner.Trust.Mode != setupsvc.OfficialVerified || inner.Trust.ReleaseAuthenticated || inner.Trust.RobloxPolicy != nil {
+		t.Fatalf("default live trust=%+v", inner.Trust)
+	}
+	service := &productionService{
+		installer: inner,
+		packageTrust: func(context.Context) (setupsvc.TrustPolicy, error) {
+			return setupsvc.DevelopmentTrustPolicy(), nil
+		},
+	}
+	err := service.Install(context.Background(), guimodel.InstallRequest{Mode: guimodel.InstallLocal}, func(guimodel.InstallProgress) {})
+	if err == nil {
+		t.Fatal("empty local install unexpectedly succeeded")
+	}
+	if inner.Trust.Mode != setupsvc.DevelopmentUnrestricted || inner.Trust.ReleaseAuthenticated || inner.Trust.RobloxPolicy != nil {
+		t.Fatalf("live setup trust=%+v", inner.Trust)
+	}
+}
+
+func TestProductionInstallDoesNotInstallWhenOfficialReleaseVerificationFails(t *testing.T) {
+	t.Parallel()
+	positive := setupsvc.InstallSnapshot{Installed: true, Readiness: setupsvc.ReadinessLaunchInputs}
+	backend := &readinessBackendFixture{install: &setupsvc.InstallResult{Snapshot: positive}}
+	broken := errors.New("official GitHub release verification: obtain keyless release bundle: release bundle download returned HTTP 404")
+	service := &productionService{
+		installer: backend,
+		packageTrust: func(context.Context) (setupsvc.TrustPolicy, error) {
+			return setupsvc.TrustPolicy{}, broken
+		},
+	}
+	if err := service.Install(context.Background(), guimodel.InstallRequest{}, func(guimodel.InstallProgress) {}); !errors.Is(err, broken) {
+		t.Fatalf("broken official install=%v", err)
+	}
+	if backend.installCalls != 0 {
+		t.Fatal("package install ran without package authority")
+	}
+	if backend.trust.Mode != "" {
+		t.Fatalf("trust was bound after authority failure: %+v", backend.trust)
 	}
 }
 

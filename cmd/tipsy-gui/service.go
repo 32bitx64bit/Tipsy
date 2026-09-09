@@ -20,13 +20,18 @@ import (
 // values into presentation-neutral GUI values and owns no package, settings,
 // or compatibility policy.
 type productionService struct {
-	installer setupBackend
-	settings  *clientsettings.Service
+	installer    setupBackend
+	packageTrust func(context.Context) (setupsvc.TrustPolicy, error)
+	settings     *clientsettings.Service
 
 	launchMu       sync.Mutex
 	launchBackend  authorizedLaunchBackend
 	preparedLaunch authorizedLaunchSession
 	launchActive   bool
+}
+
+type packageTrustReceiver interface {
+	SetPackageTrust(setupsvc.TrustPolicy)
 }
 
 type setupBackend interface {
@@ -48,9 +53,13 @@ type authorizedLaunchBackend struct {
 }
 
 func newProductionService() guimodel.Service {
+	installer := setupsvc.New()
 	return &productionService{
-		installer: setupsvc.New(),
-		settings:  clientsettings.New(),
+		installer: installer,
+		packageTrust: func(ctx context.Context) (setupsvc.TrustPolicy, error) {
+			return app.PackageAuthorizationTrust(ctx, false)
+		},
+		settings: clientsettings.New(),
 		launchBackend: authorizedLaunchBackend{open: func(ctx context.Context, approveDevelopment bool) (authorizedLaunchSession, error) {
 			return app.OpenLaunchSession(ctx, approveDevelopment)
 		}},
@@ -130,7 +139,30 @@ func (s *productionService) AutomaticAvailability(ctx context.Context) guimodel.
 	return guimodel.AutomaticAvailability{Available: availability.Available, SourceName: availability.Name, Explanation: explanation, Reason: availability.Reason}
 }
 
+func (s *productionService) bindPackageTrust(ctx context.Context) error {
+	if s == nil || s.packageTrust == nil {
+		return nil
+	}
+	trust, err := s.packageTrust(ctx)
+	if err != nil {
+		return err
+	}
+	switch installer := s.installer.(type) {
+	case *setupsvc.Service:
+		installer.Trust = trust
+	case packageTrustReceiver:
+		installer.SetPackageTrust(trust)
+	}
+	return nil
+}
+
 func (s *productionService) Install(ctx context.Context, request guimodel.InstallRequest, progress func(guimodel.InstallProgress)) error {
+	if err := s.bindPackageTrust(ctx); err != nil {
+		if errors.Is(err, context.Canceled) || setupsvc.ErrorKindOf(err) == setupsvc.ErrCanceled {
+			return context.Canceled
+		}
+		return err
+	}
 	backendRequest := setupsvc.InstallRequest{Mode: setupsvc.InstallMode(request.Mode), LocalPaths: request.LocalPaths}
 	result, err := s.installer.Install(ctx, backendRequest, func(update setupsvc.InstallProgress) {
 		percent := phasePercent(update)
