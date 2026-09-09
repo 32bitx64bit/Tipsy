@@ -23,11 +23,6 @@ type Service struct {
 	RuntimeDir          string
 	GenerationStoreRoot string
 
-	// EnableLegacyRuntimeMigration writes the compatibility runtime tree for
-	// explicit development/migration only. active.json remains the sole
-	// authority for official launch even when this is enabled.
-	EnableLegacyRuntimeMigration bool
-
 	inspect         func(context.Context, []string) (*apk.Report, error)
 	verify          func(context.Context, *apk.Report) error
 	extract         func(context.Context, []string, string) (*apk.ExtractResult, error)
@@ -201,11 +196,6 @@ func (s *Service) Install(ctx context.Context, req InstallRequest, progress Prog
 	if err := s.authorizeStagedFn()(ctx, store, id, s.trust()); err != nil {
 		return nil, setupError(ErrIntegrity, "stage generation", "staged generation failed retained APK authorization", err)
 	}
-	if s.EnableLegacyRuntimeMigration {
-		if err := replaceRuntime(stagedRuntime, s.runtimeDir()); err != nil {
-			return nil, setupError(ErrInstall, "legacy migration", "could not update the non-authoritative legacy runtime", err)
-		}
-	}
 	report(progress, PhaseCommitting, 0, 0, "Activating verified client atomically")
 	if err := store.Activate(ctx, id); err != nil {
 		return nil, setupError(ErrInstall, "activate package", "could not activate the verified client", err)
@@ -218,43 +208,6 @@ func (s *Service) Install(ctx context.Context, req InstallRequest, progress Prog
 	}
 	report(progress, PhaseComplete, 1, 1, "Setup complete")
 	return &InstallResult{Snapshot: snapshot}, nil
-}
-
-func replaceRuntime(staged, dest string) error {
-	parent := filepath.Dir(dest)
-	backup, err := os.MkdirTemp(parent, ".runtime-backup-*")
-	if err != nil {
-		return err
-	}
-	if err := os.Remove(backup); err != nil {
-		return err
-	}
-	hadOld := false
-	if st, err := os.Lstat(dest); err == nil {
-		if st.Mode()&os.ModeSymlink != 0 || !st.IsDir() {
-			return errors.New("runtime destination is not a real directory")
-		}
-		if err := os.Rename(dest, backup); err != nil {
-			return err
-		}
-		hadOld = true
-	} else if !errors.Is(err, os.ErrNotExist) {
-		return err
-	}
-	if err := os.Rename(staged, dest); err != nil {
-		if hadOld {
-			_ = os.Rename(backup, dest)
-		}
-		return err
-	}
-	if hadOld {
-		_ = os.RemoveAll(backup)
-	}
-	if d, err := os.Open(parent); err == nil {
-		defer d.Close()
-		return d.Sync()
-	}
-	return nil
 }
 
 func (s *Service) runtimeDir() string {
