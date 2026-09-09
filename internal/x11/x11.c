@@ -79,6 +79,15 @@ static int tipsy_pump_nudge_fd = -1;
 // an unrelated descriptor if the OS reuses its number.
 static pthread_mutex_t tipsy_pump_wake_mu = PTHREAD_MUTEX_INITIALIZER;
 
+// Fire-and-forget token on the nonblocking wake pipe. EAGAIN means a wake is
+// already pending, so the result is deliberately dropped; assigning it is what
+// silences glibc's warn_unused_result (a bare (void) cast does not).
+static void tipsy_pipe_write_token(int fd) {
+	char one = 1;
+	ssize_t n = write(fd, &one, 1);
+	(void)n;
+}
+
 static void tipsy_wake_go(void) {
 	if (atomic_exchange(&tipsy_go_wake_pending, 1) != 0) {
 		return;
@@ -94,8 +103,7 @@ void tipsy_nudge_pump(void) {
 	pthread_mutex_lock(&tipsy_pump_wake_mu);
 	int fd = tipsy_pump_nudge_fd;
 	if (fd >= 0) {
-		char one = 1;
-		(void)write(fd, &one, 1);
+		tipsy_pipe_write_token(fd);
 	}
 	pthread_mutex_unlock(&tipsy_pump_wake_mu);
 }
@@ -1851,8 +1859,7 @@ void tipsy_x11_pump_thread_stop(uintptr_t ptr, int *out_w, int *out_h, int *out_
 	}
 	p->run = 0;
 	if (p->wake_w >= 0) {
-		char one = 1;
-		(void)write(p->wake_w, &one, 1);
+		tipsy_pipe_write_token(p->wake_w);
 	}
 	pthread_join(p->thr, NULL);
 	pthread_mutex_lock(&tipsy_pump_wake_mu);

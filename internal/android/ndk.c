@@ -66,6 +66,23 @@ static ALooper *g_ui_looper;
 static int g_cond_wait_poll;
 static int g_logged_nested_poll;
 
+/* Fire-and-forget token on a nonblocking wake pipe. EAGAIN means a wake is
+ * already pending, so the result is deliberately dropped; assigning it is
+ * what silences glibc's warn_unused_result (a bare (void) cast does not). */
+static void pipe_write_token(int fd)
+{
+	char b = 1;
+	ssize_t n = write(fd, &b, 1);
+	(void)n;
+}
+
+static void pipe_drain_token(int fd)
+{
+	char b;
+	ssize_t n = read(fd, &b, 1);
+	(void)n;
+}
+
 struct wait_diag_path {
 	_Atomic uint64_t calls;
 	_Atomic uint64_t slices;
@@ -642,8 +659,7 @@ static void looper_stop_watcher(ALooper *l)
 	}
 	atomic_store_explicit(&l->watcher_stop, 1, memory_order_relaxed);
 	if (l->stop_w >= 0) {
-		char b = 1;
-		(void)write(l->stop_w, &b, 1);
+		pipe_write_token(l->stop_w);
 	}
 	if (l->watcher_on) {
 		(void)pthread_join(l->watcher, NULL);
@@ -896,11 +912,10 @@ int tipsy_ALooper_pollOnce(int timeoutMillis, int *outFd, int *outEvents, void *
 
 void tipsy_ALooper_wake(ALooper *looper)
 {
-	char b = 1;
 	if (looper == NULL || looper->magic != TIPSY_ALOOPER_MAGIC) {
 		return;
 	}
-	(void)write(looper->wake_w, &b, 1);
+	pipe_write_token(looper->wake_w);
 	looper_signal_parked(looper);
 }
 
@@ -1268,11 +1283,9 @@ static int test_wait_helper_rc(int spins)
 
 static int test_cond_cb(int fd, int events, void *data)
 {
-	char b;
-
 	(void)events;
 	(void)data;
-	(void)read(fd, &b, 1);
+	pipe_drain_token(fd);
 	g_test_cb_fired = 1;
 	pthread_cond_signal(&g_test_cv);
 	return 1;
@@ -1281,10 +1294,9 @@ static int test_cond_cb(int fd, int events, void *data)
 static void *test_write_pipe(void *arg)
 {
 	int fd = (int)(intptr_t)arg;
-	char b = 1;
 
 	usleep(5000);
-	(void)write(fd, &b, 1);
+	pipe_write_token(fd);
 	return NULL;
 }
 
@@ -1391,7 +1403,6 @@ int tipsy_test_cond_wait_lost_wakeup(void)
 {
 	ALooper *l;
 	int fds[2];
-	char b = 1;
 	struct timespec start, end;
 	long elapsed_ms;
 
@@ -1409,7 +1420,7 @@ int tipsy_test_cond_wait_lost_wakeup(void)
 		return -2;
 	}
 	/* Event before arm: watcher sets pending_wake; cond_wait must not hang. */
-	(void)write(fds[1], &b, 1);
+	pipe_write_token(fds[1]);
 	usleep(20000);
 	clock_gettime(CLOCK_MONOTONIC, &start);
 	pthread_mutex_lock(&g_test_mu);
@@ -1470,11 +1481,10 @@ int tipsy_test_idle_unblocks_on_wake(void)
 
 static int test_fallback_cb(int fd, int events, void *data)
 {
-	char b;
 	pthread_cond_t *cv = data;
 
 	(void)events;
-	(void)read(fd, &b, 1);
+	pipe_drain_token(fd);
 	g_test_cb_fired = 1;
 	pthread_cond_signal(cv);
 	return 1;
