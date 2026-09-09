@@ -85,7 +85,15 @@ exit 0
 EOF
 chmod 0755 "$stage/DEBIAN/postinst"
 
-dpkg-deb --root-owner-group --build "$stage" "$work/$deb_name"
+printf 'build-deb: stage usage:\n' >&2
+du -sh "$stage" >&2
+df -h "$stage" "$work" >&2
+find "$stage" -type f -printf '%12s %p\n' | sort -nr | head -8 >&2
+weird=$(find "$stage" ! -type f ! -type d ! -type l -print -quit)
+[[ -z "$weird" ]] || fail "stage contains non-regular entry: $weird"
+
+# gzip: universally accepted by APT, far faster and leaner than the xz default.
+dpkg-deb --root-owner-group -Zgzip --build "$stage" "$work/$deb_name"
 mv -- "$work/$deb_name" "$output_dir/$deb_name"
 
 # Sanity: package opens, ships both binaries and both desktop files.
