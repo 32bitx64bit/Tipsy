@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"time"
 )
 
@@ -23,6 +24,10 @@ const (
 var (
 	onGameLoadedColon = []byte("onGameLoaded: placeId:")
 	onGameLoadedEq    = []byte("onGameLoaded: placeId = ")
+
+	// watchPlayerLogsStarts counts invocations of watchPlayerLogs. Presence
+	// must not start the poller; tests snapshot this counter.
+	watchPlayerLogsStarts atomic.Uint64
 )
 
 // parseOnGameLoadedPlaceID extracts the numeric place id from a named
@@ -56,6 +61,7 @@ func parsePrefixedInt64(line, prefix []byte) (int64, bool) {
 }
 
 func watchPlayerLogs(ctx context.Context, dir string, poll time.Duration, observe func(int64)) {
+	watchPlayerLogsStarts.Add(1)
 	if dir == "" || observe == nil {
 		return
 	}

@@ -116,10 +116,10 @@ func TestNativeHelperOnScreenOrientationChanged(t *testing.T) {
 // TestNativeHelperOnGameLoaded drives the exact production dispatch path
 // the engine's CallVoidMethod takes for
 // com/roblox/client/startup/NativeHelper.gameActivity_onGameLoaded(J)V
-// (GetMethodID'd AND called once per launch at startup, launch logs, with
-// a J argument of 0): the call is handled, the engine-provided handle is
-// received and recorded (never invented, never acted on), and nothing else
-// in the class is claimed.
+// (GetMethodID'd AND called for every loaded DataModel, launch logs: J=0
+// for Home at startup, then the joined place id): the call is handled, the
+// engine-provided place id is received and recorded (never invented), and
+// nothing else in the class is claimed.
 func TestNativeHelperOnGameLoaded(t *testing.T) {
 	vm, err := NewVM()
 	if err != nil {
@@ -133,7 +133,7 @@ func TestNativeHelperOnGameLoaded(t *testing.T) {
 	vm.mu.Unlock()
 
 	countBefore, _ := NativeHelperGameLoaded()
-	// The live-observed startup value first, then a distinct handle to
+	// The live-observed startup value first, then a distinct place id to
 	// prove the record tracks the engine's announcement verbatim.
 	v, handled := vm.dispatch(idToJobject(h.id), nativeHelperClass, "gameActivity_onGameLoaded", "(J)V", packJlong(0))
 	if !handled {
@@ -145,15 +145,15 @@ func TestNativeHelperOnGameLoaded(t *testing.T) {
 	if _, handled := vm.dispatch(idToJobject(h.id), nativeHelperClass, "gameActivity_onGameLoaded", "(J)V", packJlong(77)); !handled {
 		t.Fatal("second gameActivity_onGameLoaded not handled")
 	}
-	count, handle := NativeHelperGameLoaded()
+	count, placeID := NativeHelperGameLoaded()
 	if count != countBefore+2 {
 		t.Fatalf("gameLoaded count = %d, want %d", count, countBefore+2)
 	}
-	if handle != 77 {
-		t.Fatalf("recorded handle = %d, want 77", handle)
+	if placeID != 77 {
+		t.Fatalf("recorded placeId = %d, want 77", placeID)
 	}
 	out := buf.String()
-	if !strings.Contains(out, "[jni] onGameLoaded") || !strings.Contains(out, "handle=0") {
+	if !strings.Contains(out, "[jni] onGameLoaded") || !strings.Contains(out, "placeId=0") {
 		t.Fatalf("log missing onGameLoaded record: %s", out)
 	}
 

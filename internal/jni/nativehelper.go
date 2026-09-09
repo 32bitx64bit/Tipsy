@@ -51,18 +51,22 @@ var (
 )
 
 // Game-loaded announcements received from the engine
-// (gameActivity_onGameLoaded(J)V). The engine calls this once per launch
-// at startup in the experience-lifecycle batch (launch logs: the same
-// second as NativeGLJavaInterface.gameLoadedCallback(J)V with handle=0,
-// screenOrientationChanged, and onDataModelNotificationCallback, right
-// after the logged-out NativeUser group) — observed live with a J
-// argument of 0. Receiving and recording the engine's announcement is the
-// complete honest Tipsy-side behavior: nothing fabricates loaded state,
-// and Tipsy never acts on the handle.
+// (gameActivity_onGameLoaded(J)V). The engine calls this every time a
+// DataModel finishes loading, in the same experience-lifecycle batch as
+// NativeGLJavaInterface.gameLoadedCallback(J)V, screenOrientationChanged,
+// and onDataModelNotificationCallback. The J argument is the loaded place
+// id: 0 for the Home/App DataModel at startup and after leaving an
+// experience, and the public place id after an in-client join (live
+// 2026-09-06 session: 0, 18667984660, 0, 8735521924 — each matching the
+// Player log's `onGameLoaded: placeId:N` line for the same event; official
+// Java is NativeHelper.gameActivity_onGameLoaded(long placeId)). Startup-only
+// observation of J=0 was a Home DataModel announcement, not an opaque
+// handle. Tipsy only records the engine's own statement and forwards the id
+// to the presence listener; nothing fabricates loaded state.
 var (
-	gameLoadedMu         sync.Mutex
-	gameLoadedCount      uint64
-	gameLoadedLastHandle int64
+	gameLoadedMu          sync.Mutex
+	gameLoadedCount       uint64
+	gameLoadedLastPlaceID int64
 )
 
 // appReadyStepName makes the engine-provided app-step string safe for a
@@ -114,18 +118,18 @@ func (vm *VM) dispatchNativeHelper(o *Object, class, name, sig string, args *C.j
 		logging.Logger(logging.CatJNI).Info("[jni] onScreenOrientationChanged",
 			"orientation", orient, "requestDefault", def)
 	case name == "gameActivity_onGameLoaded" && sig == "(J)V":
-		// The single J slot carries the engine's native handle (observed 0
-		// at startup in every launch log); a nil slot reads as 0, never a
-		// fabricated value.
-		var handle int64
+		// The single J slot carries the loaded place id (0 = Home); a nil
+		// slot reads as 0, never a fabricated value.
+		var placeID int64
 		if args != nil {
-			handle = int64(C.tipsy_jvalue_j(args))
+			placeID = int64(jvalueJ(args))
 		}
 		gameLoadedMu.Lock()
 		gameLoadedCount++
-		gameLoadedLastHandle = handle
+		gameLoadedLastPlaceID = placeID
 		gameLoadedMu.Unlock()
-		logging.Logger(logging.CatJNI).Info("[jni] onGameLoaded", "handle", handle)
+		logging.Logger(logging.CatJNI).Info("[jni] onGameLoaded", "placeId", placeID)
+		noteGameLoadedPlaceID(placeID)
 	default:
 		return jnull(), false
 	}
@@ -160,19 +164,19 @@ func NativeHelperAppReady() (count uint64, lastStep string) {
 
 // NativeHelperGameLoaded reports the gameActivity_onGameLoaded
 // announcements received from the engine: the count and the most recent
-// handle value. A count of 0 means the engine has not announced
+// place id (0 = Home). A count of 0 means the engine has not announced
 // game-loaded to the Java side — never a fabricated value.
-func NativeHelperGameLoaded() (count uint64, handle int64) {
+func NativeHelperGameLoaded() (count uint64, placeID int64) {
 	gameLoadedMu.Lock()
 	defer gameLoadedMu.Unlock()
-	return gameLoadedCount, gameLoadedLastHandle
+	return gameLoadedCount, gameLoadedLastPlaceID
 }
 
 // testPackObjectArg packs one jobject argument slot for tests (test files
 // cannot import "C" in this package).
 func testPackObjectArg(id int64) *C.jvalue {
 	sl := make([]C.jvalue, 1)
-	C.tipsy_jvalue_set_l(&sl[0], idToJobject(id))
+	jvalueSetL(&sl[0], idToJobject(id))
 	return &sl[0]
 }
 
@@ -180,7 +184,7 @@ func testPackObjectArg(id int64) *C.jvalue {
 // (IZ)V orientation callback: I then Z).
 func testPackTwoInts(a, b int32) *C.jvalue {
 	sl := make([]C.jvalue, 2)
-	C.tipsy_jvalue_set_i(&sl[0], C.jint(a))
-	C.tipsy_jvalue_set_i(&sl[1], C.jint(b))
+	jvalueSetI(&sl[0], C.jint(a))
+	jvalueSetI(&sl[1], C.jint(b))
 	return &sl[0]
 }
