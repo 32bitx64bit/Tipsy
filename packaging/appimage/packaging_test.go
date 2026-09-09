@@ -775,6 +775,7 @@ func TestPublicSourceAdmissionRejectsHighConfidenceCredentialWithoutEchoingIt(t 
 func TestPublicSourceAdmissionAllowsOnlyReviewedGenericCredentialFixtures(t *testing.T) {
 	const loggingTestPath = "internal/logging/logging_test.go"
 	reviewedBlobs := []string{
+		"29b2714b944bce1f3b5abaecf79db92b2c2bad5d",
 		"29bcf100cb32fe66841690e688f9848f39a84025",
 		"57130ac3c72744cad6dc0c015b68d0399bc2de5f",
 		"64435761862bfd222a01795875835c244e882a3e",

@@ -57,8 +57,8 @@ func TestRedact(t *testing.T) {
 		},
 		{
 			name:       "authorization bearer",
-			in:         "Authorization: Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.aa",
-			notContain: "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.aa",
+			in:         "Authorization: Bearer example-bearer-token-aaaaaaaaaaaaaaaa",
+			notContain: "example-bearer-token-aaaaaaaaaaaaaaaa",
 			contain:    redacted,
 		},
 		{
@@ -141,8 +141,8 @@ func TestRedact(t *testing.T) {
 		},
 		{
 			name:       "lowercase roblo security",
-			in:         ".roblosecurity=synthetic-not-a-real-cookie",
-			notContain: "synthetic-not-a-real-cookie",
+			in:         ".roblosecurity=example-not-a-real-cookie-value",
+			notContain: "example-not-a-real-cookie-value",
 			contain:    redacted,
 		},
 		{
@@ -245,7 +245,7 @@ func TestRedactPrefilterDoesNotSkipProtectedForms(t *testing.T) {
 		".ROBLOSECURITY=_|WARNING:-DO-NOT-SHARE-THIS.--abc",
 		"Cookie: session=abc; .ROBLOSECURITY=xyz",
 		"Set-Cookie: .ROBLOSECURITY=tok123; Path=/",
-		"Authorization: Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.aa",
+		"Authorization: Bearer example-bearer-token-aaaaaaaaaaaaaaaa",
 		"authorization: Basic dXNlcjpwYXNz",
 		"token Bearer abcdef123456",
 		"roblox-player:1+launchmode:play+gameinfo:SUPER-SECRET-TICKET+placeId:1818",
@@ -257,7 +257,7 @@ func TestRedactPrefilterDoesNotSkipProtectedForms(t *testing.T) {
 		"PASSWORD=hunter2",
 		"passwd=hunter2",
 		"pwd=hunter2",
-		".roblosecurity=synthetic-not-a-real-cookie",
+		".roblosecurity=example-not-a-real-cookie-value",
 		"GAMEINFO:SYNTHETIC-NOT-A-REAL-TICKET",
 		`{"cookie":"synthetic-json-cookie"}`,
 	} {
@@ -333,7 +333,7 @@ func TestDebugEnabledHonorsAndroidCategory(t *testing.T) {
 // .ROBLOSECURITY value.
 const (
 	benchRedactHot    = "[FLog::Graphics] Vulkan present ok frames=240 renderer=radv"
-	benchRedactSecret = "Cookie: session=synthetic-fixture-not-a-real-cookie; .ROBLOSECURITY=SYNTHETIC_NOT_A_REAL_COOKIE_VALUE"
+	benchRedactSecret = "Cookie: session=example-fixture-not-a-real-cookie; .ROBLOSECURITY=EXAMPLE_NOT_A_REAL_COOKIE_VALUE"
 )
 
 func BenchmarkRedact(b *testing.B) {
