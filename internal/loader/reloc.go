@@ -79,16 +79,27 @@ func (m *Module) relocate() error {
 		return fmt.Errorf("loader: no dynamic section")
 	}
 
+	applyOne := func(r Reloc, rela bool) error {
+		if err := applyReloc(m, r, rela); err != nil {
+			if _, ok := err.(errMissing); ok {
+				return nil
+			}
+			return err
+		}
+		return nil
+	}
 	applyList := func(relocs []Reloc, rela bool) error {
 		for _, r := range relocs {
-			if err := applyReloc(m, r, rela); err != nil {
-				if _, ok := err.(errMissing); ok {
-					continue
-				}
+			if err := applyOne(r, rela); err != nil {
 				return err
 			}
 		}
 		return nil
+	}
+	applyAPS2 := func(blob []byte, rela bool) error {
+		return walkAPS2(blob, func(r Reloc) error {
+			return applyOne(r, rela)
+		})
 	}
 
 	if d.rela != 0 && d.relasz > 0 {
@@ -135,11 +146,7 @@ func (m *Module) relocate() error {
 		if err != nil {
 			return fmt.Errorf("loader: DT_ANDROID_RELA: %w", err)
 		}
-		rs, err := decodeAPS2(blob)
-		if err != nil {
-			return err
-		}
-		if err := applyList(rs, true); err != nil {
+		if err := applyAPS2(blob, true); err != nil {
 			return err
 		}
 		packed = true
@@ -149,11 +156,7 @@ func (m *Module) relocate() error {
 		if err != nil {
 			return fmt.Errorf("loader: DT_ANDROID_REL: %w", err)
 		}
-		rs, err := decodeAPS2(blob)
-		if err != nil {
-			return err
-		}
-		if err := applyList(rs, false); err != nil {
+		if err := applyAPS2(blob, false); err != nil {
 			return err
 		}
 		packed = true
@@ -194,17 +197,16 @@ func (m *Module) applyPackedSections() error {
 		if err != nil {
 			return err
 		}
-		rs, err := decodeAPS2(data)
-		if err != nil {
-			return err
-		}
-		for _, r := range rs {
+		if err := walkAPS2(data, func(r Reloc) error {
 			if err := applyReloc(m, r, rela); err != nil {
 				if _, ok := err.(errMissing); ok {
-					continue
+					return nil
 				}
 				return err
 			}
+			return nil
+		}); err != nil {
+			return err
 		}
 	}
 	return nil

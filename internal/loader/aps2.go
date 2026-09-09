@@ -31,55 +31,58 @@ func makeRelInfo(sym uint32, typ uint32) uint64 {
 	return uint64(sym)<<32 | uint64(typ)
 }
 
-func decodeAPS2(data []byte) ([]Reloc, error) {
+// walkAPS2 decodes Android packed relocations and visits each record without
+// retaining the full []Reloc. Grouping/addend semantics match AOSP
+// for_all_packed_relocs (linker_reloc_iterators.h).
+func walkAPS2(data []byte, visit func(Reloc) error) error {
 	if len(data) < 4 || string(data[:4]) != "APS2" {
-		return nil, fmt.Errorf("loader: packed reloc header is not APS2")
+		return fmt.Errorf("loader: packed reloc header is not APS2")
 	}
 	p := data[4:]
 	count, n, ok := readSLEB128(p)
 	if !ok {
-		return nil, fmt.Errorf("loader: APS2 count SLEB128")
+		return fmt.Errorf("loader: APS2 count SLEB128")
 	}
 	p = p[n:]
 	if count < 0 {
-		return nil, fmt.Errorf("loader: APS2 negative count %d", count)
+		return fmt.Errorf("loader: APS2 negative count %d", count)
 	}
 	if count > 1<<28 {
-		return nil, fmt.Errorf("loader: APS2 count %d too large", count)
+		return fmt.Errorf("loader: APS2 count %d too large", count)
 	}
 
 	// Initial r_offset is a dedicated SLEB after count (AOSP for_all_packed_relocs).
 	initOff, n, ok := readSLEB128(p)
 	if !ok {
-		return nil, fmt.Errorf("loader: APS2 initial r_offset SLEB128")
+		return fmt.Errorf("loader: APS2 initial r_offset SLEB128")
 	}
 	p = p[n:]
 
 	rOff := uint64(initOff)
 	var rInfo uint64
 	var addend int64
-	out := make([]Reloc, 0, int(count))
+	have := 0
 
-	for len(out) < int(count) {
+	for have < int(count) {
 		if len(p) == 0 {
-			return nil, fmt.Errorf("loader: APS2 truncated (have %d of %d)", len(out), count)
+			return fmt.Errorf("loader: APS2 truncated (have %d of %d)", have, count)
 		}
 		gs, n, ok := readSLEB128(p)
 		if !ok {
-			return nil, fmt.Errorf("loader: APS2 group_size SLEB128")
+			return fmt.Errorf("loader: APS2 group_size SLEB128")
 		}
 		p = p[n:]
 		if gs <= 0 {
-			return nil, fmt.Errorf("loader: APS2 group_size %d", gs)
+			return fmt.Errorf("loader: APS2 group_size %d", gs)
 		}
-		remain := int(count) - len(out)
+		remain := int(count) - have
 		if gs > int64(remain) {
-			return nil, fmt.Errorf("loader: APS2 group_size %d exceeds remaining %d", gs, remain)
+			return fmt.Errorf("loader: APS2 group_size %d exceeds remaining %d", gs, remain)
 		}
 
 		flags, n, ok := readSLEB128(p)
 		if !ok {
-			return nil, fmt.Errorf("loader: APS2 group flags SLEB128")
+			return fmt.Errorf("loader: APS2 group flags SLEB128")
 		}
 		p = p[n:]
 		gflags := uint64(flags)
@@ -88,7 +91,7 @@ func decodeAPS2(data []byte) ([]Reloc, error) {
 		if gflags&relocGroupedByOffsetDelta != 0 {
 			d, n, ok := readSLEB128(p)
 			if !ok {
-				return nil, fmt.Errorf("loader: APS2 group offset delta SLEB128")
+				return fmt.Errorf("loader: APS2 group offset delta SLEB128")
 			}
 			p = p[n:]
 			groupDelta = uint64(d)
@@ -96,7 +99,7 @@ func decodeAPS2(data []byte) ([]Reloc, error) {
 		if gflags&relocGroupedByInfo != 0 {
 			info, n, ok := readSLEB128(p)
 			if !ok {
-				return nil, fmt.Errorf("loader: APS2 group r_info SLEB128")
+				return fmt.Errorf("loader: APS2 group r_info SLEB128")
 			}
 			p = p[n:]
 			rInfo = uint64(info)
@@ -108,7 +111,7 @@ func decodeAPS2(data []byte) ([]Reloc, error) {
 		case hasAddend && groupedAddend:
 			d, n, ok := readSLEB128(p)
 			if !ok {
-				return nil, fmt.Errorf("loader: APS2 group addend SLEB128")
+				return fmt.Errorf("loader: APS2 group addend SLEB128")
 			}
 			p = p[n:]
 			addend += d
@@ -122,7 +125,7 @@ func decodeAPS2(data []byte) ([]Reloc, error) {
 			} else {
 				d, n, ok := readSLEB128(p)
 				if !ok {
-					return nil, fmt.Errorf("loader: APS2 r_offset delta SLEB128")
+					return fmt.Errorf("loader: APS2 r_offset delta SLEB128")
 				}
 				p = p[n:]
 				rOff += uint64(d)
@@ -130,7 +133,7 @@ func decodeAPS2(data []byte) ([]Reloc, error) {
 			if gflags&relocGroupedByInfo == 0 {
 				info, n, ok := readSLEB128(p)
 				if !ok {
-					return nil, fmt.Errorf("loader: APS2 r_info SLEB128")
+					return fmt.Errorf("loader: APS2 r_info SLEB128")
 				}
 				p = p[n:]
 				rInfo = uint64(info)
@@ -138,13 +141,30 @@ func decodeAPS2(data []byte) ([]Reloc, error) {
 			if hasAddend && !groupedAddend {
 				d, n, ok := readSLEB128(p)
 				if !ok {
-					return nil, fmt.Errorf("loader: APS2 r_addend SLEB128")
+					return fmt.Errorf("loader: APS2 r_addend SLEB128")
 				}
 				p = p[n:]
 				addend += d
 			}
-			out = append(out, Reloc{Off: rOff, Info: rInfo, Addend: addend})
+			if err := visit(Reloc{Off: rOff, Info: rInfo, Addend: addend}); err != nil {
+				return err
+			}
+			have++
 		}
+	}
+	return nil
+}
+
+// decodeAPS2 is a collecting walker for APS2 unit tests that inspect the slice.
+// Production relocate/applyPackedSections use walkAPS2 and do not keep the list.
+func decodeAPS2(data []byte) ([]Reloc, error) {
+	var out []Reloc
+	err := walkAPS2(data, func(r Reloc) error {
+		out = append(out, r)
+		return nil
+	})
+	if err != nil {
+		return nil, err
 	}
 	return out, nil
 }
