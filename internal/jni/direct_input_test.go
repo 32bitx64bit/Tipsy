@@ -46,11 +46,14 @@ func wireRecordingDirectKeyTarget(t *testing.T, env, class uintptr) {
 func stubPointerLock(t *testing.T, fn func(bool) (bool, error)) {
 	t.Helper()
 	old := pointerLockSetter
+	oldCursor := pointerLockAtCursorSetter
 	pointerLockSetter = fn
+	pointerLockAtCursorSetter = fn
 	rmbPointerFallback.Store(false)
 	pointerLockSticky.Store(false)
 	t.Cleanup(func() {
 		pointerLockSetter = old
+		pointerLockAtCursorSetter = oldCursor
 		rmbPointerFallback.Store(false)
 		pointerLockSticky.Store(false)
 	})
@@ -303,6 +306,9 @@ func TestGetterFalseSecondaryDownUsesHeldRMBCapture(t *testing.T) {
 	if len(calls) != 1 || !calls[0] || !rmbPointerFallback.Load() {
 		t.Fatalf("fallback acquire calls=%v active=%t, want [true],true", calls, rmbPointerFallback.Load())
 	}
+	if pointerLockSticky.Load() {
+		t.Fatal("held-RMB fallback must not sticky-recenter after Alt-Tab")
+	}
 
 	// The getter remains false, so this regression proves the successful
 	// held-RMB fallback retains the captured relative motion instead of
@@ -415,6 +421,74 @@ func TestGetterFalseFallbackFocusLossReleasesHostGrab(t *testing.T) {
 	handleX11InputEvent(x11.InputEvent{Kind: x11.InputFocus, FocusGained: false})
 	if len(calls) != 1 || !calls[0] || rmbPointerFallback.Load() {
 		t.Fatalf("focus-loss fallback calls=%v active=%t, want [true],false", calls, rmbPointerFallback.Load())
+	}
+}
+
+func TestGetterFalseFallbackUsesCursorAnchorNotCenter(t *testing.T) {
+	selectPointerPath(t, "direct")
+	wireRecordingDirectTarget(t, 0x1234, 0x5678)
+	testDirectRecSetMouseLocked(false)
+	var centerCalls, cursorCalls []bool
+	oldCenter := pointerLockSetter
+	oldCursor := pointerLockAtCursorSetter
+	pointerLockSetter = func(locked bool) (bool, error) {
+		centerCalls = append(centerCalls, locked)
+		return true, nil
+	}
+	pointerLockAtCursorSetter = func(locked bool) (bool, error) {
+		cursorCalls = append(cursorCalls, locked)
+		return true, nil
+	}
+	rmbPointerFallback.Store(false)
+	pointerLockSticky.Store(false)
+	t.Cleanup(func() {
+		pointerLockSetter = oldCenter
+		pointerLockAtCursorSetter = oldCursor
+		rmbPointerFallback.Store(false)
+		pointerLockSticky.Store(false)
+	})
+
+	handleX11InputEvent(x11.InputEvent{
+		Kind: x11.InputPointer, PointerAction: x11.PointerDown, Button: 3, X: 20, Y: 22,
+	})
+	if len(cursorCalls) != 1 || !cursorCalls[0] {
+		t.Fatalf("cursor-anchor acquire calls=%v, want [true]", cursorCalls)
+	}
+	if len(centerCalls) != 0 {
+		t.Fatalf("centered acquire calls=%v, want none on held-RMB fallback", centerCalls)
+	}
+	if pointerLockSticky.Load() {
+		t.Fatal("held-RMB fallback set first-person sticky recapture")
+	}
+
+	handleX11InputEvent(x11.InputEvent{
+		Kind: x11.InputPointer, PointerAction: x11.PointerUp, Button: 3, X: 20, Y: 22,
+	})
+	if len(cursorCalls) != 1 || len(centerCalls) != 1 || centerCalls[0] {
+		t.Fatalf("RMB release centerCalls=%v cursorCalls=%v, want unlock via centered setter false", centerCalls, cursorCalls)
+	}
+}
+
+func TestGetterFalseFallbackFocusInDoesNotRecapture(t *testing.T) {
+	selectPointerPath(t, "direct")
+	wireRecordingDirectTarget(t, 0x1234, 0x5678)
+	testDirectRecSetMouseLocked(false)
+	var calls []bool
+	stubPointerLock(t, func(locked bool) (bool, error) {
+		calls = append(calls, locked)
+		return true, nil
+	})
+
+	handleX11InputEvent(x11.InputEvent{
+		Kind: x11.InputPointer, PointerAction: x11.PointerDown, Button: 3, X: 20, Y: 22,
+	})
+	handleX11InputEvent(x11.InputEvent{Kind: x11.InputFocus, FocusGained: false})
+	handleX11InputEvent(x11.InputEvent{Kind: x11.InputFocus, FocusGained: true})
+	if len(calls) != 1 || !calls[0] {
+		t.Fatalf("held-RMB focus-return lock calls=%v, want [true] (no recapture)", calls)
+	}
+	if pointerLockSticky.Load() || rmbPointerFallback.Load() {
+		t.Fatal("held-RMB fallback remained sticky after focus return")
 	}
 }
 

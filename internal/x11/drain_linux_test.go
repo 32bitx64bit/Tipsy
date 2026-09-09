@@ -11,6 +11,36 @@ import (
 	"testing"
 )
 
+func TestDrainCapturedRawPumpCoalescesWarps(t *testing.T) {
+	t.Cleanup(testClearInputRing)
+	const n = 8
+	if rc := testCoalesceRawPump(n); rc != 0 {
+		t.Fatalf("testCoalesceRawPump(%d) = %d", n, rc)
+	}
+	if samples := testLastPumpRawSamples(); samples != n {
+		t.Fatalf("raw samples = %d, want %d", samples, n)
+	}
+	if warps := testLastPumpWarps(); warps != 1 {
+		t.Fatalf("warps = %d, want 1 for %d raw samples in one pump", warps, n)
+	}
+	w := &Window{}
+	w.mu.Lock()
+	evs, closed := w.drainInputLocked()
+	w.mu.Unlock()
+	if closed {
+		t.Fatal("unexpected close")
+	}
+	if len(evs) != n {
+		t.Fatalf("relative records = %d, want %d", len(evs), n)
+	}
+	for i, ev := range evs {
+		if ev.Kind != InputPointer || ev.PointerAction != PointerMove || !ev.Relative ||
+			ev.X != 160 || ev.Y != 90 || ev.DeltaX != 1 || ev.DeltaY != 0 {
+			t.Fatalf("relative sample %d = %+v, want (dx=1,dy=0) at anchor (160,90)", i, ev)
+		}
+	}
+}
+
 func TestInputDrainABISizes(t *testing.T) {
 	evBytes, textBytes := inputABISizes()
 	if evBytes <= 0 || evBytes > 48 {

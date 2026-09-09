@@ -621,8 +621,10 @@ var pointerLockSticky atomic.Bool
 
 // pointerLockSetter is a test seam for the host boundary. Production never
 // replaces it; retaining the call behind this seam lets tests prove that a
-// rejected fallback preserves Roblox's button edges.
+// rejected fallback preserves Roblox's button edges. First-person / shift-lock
+// uses the centered grab; held-RMB camera look uses the cursor-anchor grab.
 var pointerLockSetter = x11.SetPointerLock
+var pointerLockAtCursorSetter = x11.SetPointerLockAtCursor
 
 func pointerButtonState(x11Button int32, down bool) int32 {
 	pointerButtons.mu.Lock()
@@ -879,11 +881,13 @@ func handleX11InputEvent(ev x11.InputEvent) {
 				} else if available {
 					// The observed in-experience client leaves the exact lock getter
 					// false for ordinary RMB camera look. Deliver the edge first,
-					// then use one held-RMB host capture. A grab failure is only
-					// diagnostic: the already-delivered button edge remains live.
-					changed, err := pointerLockSetter(true)
+					// then use one held-RMB host capture anchored at the click so
+					// the desktop cursor does not teleport to the window center.
+					// This grab is not sticky: Alt-Tab already synthesizes RMB up.
+					// A grab failure is only diagnostic: the already-delivered
+					// button edge remains live.
+					changed, err := pointerLockAtCursorSetter(true)
 					if err == nil && changed {
-						pointerLockSticky.Store(true)
 						BeginRobloxDirectPointerFallback(ev.X, ev.Y)
 						// Publish fallback only after its virtual origin is ready. The
 						// X11 bridge normally serializes this stream, but this ordering
@@ -978,8 +982,8 @@ func testEventGetter(vm *VM, objID int64, class, name, sig string, intArg int32)
 // testEventGetterII packs two jint arguments (e.g. getAxisValue(II)F).
 func testEventGetterII(vm *VM, objID int64, class, name, sig string, a, b int32) (uintptr, bool) {
 	sl := make([]C.jvalue, 2)
-	C.tipsy_jvalue_set_i(&sl[0], C.jint(a))
-	C.tipsy_jvalue_set_i(&sl[1], C.jint(b))
+	jvalueSetI(&sl[0], C.jint(a))
+	jvalueSetI(&sl[1], C.jint(b))
 	v, ok := vm.dispatch(idToJobject(objID), class, name, sig, &sl[0])
 	return uintptr(v), ok
 }
@@ -988,9 +992,9 @@ func testEventGetterII(vm *VM, objID int64, class, name, sig string, a, b int32)
 // (e.g. getHistoricalAxisValue(III)F).
 func testEventGetterIII(vm *VM, objID int64, class, name, sig string, a, b, c int32) (uintptr, bool) {
 	sl := make([]C.jvalue, 3)
-	C.tipsy_jvalue_set_i(&sl[0], C.jint(a))
-	C.tipsy_jvalue_set_i(&sl[1], C.jint(b))
-	C.tipsy_jvalue_set_i(&sl[2], C.jint(c))
+	jvalueSetI(&sl[0], C.jint(a))
+	jvalueSetI(&sl[1], C.jint(b))
+	jvalueSetI(&sl[2], C.jint(c))
 	v, ok := vm.dispatch(idToJobject(objID), class, name, sig, &sl[0])
 	return uintptr(v), ok
 }

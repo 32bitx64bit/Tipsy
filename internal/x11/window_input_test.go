@@ -738,6 +738,95 @@ func TestPointerLockPreservesEachQueuedRelativeSample(t *testing.T) {
 	waitPointerPosition(t, w, centerX, centerY)
 }
 
+func drainQueuedRelative(c *inputCollector) []InputEvent {
+	var got []InputEvent
+	for {
+		select {
+		case ev := <-c.ch:
+			if ev.Kind == InputPointer && ev.Relative {
+				got = append(got, ev)
+			}
+		default:
+			return got
+		}
+	}
+}
+
+func TestPointerLockCoalescesCapturedRawWarpsInOnePump(t *testing.T) {
+	const winW, winH = 320, 180
+	const n = 8
+	centerX, centerY := winW/2, winH/2
+	w := openInputWindowSize(t, winW, winH)
+	c := collectInput(t)
+	requireProbe(t)
+	requirePointerGrabAvailable(t, w)
+	c.clearAndSettle(t, w)
+
+	if err := x11probe.Button(w.XID(), 80, 60, button3, true); err != nil {
+		t.Fatalf("secondary down: %v", err)
+	}
+	_ = c.nextPointerEdge(t, w, PointerDown, 3)
+	if changed, err := SetPointerLock(true); err != nil || !changed {
+		t.Fatalf("SetPointerLock(true) = changed %t, err %v", changed, err)
+	}
+	ev := c.next(t, w)
+	if ev.Kind != InputPointerCapture || !ev.Captured {
+		t.Fatalf("capture event = %+v", ev)
+	}
+	waitPointerPosition(t, w, centerX, centerY)
+	c.clear()
+
+	for i := 0; i < n; i++ {
+		if err := x11probe.RelativeMotion(1, 0); err != nil {
+			t.Fatalf("relative motion %d: %v", i, err)
+		}
+	}
+	x11probe.Sync()
+
+	var (
+		burstSamples, burstWarps int
+		got                      []InputEvent
+	)
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if err := w.Pump(); err != nil && err != ErrClosed {
+			t.Fatalf("Pump: %v", err)
+		}
+		samples, warps := testLastPumpRawSamples(), testLastPumpWarps()
+		if samples == 0 {
+			time.Sleep(10 * time.Millisecond)
+			continue
+		}
+		burstSamples, burstWarps = samples, warps
+		got = drainQueuedRelative(c)
+		break
+	}
+	if burstSamples != n {
+		t.Fatalf("one pump raw samples = %d, want all %d queued relative samples", burstSamples, n)
+	}
+	if burstWarps != 1 {
+		t.Fatalf("pump with %d raw samples issued %d warps, want 1", burstSamples, burstWarps)
+	}
+	if len(got) != n {
+		t.Fatalf("relative records = %d, want %d", len(got), n)
+	}
+	for i := 0; i < n; i++ {
+		ev := got[i]
+		if ev.Kind != InputPointer || ev.PointerAction != PointerMove || !ev.Relative ||
+			ev.X != float32(centerX) || ev.Y != float32(centerY) || ev.DeltaX == 0 || ev.DeltaY != 0 {
+			t.Fatalf("relative sample %d = %+v, want separate horizontal captured move at center", i, ev)
+		}
+	}
+	select {
+	case extra := <-c.ch:
+		if extra.Kind == InputPointer && extra.Relative {
+			t.Fatalf("unexpected extra captured sample: %+v", extra)
+		}
+	default:
+	}
+	waitPointerPosition(t, w, centerX, centerY)
+}
+
 func TestPointerLockFallsBackToCoreMotionWhenRawStreamIsQuiet(t *testing.T) {
 	const winW, winH = 320, 180
 	centerX, centerY := winW/2, winH/2
@@ -907,6 +996,76 @@ func TestPointerLockCentersAwayFromEdge(t *testing.T) {
 		t.Fatalf("capture release = %+v", ev)
 	}
 	waitPointerPosition(t, w, centerX, centerY)
+}
+
+func TestPointerLockAtCursorKeepsPressAnchor(t *testing.T) {
+	const winW, winH = 320, 180
+	centerX, centerY := winW/2, winH/2
+	const pressX, pressY = 80, 60
+	w := openInputWindowSize(t, winW, winH)
+	c := collectInput(t)
+	requireProbe(t)
+	requirePointerGrabAvailable(t, w)
+	c.clearAndSettle(t, w)
+
+	if err := x11probe.Button(w.XID(), pressX, pressY, button3, true); err != nil {
+		t.Fatalf("secondary down: %v", err)
+	}
+	ev := c.nextPointerEdge(t, w, PointerDown, 3)
+	if ev.Kind != InputPointer || ev.PointerAction != PointerDown || ev.Button != 3 || ev.X != pressX || ev.Y != pressY {
+		t.Fatalf("secondary down = %+v, want press (%d,%d)", ev, pressX, pressY)
+	}
+	changed, err := SetPointerLockAtCursor(true)
+	if err != nil || !changed {
+		t.Fatalf("SetPointerLockAtCursor(true) = changed %t, err %v", changed, err)
+	}
+	ev = c.next(t, w)
+	if ev.Kind != InputPointerCapture || !ev.Captured || ev.X != float32(pressX) || ev.Y != float32(pressY) {
+		t.Fatalf("capture event = %+v, want acquired at press (%d,%d)", ev, pressX, pressY)
+	}
+	if captured, x, y := w.PointerCapture(); !captured || x != pressX || y != pressY {
+		t.Fatalf("PointerCapture = %t (%d,%d), want true (%d,%d)", captured, x, y, pressX, pressY)
+	}
+	waitPointerPosition(t, w, pressX, pressY)
+
+	if err := x11probe.WarpPointer(w.XID(), pressX+40, pressY+20); err != nil {
+		t.Fatalf("captured motion: %v", err)
+	}
+	ev = c.next(t, w)
+	if ev.Kind != InputPointer || ev.PointerAction != PointerMove || !ev.Relative ||
+		ev.X != float32(pressX) || ev.Y != float32(pressY) || ev.DeltaX != 40 || ev.DeltaY != 20 {
+		t.Fatalf("captured motion = %+v, want press-anchored relative (40,20)", ev)
+	}
+	waitPointerPosition(t, w, pressX, pressY)
+
+	if err := x11probe.Button(w.XID(), pressX, pressY, button3, false); err != nil {
+		t.Fatalf("secondary up: %v", err)
+	}
+	ev = c.nextPointerEdge(t, w, PointerUp, 3)
+	if ev.Kind != InputPointer || ev.PointerAction != PointerUp || ev.Button != 3 || ev.X != pressX || ev.Y != pressY {
+		t.Fatalf("secondary up = %+v, want release at press", ev)
+	}
+	changed, err = SetPointerLockAtCursor(false)
+	if err != nil || !changed {
+		t.Fatalf("SetPointerLockAtCursor(false) = changed %t, err %v", changed, err)
+	}
+	ev = c.next(t, w)
+	if ev.Kind != InputPointerCapture || ev.Captured || ev.CaptureFailed {
+		t.Fatalf("capture release = %+v", ev)
+	}
+	waitPointerPosition(t, w, pressX, pressY)
+
+	if captured, _, _ := w.PointerCapture(); captured {
+		t.Fatal("pointer remained captured after cursor-anchor unlock")
+	}
+	if err := x11probe.WarpPointer(w.XID(), centerX, centerY); err != nil {
+		t.Fatalf("post-release motion: %v", err)
+	}
+	ev = c.next(t, w)
+	if ev.Kind != InputPointer || ev.PointerAction != PointerMove || ev.Relative ||
+		ev.X != float32(centerX) || ev.Y != float32(centerY) {
+		t.Fatalf("post-release motion = %+v, want normal absolute motion to center", ev)
+	}
 }
 
 func TestPointerLockReacquiresCenteredOnFocusIn(t *testing.T) {

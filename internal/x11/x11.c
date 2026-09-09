@@ -160,6 +160,7 @@ static int tipsy_x11_set_raw_motion(Display *dpy, int enabled) {
 struct tipsy_pointer_capture {
 	int active;
 	int sticky;
+	int center;
 	int right_down;
 	int have_last;
 	int anchor_x;
@@ -169,10 +170,18 @@ struct tipsy_pointer_capture {
 	int ignore_warps;
 	int failed_status;
 	int raw_motion;
+	int raw_warp_pending;
 	Time last_raw_motion_time;
 	Display *dpy;
 	Window win;
 };
+
+// Test hooks: raw samples accepted and tipsy_warp_to calls during the last
+// tipsy_x11_pump pass. Production does not read these.
+static int tipsy_in_pump;
+static int tipsy_test_last_pump_raw_samples;
+static int tipsy_test_last_pump_warps;
+static int tipsy_warp_dry_run;
 
 static struct tipsy_pointer_capture tipsy_capture;
 // Keyboard focus for the sole client window. Pointer-lock acquisition is
@@ -308,6 +317,31 @@ static void tipsy_capture_center(int width, int height, int *x, int *y) {
 	*y = tipsy_clamp_coord(height / 2, height);
 }
 
+// Held-RMB camera look anchors at the live cursor. Prefer the last client
+// coordinate Tipsy already delivered (the click, or latest hover) so the
+// grab cannot teleport relative to the button edge. Query, then window
+// center, only when no pointer sample exists yet.
+static void tipsy_capture_set_cursor_anchor(Display *dpy, Window win,
+	int width, int height) {
+	if (tipsy_capture.have_last) {
+		tipsy_capture.anchor_x = tipsy_clamp_coord(tipsy_capture.last_x, width);
+		tipsy_capture.anchor_y = tipsy_clamp_coord(tipsy_capture.last_y, height);
+		return;
+	}
+	Window root = 0, child = 0;
+	int root_x = 0, root_y = 0, x = 0, y = 0;
+	unsigned int mask = 0;
+	if (dpy != NULL && win != 0 &&
+		XQueryPointer(dpy, win, &root, &child, &root_x, &root_y,
+			&x, &y, &mask)) {
+		tipsy_capture.anchor_x = tipsy_clamp_coord(x, width);
+		tipsy_capture.anchor_y = tipsy_clamp_coord(y, height);
+		return;
+	}
+	tipsy_capture_center(width, height, &tipsy_capture.anchor_x,
+		&tipsy_capture.anchor_y);
+}
+
 static int tipsy_window_is_related(Display *dpy, Window win, Window other) {
 	if (dpy == NULL || win == 0 || other == 0) {
 		return 0;
@@ -402,6 +436,12 @@ static int tipsy_is_recenter_motion(int x, int y) {
 }
 
 static void tipsy_warp_to(Display *dpy, Window win, int x, int y) {
+	if (tipsy_in_pump) {
+		tipsy_test_last_pump_warps++;
+	}
+	if (tipsy_warp_dry_run) {
+		return;
+	}
 	Window root = DefaultRootWindow(dpy);
 	int root_x = 0, root_y = 0;
 	Window child = None;
@@ -421,10 +461,28 @@ static void tipsy_warp_to(Display *dpy, Window win, int x, int y) {
 // core recenter event is harmless because raw capture does not select core
 // PointerMotionMask on its grab.
 static void tipsy_warp_to_anchor_force(Display *dpy, Window win) {
+	tipsy_capture.raw_warp_pending = 0;
 	tipsy_warp_to(dpy, win, tipsy_capture.anchor_x, tipsy_capture.anchor_y);
 	tipsy_capture.ignore_warps = 1;
 	tipsy_capture.last_x = tipsy_capture.anchor_x;
 	tipsy_capture.last_y = tipsy_capture.anchor_y;
+}
+
+// One recenter for a pump pass of captured XI2 samples. Per-sample warps
+// stay queued in Xlib until the later XFlush, so they do not pull the
+// pointer back before later events in this pass; they only multiply X
+// requests. Lock/resize/unlock and the quiet-raw core fallback still warp
+// immediately through tipsy_warp_to_anchor / tipsy_warp_to_anchor_force.
+static void tipsy_flush_pending_raw_warp(Display *dpy, Window win) {
+	if (!tipsy_capture.raw_warp_pending) {
+		return;
+	}
+	tipsy_capture.raw_warp_pending = 0;
+	if (!tipsy_capture.active || !tipsy_capture.raw_motion ||
+		tipsy_capture.dpy != dpy || tipsy_capture.win != win) {
+		return;
+	}
+	tipsy_warp_to_anchor_force(dpy, win);
 }
 
 static void tipsy_warp_to_anchor(Display *dpy, Window win) {
@@ -474,9 +532,15 @@ static void tipsy_handle_raw_motion(Display *dpy, Window win,
 	// A normal core MotionNotify produced by this same physical sample has the
 	// same server timestamp. Keep it selected as an active-capture fallback,
 	// but use this marker to avoid delivering the coarse coordinate delta in
-	// addition to the precise XI2 value.
+	// addition to the precise XI2 value. Recenter is deferred to the end of
+	// this pump pass: one XWarpPointer, not one per raw sample.
 	tipsy_capture.last_raw_motion_time = raw->time;
-	tipsy_warp_to_anchor_force(dpy, win);
+	tipsy_capture.last_x = tipsy_capture.anchor_x;
+	tipsy_capture.last_y = tipsy_capture.anchor_y;
+	tipsy_capture.raw_warp_pending = 1;
+	if (tipsy_in_pump) {
+		tipsy_test_last_pump_raw_samples++;
+	}
 }
 
 // End an acquired grab exactly once. A focus/close cancellation also emits
@@ -494,10 +558,11 @@ static int tipsy_pointer_unlock(Display *dpy, Window win, int notify,
 			(float)tipsy_capture.anchor_x, (float)tipsy_capture.anchor_y);
 		tipsy_capture.right_down = 0;
 	}
-	// Leave the desktop pointer at the grab center. Warping back to the
-	// pre-lock coordinate made unlock appear to "teleport" away from where
-	// the hidden locked cursor had been.
+	// Leave the desktop pointer at the grab anchor. First-person look uses
+	// the window center; held-RMB look uses the click. Warping to a different
+	// restore point made unlock appear to teleport.
 	tipsy_capture.ignore_warps = 0;
+	tipsy_capture.raw_warp_pending = 0;
 	if (tipsy_capture.raw_motion) {
 		tipsy_capture.raw_motion = 0;
 		(void)tipsy_x11_set_raw_motion(dpy, 0);
@@ -514,10 +579,13 @@ static int tipsy_pointer_unlock(Display *dpy, Window win, int notify,
 	return 1;
 }
 
-// Grab/recenter. Caller holds tipsy_event_mu. Returns 1 for a new grab,
-// 0 for unchanged (including an already-active grab that was re-centered),
-// and -1 for a rejected grab.
-static int tipsy_pointer_lock_apply(Display *dpy, Window win, int *out_status) {
+// Grab/recenter. Caller holds tipsy_event_mu. center!=0 is first-person
+// lock (window center, sticky tab-back). center==0 is held-RMB camera look
+// (live cursor, no sticky recapture). Returns 1 for a new grab, 0 for
+// unchanged (including an already-active first-person grab that was
+// re-centered), and -1 for a rejected grab.
+static int tipsy_pointer_lock_apply(Display *dpy, Window win, int center,
+	int *out_status) {
 	if (dpy == NULL || win == 0 || tipsy_x_io_error) {
 		return -1;
 	}
@@ -537,22 +605,32 @@ static int tipsy_pointer_lock_apply(Display *dpy, Window win, int *out_status) {
 	tipsy_capture_center(attr.width, attr.height, &center_x, &center_y);
 	if (tipsy_capture.active && tipsy_capture.dpy == dpy &&
 		tipsy_capture.win == win) {
-		tipsy_capture.anchor_x = center_x;
-		tipsy_capture.anchor_y = center_y;
-		tipsy_capture.last_x = center_x;
-		tipsy_capture.last_y = center_y;
-		tipsy_warp_to_anchor_force(dpy, win);
+		if (center) {
+			tipsy_capture.center = 1;
+			tipsy_capture.sticky = 1;
+			tipsy_capture.anchor_x = center_x;
+			tipsy_capture.anchor_y = center_y;
+			tipsy_capture.last_x = center_x;
+			tipsy_capture.last_y = center_y;
+			tipsy_warp_to_anchor_force(dpy, win);
+		}
 		return 0;
 	}
 	tipsy_capture.dpy = dpy;
 	tipsy_capture.win = win;
-	tipsy_capture.anchor_x = center_x;
-	tipsy_capture.anchor_y = center_y;
-	tipsy_capture.last_x = center_x;
-	tipsy_capture.last_y = center_y;
+	tipsy_capture.center = center ? 1 : 0;
+	if (tipsy_capture.center) {
+		tipsy_capture.anchor_x = center_x;
+		tipsy_capture.anchor_y = center_y;
+	} else {
+		tipsy_capture_set_cursor_anchor(dpy, win, attr.width, attr.height);
+	}
+	tipsy_capture.last_x = tipsy_capture.anchor_x;
+	tipsy_capture.last_y = tipsy_capture.anchor_y;
 	tipsy_capture.have_last = 1;
-	// Warp to the center before confine so an edge cursor cannot stay pinned
-	// against the grab rectangle.
+	// First-person: warp to the center before confine so an edge cursor
+	// cannot stay pinned against the grab rectangle. Held-RMB: warp is a
+	// no-op at the live cursor so look does not teleport to mid-window.
 	tipsy_warp_to_anchor_force(dpy, win);
 	XFlush(dpy);
 	int raw_motion = tipsy_x11_set_raw_motion(dpy, 1);
@@ -572,7 +650,7 @@ static int tipsy_pointer_lock_apply(Display *dpy, Window win, int *out_status) {
 		return -1;
 	}
 	tipsy_capture.active = 1;
-	tipsy_capture.sticky = 1;
+	tipsy_capture.sticky = tipsy_capture.center;
 	tipsy_capture.raw_motion = raw_motion;
 	tipsy_capture.last_raw_motion_time = CurrentTime;
 	tipsy_warp_to_anchor_force(dpy, win);
@@ -584,7 +662,7 @@ static void tipsy_apply_host_focus(Display *dpy, Window win, int gained) {
 	if (gained) {
 		if (tipsy_have_keyboard_focus) {
 			if (tipsy_capture.sticky) {
-				(void)tipsy_pointer_lock_apply(dpy, win, NULL);
+				(void)tipsy_pointer_lock_apply(dpy, win, tipsy_capture.center, NULL);
 			}
 			return;
 		}
@@ -594,7 +672,7 @@ static void tipsy_apply_host_focus(Display *dpy, Window win, int gained) {
 			XSetICFocus(tipsy_xic);
 		}
 		if (tipsy_capture.sticky) {
-			(void)tipsy_pointer_lock_apply(dpy, win, NULL);
+			(void)tipsy_pointer_lock_apply(dpy, win, tipsy_capture.center, NULL);
 		}
 		tipsy_input_push(TIPSY_INPUT_FOCUS, 1, 0, 0, 0, 0);
 		return;
@@ -615,7 +693,7 @@ static void tipsy_apply_host_focus(Display *dpy, Window win, int gained) {
 // acquired, 2 for released, 0 for unchanged, -1 for grab rejection, and -2
 // for a closed display.
 int tipsy_x11_set_pointer_lock(uintptr_t dpy_ptr, unsigned long xid,
-	int locked, int *out_x, int *out_y, int *out_status) {
+	int locked, int center, int *out_x, int *out_y, int *out_status) {
 	Display *dpy = (Display *)dpy_ptr;
 	Window win = (Window)xid;
 	if (dpy == NULL || win == 0 || tipsy_x_io_error) return -2;
@@ -624,11 +702,12 @@ int tipsy_x11_set_pointer_lock(uintptr_t dpy_ptr, unsigned long xid,
 	if (!locked) {
 		tipsy_capture.failed_status = 0;
 		tipsy_capture.sticky = 0;
+		tipsy_capture.center = 0;
 		result = tipsy_pointer_unlock(dpy, win, 1, 0) ? 2 : 0;
 		goto done;
 	}
 	if (tipsy_capture.failed_status != 0) goto done;
-	result = tipsy_pointer_lock_apply(dpy, win, out_status);
+	result = tipsy_pointer_lock_apply(dpy, win, center, out_status);
 
 done:
 	if (out_x != NULL) *out_x = tipsy_capture.anchor_x;
@@ -716,6 +795,65 @@ void tipsy_x11_input_test_push(int kind, int a, long b, long c, float x, float y
 
 void tipsy_x11_input_test_push_text(const char *text, int len) {
 	tipsy_input_push_text(text, len);
+}
+
+int tipsy_x11_test_last_pump_raw_samples(void) {
+	return tipsy_test_last_pump_raw_samples;
+}
+
+int tipsy_x11_test_last_pump_warps(void) {
+	return tipsy_test_last_pump_warps;
+}
+
+// Simulate one pump pass of N valid captured XI2 samples without a real X
+// grab or XWarpPointer. Used when the desktop already holds the pointer.
+int tipsy_x11_test_coalesce_raw_pump(int n) {
+	if (n < 2 || n >= TIPSY_INPUT_RING) {
+		return -1;
+	}
+	pthread_mutex_lock(&tipsy_event_mu);
+	struct tipsy_pointer_capture saved = tipsy_capture;
+	Display *fake = (Display *)(uintptr_t)1;
+	Window win = 1;
+	memset(&tipsy_capture, 0, sizeof(tipsy_capture));
+	tipsy_capture.active = 1;
+	tipsy_capture.raw_motion = 1;
+	tipsy_capture.dpy = fake;
+	tipsy_capture.win = win;
+	tipsy_capture.anchor_x = 160;
+	tipsy_capture.anchor_y = 90;
+	tipsy_capture.last_x = 160;
+	tipsy_capture.last_y = 90;
+	tipsy_capture.have_last = 1;
+
+	tipsy_x11_input_test_clear();
+
+	unsigned char mask[4];
+	memset(mask, 0, sizeof(mask));
+	XISetMask(mask, 0);
+	XISetMask(mask, 1);
+	double values[2] = {1.0, 0.0};
+	XIRawEvent raw;
+	memset(&raw, 0, sizeof(raw));
+	raw.valuators.mask = mask;
+	raw.valuators.mask_len = 1;
+	raw.valuators.values = values;
+
+	tipsy_warp_dry_run = 1;
+	tipsy_test_last_pump_raw_samples = 0;
+	tipsy_test_last_pump_warps = 0;
+	tipsy_in_pump = 1;
+	for (int i = 0; i < n; i++) {
+		raw.time = (Time)(i + 1);
+		tipsy_handle_raw_motion(fake, win, &raw);
+	}
+	tipsy_flush_pending_raw_warp(fake, win);
+	tipsy_in_pump = 0;
+	tipsy_warp_dry_run = 0;
+
+	tipsy_capture = saved;
+	pthread_mutex_unlock(&tipsy_event_mu);
+	return 0;
 }
 
 int tipsy_x11_input_test_text_slots_clean(void) {
@@ -1231,6 +1369,9 @@ int tipsy_x11_pump(uintptr_t dpy_ptr, unsigned long xid, unsigned long wm_delete
 	Window win = (Window)xid;
 	*out_closed = 0;
 	pthread_mutex_lock(&tipsy_event_mu);
+	tipsy_test_last_pump_raw_samples = 0;
+	tipsy_test_last_pump_warps = 0;
+	tipsy_in_pump = 1;
 	while (XPending(dpy) > 0) {
 		XEvent ev;
 		XNextEvent(dpy, &ev);
@@ -1292,7 +1433,7 @@ int tipsy_x11_pump(uintptr_t dpy_ptr, unsigned long xid, unsigned long wm_delete
 						XSetICFocus(tipsy_xic);
 					}
 					if (tipsy_capture.sticky) {
-						(void)tipsy_pointer_lock_apply(dpy, win, NULL);
+						(void)tipsy_pointer_lock_apply(dpy, win, tipsy_capture.center, NULL);
 					}
 				}
 				tipsy_input_push(TIPSY_INPUT_FOCUS,
@@ -1394,8 +1535,12 @@ int tipsy_x11_pump(uintptr_t dpy_ptr, unsigned long xid, unsigned long wm_delete
 					}
 					tipsy_capture.right_down = ev.type == ButtonPress;
 					if (ev.type == ButtonPress) {
-						tipsy_capture.anchor_x = ev.xbutton.x;
-						tipsy_capture.anchor_y = ev.xbutton.y;
+						// Remember the click for a following held-RMB grab.
+						// Do not steal an active first-person center anchor.
+						if (!(tipsy_capture.active && tipsy_capture.center)) {
+							tipsy_capture.anchor_x = ev.xbutton.x;
+							tipsy_capture.anchor_y = ev.xbutton.y;
+						}
 						tipsy_capture.failed_status = 0;
 					}
 				}
@@ -1500,8 +1645,15 @@ int tipsy_x11_pump(uintptr_t dpy_ptr, unsigned long xid, unsigned long wm_delete
 				atomic_fetch_add_explicit(&tipsy_refresh_version, 1, memory_order_relaxed);
 				if (tipsy_capture.active) {
 					int ax = 0, ay = 0;
-					tipsy_capture_center(ev.xconfigure.width, ev.xconfigure.height,
-						&ax, &ay);
+					if (tipsy_capture.center) {
+						tipsy_capture_center(ev.xconfigure.width, ev.xconfigure.height,
+							&ax, &ay);
+					} else {
+						ax = tipsy_clamp_coord(tipsy_capture.anchor_x,
+							ev.xconfigure.width);
+						ay = tipsy_clamp_coord(tipsy_capture.anchor_y,
+							ev.xconfigure.height);
+					}
 					if (ax != tipsy_capture.anchor_x || ay != tipsy_capture.anchor_y) {
 						tipsy_capture.anchor_x = ax;
 						tipsy_capture.anchor_y = ay;
@@ -1557,6 +1709,8 @@ int tipsy_x11_pump(uintptr_t dpy_ptr, unsigned long xid, unsigned long wm_delete
 			break;
 		}
 	}
+	tipsy_flush_pending_raw_warp(dpy, win);
+	tipsy_in_pump = 0;
 	XFlush(dpy);
 	pthread_mutex_unlock(&tipsy_event_mu);
 	if (tipsy_x_io_error) {

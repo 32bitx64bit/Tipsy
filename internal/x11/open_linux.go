@@ -79,6 +79,18 @@ func testInputTextSlotsClean() bool {
 	return C.tipsy_x11_input_test_text_slots_clean() != 0
 }
 
+func testLastPumpRawSamples() int {
+	return int(C.tipsy_x11_test_last_pump_raw_samples())
+}
+
+func testLastPumpWarps() int {
+	return int(C.tipsy_x11_test_last_pump_warps())
+}
+
+func testCoalesceRawPump(n int) int {
+	return int(C.tipsy_x11_test_coalesce_raw_pump(C.int(n)))
+}
+
 func inputABISizes() (evBytes, textBytes int) {
 	return int(C.tipsy_x11_input_ev_size()), int(C.TIPSY_INPUT_TEXT_BYTES)
 }
@@ -211,21 +223,26 @@ func dismissLocked(w *Window) error {
 	return nil
 }
 
-func setPointerLockLocked(w *Window, locked bool) (bool, error) {
+func setPointerLockLocked(w *Window, locked, center bool) (bool, error) {
 	value := C.int(0)
 	if locked {
 		value = 1
 	}
+	centerFlag := C.int(0)
+	if center {
+		centerFlag = 1
+	}
 	var anchorX, anchorY, status C.int
 	rc := int(C.tipsy_x11_set_pointer_lock(C.uintptr_t(w.display), C.ulong(w.xid),
-		value, &anchorX, &anchorY, &status))
+		value, centerFlag, &anchorX, &anchorY, &status))
 	switch rc {
 	case 1:
 		w.pointerCaptured = true
 		w.pointerAnchorX = int(anchorX)
 		w.pointerAnchorY = int(anchorY)
 		logging.Logger(logging.CatX11).Info("X11 pointer lock acquired",
-			"xid", w.xid, "anchorX", w.pointerAnchorX, "anchorY", w.pointerAnchorY)
+			"xid", w.xid, "anchorX", w.pointerAnchorX, "anchorY", w.pointerAnchorY,
+			"center", center)
 		return true, nil
 	case 2:
 		w.pointerCaptured = false

@@ -36,9 +36,10 @@ func dismissLocked(w *Window) error {
 	return nil
 }
 
-func setPointerLockLocked(w *Window, locked bool) (bool, error) {
+func setPointerLockLocked(w *Window, locked, center bool) (bool, error) {
 	_ = w
 	_ = locked
+	_ = center
 	return false, ErrUnavailable
 }
 
@@ -93,3 +94,12 @@ func (w *Window) RefreshVersion() uint64 { return 0 }
 
 // WakeEventPump is a no-op without native X11.
 func WakeEventPump() {}
+
+func testLastPumpRawSamples() int { return 0 }
+
+func testLastPumpWarps() int { return 0 }
+
+func testCoalesceRawPump(n int) int {
+	_ = n
+	return -1
+}

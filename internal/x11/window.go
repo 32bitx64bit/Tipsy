@@ -173,13 +173,23 @@ func clearActiveWindow(w *Window) {
 }
 
 // SetPointerLock applies Roblox's current native mouse-lock request to the
-// sole client window. The X11 implementation grabs only that window and warps
-// to the window center so first-person look has travel room in every
-// direction. Release leaves the desktop pointer at that same center rather
-// than teleporting back to the pre-lock coordinate. Acquisition is refused
-// while the window is unfocused so Alt-Tab cannot leave a background grab in
-// place.
+// sole client window. First-person / shift-lock grabs warp to the window
+// center so look has travel room in every direction. Release leaves the
+// desktop pointer at that same center rather than teleporting back to the
+// pre-lock coordinate. Acquisition is refused while the window is unfocused
+// so Alt-Tab cannot leave a background grab in place.
 func SetPointerLock(locked bool) (bool, error) {
+	return setPointerLock(locked, true)
+}
+
+// SetPointerLockAtCursor is the held-RMB camera-look grab. It confines the
+// pointer at its current client position instead of warping to the window
+// center, so releasing RMB leaves the desktop cursor where the user clicked.
+func SetPointerLockAtCursor(locked bool) (bool, error) {
+	return setPointerLock(locked, false)
+}
+
+func setPointerLock(locked, center bool) (bool, error) {
 	activeWindow.Lock()
 	w := activeWindow.w
 	activeWindow.Unlock()
@@ -191,7 +201,7 @@ func SetPointerLock(locked bool) (bool, error) {
 	if w.closed || w.display == 0 || w.xid == 0 {
 		return false, ErrClosed
 	}
-	return setPointerLockLocked(w, locked)
+	return setPointerLockLocked(w, locked, center)
 }
 
 // OnInput subscribes fn to captured input events of every open window.

@@ -68,12 +68,15 @@ uint64_t tipsy_x11_refresh_version(void);
 void tipsy_x11_wake_ack(void);
 void tipsy_nudge_pump(void);
 int tipsy_x11_set_pointer_lock(uintptr_t dpy_ptr, unsigned long xid,
-	int locked, int *out_x, int *out_y, int *out_status);
+	int locked, int center, int *out_x, int *out_y, int *out_status);
 int tipsy_x11_input_drain(struct tipsy_input_ev *out, char *text_out, int max);
 void tipsy_x11_input_test_clear(void);
 void tipsy_x11_input_test_push(int kind, int a, long b, long c, float x, float y);
 void tipsy_x11_input_test_push_text(const char *text, int len);
 int tipsy_x11_input_test_text_slots_clean(void);
+int tipsy_x11_test_last_pump_raw_samples(void);
+int tipsy_x11_test_last_pump_warps(void);
+int tipsy_x11_test_coalesce_raw_pump(int n);
 int tipsy_x11_input_ev_size(void);
 int tipsy_x11_io_error(void);
 int tipsy_x11_request_fullscreen(uintptr_t dpy_ptr, unsigned long win, int enabled);
