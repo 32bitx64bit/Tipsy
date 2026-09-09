@@ -17,11 +17,48 @@ import (
 )
 
 const (
+	// focusedTextOverlayPollInterval is the retired always-on launch-loop
+	// period (62 Hz). The loop now uses a nil channel while no textbox is
+	// focused and focusedTextOverlayRepaint (4 Hz) only while one is.
 	focusedTextOverlayPollInterval = 16 * time.Millisecond
 	focusedTextOverlayRepaint      = 250 * time.Millisecond
 	rbxFallbackFontRatio           = float32(0.795)
 	rbxBoldFallbackLetterSpacing   = float32(0.04)
 )
+
+// focusedTextOverlayWake is a launch-loop ticker that is nil while the
+// overlay is inactive and ticks at focusedTextOverlayRepaint while focused.
+type focusedTextOverlayWake struct {
+	ticker *time.Ticker
+}
+
+func (o *focusedTextOverlayWake) C() <-chan time.Time {
+	if o == nil || o.ticker == nil {
+		return nil
+	}
+	return o.ticker.C
+}
+
+func (o *focusedTextOverlayWake) sync(active bool) {
+	if o == nil {
+		return
+	}
+	if active {
+		if o.ticker == nil {
+			o.ticker = time.NewTicker(focusedTextOverlayRepaint)
+		}
+		return
+	}
+	o.stop()
+}
+
+func (o *focusedTextOverlayWake) stop() {
+	if o == nil || o.ticker == nil {
+		return
+	}
+	o.ticker.Stop()
+	o.ticker = nil
+}
 
 type rbxFontMappingRecord struct {
 	Enum             int32   `json:"enum"`

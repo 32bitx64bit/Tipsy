@@ -310,6 +310,29 @@ func TestFocusedTextOverlaySyncHidesOnGenuineInactiveVersion(t *testing.T) {
 	}
 }
 
+func TestFocusedTextOverlayWakeIsNilWhenInactive(t *testing.T) {
+	var wake focusedTextOverlayWake
+	defer wake.stop()
+	if wake.C() != nil {
+		t.Fatal("inactive overlay wake channel must be nil")
+	}
+	wake.sync(true)
+	if wake.C() == nil {
+		t.Fatal("focused overlay must tick")
+	}
+	if wake.ticker == nil {
+		t.Fatal("focused overlay ticker must exist")
+	}
+	wake.sync(true)
+	if wake.C() == nil {
+		t.Fatal("still-focused overlay must keep ticking")
+	}
+	wake.sync(false)
+	if wake.C() != nil || wake.ticker != nil {
+		t.Fatal("inactive overlay wake must become nil")
+	}
+}
+
 func TestEGLPresentationPolicyHandoff(t *testing.T) {
 	t.Cleanup(func() { android.SetEGLVSync(false) })
 	for _, tt := range []struct {

@@ -333,8 +333,8 @@ func Launch(ctx context.Context, opt LaunchOptions) error {
 		}
 	}()
 	focusedTextSync := newFocusedTextOverlaySync(focusedTextOverlay, assets)
-	textOverlayTicker := time.NewTicker(focusedTextOverlayPollInterval)
-	defer textOverlayTicker.Stop()
+	var textOverlayWake focusedTextOverlayWake
+	defer textOverlayWake.stop()
 	textOverlayErrorLogged := false
 	var textOverlayDiagnosticsVersion uint64
 	refreshFocusedText := func(now time.Time) {
@@ -361,6 +361,7 @@ func Launch(ctx context.Context, opt LaunchOptions) error {
 				textOverlayDiagnosticsVersion = focusedTextSync.seen
 			}
 		}
+		textOverlayWake.sync(focusedTextSync.active)
 	}
 	refreshFocusedText(time.Now())
 	defer jni.ClearRobloxDirectInputTarget()
@@ -436,7 +437,7 @@ func Launch(ctx context.Context, opt LaunchOptions) error {
 					"textInfoApplied", textInfo.Applied, "textInfoMissing", textInfo.MissingTarget,
 					"textInfoNull", textInfo.NullResult, "textInfoStale", textInfo.StaleSession)
 			}
-		case now := <-textOverlayTicker.C:
+		case now := <-textOverlayWake.C():
 			refreshFocusedText(now)
 		case <-resizeSettleC:
 			flushSurfaceResize()
