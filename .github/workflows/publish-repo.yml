@@ -15,8 +15,15 @@ name: Publish Linux repositories
 # updates are owned by those package managers; only AppImage uses latest.json.
 
 on:
+  # UI-created releases (real user actor) arrive via `release`. Releases
+  # created by release.yml use GITHUB_TOKEN, whose events never start new
+  # workflow runs, so those arrive via `workflow_run` when the build finishes
+  # instead. Manual dispatch covers reruns and backfills.
   release:
     types: [published]
+  workflow_run:
+    workflows: ["GitHub-signed release"]
+    types: [completed]
   workflow_dispatch:
     inputs:
       version:
@@ -33,7 +40,7 @@ permissions:
   contents: read
 
 concurrency:
-  group: publish-linux-repos-${{ github.event.release.tag_name || inputs.version }}
+  group: publish-linux-repos-${{ github.event.release.tag_name || inputs.version || github.event.workflow_run.head_sha }}
   cancel-in-progress: false
 
 env:
@@ -59,6 +66,25 @@ jobs:
           if [[ "${{ github.event_name }}" == release ]]; then
             tag='${{ github.event.release.tag_name }}'
             prerelease='${{ github.event.release.prerelease }}'
+          elif [[ "${{ github.event_name }}" == workflow_run ]]; then
+            if [[ '${{ github.event.workflow_run.conclusion }}' != success ]]; then
+              echo "do_publish=false" >> "$GITHUB_OUTPUT"
+              echo "Upstream release run did not succeed; nothing to publish." >> "$GITHUB_STEP_SUMMARY"
+              exit 0
+            fi
+            head_branch='${{ github.event.workflow_run.head_branch }}'
+            head_sha='${{ github.event.workflow_run.head_sha }}'
+            if [[ "$head_branch" =~ ^v[0-9A-Za-z][0-9A-Za-z._+-]*$ ]]; then
+              tag=$head_branch
+            else
+              # Dispatch-created tags point at the run's commit: recover newest.
+              tag=$(git ls-remote --tags "$GITHUB_SERVER_URL/$SOURCE_REPO" \
+                | awk -v sha="$head_sha" '$1 == sha {print $2}' \
+                | sed -e 's|^refs/tags/||' -e 's|\^{}$||' | sort -uV | tail -n 1)
+            fi
+            [[ -n "${tag:-}" ]] || { echo "could not resolve release tag" >&2; exit 1; }
+            prerelease=$(GH_TOKEN="$GITHUB_TOKEN" gh release view "$tag" \
+              --repo "$SOURCE_REPO" --json isPrerelease --jq .isPrerelease)
           else
             tag="v${{ inputs.version }}"
             prerelease=false
