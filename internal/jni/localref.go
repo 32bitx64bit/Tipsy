@@ -11,7 +11,11 @@ package jni
 */
 import "C"
 
-import "unsafe"
+import (
+	"sync"
+	"sync/atomic"
+	"unsafe"
+)
 
 // localFrame is one JNI local-reference frame. refs maps object id → count
 // of local refs in this frame. Field-held IDs without a remaining global or
@@ -22,8 +26,9 @@ type localFrame struct {
 }
 
 type jniThreadState struct {
+	mu          sync.Mutex
 	localFrames []localFrame
-	pending     int64
+	pending     atomic.Int64
 }
 
 func (vm *VM) currentEnvKey() uintptr {
@@ -36,14 +41,18 @@ func (vm *VM) currentEnvKey() uintptr {
 	return uintptr(vm.envRaw)
 }
 
+func (vm *VM) envKey(env unsafe.Pointer) uintptr {
+	if env != nil {
+		return uintptr(env)
+	}
+	return vm.currentEnvKey()
+}
+
 func (vm *VM) ensureThreadStateLocked(env unsafe.Pointer) *jniThreadState {
 	if vm == nil {
 		return nil
 	}
-	key := uintptr(env)
-	if env == nil {
-		key = vm.currentEnvKey()
-	}
+	key := vm.envKey(env)
 	if key == 0 {
 		return nil
 	}
@@ -55,27 +64,32 @@ func (vm *VM) ensureThreadStateLocked(env unsafe.Pointer) *jniThreadState {
 	return state
 }
 
-func (vm *VM) ensureFramesLocked() *jniThreadState {
+func (vm *VM) threadState(env unsafe.Pointer) *jniThreadState {
 	if vm == nil {
 		return nil
 	}
-	state := vm.ensureThreadStateLocked(nil)
-	if state == nil {
+	key := vm.envKey(env)
+	if key == 0 {
 		return nil
 	}
-	if len(state.localFrames) == 0 {
-		state.localFrames = []localFrame{{refs: make(map[int64]int)}}
+	vm.mu.RLock()
+	state := vm.threadStates[key]
+	vm.mu.RUnlock()
+	if state != nil {
+		return state
 	}
+	vm.mu.Lock()
+	state = vm.ensureThreadStateLocked(env)
+	vm.mu.Unlock()
 	return state
 }
 
-func (vm *VM) addLocalLocked(id int64) {
-	if vm == nil || id == 0 {
+func addFrameRef(state *jniThreadState, id int64) {
+	if state == nil || id == 0 {
 		return
 	}
-	state := vm.ensureFramesLocked()
-	if state == nil {
-		return
+	if len(state.localFrames) == 0 {
+		state.localFrames = []localFrame{{refs: make(map[int64]int)}}
 	}
 	f := &state.localFrames[len(state.localFrames)-1]
 	if f.refs == nil {
@@ -84,41 +98,9 @@ func (vm *VM) addLocalLocked(id int64) {
 	f.refs[id]++
 }
 
-func (vm *VM) localCountLocked(id int64) int {
-	if vm == nil || id == 0 {
-		return 0
-	}
-	n := 0
-	for _, state := range vm.threadStates {
-		for i := range state.localFrames {
-			n += state.localFrames[i].refs[id]
-		}
-	}
-	return n
-}
-
-func (vm *VM) pendingCountLocked(id int64) int {
-	if vm == nil || id == 0 {
-		return 0
-	}
-	n := 0
-	for _, state := range vm.threadStates {
-		if state.pending == id {
-			n++
-		}
-	}
-	return n
-}
-
-// dropLocalLocked removes one local ref, searching from the current frame
-// down to the env-lifetime frame 0.
-func (vm *VM) dropLocalLocked(id int64) {
-	if vm == nil || id == 0 {
-		return
-	}
-	state := vm.ensureFramesLocked()
-	if state == nil {
-		return
+func dropFrameRef(state *jniThreadState, id int64) bool {
+	if state == nil || id == 0 {
+		return false
 	}
 	for i := len(state.localFrames) - 1; i >= 0; i-- {
 		c := state.localFrames[i].refs[id]
@@ -130,7 +112,70 @@ func (vm *VM) dropLocalLocked(id int64) {
 		} else {
 			state.localFrames[i].refs[id] = c - 1
 		}
+		return true
+	}
+	return false
+}
+
+func (vm *VM) addLocalOnLocked(env unsafe.Pointer, id int64) {
+	if vm == nil || id == 0 {
 		return
+	}
+	o := vm.objects[id]
+	if o == nil {
+		return
+	}
+	o.localRefs.Add(1)
+	state := vm.ensureThreadStateLocked(env)
+	if state == nil {
+		o.localRefs.Add(-1)
+		return
+	}
+	state.mu.Lock()
+	addFrameRef(state, id)
+	state.mu.Unlock()
+}
+
+func (vm *VM) addLocal(env unsafe.Pointer, id int64) bool {
+	if vm == nil || id == 0 {
+		return false
+	}
+	vm.mu.RLock()
+	o := vm.objects[id]
+	if o == nil {
+		vm.mu.RUnlock()
+		return false
+	}
+	o.localRefs.Add(1)
+	vm.mu.RUnlock()
+
+	state := vm.threadState(env)
+	if state == nil {
+		o.localRefs.Add(-1)
+		return false
+	}
+	state.mu.Lock()
+	addFrameRef(state, id)
+	state.mu.Unlock()
+	return true
+}
+
+func (vm *VM) dropLocal(env unsafe.Pointer, id int64) {
+	if vm == nil || id == 0 {
+		return
+	}
+	state := vm.threadState(env)
+	if state == nil {
+		return
+	}
+	state.mu.Lock()
+	dropped := dropFrameRef(state, id)
+	state.mu.Unlock()
+	if !dropped {
+		return
+	}
+	if o := vm.get(id); o != nil {
+		o.localRefs.Add(-1)
 	}
 }
 
@@ -197,6 +242,15 @@ func (vm *VM) unpinOutgoingLocked(o *Object) {
 	}
 }
 
+func (vm *VM) maybeReclaim(id int64) {
+	if vm == nil || id == 0 {
+		return
+	}
+	vm.mu.Lock()
+	vm.maybeReclaimLocked(id)
+	vm.mu.Unlock()
+}
+
 func (vm *VM) maybeReclaimLocked(id int64) {
 	if vm == nil || id == 0 {
 		return
@@ -205,45 +259,55 @@ func (vm *VM) maybeReclaimLocked(id int64) {
 	if o == nil || o.global || o.immortal {
 		return
 	}
-	if vm.localCountLocked(id) > 0 || vm.pendingCountLocked(id) > 0 || o.heapRefs > 0 {
+	if o.localRefs.Load() > 0 || o.pendingRefs.Load() > 0 || o.heapRefs > 0 {
 		return
 	}
 	delete(vm.objects, id)
 	vm.unpinOutgoingLocked(o)
 }
 
-func (vm *VM) pushLocalFrameLocked() {
-	state := vm.ensureFramesLocked()
+func (vm *VM) pushLocalFrame(env unsafe.Pointer) {
+	state := vm.threadState(env)
 	if state == nil {
 		return
 	}
+	state.mu.Lock()
 	state.localFrames = append(state.localFrames, localFrame{refs: make(map[int64]int)})
+	state.mu.Unlock()
 }
 
-func (vm *VM) popLocalFrameLocked(resultID int64) {
-	state := vm.ensureFramesLocked()
+func (vm *VM) popLocalFrame(env unsafe.Pointer, resultID int64) {
+	state := vm.threadState(env)
 	if state == nil {
 		return
 	}
+	state.mu.Lock()
 	if len(state.localFrames) <= 1 {
-		// Frame 0 lives for the env. Promoting result into it is still
-		// useful if native pops too far.
+		state.mu.Unlock()
 		if resultID != 0 {
-			vm.addLocalLocked(resultID)
+			vm.addLocal(env, resultID)
 		}
 		return
 	}
 	top := state.localFrames[len(state.localFrames)-1]
 	state.localFrames = state.localFrames[:len(state.localFrames)-1]
-	for id := range top.refs {
-		if id == resultID {
-			continue
+	state.mu.Unlock()
+
+	for id, n := range top.refs {
+		if o := vm.get(id); o != nil {
+			o.localRefs.Add(-int32(n))
 		}
-		vm.maybeReclaimLocked(id)
 	}
 	if resultID != 0 {
-		vm.addLocalLocked(resultID)
+		vm.addLocal(env, resultID)
 	}
+	vm.mu.Lock()
+	for id := range top.refs {
+		if id != resultID {
+			vm.maybeReclaimLocked(id)
+		}
+	}
+	vm.mu.Unlock()
 }
 
 func (vm *VM) detachThreadState(env unsafe.Pointer) {
@@ -253,38 +317,64 @@ func (vm *VM) detachThreadState(env unsafe.Pointer) {
 	vm.mu.Lock()
 	state := vm.threadStates[uintptr(env)]
 	delete(vm.threadStates, uintptr(env))
-	if state != nil {
-		ids := make(map[int64]struct{})
-		for _, frame := range state.localFrames {
-			for id := range frame.refs {
-				ids[id] = struct{}{}
-			}
+	vm.mu.Unlock()
+	if state == nil {
+		return
+	}
+	state.mu.Lock()
+	frames := state.localFrames
+	state.localFrames = nil
+	pending := state.pending.Swap(0)
+	state.mu.Unlock()
+
+	counts := make(map[int64]int)
+	for _, frame := range frames {
+		for id, n := range frame.refs {
+			counts[id] += n
 		}
-		if state.pending != 0 {
-			ids[state.pending] = struct{}{}
+	}
+	vm.mu.Lock()
+	for id, n := range counts {
+		if o := vm.objects[id]; o != nil {
+			o.localRefs.Add(-int32(n))
 		}
-		for id := range ids {
-			vm.maybeReclaimLocked(id)
+		vm.maybeReclaimLocked(id)
+	}
+	if pending != 0 {
+		if o := vm.objects[pending]; o != nil {
+			o.pendingRefs.Add(-1)
 		}
+		vm.maybeReclaimLocked(pending)
 	}
 	vm.mu.Unlock()
 }
 
-func (vm *VM) pendingLocked() int64 {
-	state := vm.ensureThreadStateLocked(nil)
+func (vm *VM) pending(env unsafe.Pointer) int64 {
+	state := vm.threadState(env)
 	if state == nil {
 		return 0
 	}
-	return state.pending
+	return state.pending.Load()
 }
 
-func (vm *VM) setPendingLocked(id int64) {
-	state := vm.ensureThreadStateLocked(nil)
-	if state != nil {
-		old := state.pending
-		state.pending = id
-		if old != 0 && old != id {
-			vm.maybeReclaimLocked(old)
+func (vm *VM) setPending(env unsafe.Pointer, id int64) {
+	state := vm.threadState(env)
+	if state == nil {
+		return
+	}
+	old := state.pending.Swap(id)
+	if old == id {
+		return
+	}
+	if old != 0 {
+		if o := vm.get(old); o != nil {
+			o.pendingRefs.Add(-1)
+		}
+		vm.maybeReclaim(old)
+	}
+	if id != 0 {
+		if o := vm.get(id); o != nil {
+			o.pendingRefs.Add(1)
 		}
 	}
 }
@@ -312,23 +402,16 @@ func (vm *VM) deleteGlobalRefLocked(id int64) {
 	vm.maybeReclaimLocked(id)
 }
 
-func (vm *VM) deleteLocalRefLocked(id int64) {
+func (vm *VM) deleteLocalRef(env unsafe.Pointer, id int64) {
 	if vm == nil || id == 0 {
 		return
 	}
-	vm.dropLocalLocked(id)
-	vm.maybeReclaimLocked(id)
+	vm.dropLocal(env, id)
+	vm.maybeReclaim(id)
 }
 
-func (vm *VM) newLocalRefLocked(id int64) bool {
-	if vm == nil || id == 0 {
-		return false
-	}
-	if vm.objects[id] == nil {
-		return false
-	}
-	vm.addLocalLocked(id)
-	return true
+func (vm *VM) newLocalRef(env unsafe.Pointer, id int64) bool {
+	return vm.addLocal(env, id)
 }
 
 //export GoJNI_PushLocalFrame
@@ -338,9 +421,7 @@ func GoJNI_PushLocalFrame(env *C.JNIEnv, capacity C.jint) C.jint {
 	if vm == nil {
 		return C.JNI_OK
 	}
-	vm.mu.Lock()
-	vm.pushLocalFrameLocked()
-	vm.mu.Unlock()
+	vm.pushLocalFrame(unsafe.Pointer(env))
 	return C.JNI_OK
 }
 
@@ -350,9 +431,7 @@ func GoJNI_PopLocalFrame(env *C.JNIEnv, result C.jobject) C.jobject {
 	if vm == nil {
 		return result
 	}
-	vm.mu.Lock()
-	vm.popLocalFrameLocked(jobjectToID(uintptr(result)))
-	vm.mu.Unlock()
+	vm.popLocalFrame(unsafe.Pointer(env), jobjectToID(uintptr(result)))
 	return result
 }
 
@@ -392,9 +471,7 @@ func GoJNI_DeleteLocalRef(env *C.JNIEnv, obj C.jobject) {
 	if vm == nil {
 		return
 	}
-	vm.mu.Lock()
-	vm.deleteLocalRefLocked(jobjectToID(uintptr(obj)))
-	vm.mu.Unlock()
+	vm.deleteLocalRef(unsafe.Pointer(env), jobjectToID(uintptr(obj)))
 }
 
 //export GoJNI_NewLocalRef
@@ -407,10 +484,7 @@ func GoJNI_NewLocalRef(env *C.JNIEnv, ref C.jobject) C.jobject {
 	if id == 0 {
 		return jnull()
 	}
-	vm.mu.Lock()
-	ok := vm.newLocalRefLocked(id)
-	vm.mu.Unlock()
-	if !ok {
+	if !vm.newLocalRef(unsafe.Pointer(env), id) {
 		return jnull()
 	}
 	return ref

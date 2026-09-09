@@ -14,6 +14,7 @@ import "C"
 import (
 	"math"
 	"sync/atomic"
+	"unsafe"
 )
 
 type familyFn func(vm *VM, o *Object, class, name, sig string, args *C.jvalue) (C.jobject, bool)
@@ -67,8 +68,9 @@ var dispatchFamilies = []familyFn{
 	familyLuaTextBox,
 }
 
-func initCallHandler(vm *VM, obj C.jobject, args *C.jvalue, retKind rune) (C.jobject, bool) {
+func initCallHandler(vm *VM, env unsafe.Pointer, obj C.jobject, args *C.jvalue, retKind rune) (C.jobject, bool) {
 	_ = vm
+	_ = env
 	_ = args
 	_ = retKind
 	return obj, true
@@ -81,30 +83,31 @@ func stubFallback(vm *VM, class, name, sig string, args *C.jvalue, retKind rune)
 }
 
 func wrapFamily(fn familyFn, class, name, sig string) callHandler {
-	return func(vm *VM, obj C.jobject, args *C.jvalue, retKind rune) (C.jobject, bool) {
+	return func(vm *VM, env unsafe.Pointer, obj C.jobject, args *C.jvalue, retKind rune) (C.jobject, bool) {
+		_ = env
 		o := vm.get(jobjectToID(uintptr(obj)))
 		if v, ok := fn(vm, o, class, name, sig, args); ok {
 			return v, true
 		}
-		if v, ok := vm.dispatchCore(o, obj, class, name, sig, args); ok {
-			return v, true
-		}
 		return stubFallback(vm, class, name, sig, args, retKind)
 	}
 }
 
-func wrapCore(class, name, sig string) callHandler {
-	return func(vm *VM, obj C.jobject, args *C.jvalue, retKind rune) (C.jobject, bool) {
+func wrapFieldGetter(name, sig string) callHandler {
+	return func(vm *VM, env unsafe.Pointer, obj C.jobject, args *C.jvalue, retKind rune) (C.jobject, bool) {
+		_ = env
+		_ = args
 		o := vm.get(jobjectToID(uintptr(obj)))
-		if v, ok := vm.dispatchCore(o, obj, class, name, sig, args); ok {
+		if v, ok := vm.fieldGetter(o, name, sig); ok {
 			return v, true
 		}
-		return stubFallback(vm, class, name, sig, args, retKind)
+		return stubFallback(vm, oClassName(o), name, sig, args, retKind)
 	}
 }
 
 func wrapStub(class, name, sig string) callHandler {
-	return func(vm *VM, obj C.jobject, args *C.jvalue, retKind rune) (C.jobject, bool) {
+	return func(vm *VM, env unsafe.Pointer, obj C.jobject, args *C.jvalue, retKind rune) (C.jobject, bool) {
+		_ = env
 		o := vm.get(jobjectToID(uintptr(obj)))
 		if class == motionEventClass || class == keyEventClass {
 			if v, ok := vm.dispatchInput(o, class, name, sig, args); ok {
@@ -120,7 +123,14 @@ func wrapStub(class, name, sig string) callHandler {
 	}
 }
 
-func (vm *VM) resolveDispatch(obj C.jobject, class, name, sig string, args *C.jvalue) (C.jobject, bool, callHandler) {
+func oClassName(o *Object) string {
+	if o != nil && o.class != nil {
+		return o.class.name
+	}
+	return ""
+}
+
+func (vm *VM) resolveDispatch(env unsafe.Pointer, obj C.jobject, class, name, sig string, args *C.jvalue) (C.jobject, bool, callHandler) {
 	if name == "<init>" {
 		return obj, true, initCallHandler
 	}
@@ -130,14 +140,24 @@ func (vm *VM) resolveDispatch(obj C.jobject, class, name, sig string, args *C.jv
 			return v, true, wrapFamily(fn, class, name, sig)
 		}
 	}
-	if v, ok := vm.dispatchCore(o, obj, class, name, sig, args); ok {
-		return v, true, wrapCore(class, name, sig)
+	if h := lookupCoreHandler(name, sig); h != nil {
+		v, ok := h(vm, env, obj, args, 0)
+		return v, ok, h
+	}
+	if o != nil {
+		if v, ok := vm.fieldGetter(o, name, sig); ok {
+			return v, true, wrapFieldGetter(name, sig)
+		}
 	}
 	return jnull(), false, wrapStub(class, name, sig)
 }
 
 func (vm *VM) dispatch(obj C.jobject, class, name, sig string, args *C.jvalue) (C.jobject, bool) {
-	v, handled, _ := vm.resolveDispatch(obj, class, name, sig, args)
+	env := unsafe.Pointer(nil)
+	if vm != nil {
+		env = vm.envRaw
+	}
+	v, handled, _ := vm.resolveDispatch(env, obj, class, name, sig, args)
 	return v, handled
 }
 
@@ -158,13 +178,13 @@ func resolveCallClass(vm *VM, info *internedMethod, obj C.jobject, clazz C.jclas
 func packCallResult(out *C.jvalue, retKind C.jint, v C.jobject) {
 	switch rune(retKind) {
 	case 'L':
-		C.tipsy_jvalue_set_l(out, v)
+		jvalueSetL(out, v)
 	case 'I', 'B', 'C', 'S', 'Z':
-		C.tipsy_jvalue_set_i(out, C.jint(v))
+		jvalueSetI(out, C.jint(v))
 	case 'J':
-		C.tipsy_jvalue_set_j(out, C.jlong(v))
+		jvalueSetJ(out, C.jlong(v))
 	case 'F':
-		C.tipsy_jvalue_set_f(out, C.jfloat(math.Float32frombits(uint32(uintptr(v)))))
+		jvalueSetF(out, C.jfloat(math.Float32frombits(uint32(uintptr(v)))))
 	default:
 	}
 }
@@ -179,9 +199,9 @@ func (vm *VM) callA(objID int64, mid C.jmethodID, isStatic int, retKind rune) ca
 	var out C.jvalue
 	GoJNI_CallA((*C.JNIEnv)(vm.envRaw), idToJobject(objID), jclassNull(), mid, nil, C.jint(isStatic), C.jint(retKind), &out)
 	return callAResult{
-		l: jobjectToID(uintptr(C.tipsy_jvalue_l(&out))),
-		i: int32(C.tipsy_jvalue_i(&out)),
-		j: int64(C.tipsy_jvalue_j(&out)),
+		l: jobjectToID(uintptr(jvalueL(&out))),
+		i: int32(jvalueI(&out)),
+		j: int64(jvalueJ(&out)),
 	}
 }
 
@@ -190,8 +210,8 @@ func (m *internedMethod) wrapHandlerHits(hits *atomic.Int32) {
 	if orig == nil {
 		return
 	}
-	m.handler.Store(callHandler(func(vm *VM, obj C.jobject, args *C.jvalue, retKind rune) (C.jobject, bool) {
+	m.handler.Store(callHandler(func(vm *VM, env unsafe.Pointer, obj C.jobject, args *C.jvalue, retKind rune) (C.jobject, bool) {
 		hits.Add(1)
-		return orig(vm, obj, args, retKind)
+		return orig(vm, env, obj, args, retKind)
 	}))
 }

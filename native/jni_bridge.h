@@ -111,6 +111,7 @@ struct JavaVM_ {
 
 typedef struct TipsyMethod {
 	uint32_t magic;
+	uint32_t slot;
 	char *class_name;
 	char *name;
 	char *sig;
@@ -119,6 +120,7 @@ typedef struct TipsyMethod {
 
 typedef struct TipsyField {
 	uint32_t magic;
+	uint32_t slot;
 	char *class_name;
 	char *name;
 	char *sig;
@@ -463,18 +465,6 @@ jobject tipsy_jni_AllocObject(JNIEnv *env, jclass clazz);
 jbyteArray tipsy_jni_NewByteArray(JNIEnv *env, jsize len);
 
 int tipsy_pack_jargs(const char *sig, va_list ap, jvalue *out, int max);
-
-void tipsy_jvalue_zero(jvalue *v);
-void tipsy_jvalue_set_l(jvalue *v, jobject l);
-void tipsy_jvalue_set_i(jvalue *v, jint i);
-void tipsy_jvalue_set_j(jvalue *v, jlong x);
-void tipsy_jvalue_set_z(jvalue *v, jboolean z);
-void tipsy_jvalue_set_d(jvalue *v, jdouble d);
-void tipsy_jvalue_set_f(jvalue *v, jfloat f);
-jobject tipsy_jvalue_l(const jvalue *v);
-jint tipsy_jvalue_i(const jvalue *v);
-jlong tipsy_jvalue_j(const jvalue *v);
-jobject tipsy_jvalue_l_at(const jvalue *args, int i);
 
 #ifdef __cplusplus
 }

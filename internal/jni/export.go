@@ -18,7 +18,6 @@ import (
 	"runtime"
 	"strings"
 	"sync"
-	"time"
 	"unicode/utf16"
 	"unsafe"
 
@@ -59,13 +58,19 @@ func logStubDispatch(class, name, sig string, retKind rune) {
 // two approved lifecycle identities after logStubDispatch and before
 // stubCall: no dispatch decision, return value, or side effect changes.
 func callDispatchOrStub(vm *VM, obj C.jobject, class, name, sig string, args *C.jvalue, retKind rune) (C.jobject, bool) {
-	v, handled := vm.dispatch(obj, class, name, sig, args)
+	env := unsafe.Pointer(nil)
+	if vm != nil {
+		env = vm.envRaw
+	}
+	return callDispatchOrStubEnv(vm, env, obj, class, name, sig, args, retKind)
+}
+
+func callDispatchOrStubEnv(vm *VM, env unsafe.Pointer, obj C.jobject, class, name, sig string, args *C.jvalue, retKind rune) (C.jobject, bool) {
+	v, handled, bound := vm.resolveDispatch(env, obj, class, name, sig, args)
 	if handled {
 		return v, true
 	}
-	logStubDispatch(class, name, sig, retKind)
-	logLifecycleStubArgs(class, name, sig, args)
-	return vm.stubCall(class, name, sig, C.jint(retKind)), false
+	return bound(vm, env, obj, args, retKind)
 }
 
 // findClassByName is java/lang/ClassLoader.findClass, the engine's
@@ -78,7 +83,7 @@ func callDispatchOrStub(vm *VM, obj C.jobject, class, name, sig string, args *C.
 // nameless java/lang/Class object). Unknown names mirror FindClass's
 // auto-create with the same diagnostic: one class-resolution policy for
 // both JNIEnv paths. An empty or absent name resolves nothing.
-func (vm *VM) findClassByName(name string) C.jobject {
+func (vm *VM) findClassByName(env unsafe.Pointer, name string) C.jobject {
 	if name == "" {
 		return jnull()
 	}
@@ -89,7 +94,7 @@ func (vm *VM) findClassByName(name string) C.jobject {
 		cls = vm.ensureClassLocked(name)
 	}
 	if cls != nil && cls.obj != nil {
-		vm.addLocalLocked(cls.obj.id)
+		vm.addLocalOnLocked(env, cls.obj.id)
 	}
 	vm.mu.Unlock()
 	if cls == nil || cls.obj == nil {
@@ -112,14 +117,6 @@ func classNameOf(vm *VM, cls C.jclass) string {
 			return n
 		}
 	}
-	vm.mu.RLock()
-	for name, c := range vm.classes {
-		if c.obj != nil && c.obj.id == id {
-			vm.mu.RUnlock()
-			return name
-		}
-	}
-	vm.mu.RUnlock()
 	if o.class != nil {
 		return o.class.name
 	}
@@ -147,7 +144,7 @@ func GoJNI_FindClass(env *C.JNIEnv, name *C.char) C.jclass {
 		cls = vm.ensureClassLocked(n)
 	}
 	if cls != nil && cls.obj != nil {
-		vm.addLocalLocked(cls.obj.id)
+		vm.addLocalOnLocked(unsafe.Pointer(env), cls.obj.id)
 	}
 	vm.mu.Unlock()
 	if cls == nil || cls.obj == nil {
@@ -174,7 +171,7 @@ func GoJNI_GetSuperclass(env *C.JNIEnv, sub C.jclass) C.jclass {
 	vm.mu.Lock()
 	cls := vm.classes[n]
 	if cls != nil && cls.super != nil && cls.super.obj != nil {
-		vm.addLocalLocked(cls.super.obj.id)
+		vm.addLocalOnLocked(unsafe.Pointer(env), cls.super.obj.id)
 	}
 	vm.mu.Unlock()
 	if cls == nil || cls.super == nil || cls.super.obj == nil {
@@ -191,9 +188,9 @@ func GoJNI_IsAssignableFrom(env *C.JNIEnv, sub, sup C.jclass) C.jboolean {
 	}
 	subN := classNameOf(vm, sub)
 	supN := classNameOf(vm, sup)
-	vm.mu.Lock()
+	vm.mu.RLock()
 	subC, supC := vm.classes[subN], vm.classes[supN]
-	vm.mu.Unlock()
+	vm.mu.RUnlock()
 	if supC != nil && supC.isAssignable(subC) {
 		return C.JNI_TRUE
 	}
@@ -206,9 +203,7 @@ func GoJNI_Throw(env *C.JNIEnv, obj C.jthrowable) C.jint {
 	if vm == nil {
 		return C.JNI_ERR
 	}
-	vm.mu.Lock()
-	vm.setPendingLocked(jobjectToID(uintptr(asJobjectFromThrow(obj))))
-	vm.mu.Unlock()
+	vm.setPending(unsafe.Pointer(env), jobjectToID(uintptr(asJobjectFromThrow(obj))))
 	return C.JNI_OK
 }
 
@@ -224,12 +219,12 @@ func GoJNI_ThrowNew(env *C.JNIEnv, clazz C.jclass, msg *C.char) C.jint {
 	if cls == nil {
 		cls = vm.classes["java/lang/Throwable"]
 	}
-	o := vm.newObjectLocked(cls)
+	o := vm.newObjectOn(unsafe.Pointer(env), cls)
 	if msg != nil {
 		o.str = C.GoString(msg)
 	}
-	vm.setPendingLocked(o.id)
 	vm.mu.Unlock()
+	vm.setPending(unsafe.Pointer(env), o.id)
 	return C.JNI_OK
 }
 
@@ -239,12 +234,10 @@ func GoJNI_ExceptionOccurred(env *C.JNIEnv) C.jthrowable {
 	if vm == nil {
 		return jthrowableOf(jnull())
 	}
-	vm.mu.Lock()
-	id := vm.pendingLocked()
+	id := vm.pending(unsafe.Pointer(env))
 	if id != 0 {
-		vm.addLocalLocked(id)
+		vm.addLocal(unsafe.Pointer(env), id)
 	}
-	vm.mu.Unlock()
 	return jthrowableOf(idToJobject(id))
 }
 
@@ -254,9 +247,7 @@ func GoJNI_ExceptionDescribe(env *C.JNIEnv) {
 	if vm == nil {
 		return
 	}
-	vm.mu.Lock()
-	id := vm.pendingLocked()
-	vm.mu.Unlock()
+	id := vm.pending(unsafe.Pointer(env))
 	if id != 0 {
 		logf("[jni] pending exception")
 	}
@@ -268,9 +259,7 @@ func GoJNI_ExceptionClear(env *C.JNIEnv) {
 	if vm == nil {
 		return
 	}
-	vm.mu.Lock()
-	vm.setPendingLocked(0)
-	vm.mu.Unlock()
+	vm.setPending(unsafe.Pointer(env), 0)
 }
 
 //export GoJNI_FatalError
@@ -308,7 +297,7 @@ func GoJNI_AllocObject(env *C.JNIEnv, clazz C.jclass) C.jobject {
 		vm.mu.Unlock()
 		return jnull()
 	}
-	o := vm.newObjectLocked(cls)
+	o := vm.newObjectOn(unsafe.Pointer(env), cls)
 	vm.mu.Unlock()
 	return idToJobject(o.id)
 }
@@ -337,9 +326,7 @@ func GoJNI_GetObjectClass(env *C.JNIEnv, obj C.jobject) C.jclass {
 		return jclassNull()
 	}
 	id := o.class.obj.id
-	vm.mu.Lock()
-	vm.addLocalLocked(id)
-	vm.mu.Unlock()
+	vm.addLocal(unsafe.Pointer(env), id)
 	return jclassOf(idToJobject(id))
 }
 
@@ -369,11 +356,12 @@ func GoJNI_GetMethodID(env *C.JNIEnv, clazz C.jclass, name, sig *C.char, isStati
 
 //export GoJNI_CallA
 func GoJNI_CallA(env *C.JNIEnv, obj C.jobject, clazz C.jclass, methodID C.jmethodID, args *C.jvalue, isStatic C.jint, retKind C.jint, out *C.jvalue) {
-	C.tipsy_jvalue_zero(out)
+	jvalueZero(out)
 	vm := vmFromEnv(unsafe.Pointer(env))
 	if vm == nil {
 		return
 	}
+	raw := unsafe.Pointer(env)
 	info, ok := lookupMethod(methodID)
 	if !ok {
 		class, name, sig, _, parsed := parseMethod(methodID)
@@ -391,368 +379,23 @@ func GoJNI_CallA(env *C.JNIEnv, obj C.jobject, clazz C.jclass, methodID C.jmetho
 				}
 			}
 		}
-		v, _ := callDispatchOrStub(vm, obj, class, name, sig, args, rune(retKind))
+		v, _ := callDispatchOrStubEnv(vm, raw, obj, class, name, sig, args, rune(retKind))
 		packCallResult(out, retKind, v)
 		return
 	}
 	if h := info.loadHandler(); h != nil {
-		v, _ := h(vm, obj, args, rune(retKind))
+		v, _ := h(vm, raw, obj, args, rune(retKind))
 		packCallResult(out, retKind, v)
 		return
 	}
 	class := resolveCallClass(vm, info, obj, clazz, isStatic)
 	name, sig := info.name, info.sig
-	v, handled, bound := vm.resolveDispatch(obj, class, name, sig, args)
+	v, handled, bound := vm.resolveDispatch(raw, obj, class, name, sig, args)
 	if !handled {
-		v, _ = bound(vm, obj, args, rune(retKind))
+		v, _ = bound(vm, raw, obj, args, rune(retKind))
 	}
 	info.storeHandler(bound)
 	packCallResult(out, retKind, v)
-}
-
-func (vm *VM) dispatchCore(o *Object, obj C.jobject, class, name, sig string, args *C.jvalue) (C.jobject, bool) {
-	key := name + sig
-	switch key {
-	case "getFilesDir()Ljava/io/File;":
-		return vm.internFilesDirFile(), true
-	case "getFilesDir()Ljava/lang/String;":
-		return vm.internFilesDirString(), true
-	case "getAppVersion()Ljava/lang/String;":
-		vm.mu.RLock()
-		version := vm.appVersion
-		vm.mu.RUnlock()
-		return vm.internString(&vm.immortalAppVersion, version), true
-	case "getCacheDir()Ljava/io/File;":
-		return vm.internCacheDirFile(), true
-	case "getObbDir()Ljava/io/File;":
-		return vm.internObbDirFile(), true
-	case "getExternalFilesDir(Ljava/lang/String;)Ljava/io/File;":
-		return vm.internFilesDirFile(), true
-	case "getAssets()Landroid/content/res/AssetManager;":
-		return vm.internClassObject("android/content/res/AssetManager"), true
-	case "getWindow()Landroid/view/Window;":
-		return vm.internClassObject("android/view/Window"), true
-	case "getApplicationContext()Landroid/content/Context;":
-		if o != nil {
-			return idToJobject(o.id), true
-		}
-		return obj, true
-	case "getPackageName()Ljava/lang/String;":
-		return vm.internString(&vm.immortalPackageName, "com.roblox.client"), true
-	case "getAbsolutePath()Ljava/lang/String;", "getPath()Ljava/lang/String;":
-		p := ""
-		if o != nil {
-			p = o.str
-			if id, ok := o.fields["tipsy.pathString"].(int64); ok && id != 0 {
-				vm.mu.Lock()
-				if vm.objects[id] != nil {
-					vm.addLocalLocked(id)
-					vm.mu.Unlock()
-					return idToJobject(id), true
-				}
-				delete(o.fields, "tipsy.pathString")
-				vm.mu.Unlock()
-			}
-		}
-		vm.mu.Lock()
-		s := vm.newStringLocked(p)
-		if o != nil {
-			vm.storeFieldObjLocked(o, "tipsy.pathString", s.id)
-		}
-		vm.mu.Unlock()
-		return idToJobject(s.id), true
-	case "getSurface()Landroid/view/Surface;":
-		vm.mu.Lock()
-		cls := vm.classes["android/view/Surface"]
-		s := vm.newObjectLocked(cls)
-		vm.mu.Unlock()
-		return idToJobject(s.id), true
-	case "getDecorView()Landroid/view/View;":
-		vm.mu.Lock()
-		cls := vm.classes["android/view/View"]
-		v := vm.newObjectLocked(cls)
-		vm.mu.Unlock()
-		return idToJobject(v.id), true
-	case "getWindowManager()Landroid/view/WindowManager;":
-		return vm.internClassObject("android/view/WindowManager"), true
-	case "getDefaultDisplay()Landroid/view/Display;":
-		return vm.internClassObject("android/view/Display"), true
-	case "getResources()Landroid/content/res/Resources;":
-		return vm.internClassObject("android/content/res/Resources"), true
-	case "getPackageManager()Landroid/content/pm/PackageManager;":
-		return vm.internClassObject("android/content/pm/PackageManager"), true
-	case "hasSystemFeature(Ljava/lang/String;)Z":
-		// The official APK's PlatformParams builder asks PackageManager for
-		// android.hardware.type.pc and uses that one answer for both its mouse
-		// and keyboard capability bits. Tipsy is running on a real Linux PC
-		// desktop and supplies those devices, so advertise that exact Android
-		// feature in the default profile. The explicit touch diagnostic profile
-		// reports touchscreen instead; every unrelated feature remains absent
-		// unless its host bridge is independently implemented and proven.
-		if class == "android/content/pm/PackageManager" && platformSystemFeature(vm.stringFromArg(args, 0)) {
-			return idToJobject(1), true
-		}
-		return jnull(), true
-	case "getApplicationInfo()Landroid/content/pm/ApplicationInfo;":
-		return vm.internClassObject("android/content/pm/ApplicationInfo"), true
-	case "getLocale()Ljava/lang/String;", "getRobloxLocale()Ljava/lang/String;", "getGameLocale()Ljava/lang/String;":
-		return vm.internString(&vm.immortalLocale, "en_US"), true
-	case "getSystemService(Ljava/lang/String;)Ljava/lang/Object;":
-		return vm.lookupSystemService(vm.stringFromArg(args, 0)), true
-	case "getClassLoader()Ljava/lang/ClassLoader;":
-		return vm.internClassObject("java/lang/ClassLoader"), true
-	case "findClass(Ljava/lang/String;)Ljava/lang/Class;":
-		fcName := vm.stringFromArg(args, 0)
-		logFindClassName(fcName)
-		return vm.findClassByName(fcName), true
-	case "getMainLooper()Landroid/os/Looper;":
-		return vm.internClassObject("android/os/Looper"), true
-	case "getRuntime()Ljava/lang/Runtime;":
-		return vm.internClassObject("java/lang/Runtime"), true
-	case "getMetrics(Landroid/util/DisplayMetrics;)V":
-		if args != nil {
-			m := vm.get(jobjectToID(uintptr(C.tipsy_jvalue_l_at(args, 0))))
-			vm.mu.Lock()
-			vm.fillDisplayMetricsLocked(m)
-			vm.mu.Unlock()
-		}
-		return jnull(), true
-	case "getDisplayMetrics()Landroid/util/DisplayMetrics;":
-		vm.mu.Lock()
-		cls := vm.ensureClassLocked("android/util/DisplayMetrics")
-		m := vm.newObjectLocked(cls)
-		vm.fillDisplayMetricsLocked(m)
-		vm.mu.Unlock()
-		return idToJobject(m.id), true
-	case "getScreenPhysicalSizeInMillimeters(Landroid/content/Context;)Landroid/graphics/Point;":
-		// java/lang/Class.getScreenPhysicalSizeInMillimeters(Context):
-		// static display-metrics helper the engine queries during init.
-		// Returns the host screen's physical size as android.graphics.Point
-		// {int x, int y} in millimeters (X-server-reported when available).
-		w, h := vm.screenPhysicalSizeMM()
-		if w <= 0 || h <= 0 {
-			logging.Logger(logging.CatJNI).Error("[jni] getScreenPhysicalSizeInMillimeters: no display geometry (x=0 or y=0)")
-		}
-		vm.mu.Lock()
-		cls := vm.ensureClassLocked("android/graphics/Point")
-		p := vm.newObjectLocked(cls)
-		if p.fields == nil {
-			p.fields = make(map[string]any)
-		}
-		p.fields["x"] = w
-		p.fields["y"] = h
-		vm.mu.Unlock()
-		logging.Logger(logging.CatJNI).Info("[jni] getScreenPhysicalSizeInMillimeters", "x", w, "y", h)
-		return idToJobject(p.id), true
-	case "getLocales()Landroid/os/LocaleList;":
-		vm.mu.Lock()
-		locale := vm.newObjectLocked(vm.ensureClassLocked("java/util/Locale"))
-		locale.fields["language"] = "en"
-		locale.fields["script"] = ""
-		locale.fields["country"] = "US"
-		locale.fields["variant"] = ""
-		list := vm.newObjectLocked(vm.ensureClassLocked("android/os/LocaleList"))
-		list.elems = []int64{locale.id}
-		vm.mu.Unlock()
-		return idToJobject(list.id), true
-	case "getLanguage()Ljava/lang/String;", "getScript()Ljava/lang/String;", "getCountry()Ljava/lang/String;", "getVariant()Ljava/lang/String;":
-		field := map[string]string{
-			"getLanguage()Ljava/lang/String;": "language",
-			"getScript()Ljava/lang/String;":   "script",
-			"getCountry()Ljava/lang/String;":  "country",
-			"getVariant()Ljava/lang/String;":  "variant",
-		}[key]
-		value := ""
-		if o != nil {
-			value, _ = o.fields[field].(string)
-		}
-		vm.mu.Lock()
-		s := vm.newStringLocked(value)
-		vm.mu.Unlock()
-		return idToJobject(s.id), true
-	case "getNativeHelper()Lcom/roblox/client/startup/NativeHelper;":
-		vm.mu.Lock()
-		cls := vm.ensureClassLocked("com/roblox/client/startup/NativeHelper")
-		h := vm.newObjectLocked(cls)
-		vm.mu.Unlock()
-		return idToJobject(h.id), true
-	case "getDeviceStaticParams()Lcom/roblox/engine/jni/model/DeviceStaticParams;":
-		return vm.newDeviceStaticParams(), true
-	case "setDeviceStaticParams(Lcom/roblox/engine/jni/model/DeviceStaticParams;)V":
-		return obj, true
-	case "bootstrapTheApp()V":
-		if onBootstrap != nil {
-			onBootstrap(vm.currentEnvKey(), uintptr(obj))
-		}
-		return obj, true
-	case "addBoolean(Ljava/lang/String;ZZ)V",
-		"addInt(Ljava/lang/String;II)V",
-		"addString(Ljava/lang/String;Ljava/lang/String;Z)V",
-		"gameActivity_onFlagsFailed()V",
-		"gameActivity_onFlagsLoaded()V":
-		return obj, true
-	case "loadLibrary(Ljava/lang/String;)V", "gc()V":
-		return jnull(), true
-	case "getProperty(Ljava/lang/String;)Ljava/lang/String;":
-		vm.mu.Lock()
-		s := vm.newStringLocked("")
-		vm.mu.Unlock()
-		return idToJobject(s.id), true
-	case "getBytes(Ljava/lang/String;)[B":
-		// Roblox's syncTextboxTextAndCursorPosition2 JNI wrapper uses the
-		// ordinary Java String.getBytes("UTF-8") path before handing the
-		// textbox snapshot to native code. Preserve Java's standard UTF-8
-		// bytes, including non-ASCII text, without logging either source or
-		// result. Unsupported/nil charsets and non-String receivers return
-		// null honestly; the supplied APK calls only the UTF-8 form.
-		if class != "java/lang/String" || o == nil {
-			return jnull(), true
-		}
-		charset := vm.stringFromArg(args, 0)
-		if !strings.EqualFold(charset, "UTF-8") &&
-			!strings.EqualFold(charset, "UTF8") &&
-			!strings.EqualFold(charset, "unicode-1-1-utf-8") {
-			return jnull(), true
-		}
-		vm.mu.Lock()
-		arrayClass := vm.ensureClassLocked("[B")
-		bytes := vm.newObjectLocked(arrayClass)
-		bytes.arrKind = int('B')
-		bytes.bytes = append([]byte(nil), []byte(o.str)...)
-		vm.mu.Unlock()
-		return idToJobject(bytes.id), true
-	case "currentTimeMillis()J", "getProcessTimestamp()J":
-		ms := time.Now().UnixMilli()
-		return C.jobject(unsafe.Pointer(uintptr(ms))), true
-	case "nanoTime()J":
-		ns := time.Now().UnixNano()
-		return C.jobject(unsafe.Pointer(uintptr(ns))), true
-	case "getAllocatableBytes()J":
-		// LocalStorageManager native V3 GetMethodIDs this; later OTA
-		// rbxm open can CallLongMethod. Official Java uses StatFs.
-		const allocatable = 8 << 30 // 8 GiB
-		return C.jobject(unsafe.Pointer(uintptr(allocatable))), true
-	case "availableProcessors()I":
-		return C.jobject(unsafe.Pointer(uintptr(runtime.NumCPU()))), true
-	case "getIdentifier(Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;)I":
-		return jnull(), true
-	case "toString()Ljava/lang/String;":
-		str := ""
-		if o != nil {
-			str = o.str
-			if str == "" {
-				str = o.class.name
-			}
-		}
-		vm.mu.Lock()
-		s := vm.newStringLocked(str)
-		vm.mu.Unlock()
-		return idToJobject(s.id), true
-	case "getName()Ljava/lang/String;":
-		n := class
-		if o != nil {
-			if name, ok := o.fields["name"].(string); ok {
-				n = name
-			}
-		}
-		vm.mu.Lock()
-		s := vm.newStringLocked(n)
-		vm.mu.Unlock()
-		return idToJobject(s.id), true
-	case "getClass()Ljava/lang/Class;":
-		if o != nil && o.class != nil && o.class.obj != nil {
-			return idToJobject(o.class.obj.id), true
-		}
-		return jnull(), true
-	case "size()I":
-		n := 0
-		if o != nil {
-			n = len(o.elems)
-		}
-		return C.jobject(unsafe.Pointer(uintptr(n))), true
-	case "isEmpty()Z":
-		empty := 1
-		if o != nil && len(o.elems) > 0 {
-			empty = 0
-		}
-		return C.jobject(unsafe.Pointer(uintptr(empty))), true
-	case "get(I)Ljava/lang/Object;", "get(I)Ljava/util/Locale;":
-		if o == nil || args == nil {
-			return jnull(), true
-		}
-		idx := int(jvalueIAt(args, 0))
-		if idx < 0 || idx >= len(o.elems) {
-			return jnull(), true
-		}
-		id := o.elems[idx]
-		vm.mu.Lock()
-		if vm.objects[id] != nil {
-			vm.addLocalLocked(id)
-		}
-		vm.mu.Unlock()
-		return idToJobject(id), true
-	case "add(Ljava/lang/Object;)Z":
-		if o != nil && args != nil {
-			id := jobjectToID(uintptr(C.tipsy_jvalue_l_at(args, 0)))
-			vm.mu.Lock()
-			vm.replaceHeapEdgeLocked(o, 0, id)
-			o.elems = append(o.elems, id)
-			vm.mu.Unlock()
-		}
-		return C.jobject(unsafe.Pointer(uintptr(1))), true
-	case "iterator()Ljava/util/Iterator;":
-		vm.mu.Lock()
-		cls := vm.ensureClassLocked("java/util/Iterator")
-		it := vm.newObjectLocked(cls)
-		if o != nil {
-			vm.storeFieldObjLocked(it, "list", o.id)
-		}
-		it.fields["index"] = int32(0)
-		vm.mu.Unlock()
-		return idToJobject(it.id), true
-	case "hasNext()Z":
-		if o == nil {
-			return jnull(), true
-		}
-		listID, _ := o.fields["list"].(int64)
-		idx, _ := o.fields["index"].(int32)
-		list := vm.get(listID)
-		n := 0
-		if list != nil {
-			n = len(list.elems)
-		}
-		if int(idx) < n {
-			return C.jobject(unsafe.Pointer(uintptr(1))), true
-		}
-		return jnull(), true
-	case "next()Ljava/lang/Object;":
-		if o == nil {
-			return jnull(), true
-		}
-		listID, _ := o.fields["list"].(int64)
-		idx, _ := o.fields["index"].(int32)
-		list := vm.get(listID)
-		if list == nil || int(idx) < 0 || int(idx) >= len(list.elems) {
-			return jnull(), true
-		}
-		elem := list.elems[idx]
-		vm.mu.Lock()
-		o.fields["index"] = idx + 1
-		if vm.objects[elem] != nil {
-			vm.addLocalLocked(elem)
-		}
-		vm.mu.Unlock()
-		return idToJobject(elem), true
-	default:
-		if o != nil {
-			if v, ok := vm.fieldGetter(o, name, sig); ok {
-				return v, true
-			}
-		}
-		_ = args
-		_ = class
-		return jnull(), false
-	}
 }
 
 // newDeviceStaticParams is NativeGLJavaInterface.getDeviceStaticParams.
@@ -777,11 +420,7 @@ func (vm *VM) newDeviceStaticParams() C.jobject {
 }
 
 func jvalueIAt(args *C.jvalue, i int) int32 {
-	if args == nil || i < 0 {
-		return 0
-	}
-	slice := unsafe.Slice(args, i+1)
-	return int32(C.tipsy_jvalue_i(&slice[i]))
+	return int32(jvalueI(jvalueSlot(args, i)))
 }
 
 func (vm *VM) fieldGetter(o *Object, name, sig string) (C.jobject, bool) {
@@ -859,7 +498,7 @@ func (vm *VM) stringFromArg(args *C.jvalue, i int) string {
 	if args == nil {
 		return ""
 	}
-	obj := C.tipsy_jvalue_l_at(args, C.int(i))
+	obj := jvalueLAt(args, i)
 	o := vm.get(jobjectToID(uintptr(obj)))
 	if o == nil {
 		return ""
@@ -924,13 +563,13 @@ func (vm *VM) stubField(name, sig string, retKind C.jint, out *C.jvalue) {
 		if name == "densityDpi" {
 			v = 160
 		}
-		C.tipsy_jvalue_set_i(out, v)
+		jvalueSetI(out, v)
 	case 'F':
-		C.tipsy_jvalue_set_f(out, 1)
+		jvalueSetF(out, 1)
 	case 'Z':
-		C.tipsy_jvalue_set_z(out, 0)
+		jvalueSetZ(out, 0)
 	case 'J':
-		C.tipsy_jvalue_set_j(out, 0)
+		jvalueSetJ(out, 0)
 	case 'L':
 		if sig == "Ljava/lang/String;" || strings.HasPrefix(sig, "Ljava/lang/String;") {
 			s := ""
@@ -947,7 +586,7 @@ func (vm *VM) stubField(name, sig string, retKind C.jint, out *C.jvalue) {
 			vm.mu.Lock()
 			o := vm.newStringLocked(s)
 			vm.mu.Unlock()
-			C.tipsy_jvalue_set_l(out, idToJobject(o.id))
+			jvalueSetL(out, idToJobject(o.id))
 		}
 	}
 }
@@ -966,7 +605,7 @@ func GoJNI_GetFieldID(env *C.JNIEnv, clazz C.jclass, name, sig *C.char, isStatic
 
 //export GoJNI_GetField
 func GoJNI_GetField(env *C.JNIEnv, obj C.jobject, clazz C.jclass, fieldID C.jfieldID, isStatic C.jint, retKind C.jint, out *C.jvalue) {
-	C.tipsy_jvalue_zero(out)
+	jvalueZero(out)
 	vm := vmFromEnv(unsafe.Pointer(env))
 	if vm == nil {
 		return
@@ -978,11 +617,11 @@ func GoJNI_GetField(env *C.JNIEnv, obj C.jobject, clazz C.jclass, fieldID C.jfie
 	var o *Object
 	if isStatic != 0 {
 		n := classNameOf(vm, clazz)
-		vm.mu.Lock()
+		vm.mu.RLock()
 		if c := vm.classes[n]; c != nil {
 			o = c.obj
 		}
-		vm.mu.Unlock()
+		vm.mu.RUnlock()
 	} else {
 		o = vm.get(jobjectToID(uintptr(obj)))
 	}
@@ -999,32 +638,30 @@ func GoJNI_GetField(env *C.JNIEnv, obj C.jobject, clazz C.jclass, fieldID C.jfie
 	case 'L':
 		switch t := val.(type) {
 		case int64:
-			vm.mu.Lock()
-			if vm.objects[t] != nil {
-				vm.addLocalLocked(t)
+			if vm.get(t) != nil {
+				vm.addLocal(unsafe.Pointer(env), t)
 			}
-			vm.mu.Unlock()
-			C.tipsy_jvalue_set_l(out, idToJobject(t))
+			jvalueSetL(out, idToJobject(t))
 		case string:
 			vm.mu.Lock()
-			s := vm.newStringLocked(t)
+			s := vm.newStringOn(unsafe.Pointer(env), t)
 			vm.mu.Unlock()
-			C.tipsy_jvalue_set_l(out, idToJobject(s.id))
+			jvalueSetL(out, idToJobject(s.id))
 		}
 	case 'I':
 		switch t := val.(type) {
 		case int32:
-			C.tipsy_jvalue_set_i(out, C.jint(t))
+			jvalueSetI(out, C.jint(t))
 		case int:
-			C.tipsy_jvalue_set_i(out, C.jint(t))
+			jvalueSetI(out, C.jint(t))
 		}
 	case 'F':
 		if f, ok := val.(float32); ok {
-			C.tipsy_jvalue_set_f(out, C.jfloat(f))
+			jvalueSetF(out, C.jfloat(f))
 		}
 	case 'J':
 		if i, ok := val.(int64); ok {
-			C.tipsy_jvalue_set_j(out, C.jlong(i))
+			jvalueSetJ(out, C.jlong(i))
 			noteStartGamePlaceID(class, name, i)
 		}
 	case 'Z':
@@ -1038,9 +675,9 @@ func GoJNI_GetField(env *C.JNIEnv, obj C.jobject, clazz C.jclass, fieldID C.jfie
 			b = t != 0
 		}
 		if b {
-			C.tipsy_jvalue_set_z(out, 1)
+			jvalueSetZ(out, 1)
 		} else {
-			C.tipsy_jvalue_set_z(out, 0)
+			jvalueSetZ(out, 0)
 		}
 	}
 }
@@ -1058,11 +695,11 @@ func GoJNI_SetField(env *C.JNIEnv, obj C.jobject, clazz C.jclass, fieldID C.jfie
 	o := vm.get(jobjectToID(uintptr(obj)))
 	if isStatic != 0 {
 		n := classNameOf(vm, clazz)
-		vm.mu.Lock()
+		vm.mu.RLock()
 		if c := vm.classes[n]; c != nil {
 			o = c.obj
 		}
-		vm.mu.Unlock()
+		vm.mu.RUnlock()
 	}
 	if o == nil {
 		return
@@ -1075,15 +712,15 @@ func GoJNI_SetField(env *C.JNIEnv, obj C.jobject, clazz C.jclass, fieldID C.jfie
 	}
 	switch rune(retKind) {
 	case 'L':
-		vm.storeFieldObjLocked(o, name, jobjectToID(uintptr(C.tipsy_jvalue_l(&val))))
+		vm.storeFieldObjLocked(o, name, jobjectToID(uintptr(jvalueL(&val))))
 	case 'I':
-		o.fields[name] = int32(C.tipsy_jvalue_i(&val))
+		o.fields[name] = int32(jvalueI(&val))
 	case 'J':
-		place = int64(C.tipsy_jvalue_j(&val))
+		place = int64(jvalueJ(&val))
 		o.fields[name] = place
 		sawPlace = true
 	case 'Z':
-		o.fields[name] = C.tipsy_jvalue_i(&val) != 0
+		o.fields[name] = jvalueI(&val) != 0
 	}
 	vm.mu.Unlock()
 	if sawPlace {
@@ -1105,9 +742,21 @@ func GoJNI_NewString(env *C.JNIEnv, unicode *C.jchar, len C.jsize) C.jstring {
 	}
 	s := string(utf16.Decode(runes))
 	vm.mu.Lock()
-	o := vm.newStringLocked(s)
+	o := vm.newStringOn(unsafe.Pointer(env), s)
 	vm.mu.Unlock()
 	return jstringOf(idToJobject(o.id))
+}
+
+func utf16UnitCount(s string) int {
+	n := 0
+	for _, r := range s {
+		if r >= 0x10000 {
+			n += 2
+		} else {
+			n++
+		}
+	}
+	return n
 }
 
 //export GoJNI_GetStringLength
@@ -1120,10 +769,8 @@ func GoJNI_GetStringLength(env *C.JNIEnv, str C.jstring) C.jsize {
 	if o == nil {
 		return 0
 	}
-	return C.jsize(len(utf16.Encode([]rune(o.str))))
+	return C.jsize(utf16UnitCount(o.str))
 }
-
-var stringChars sync.Map // uintptr -> []uint16 backing (kept alive)
 
 //export GoJNI_GetStringChars
 func GoJNI_GetStringChars(env *C.JNIEnv, str C.jstring, isCopy *C.jboolean) *C.jchar {
@@ -1150,7 +797,6 @@ func GoJNI_GetStringChars(env *C.JNIEnv, str C.jstring, isCopy *C.jboolean) *C.j
 	}
 	dst := unsafe.Slice((*uint16)(p), len(u))
 	copy(dst, u)
-	stringChars.Store(uintptr(p), u)
 	return (*C.jchar)(p)
 }
 
@@ -1160,7 +806,6 @@ func GoJNI_ReleaseStringChars(env *C.JNIEnv, str C.jstring, chars *C.jchar) {
 	_ = str
 	if chars != nil {
 		C.free(unsafe.Pointer(chars))
-		stringChars.Delete(uintptr(unsafe.Pointer(chars)))
 	}
 }
 
@@ -1175,7 +820,7 @@ func GoJNI_NewStringUTF(env *C.JNIEnv, utf *C.char) C.jstring {
 		s = C.GoString(utf)
 	}
 	vm.mu.Lock()
-	o := vm.newStringLocked(s)
+	o := vm.newStringOn(unsafe.Pointer(env), s)
 	vm.mu.Unlock()
 	return jstringOf(idToJobject(o.id))
 }
@@ -1299,7 +944,7 @@ func GoJNI_NewObjectArray(env *C.JNIEnv, length C.jsize, clazz C.jclass, init C.
 	initID := jobjectToID(uintptr(init))
 	vm.mu.Lock()
 	cls := vm.classes["java/lang/Object"]
-	o := vm.newObjectLocked(cls)
+	o := vm.newObjectOn(unsafe.Pointer(env), cls)
 	o.elems = make([]int64, n)
 	for i := range o.elems {
 		o.elems[i] = initID
@@ -1324,11 +969,9 @@ func GoJNI_GetObjectArrayElement(env *C.JNIEnv, array C.jobjectArray, index C.js
 	if id == 0 {
 		return jnull()
 	}
-	vm.mu.Lock()
-	if vm.objects[id] != nil {
-		vm.addLocalLocked(id)
+	if vm.get(id) != nil {
+		vm.addLocal(unsafe.Pointer(env), id)
 	}
-	vm.mu.Unlock()
 	return idToJobject(id)
 }
 
@@ -1376,7 +1019,7 @@ func GoJNI_NewArray(env *C.JNIEnv, typeKind C.jint, length C.jsize) C.jarray {
 	}
 	vm.mu.Lock()
 	cls := vm.classes["java/lang/Object"]
-	o := vm.newObjectLocked(cls)
+	o := vm.newObjectOn(unsafe.Pointer(env), cls)
 	o.arrKind = int(typeKind)
 	o.bytes = make([]byte, n*elemSize(int(typeKind)))
 	vm.mu.Unlock()
@@ -1423,6 +1066,50 @@ func GoJNI_ReleaseArrayElements(env *C.JNIEnv, array C.jarray, elems unsafe.Poin
 		copy(o.bytes, unsafe.Slice((*byte)(elems), len(o.bytes)))
 	}
 	C.free(elems)
+}
+
+type criticalPin struct {
+	pinner runtime.Pinner
+	obj    *Object
+}
+
+var criticalPins sync.Map // uintptr -> *criticalPin
+
+//export GoJNI_GetPrimitiveArrayCritical
+func GoJNI_GetPrimitiveArrayCritical(env *C.JNIEnv, array C.jarray, isCopy *C.jboolean) unsafe.Pointer {
+	vm := vmFromEnv(unsafe.Pointer(env))
+	if vm == nil {
+		return nil
+	}
+	o := vm.get(jobjectToID(uintptr(array)))
+	if o == nil {
+		return nil
+	}
+	if len(o.bytes) == 0 {
+		return GoJNI_GetArrayElements(env, array, isCopy, 'B')
+	}
+	pin := &criticalPin{obj: o}
+	pin.pinner.Pin(o)
+	pin.pinner.Pin(unsafe.SliceData(o.bytes))
+	ptr := unsafe.Pointer(unsafe.SliceData(o.bytes))
+	criticalPins.Store(uintptr(ptr), pin)
+	if isCopy != nil {
+		*isCopy = C.JNI_FALSE
+	}
+	return ptr
+}
+
+//export GoJNI_ReleasePrimitiveArrayCritical
+func GoJNI_ReleasePrimitiveArrayCritical(env *C.JNIEnv, array C.jarray, carray unsafe.Pointer, mode C.jint) {
+	if carray == nil {
+		return
+	}
+	if v, ok := criticalPins.LoadAndDelete(uintptr(carray)); ok {
+		_ = mode
+		v.(*criticalPin).pinner.Unpin()
+		return
+	}
+	GoJNI_ReleaseArrayElements(env, array, carray, mode, 'B')
 }
 
 //export GoJNI_GetArrayRegion
@@ -1498,13 +1185,18 @@ func GoJNI_MonitorEnter(env *C.JNIEnv, obj C.jobject) C.jint {
 		return C.JNI_ERR
 	}
 	id := jobjectToID(uintptr(obj))
-	vm.mu.Lock()
+	vm.mu.RLock()
 	m := vm.monitors[id]
+	vm.mu.RUnlock()
 	if m == nil {
-		m = &sync.Mutex{}
-		vm.monitors[id] = m
+		vm.mu.Lock()
+		m = vm.monitors[id]
+		if m == nil {
+			m = &sync.Mutex{}
+			vm.monitors[id] = m
+		}
+		vm.mu.Unlock()
 	}
-	vm.mu.Unlock()
 	m.Lock()
 	return C.JNI_OK
 }
@@ -1516,9 +1208,9 @@ func GoJNI_MonitorExit(env *C.JNIEnv, obj C.jobject) C.jint {
 		return C.JNI_ERR
 	}
 	id := jobjectToID(uintptr(obj))
-	vm.mu.Lock()
+	vm.mu.RLock()
 	m := vm.monitors[id]
-	vm.mu.Unlock()
+	vm.mu.RUnlock()
 	if m != nil {
 		m.Unlock()
 	}
@@ -1548,10 +1240,7 @@ func GoJNI_ExceptionCheck(env *C.JNIEnv) C.jboolean {
 	if vm == nil {
 		return C.JNI_FALSE
 	}
-	vm.mu.Lock()
-	p := vm.pendingLocked()
-	vm.mu.Unlock()
-	if p != 0 {
+	if vm.pending(unsafe.Pointer(env)) != 0 {
 		return C.JNI_TRUE
 	}
 	return C.JNI_FALSE
@@ -1565,7 +1254,7 @@ func GoJNI_NewDirectByteBuffer(env *C.JNIEnv, address unsafe.Pointer, capacity C
 	}
 	vm.mu.Lock()
 	cls := vm.classes["java/lang/Object"]
-	o := vm.newObjectLocked(cls)
+	o := vm.newObjectOn(unsafe.Pointer(env), cls)
 	o.direct = address
 	o.cap = int64(capacity)
 	vm.mu.Unlock()

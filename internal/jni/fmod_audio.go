@@ -161,6 +161,12 @@ func (vm *VM) fmodDevice(o *Object) *fmodAudioDevice {
 	if o == nil {
 		return nil
 	}
+	vm.mu.RLock()
+	if d, ok := o.fields["tipsy.fmodPlayback"].(*fmodAudioDevice); ok {
+		vm.mu.RUnlock()
+		return d
+	}
+	vm.mu.RUnlock()
 	vm.mu.Lock()
 	defer vm.mu.Unlock()
 	if d, ok := o.fields["tipsy.fmodPlayback"].(*fmodAudioDevice); ok {
@@ -219,7 +225,7 @@ func (vm *VM) dispatchFmodAudio(o *Object, class, name, sig string, args *C.jval
 		if d == nil || args == nil {
 			return jnull(), true
 		}
-		array := vm.get(jobjectToID(uintptr(C.tipsy_jvalue_l_at(args, 0))))
+		array := vm.get(jobjectToID(uintptr(jvalueLAt(args, 0))))
 		count := jvalueIAt(args, 1)
 		if array == nil || array.arrKind != 'B' || count < 0 || int(count) > len(array.bytes) {
 			logging.Logger(logging.CatAudio).Error("[audio] FMOD playback rejected invalid byte array")
@@ -242,14 +248,14 @@ func (vm *VM) dispatchFmodAudio(o *Object, class, name, sig string, args *C.jval
 func testFmodInitArgs(channels, rate, frames, blocks int32) *C.jvalue {
 	a := new([4]C.jvalue)
 	for i, value := range []int32{channels, rate, frames, blocks} {
-		C.tipsy_jvalue_set_i(&a[i], C.jint(value))
+		jvalueSetI(&a[i], C.jint(value))
 	}
 	return &a[0]
 }
 
 func testFmodWriteArgs(arrayID int64, count int32) *C.jvalue {
 	a := new([2]C.jvalue)
-	C.tipsy_jvalue_set_l(&a[0], idToJobject(arrayID))
-	C.tipsy_jvalue_set_i(&a[1], C.jint(count))
+	jvalueSetL(&a[0], idToJobject(arrayID))
+	jvalueSetI(&a[1], C.jint(count))
 	return &a[0]
 }

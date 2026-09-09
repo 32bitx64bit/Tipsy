@@ -45,7 +45,7 @@ func (e *Env) NewString(s string) uintptr {
 		return 0
 	}
 	e.vm.mu.Lock()
-	o := e.vm.newStringLocked(s)
+	o := e.vm.newStringOn(e.raw, s)
 	e.vm.mu.Unlock()
 	return uintptr(idToJobject(o.id))
 }

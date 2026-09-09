@@ -199,12 +199,14 @@ func TestPendingExceptionRootsAndReturnsLocalReference(t *testing.T) {
 	}
 	defer detachCurrentThreadForTest()
 
-	vm.pushFrame(8)
-	throwable := vm.Env().NewString("pending")
+	if testPushFrame(env, 8) != 0 {
+		t.Fatal("PushLocalFrame")
+	}
+	throwable := testNewStringOn(env, "pending")
 	if rc := throwForTest(env, throwable); rc != testJNIOK {
 		t.Fatalf("Throw = %d", rc)
 	}
-	vm.popFrame(0)
+	testPopFrame(env, 0)
 	if vm.get(int64(throwable)) == nil {
 		t.Fatal("PopLocalFrame reclaimed the pending exception")
 	}
@@ -216,16 +218,16 @@ func TestPendingExceptionRootsAndReturnsLocalReference(t *testing.T) {
 	if vm.get(int64(throwable)) == nil {
 		t.Fatal("ExceptionClear reclaimed the local reference returned by ExceptionOccurred")
 	}
-	vm.deleteLocal(int64(returned))
+	testDeleteLocalRef(env, int64(returned))
 	if vm.get(int64(throwable)) != nil {
 		t.Fatal("throwable survived clearing pending state and deleting its last local ref")
 	}
 
-	second := vm.Env().NewString("pending until clear")
+	second := testNewStringOn(env, "pending until clear")
 	if rc := throwForTest(env, second); rc != testJNIOK {
 		t.Fatalf("second Throw = %d", rc)
 	}
-	vm.deleteLocal(int64(second))
+	testDeleteLocalRef(env, int64(second))
 	if vm.get(int64(second)) == nil {
 		t.Fatal("DeleteLocalRef reclaimed the pending exception")
 	}
@@ -249,11 +251,11 @@ func TestPendingExceptionsAreThreadLocalAndDetachReclaims(t *testing.T) {
 		t.Fatalf("controller Attach = (%d, %p)", rc, controllerEnv)
 	}
 	defer detachCurrentThreadForTest()
-	controllerThrowable := vm.Env().NewString("controller pending")
+	controllerThrowable := testNewStringOn(controllerEnv, "controller pending")
 	if rc := throwForTest(controllerEnv, controllerThrowable); rc != testJNIOK {
 		t.Fatalf("controller Throw = %d", rc)
 	}
-	vm.deleteLocal(int64(controllerThrowable))
+	testDeleteLocalRef(controllerEnv, int64(controllerThrowable))
 
 	type pendingPeer struct {
 		env       unsafe.Pointer
@@ -270,9 +272,9 @@ func TestPendingExceptionsAreThreadLocalAndDetachReclaims(t *testing.T) {
 		rc, env := attachCurrentThreadForTest(false)
 		result := pendingPeer{env: env, err: rc}
 		if rc == testJNIOK {
-			result.throwable = vm.Env().NewString("peer pending")
+			result.throwable = testNewStringOn(env, "peer pending")
 			result.err = throwForTest(env, result.throwable)
-			vm.deleteLocal(int64(result.throwable))
+			testDeleteLocalRef(env, int64(result.throwable))
 		}
 		ready <- result
 		<-release
@@ -291,7 +293,7 @@ func TestPendingExceptionsAreThreadLocalAndDetachReclaims(t *testing.T) {
 		<-done
 		t.Fatalf("controller observed peer exception %#x, want own %#x", got, controllerThrowable)
 	}
-	vm.deleteLocal(int64(controllerThrowable)) // ExceptionOccurred's new local.
+	testDeleteLocalRef(controllerEnv, int64(controllerThrowable)) // ExceptionOccurred's new local.
 	close(release)
 	peer = <-done
 	if peer.err != testJNIOK {
@@ -402,14 +404,14 @@ func TestConcurrentAttachedThreadLocalAndExceptionLifecycle(t *testing.T) {
 			}
 			e := &Env{vm: vm, raw: env}
 			for range iterations {
-				vm.pushFrame(8)
+				testPushFrame(env, 8)
 				obj := e.NewStringUTF("thread lifecycle sentinel")
 				if obj == 0 || throwForTest(env, obj) != testJNIOK || exceptionOccurredForTest(env) != obj {
 					result.err = "JNI callback lifecycle failed"
 					break
 				}
 				exceptionClearForTest(env)
-				vm.popFrame(0)
+				testPopFrame(env, 0)
 				if vm.get(int64(obj)) != nil {
 					result.err = "local reference survived PopLocalFrame"
 					break
@@ -420,7 +422,7 @@ func TestConcurrentAttachedThreadLocalAndExceptionLifecycle(t *testing.T) {
 				if result.pendingID == 0 || throwForTest(env, result.pendingID) != testJNIOK {
 					result.err = "pending detach setup failed"
 				} else {
-					vm.deleteLocal(int64(result.pendingID))
+					testDeleteLocalRef(env, int64(result.pendingID))
 				}
 			}
 			staged <- result
@@ -461,7 +463,7 @@ func TestConcurrentAttachedThreadLocalAndExceptionLifecycle(t *testing.T) {
 		state := vm.threadStates[uintptr(result.env)]
 		pending := uintptr(0)
 		if state != nil {
-			pending = uintptr(state.pending)
+			pending = uintptr(state.pending.Load())
 		}
 		vm.mu.RUnlock()
 		if state == nil || pending != result.pendingID || vm.get(int64(result.pendingID)) == nil {

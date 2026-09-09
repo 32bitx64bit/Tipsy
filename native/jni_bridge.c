@@ -60,6 +60,8 @@ extern void GoJNI_SetObjectArrayElement(JNIEnv *env, jobjectArray array, jsize i
 extern jarray GoJNI_NewArray(JNIEnv *env, jint type_kind, jsize len);
 extern void *GoJNI_GetArrayElements(JNIEnv *env, jarray array, jboolean *isCopy, jint type_kind);
 extern void GoJNI_ReleaseArrayElements(JNIEnv *env, jarray array, void *elems, jint mode, jint type_kind);
+extern void *GoJNI_GetPrimitiveArrayCritical(JNIEnv *env, jarray array, jboolean *isCopy);
+extern void GoJNI_ReleasePrimitiveArrayCritical(JNIEnv *env, jarray array, void *carray, jint mode);
 extern void GoJNI_GetArrayRegion(JNIEnv *env, jarray array, jsize start, jsize len, void *buf, jint type_kind);
 extern void GoJNI_SetArrayRegion(JNIEnv *env, jarray array, jsize start, jsize len, const void *buf, jint type_kind);
 extern jint GoJNI_RegisterNatives(JNIEnv *env, jclass clazz, const JNINativeMethod *methods, jint nMethods);
@@ -1022,11 +1024,11 @@ static void JNICALL t_GetStringUTFRegion(JNIEnv *env, jstring str, jsize start, 
 }
 static void *JNICALL t_GetPrimitiveArrayCritical(JNIEnv *env, jarray array, jboolean *isCopy)
 {
-	return GoJNI_GetArrayElements(env, array, isCopy, 'B');
+	return GoJNI_GetPrimitiveArrayCritical(env, array, isCopy);
 }
 static void JNICALL t_ReleasePrimitiveArrayCritical(JNIEnv *env, jarray array, void *carray, jint mode)
 {
-	GoJNI_ReleaseArrayElements(env, array, carray, mode, 'B');
+	GoJNI_ReleasePrimitiveArrayCritical(env, array, carray, mode);
 }
 static const jchar *JNICALL t_GetStringCritical(JNIEnv *env, jstring str, jboolean *isCopy)
 {
@@ -1795,76 +1797,4 @@ jbyteArray tipsy_jni_NewByteArray(JNIEnv *env, jsize len)
 		return NULL;
 	}
 	return env->functions->NewByteArray(env, len);
-}
-
-void tipsy_jvalue_zero(jvalue *v)
-{
-	if (v != NULL) {
-		memset(v, 0, sizeof(*v));
-	}
-}
-
-void tipsy_jvalue_set_l(jvalue *v, jobject l)
-{
-	if (v != NULL) {
-		v->l = l;
-	}
-}
-
-void tipsy_jvalue_set_i(jvalue *v, jint i)
-{
-	if (v != NULL) {
-		v->i = i;
-	}
-}
-
-void tipsy_jvalue_set_j(jvalue *v, jlong x)
-{
-	if (v != NULL) {
-		v->j = x;
-	}
-}
-
-void tipsy_jvalue_set_z(jvalue *v, jboolean z)
-{
-	if (v != NULL) {
-		v->z = z;
-	}
-}
-
-void tipsy_jvalue_set_d(jvalue *v, jdouble d)
-{
-	if (v != NULL) {
-		v->d = d;
-	}
-}
-
-void tipsy_jvalue_set_f(jvalue *v, jfloat f)
-{
-	if (v != NULL) {
-		v->f = f;
-	}
-}
-
-jobject tipsy_jvalue_l(const jvalue *v)
-{
-	return v != NULL ? v->l : NULL;
-}
-
-jint tipsy_jvalue_i(const jvalue *v)
-{
-	return v != NULL ? v->i : 0;
-}
-
-jlong tipsy_jvalue_j(const jvalue *v)
-{
-	return v != NULL ? v->j : 0;
-}
-
-jobject tipsy_jvalue_l_at(const jvalue *args, int i)
-{
-	if (args == NULL || i < 0) {
-		return NULL;
-	}
-	return args[i].l;
 }

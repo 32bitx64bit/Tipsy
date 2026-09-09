@@ -114,10 +114,11 @@ func (vm *VM) StoreAuthCookies(url string, cookies []string) error {
 func (vm *VM) authCookieFailure() {
 	logging.Logger(logging.CatFilesystem).Error("official cookie persistence failed")
 	vm.mu.Lock()
-	defer vm.mu.Unlock()
 	o := vm.newObjectLocked(vm.ensureClassLocked("java/lang/IllegalStateException"))
 	o.str = "cookie persistence unavailable"
-	vm.setPendingLocked(o.id)
+	id := o.id
+	vm.mu.Unlock()
+	vm.setPending(nil, id)
 }
 
 func (vm *VM) dispatchAuthCookies(o *Object, class, name, sig string, args *C.jvalue) (C.jobject, bool) {
@@ -126,7 +127,7 @@ func (vm *VM) dispatchAuthCookies(o *Object, class, name, sig string, args *C.jv
 		var cookies []string
 		var arr *Object
 		if args != nil {
-			arr = vm.get(jobjectToID(uintptr(C.tipsy_jvalue_l(args))))
+			arr = vm.get(jobjectToID(uintptr(jvalueL(args))))
 		}
 		if arr != nil {
 			vm.mu.Lock()
@@ -155,7 +156,7 @@ func (vm *VM) dispatchAuthCookies(o *Object, class, name, sig string, args *C.jv
 // client values; Go test files cannot import C.
 func testAuthCookieArgs(first, second int64) *C.jvalue {
 	args := make([]C.jvalue, 2)
-	C.tipsy_jvalue_set_l(&args[0], idToJobject(first))
-	C.tipsy_jvalue_set_l(&args[1], idToJobject(second))
+	jvalueSetL(&args[0], idToJobject(first))
+	jvalueSetL(&args[1], idToJobject(second))
 	return &args[0]
 }

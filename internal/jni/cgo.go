@@ -214,14 +214,6 @@ func asJobjectFromClass(c C.jclass) C.jobject {
 	return *(*C.jobject)(unsafe.Pointer(&c))
 }
 
-func asJobjectFromString(s C.jstring) C.jobject {
-	return *(*C.jobject)(unsafe.Pointer(&s))
-}
-
-func asJobjectFromArray(a C.jarray) C.jobject {
-	return *(*C.jobject)(unsafe.Pointer(&a))
-}
-
 func asJobjectFromThrow(t C.jthrowable) C.jobject {
 	return *(*C.jobject)(unsafe.Pointer(&t))
 }

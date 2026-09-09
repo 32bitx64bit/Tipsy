@@ -24,6 +24,11 @@ func TestInternMethodIDsReuse(t *testing.T) {
 	if jmethodNil(other) || !firstOther || other == a {
 		t.Fatalf("distinct method interned poorly: %v first=%t", other, firstOther)
 	}
+	infoA, okA := lookupMethod(a)
+	infoB, okB := lookupMethod(other)
+	if !okA || !okB || infoA == infoB || infoA.name != "length" || infoB.name != "isEmpty" {
+		t.Fatalf("slot lookup failed: ok=%t/%t a=%v b=%v", okA, okB, infoA, infoB)
+	}
 }
 
 func TestInternFieldIDsReuse(t *testing.T) {
