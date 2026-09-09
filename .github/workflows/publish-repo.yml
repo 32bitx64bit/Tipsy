@@ -142,7 +142,7 @@ jobs:
           set -euo pipefail
           scripts/ci-install-native.sh
           sudo apt-get install -y --no-install-recommends \
-            dpkg-dev rpm createrepo_c gnupg lintian
+            dpkg-dev rpm createrepo-c gnupg lintian
           command -v dpkg-deb && command -v rpmbuild && command -v createrepo_c
 
       - name: Download the signed AppImage from the Tipsy release
@@ -241,7 +241,7 @@ jobs:
           set -euo pipefail
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
-            dpkg-dev apt createrepo_c rpm gnupg ostree flatpak
+            dpkg-dev apt createrepo-c rpm gnupg ostree flatpak
           command -v dpkg-scanpackages && command -v createrepo_c
 
       - name: Import the release-signing key (never logged)
