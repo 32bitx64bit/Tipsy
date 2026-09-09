@@ -57,6 +57,24 @@ func TestWebLoginURIOmitsTicketAfterRedeem(t *testing.T) {
 	}
 }
 
+func TestSpecificServerJoinKeepsJobInStartGameRequest(t *testing.T) {
+	const fakeJob = "SYNTHETIC-JOB-ID"
+	req, err := rbxuri.Parse("roblox-player:1+launchmode:play+gameinfo:SYNTHETIC-TICKET+placelauncherurl:https%3A%2F%2Fassetgame.roblox.com%2Fgame%2FPlaceLauncher.ashx%3Frequest%3DRequestGameJob%26placeId%3D1818%26gameId%3D" + fakeJob)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if req.PlaceID != 1818 || req.GameInstanceID != fakeJob {
+		t.Fatalf("place=%d instance=%q", req.PlaceID, req.GameInstanceID)
+	}
+	if got := appStarterPlace(req); got != "1818" {
+		t.Fatalf("appStarterPlace=%q", got)
+	}
+	req.TicketRedeemed = true
+	if got := req.WebLoginURI(); !strings.Contains(got, "gameInstanceId="+fakeJob) || !strings.Contains(got, "placeId=1818") || strings.Contains(got, "gameinfo:") {
+		t.Fatalf("redeemed uri=%q", got)
+	}
+}
+
 func TestPrivateServerShareUsesOfficialNavigationHandoff(t *testing.T) {
 	const fakeCode = "SYNTHETIC-PRIVATE-SERVER-CODE"
 	req, err := rbxuri.Parse("roblox://navigation/share_links?code=" + fakeCode + "&type=Server")

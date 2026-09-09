@@ -201,7 +201,7 @@ func parsePlayerProtocol(raw string) (Request, error) {
 		AccessCode:         firstValue(values, "accesscode"),
 		ReservedServerCode: firstValue(values, "reservedserveraccesscode"),
 		LinkCode:           firstValue(values, "linkcode", "privateserverlinkcode"),
-		GameInstanceID:     firstValue(values, "gameinstanceid", "gameid"),
+		GameInstanceID:     firstValue(values, "gameinstanceid"),
 		ReferralPage:       firstValue(values, "referralpage"),
 		hasWebsiteLaunch:   true,
 	}
@@ -214,9 +214,7 @@ func parsePlayerProtocol(raw string) (Request, error) {
 	if id, ok := parseInt64(firstValue(values, "referredbyplayerid")); ok {
 		req.ReferredByPlayerID = id
 	}
-	if req.PlaceID == 0 && req.PlaceLauncherURL != "" {
-		req.PlaceID = placeIDFromQuery(req.PlaceLauncherURL)
-	}
+	applyPlaceLauncherIdentity(&req)
 	if req.PlaceID == 0 && req.Ticket == "" && req.PlaceLauncherURL == "" {
 		return Request{}, errMissingPlace
 	}
@@ -256,7 +254,7 @@ func parseRobloxDeepLink(raw string) (Request, error) {
 	req.PlaceID, _ = parseInt64(firstQuery(q, "placeid", "placeId"))
 	req.UserID, _ = parseInt64(firstQuery(q, "userid", "userId"))
 	req.ReferredByPlayerID, _ = parseInt64(firstQuery(q, "referredbyplayerid", "referredByPlayerId"))
-	req.GameInstanceID = firstQuery(q, "gameinstanceid", "gameInstanceId", "gameid")
+	req.GameInstanceID = instanceIDFromQuery(q)
 	req.AccessCode = firstQuery(q, "accesscode", "accessCode")
 	req.ReservedServerCode = firstQuery(q, "reservedserveraccesscode", "reservedServerAccessCode")
 	req.LinkCode = firstQuery(q, "linkcode", "linkCode", "privateserverlinkcode", "privateServerLinkCode")
@@ -276,7 +274,7 @@ func parseWebURL(u *url.URL) (Request, error) {
 	req := Request{Scheme: "https", LaunchMode: "play", hasWebsiteLaunch: true}
 	q := u.Query()
 	req.PlaceID, _ = parseInt64(firstQuery(q, "placeid", "placeId"))
-	req.GameInstanceID = firstQuery(q, "gameinstanceid", "gameInstanceId")
+	req.GameInstanceID = instanceIDFromQuery(q)
 	req.AccessCode = firstQuery(q, "accesscode", "accessCode")
 	req.ReservedServerCode = firstQuery(q, "reservedserveraccesscode", "reservedServerAccessCode")
 	req.LinkCode = firstQuery(q, "linkcode", "linkCode", "privateserverlinkcode", "privateServerLinkCode")
@@ -473,13 +471,58 @@ func parseInt64(s string) (int64, bool) {
 	return n, true
 }
 
-func placeIDFromQuery(raw string) int64 {
-	u, err := url.Parse(raw)
-	if err != nil {
-		return 0
+func applyPlaceLauncherIdentity(req *Request) {
+	if req == nil || req.PlaceLauncherURL == "" {
+		return
 	}
-	id, _ := parseInt64(firstQuery(u.Query(), "placeid", "placeId"))
-	return id
+	u, err := url.Parse(req.PlaceLauncherURL)
+	if err != nil {
+		return
+	}
+	q := u.Query()
+	if req.PlaceID == 0 {
+		req.PlaceID, _ = parseInt64(firstQuery(q, "placeid", "placeId"))
+	}
+	if req.GameInstanceID == "" {
+		req.GameInstanceID = instanceIDFromQuery(q)
+	}
+	if req.AccessCode == "" {
+		req.AccessCode = firstQuery(q, "accesscode", "accessCode")
+	}
+	if req.ReservedServerCode == "" {
+		req.ReservedServerCode = firstQuery(q, "reservedserveraccesscode", "reservedServerAccessCode")
+	}
+	if req.LinkCode == "" {
+		req.LinkCode = firstQuery(q, "linkcode", "linkCode", "privateserverlinkcode", "privateServerLinkCode")
+	}
+	if req.LaunchData == "" {
+		req.LaunchData = firstQuery(q, "launchdata", "launchData")
+	}
+	if req.UserID == 0 {
+		req.UserID, _ = parseInt64(firstQuery(q, "userid", "userId"))
+	}
+}
+
+// instanceIDFromQuery returns a specific-server job id. Numeric gameId values
+// are universe/place identifiers, not job UUIDs, and must not be forwarded as
+// StartGameParams.gameId.
+func instanceIDFromQuery(q url.Values) string {
+	if v := firstQuery(q, "gameinstanceid", "gameInstanceId", "jobid", "jobId"); v != "" {
+		return v
+	}
+	if v := firstQuery(q, "gameid", "gameId"); v != "" && !isDecimalID(v) {
+		return v
+	}
+	return ""
+}
+
+func isDecimalID(s string) bool {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return false
+	}
+	_, err := strconv.ParseInt(s, 10, 64)
+	return err == nil
 }
 
 func placeIDFromPath(path string) int64 {

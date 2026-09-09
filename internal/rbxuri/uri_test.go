@@ -78,6 +78,7 @@ func TestParseRobloxDeepLinkAndWebURL(t *testing.T) {
 		{raw: "https://www.roblox.com/games/920587237/Natural-Disaster-Survival", place: 920587237, scheme: "https"},
 		{raw: "https://www.roblox.com/games/start?placeid=1818", place: 1818, scheme: "https"},
 		{raw: "https://web.roblox.com/experiences/start?placeId=1818&linkCode=abc", place: 1818, scheme: "https"},
+		{raw: "https://www.roblox.com/games/start?placeId=1818&gameId=SYNTHETIC-JOB-ID", place: 1818, scheme: "https"},
 	}
 	for _, test := range cases {
 		req, err := Parse(test.raw)
@@ -93,6 +94,75 @@ func TestParseRobloxDeepLinkAndWebURL(t *testing.T) {
 		if !strings.Contains(req.AndroidDeepLink, "placeId="+itoa(test.place)) {
 			t.Fatalf("%s: deep link=%q", test.raw, req.AndroidDeepLink)
 		}
+	}
+}
+
+func TestParseSpecificServerJoinPreservesJobIdentity(t *testing.T) {
+	t.Parallel()
+	const fakeJob = "SYNTHETIC-JOB-ID"
+	cases := []struct {
+		name string
+		raw  string
+	}{
+		{
+			name: "website player RequestGameJob",
+			raw:  "roblox-player:1+launchmode:play+gameinfo:SYNTHETIC-TICKET+placelauncherurl:https%3A%2F%2Fassetgame.roblox.com%2Fgame%2FPlaceLauncher.ashx%3Frequest%3DRequestGameJob%26placeId%3D1818%26gameId%3D" + fakeJob,
+		},
+		{
+			name: "android gameInstanceId deep link",
+			raw:  "roblox://experiences/start?placeId=1818&gameInstanceId=" + fakeJob,
+		},
+		{
+			name: "website games start gameId",
+			raw:  "https://www.roblox.com/games/start?placeId=1818&gameId=" + fakeJob,
+		},
+		{
+			name: "website games start jobId",
+			raw:  "https://www.roblox.com/games/start?placeId=1818&jobId=" + fakeJob,
+		},
+		{
+			name: "experience page gameInstanceId",
+			raw:  "https://www.roblox.com/games/1818/Classic-Crossroads?gameInstanceId=" + fakeJob,
+		},
+	}
+	wantHandoff := "roblox://experiences/start?gameInstanceId=" + fakeJob + "&placeId=1818"
+	for _, test := range cases {
+		t.Run(test.name, func(t *testing.T) {
+			req, err := Parse(test.raw)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if req.PlaceID != 1818 || req.GameInstanceID != fakeJob {
+				t.Fatalf("place=%d instance=%q", req.PlaceID, req.GameInstanceID)
+			}
+			if got := req.AndroidDeepLink; got != wantHandoff {
+				t.Fatalf("handoff=%q want %q", got, wantHandoff)
+			}
+			if strings.Contains(req.Summary(), fakeJob) {
+				t.Fatalf("summary leaked job id: %s", req.Summary())
+			}
+			if !strings.Contains(req.Summary(), "instance=present") || !strings.Contains(req.Summary(), "place=1818") {
+				t.Fatalf("summary=%s", req.Summary())
+			}
+		})
+	}
+}
+
+func TestParseDoesNotTreatNumericGameIDAsJob(t *testing.T) {
+	t.Parallel()
+	raw := "roblox-player:1+launchmode:play+gameinfo:SYNTHETIC-TICKET+gameid:6325043396+placelauncherurl:https%3A%2F%2Fassetgame.roblox.com%2Fgame%2FPlaceLauncher.ashx%3Frequest%3DRequestGame%26placeId%3D18667984660"
+	req, err := Parse(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if req.PlaceID != 18667984660 {
+		t.Fatalf("place=%d", req.PlaceID)
+	}
+	if req.GameInstanceID != "" {
+		t.Fatalf("numeric universe gameid was treated as a job: %q", req.GameInstanceID)
+	}
+	if strings.Contains(req.AndroidDeepLink, "gameInstanceId=") {
+		t.Fatalf("deep link forwarded universe id as a job: %q", req.AndroidDeepLink)
 	}
 }
 
