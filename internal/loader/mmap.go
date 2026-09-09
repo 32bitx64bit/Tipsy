@@ -177,6 +177,7 @@ func (m *Module) mapLoads(fd *os.File, ef *elf.File) error {
 			prot:   protFromFlags(p.Flags),
 		})
 	}
+	m.hoistRelocSpans()
 
 	for _, p := range ef.Progs {
 		if p.Type == elf.PT_GNU_RELRO {
@@ -316,14 +317,50 @@ func vaddrFileBytes(ef *elf.File, vaddr, size uint64) ([]byte, error) {
 	return nil, fmt.Errorf("loader: vaddr 0x%x not in PT_LOAD filesz", vaddr)
 }
 
+type vaddrSpan struct {
+	lo, hi uint64 // [lo, hi)
+}
+
+func inSpans(spans []vaddrSpan, vaddr, n uint64) bool {
+	end := vaddr + n
+	for i := range spans {
+		if vaddr >= spans[i].lo && end <= spans[i].hi {
+			return true
+		}
+	}
+	return false
+}
+
+func (m *Module) hoistRelocSpans() {
+	m.execSpans = m.execSpans[:0]
+	m.writeSpans = m.writeSpans[:0]
+	for _, s := range m.segs {
+		if s.memsz == 0 {
+			continue
+		}
+		sp := vaddrSpan{lo: s.vaddr, hi: s.vaddr + s.memsz}
+		if s.prot&syscall.PROT_EXEC != 0 {
+			m.execSpans = append(m.execSpans, sp)
+			continue
+		}
+		m.writeSpans = append(m.writeSpans, sp)
+	}
+	m.spansReady = true
+}
+
+func (m *Module) ensureRelocSpans() {
+	if !m.spansReady {
+		m.hoistRelocSpans()
+	}
+}
+
 func (m *Module) write64(vaddr uint64, val uint64) error {
 	if !m.contains(vaddr, 8) {
 		return fmt.Errorf("loader: reloc store 0x%x out of range", vaddr)
 	}
-	for _, s := range m.segs {
-		if vaddr >= s.vaddr && vaddr+8 <= s.vaddr+s.memsz && s.prot&syscall.PROT_EXEC != 0 {
-			return fmt.Errorf("loader: text relocation store 0x%x prohibited in %s", vaddr, m.Path)
-		}
+	m.ensureRelocSpans()
+	if inSpans(m.execSpans, vaddr, 8) {
+		return fmt.Errorf("loader: text relocation store 0x%x prohibited in %s", vaddr, m.Path)
 	}
 	addr := m.bias + uintptr(vaddr)
 	binary.LittleEndian.PutUint64(sliceAt(addr, 8), val)
@@ -339,11 +376,6 @@ func (m *Module) read64(vaddr uint64) (uint64, error) {
 }
 
 func (m *Module) contains(vaddr, n uint64) bool {
-	end := vaddr + n
-	for _, s := range m.segs {
-		if vaddr >= s.vaddr && end <= s.vaddr+s.memsz {
-			return true
-		}
-	}
-	return false
+	m.ensureRelocSpans()
+	return inSpans(m.execSpans, vaddr, n) || inSpans(m.writeSpans, vaddr, n)
 }

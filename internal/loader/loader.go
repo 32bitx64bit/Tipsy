@@ -50,6 +50,9 @@ type Module struct {
 	minVaddr   uint64
 	segs       []loadSeg
 	relro      []loadSeg
+	execSpans  []vaddrSpan
+	writeSpans []vaddrSpan
+	spansReady bool
 	tlsPresent bool
 
 	dyn           *dynInfo

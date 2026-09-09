@@ -7,6 +7,7 @@ package loader
 
 import (
 	"bytes"
+	"encoding/binary"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -47,8 +48,37 @@ func TestRelocationCannotWriteGuestExecutableSegment(t *testing.T) {
 	if err := m.write64(8, 0x1122334455667788); err == nil || !strings.Contains(err.Error(), "text relocation") {
 		t.Fatalf("write64 error=%v, want prohibited text relocation", err)
 	}
+	if !m.spansReady || len(m.execSpans) != 1 || len(m.writeSpans) != 0 {
+		t.Fatalf("lazy hoist: ready=%v exec=%d write=%d", m.spansReady, len(m.execSpans), len(m.writeSpans))
+	}
 	if !bytes.Equal(mem[:32], want) {
 		t.Fatalf("guest executable bytes changed: %x want %x", mem[:32], want)
+	}
+}
+
+func TestRelocationCanWriteGuestWritableSegment(t *testing.T) {
+	mem, err := syscall.Mmap(-1, 0, syscall.Getpagesize(), syscall.PROT_READ|syscall.PROT_WRITE,
+		syscall.MAP_PRIVATE|syscall.MAP_ANONYMOUS)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer syscall.Munmap(mem)
+
+	const want uint64 = 0x1122334455667788
+	m := &Module{
+		Path: "guest.so",
+		bias: uintptr(unsafe.Pointer(&mem[0])),
+		segs: []loadSeg{{vaddr: 0, memsz: uint64(len(mem)), filesz: uint64(len(mem)), prot: syscall.PROT_READ | syscall.PROT_WRITE}},
+	}
+	if err := m.write64(8, want); err != nil {
+		t.Fatal(err)
+	}
+	if !m.spansReady || len(m.writeSpans) != 1 || len(m.execSpans) != 0 {
+		t.Fatalf("lazy hoist: ready=%v write=%d exec=%d", m.spansReady, len(m.writeSpans), len(m.execSpans))
+	}
+	got := binary.LittleEndian.Uint64(mem[8:])
+	if got != want {
+		t.Fatalf("writable store %#x want %#x", got, want)
 	}
 }
 
