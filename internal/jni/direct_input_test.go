@@ -48,9 +48,11 @@ func stubPointerLock(t *testing.T, fn func(bool) (bool, error)) {
 	old := pointerLockSetter
 	pointerLockSetter = fn
 	rmbPointerFallback.Store(false)
+	pointerLockSticky.Store(false)
 	t.Cleanup(func() {
 		pointerLockSetter = old
 		rmbPointerFallback.Store(false)
+		pointerLockSticky.Store(false)
 	})
 }
 
@@ -411,8 +413,32 @@ func TestGetterFalseFallbackFocusLossReleasesHostGrab(t *testing.T) {
 		t.Fatal("getter-false fallback was not active before focus loss")
 	}
 	handleX11InputEvent(x11.InputEvent{Kind: x11.InputFocus, FocusGained: false})
-	if len(calls) != 2 || !calls[0] || calls[1] || rmbPointerFallback.Load() {
-		t.Fatalf("focus-loss fallback calls=%v active=%t, want [true false],false", calls, rmbPointerFallback.Load())
+	if len(calls) != 1 || !calls[0] || rmbPointerFallback.Load() {
+		t.Fatalf("focus-loss fallback calls=%v active=%t, want [true],false", calls, rmbPointerFallback.Load())
+	}
+}
+
+func TestGetterTrueFocusInReacquiresHostGrab(t *testing.T) {
+	selectPointerPath(t, "direct")
+	wireRecordingDirectTarget(t, 0x1234, 0x5678)
+	testDirectRecSetMouseLocked(true)
+	var calls []bool
+	stubPointerLock(t, func(locked bool) (bool, error) {
+		calls = append(calls, locked)
+		return true, nil
+	})
+
+	handleX11InputEvent(x11.InputEvent{
+		Kind: x11.InputPointer, PointerAction: x11.PointerDown, Button: 3, X: 20, Y: 22,
+	})
+	handleX11InputEvent(x11.InputEvent{Kind: x11.InputFocus, FocusGained: false})
+	testDirectRecSetMouseLocked(false)
+	handleX11InputEvent(x11.InputEvent{Kind: x11.InputFocus, FocusGained: true})
+	if len(calls) != 2 || !calls[0] || !calls[1] {
+		t.Fatalf("focus-return lock calls=%v, want [true true] (no explicit unlock)", calls)
+	}
+	if !pointerLockSticky.Load() {
+		t.Fatal("sticky first-person lock was cleared on focus loss")
 	}
 }
 

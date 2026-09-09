@@ -20,8 +20,8 @@ extern "C" {
  *        moves arrive both with and without a pressed button. The direct
  *        Roblox mouse path needs both forms; it computes real deltas from
  *        this ordered stream.
- *        a = 3 is captured motion: x/y remain at the stable grab anchor and
- *        dx/dy carry the real relative delta at float precision.
+ *        a = 3 is captured motion: x/y remain at the window-center grab
+ *        anchor and dx/dy carry the real relative delta at float precision.
  * scroll: a = horizontal detents, b = vertical detents. Core X11 encodes
  *        wheel motion as Button4..7; only ButtonPress is one detent.
  * resize:  b = width, c = height. ConfigureNotify lives in this stream so

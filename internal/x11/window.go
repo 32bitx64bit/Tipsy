@@ -173,9 +173,12 @@ func clearActiveWindow(w *Window) {
 }
 
 // SetPointerLock applies Roblox's current native mouse-lock request to the
-// sole client window. The X11 implementation grabs only that window and uses
-// the last secondary-button press (or last real pointer position for
-// first-person/shift-lock) as its stable anchor.
+// sole client window. The X11 implementation grabs only that window and warps
+// to the window center so first-person look has travel room in every
+// direction. Release leaves the desktop pointer at that same center rather
+// than teleporting back to the pre-lock coordinate. Acquisition is refused
+// while the window is unfocused so Alt-Tab cannot leave a background grab in
+// place.
 func SetPointerLock(locked bool) (bool, error) {
 	activeWindow.Lock()
 	w := activeWindow.w

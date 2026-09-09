@@ -159,6 +159,7 @@ static int tipsy_x11_set_raw_motion(Display *dpy, int enabled) {
 
 struct tipsy_pointer_capture {
 	int active;
+	int sticky;
 	int right_down;
 	int have_last;
 	int anchor_x;
@@ -174,6 +175,11 @@ struct tipsy_pointer_capture {
 };
 
 static struct tipsy_pointer_capture tipsy_capture;
+// Keyboard focus for the sole client window. Pointer-lock acquisition is
+// refused while this is 0 so a Roblox getter that stays true after Alt-Tab
+// cannot re-grab the desktop pointer.
+static int tipsy_have_keyboard_focus;
+static Atom tipsy_atom_net_active_window;
 
 static void tipsy_input_drop_oldest_locked(void) {
 	if (tipsy_input_ring[tipsy_input_tail].kind == TIPSY_INPUT_TEXT &&
@@ -297,6 +303,87 @@ static int tipsy_clamp_coord(int value, int extent) {
 	return value;
 }
 
+static void tipsy_capture_center(int width, int height, int *x, int *y) {
+	*x = tipsy_clamp_coord(width / 2, width);
+	*y = tipsy_clamp_coord(height / 2, height);
+}
+
+static int tipsy_window_is_related(Display *dpy, Window win, Window other) {
+	if (dpy == NULL || win == 0 || other == 0) {
+		return 0;
+	}
+	if (win == other) {
+		return 1;
+	}
+	Window root = 0, parent = 0, *children = NULL;
+	unsigned int n = 0;
+	Window current = other;
+	for (int hop = 0; hop < 8; hop++) {
+		if (current == None || current == DefaultRootWindow(dpy)) {
+			break;
+		}
+		if (current == win) {
+			return 1;
+		}
+		if (!XQueryTree(dpy, current, &root, &parent, &children, &n)) {
+			return 0;
+		}
+		if (children != NULL) {
+			XFree(children);
+		}
+		if (parent == None || parent == current) {
+			break;
+		}
+		current = parent;
+	}
+	current = win;
+	for (int hop = 0; hop < 8; hop++) {
+		if (current == None || current == DefaultRootWindow(dpy)) {
+			break;
+		}
+		if (current == other) {
+			return 1;
+		}
+		if (!XQueryTree(dpy, current, &root, &parent, &children, &n)) {
+			return 0;
+		}
+		if (children != NULL) {
+			XFree(children);
+		}
+		if (parent == None || parent == current) {
+			break;
+		}
+		current = parent;
+	}
+	return 0;
+}
+
+static Window tipsy_ewmh_active_window(Display *dpy) {
+	if (dpy == NULL || tipsy_atom_net_active_window == None) {
+		return None;
+	}
+	Atom actual = None;
+	int format = 0;
+	unsigned long n = 0, after = 0;
+	unsigned char *raw = NULL;
+	Window active = None;
+	if (XGetWindowProperty(dpy, DefaultRootWindow(dpy),
+		tipsy_atom_net_active_window, 0, 1, False, AnyPropertyType,
+		&actual, &format, &n, &after, &raw) == Success && raw != NULL) {
+		if (n >= 1 && format == 32) {
+			active = *(Window *)raw;
+		}
+		XFree(raw);
+	}
+	return active;
+}
+
+static void tipsy_discard_queued_motion(Display *dpy, Window win) {
+	XEvent junk;
+	while (XCheckTypedWindowEvent(dpy, win, MotionNotify, &junk)) {
+	}
+}
+
 static void tipsy_capture_event(int action, int status) {
 	tipsy_input_push(TIPSY_INPUT_CAPTURE, action, (long)status,
 		(long)tipsy_capture.win, (float)tipsy_capture.anchor_x,
@@ -314,13 +401,27 @@ static int tipsy_is_recenter_motion(int x, int y) {
 	return dx <= 2 && dy <= 2;
 }
 
+static void tipsy_warp_to(Display *dpy, Window win, int x, int y) {
+	Window root = DefaultRootWindow(dpy);
+	int root_x = 0, root_y = 0;
+	Window child = None;
+	if (XTranslateCoordinates(dpy, win, root, x, y, &root_x, &root_y, &child)) {
+		XWarpPointer(dpy, None, root, 0, 0, 0, 0, root_x, root_y);
+	} else {
+		XWarpPointer(dpy, None, win, 0, 0, 0, 0, x, y);
+	}
+	if (tipsy_xi_available) {
+		(void)XIWarpPointer(dpy, XIAllMasterDevices, None, win,
+			0, 0, 0, 0, (double)x, (double)y);
+	}
+}
+
 // Raw XI2 motion has already established that the physical pointer moved, so
 // avoid the XQueryPointer round trip in the core fallback helper. The next
 // core recenter event is harmless because raw capture does not select core
 // PointerMotionMask on its grab.
 static void tipsy_warp_to_anchor_force(Display *dpy, Window win) {
-	XWarpPointer(dpy, None, win, 0, 0, 0, 0,
-		tipsy_capture.anchor_x, tipsy_capture.anchor_y);
+	tipsy_warp_to(dpy, win, tipsy_capture.anchor_x, tipsy_capture.anchor_y);
 	tipsy_capture.ignore_warps = 1;
 	tipsy_capture.last_x = tipsy_capture.anchor_x;
 	tipsy_capture.last_y = tipsy_capture.anchor_y;
@@ -393,24 +494,121 @@ static int tipsy_pointer_unlock(Display *dpy, Window win, int notify,
 			(float)tipsy_capture.anchor_x, (float)tipsy_capture.anchor_y);
 		tipsy_capture.right_down = 0;
 	}
-	// This warp precedes the ungrab on the same X connection, leaving the
-	// desktop pointer at the stable anchor after an ordinary RMB release.
-	tipsy_warp_to_anchor(dpy, win);
-	// A recenter queued while capture was active may not be read until after
-	// this release. It is no longer safe to suppress an anchor-coordinate
-	// MotionNotify once the grab has ended: that same coordinate can be the
-	// user's first or second real desktop movement. Any leftover recenter event
-	// is harmless as a normal zero-delta absolute move, whereas retaining the
-	// token silently drops a real move and desynchronizes the next delta.
+	// Leave the desktop pointer at the grab center. Warping back to the
+	// pre-lock coordinate made unlock appear to "teleport" away from where
+	// the hidden locked cursor had been.
 	tipsy_capture.ignore_warps = 0;
-	XUngrabPointer(dpy, CurrentTime);
-	tipsy_capture.active = 0;
 	if (tipsy_capture.raw_motion) {
 		tipsy_capture.raw_motion = 0;
 		(void)tipsy_x11_set_raw_motion(dpy, 0);
 	}
+	tipsy_discard_queued_motion(dpy, win);
+	tipsy_warp_to(dpy, win, tipsy_capture.anchor_x, tipsy_capture.anchor_y);
+	tipsy_capture.last_x = tipsy_capture.anchor_x;
+	tipsy_capture.last_y = tipsy_capture.anchor_y;
+	XUngrabPointer(dpy, CurrentTime);
+	tipsy_capture.active = 0;
+	XSync(dpy, False);
+	tipsy_discard_queued_motion(dpy, win);
 	if (notify) tipsy_capture_event(0, GrabSuccess);
 	return 1;
+}
+
+// Grab/recenter. Caller holds tipsy_event_mu. Returns 1 for a new grab,
+// 0 for unchanged (including an already-active grab that was re-centered),
+// and -1 for a rejected grab.
+static int tipsy_pointer_lock_apply(Display *dpy, Window win, int *out_status) {
+	if (dpy == NULL || win == 0 || tipsy_x_io_error) {
+		return -1;
+	}
+	if (!tipsy_have_keyboard_focus) {
+		return 0;
+	}
+	XWindowAttributes attr;
+	if (XGetWindowAttributes(dpy, win, &attr) == 0 || attr.map_state != IsViewable) {
+		tipsy_capture.failed_status = GrabNotViewable + 1;
+		if (out_status != NULL) {
+			*out_status = GrabNotViewable;
+		}
+		tipsy_capture_event(2, GrabNotViewable);
+		return -1;
+	}
+	int center_x = 0, center_y = 0;
+	tipsy_capture_center(attr.width, attr.height, &center_x, &center_y);
+	if (tipsy_capture.active && tipsy_capture.dpy == dpy &&
+		tipsy_capture.win == win) {
+		tipsy_capture.anchor_x = center_x;
+		tipsy_capture.anchor_y = center_y;
+		tipsy_capture.last_x = center_x;
+		tipsy_capture.last_y = center_y;
+		tipsy_warp_to_anchor_force(dpy, win);
+		return 0;
+	}
+	tipsy_capture.dpy = dpy;
+	tipsy_capture.win = win;
+	tipsy_capture.anchor_x = center_x;
+	tipsy_capture.anchor_y = center_y;
+	tipsy_capture.last_x = center_x;
+	tipsy_capture.last_y = center_y;
+	tipsy_capture.have_last = 1;
+	// Warp to the center before confine so an edge cursor cannot stay pinned
+	// against the grab rectangle.
+	tipsy_warp_to_anchor_force(dpy, win);
+	XFlush(dpy);
+	int raw_motion = tipsy_x11_set_raw_motion(dpy, 1);
+	unsigned long event_mask = ButtonPressMask | ButtonReleaseMask |
+		PointerMotionMask;
+	int status = XGrabPointer(dpy, win, False, event_mask,
+		GrabModeAsync, GrabModeAsync, win, None, CurrentTime);
+	if (status != GrabSuccess) {
+		if (raw_motion) {
+			(void)tipsy_x11_set_raw_motion(dpy, 0);
+		}
+		tipsy_capture.failed_status = status + 1;
+		if (out_status != NULL) {
+			*out_status = status;
+		}
+		tipsy_capture_event(2, status);
+		return -1;
+	}
+	tipsy_capture.active = 1;
+	tipsy_capture.sticky = 1;
+	tipsy_capture.raw_motion = raw_motion;
+	tipsy_capture.last_raw_motion_time = CurrentTime;
+	tipsy_warp_to_anchor_force(dpy, win);
+	tipsy_capture_event(1, GrabSuccess);
+	return 1;
+}
+
+static void tipsy_apply_host_focus(Display *dpy, Window win, int gained) {
+	if (gained) {
+		if (tipsy_have_keyboard_focus) {
+			if (tipsy_capture.sticky) {
+				(void)tipsy_pointer_lock_apply(dpy, win, NULL);
+			}
+			return;
+		}
+		tipsy_have_keyboard_focus = 1;
+		tipsy_capture.failed_status = 0;
+		if (tipsy_xic != NULL) {
+			XSetICFocus(tipsy_xic);
+		}
+		if (tipsy_capture.sticky) {
+			(void)tipsy_pointer_lock_apply(dpy, win, NULL);
+		}
+		tipsy_input_push(TIPSY_INPUT_FOCUS, 1, 0, 0, 0, 0);
+		return;
+	}
+	if (!tipsy_have_keyboard_focus && !tipsy_capture.active) {
+		return;
+	}
+	tipsy_have_keyboard_focus = 0;
+	tipsy_release_keys();
+	tipsy_pointer_unlock(dpy, win, 1, 1);
+	if (tipsy_xic != NULL) {
+		XUnsetICFocus(tipsy_xic);
+	}
+	tipsy_input_push(TIPSY_INPUT_FOCUS, 0, 0, 0, 0, 0);
 }
 
 // Apply the state read from the APK-proven native getter. Return 1 for
@@ -425,67 +623,12 @@ int tipsy_x11_set_pointer_lock(uintptr_t dpy_ptr, unsigned long xid,
 	int result = 0;
 	if (!locked) {
 		tipsy_capture.failed_status = 0;
+		tipsy_capture.sticky = 0;
 		result = tipsy_pointer_unlock(dpy, win, 1, 0) ? 2 : 0;
 		goto done;
 	}
-	if (tipsy_capture.active) goto done;
 	if (tipsy_capture.failed_status != 0) goto done;
-	tipsy_capture.dpy = dpy;
-	tipsy_capture.win = win;
-
-	XWindowAttributes attr;
-	if (XGetWindowAttributes(dpy, win, &attr) == 0 || attr.map_state != IsViewable) {
-		tipsy_capture.failed_status = GrabNotViewable + 1;
-		if (out_status != NULL) *out_status = GrabNotViewable;
-		tipsy_capture_event(2, GrabNotViewable);
-		result = -1;
-		goto done;
-	}
-	int anchor_x = tipsy_capture.right_down ? tipsy_capture.anchor_x : tipsy_capture.last_x;
-	int anchor_y = tipsy_capture.right_down ? tipsy_capture.anchor_y : tipsy_capture.last_y;
-	if (!tipsy_capture.have_last) {
-		anchor_x = attr.width / 2;
-		anchor_y = attr.height / 2;
-	}
-	anchor_x = tipsy_clamp_coord(anchor_x, attr.width);
-	anchor_y = tipsy_clamp_coord(anchor_y, attr.height);
-	// XI2 raw events are selected only while this grab is live. Also retain
-	// PointerMotionMask for this grabbed window: some X server/input-device
-	// combinations can accept RawMotion selection yet provide no raw master
-	// stream under a core grab. Matching-timestamp core events are suppressed
-	// below whenever raw is flowing, while a quiet/misconfigured raw stream
-	// falls back to the established captured-recenter route.
-	int raw_motion = tipsy_x11_set_raw_motion(dpy, 1);
-	unsigned long event_mask = ButtonPressMask | ButtonReleaseMask |
-		PointerMotionMask;
-	int status = XGrabPointer(dpy, win, False, event_mask,
-		GrabModeAsync, GrabModeAsync, win, None, CurrentTime);
-	// XGrabPointer replaces an implicit or explicit grab already owned by this
-	// X client. AlreadyGrabbed therefore remains an honest competing-client
-	// failure and must not be treated as capture success.
-	if (status != GrabSuccess) {
-		if (raw_motion) {
-			(void)tipsy_x11_set_raw_motion(dpy, 0);
-		}
-		tipsy_capture.failed_status = status + 1;
-		if (out_status != NULL) *out_status = status;
-		tipsy_capture_event(2, status);
-		result = -1;
-		goto done;
-	}
-	tipsy_capture.active = 1;
-	tipsy_capture.dpy = dpy;
-	tipsy_capture.win = win;
-	tipsy_capture.anchor_x = anchor_x;
-	tipsy_capture.anchor_y = anchor_y;
-	tipsy_capture.last_x = anchor_x;
-	tipsy_capture.last_y = anchor_y;
-	tipsy_capture.have_last = 1;
-	tipsy_capture.raw_motion = raw_motion;
-	tipsy_capture.last_raw_motion_time = CurrentTime;
-	tipsy_warp_to_anchor(dpy, win);
-	tipsy_capture_event(1, GrabSuccess);
-	result = 1;
+	result = tipsy_pointer_lock_apply(dpy, win, out_status);
 
 done:
 	if (out_x != NULL) *out_x = tipsy_capture.anchor_x;
@@ -903,6 +1046,7 @@ int tipsy_x11_open(const char *title, int width, int height,
 	tipsy_window_min_height = min_height > 0 ? min_height : 1;
 	memset(tipsy_keys, 0, sizeof(tipsy_keys));
 	memset(&tipsy_capture, 0, sizeof(tipsy_capture));
+	tipsy_have_keyboard_focus = 0;
 
 	Display *dpy = XOpenDisplay(NULL);
 	if (dpy == NULL) {
@@ -931,6 +1075,10 @@ int tipsy_x11_open(const char *title, int width, int height,
 #endif
 		XRRSelectInput(dpy, root, mask);
 	}
+	tipsy_atom_net_active_window = XInternAtom(dpy, "_NET_ACTIVE_WINDOW", False);
+	// EWMH active-window changes are the XWayland path where compositor
+	// focus moves on but X11 FocusOut never arrives for a grabbed pointer.
+	XSelectInput(dpy, root, PropertyChangeMask);
 	atomic_fetch_add_explicit(&tipsy_refresh_version, 1, memory_order_relaxed);
 
 	XSetWindowAttributes swa;
@@ -1125,22 +1273,42 @@ int tipsy_x11_pump(uintptr_t dpy_ptr, unsigned long xid, unsigned long wm_delete
 			break;
 		case FocusIn:
 		case FocusOut:
-			if (ev.xfocus.window == win) {
+			if (ev.xfocus.window == win &&
+				ev.xfocus.detail != NotifyPointer &&
+				ev.xfocus.detail != NotifyPointerRoot &&
+				ev.xfocus.detail != NotifyInferior) {
 				if (ev.type == FocusOut) {
+					tipsy_have_keyboard_focus = 0;
 					tipsy_release_keys();
 					tipsy_pointer_unlock(dpy, win, 1, 1);
-				} else {
-					tipsy_capture.failed_status = 0;
-				}
-				if (tipsy_xic != NULL) {
-					if (ev.type == FocusIn) {
-						XSetICFocus(tipsy_xic);
-					} else {
+					if (tipsy_xic != NULL) {
 						XUnsetICFocus(tipsy_xic);
+					}
+				} else {
+					// Re-apply a sticky first-person grab on the same FocusIn.
+					tipsy_have_keyboard_focus = 1;
+					tipsy_capture.failed_status = 0;
+					if (tipsy_xic != NULL) {
+						XSetICFocus(tipsy_xic);
+					}
+					if (tipsy_capture.sticky) {
+						(void)tipsy_pointer_lock_apply(dpy, win, NULL);
 					}
 				}
 				tipsy_input_push(TIPSY_INPUT_FOCUS,
 					ev.type == FocusIn ? 1 : 0, 0, 0, 0, 0);
+			}
+			break;
+		case PropertyNotify:
+			if (ev.xproperty.atom == tipsy_atom_net_active_window &&
+				ev.xproperty.window == DefaultRootWindow(dpy)) {
+				if (ev.xproperty.state == PropertyDelete) {
+					tipsy_apply_host_focus(dpy, win, 0);
+					break;
+				}
+				Window active = tipsy_ewmh_active_window(dpy);
+				tipsy_apply_host_focus(dpy, win,
+					active != None && tipsy_window_is_related(dpy, win, active));
 			}
 			break;
 		case KeyPress:
@@ -1331,8 +1499,9 @@ int tipsy_x11_pump(uintptr_t dpy_ptr, unsigned long xid, unsigned long wm_delete
 				}
 				atomic_fetch_add_explicit(&tipsy_refresh_version, 1, memory_order_relaxed);
 				if (tipsy_capture.active) {
-					int ax = tipsy_clamp_coord(tipsy_capture.anchor_x, ev.xconfigure.width);
-					int ay = tipsy_clamp_coord(tipsy_capture.anchor_y, ev.xconfigure.height);
+					int ax = 0, ay = 0;
+					tipsy_capture_center(ev.xconfigure.width, ev.xconfigure.height,
+						&ax, &ay);
 					if (ax != tipsy_capture.anchor_x || ay != tipsy_capture.anchor_y) {
 						tipsy_capture.anchor_x = ax;
 						tipsy_capture.anchor_y = ay;
@@ -1573,6 +1742,7 @@ void tipsy_x11_close(uintptr_t dpy_ptr, unsigned long xid) {
 	}
 	XCloseDisplay(dpy);
 	memset(&tipsy_capture, 0, sizeof(tipsy_capture));
+	tipsy_have_keyboard_focus = 0;
 	pthread_mutex_unlock(&tipsy_event_mu);
 }
 

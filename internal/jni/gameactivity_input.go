@@ -614,6 +614,11 @@ var pointerButtons struct {
 // It is cleared before every ungrab path.
 var rmbPointerFallback atomic.Bool
 
+// pointerLockSticky remembers a live first-person/host grab across Alt-Tab.
+// Roblox's getter often goes false after GameActivity focus loss, so FocusIn
+// must recapture without waiting for another click.
+var pointerLockSticky atomic.Bool
+
 // pointerLockSetter is a test seam for the host boundary. Production never
 // replaces it; retaining the call behind this seam lets tests prove that a
 // rejected fallback preserves Roblox's button edges.
@@ -751,12 +756,20 @@ func handleX11InputEvent(ev x11.InputEvent) {
 	switch ev.Kind {
 	case x11.InputFocus:
 		if !ev.FocusGained {
-			// Host focus loss always releases a grab, independently of a stale
-			// engine bit. The X11 bridge also synthesizes the one missing RMB-up
-			// edge when necessary before this focus event is drained.
+			// Host focus loss already ungrabs in X11. Do not send an explicit
+			// unlock here: that would clear the sticky first-person grab so
+			// returning to the window could not recapture without a click.
 			rmbPointerFallback.Store(false)
 			ClearRobloxDirectPointerFallback()
-			_, _ = pointerLockSetter(false)
+		} else if pointerLockSticky.Load() {
+			rmbPointerFallback.Store(false)
+			_, _ = pointerLockSetter(true)
+		} else {
+			locked, available := RobloxMainWindowMouseLocked()
+			if available && locked {
+				pointerLockSticky.Store(true)
+				_, _ = pointerLockSetter(true)
+			}
 		}
 		DispatchGameActivityFocus(ev.FocusGained)
 	case x11.InputKey:
@@ -827,6 +840,7 @@ func handleX11InputEvent(ev x11.InputEvent) {
 						// This is the official generic-listener order: observe the
 						// true getter, request capture, consume this transition move,
 						// then deliver later captured relative-axis events.
+						pointerLockSticky.Store(true)
 						_, _ = pointerLockSetter(true)
 						return
 					}
@@ -848,6 +862,7 @@ func handleX11InputEvent(ev x11.InputEvent) {
 					// dispatch and releases/consumes the event when it turns false.
 					rmbPointerFallback.Store(false)
 					ClearRobloxDirectPointerFallback()
+					pointerLockSticky.Store(false)
 					_, _ = pointerLockSetter(false)
 					return
 				}
@@ -859,6 +874,7 @@ func handleX11InputEvent(ev x11.InputEvent) {
 					"available", available, "locked", locked)
 				if available && locked {
 					rmbPointerFallback.Store(false)
+					pointerLockSticky.Store(true)
 					_, _ = pointerLockSetter(true)
 				} else if available {
 					// The observed in-experience client leaves the exact lock getter
@@ -867,6 +883,7 @@ func handleX11InputEvent(ev x11.InputEvent) {
 					// diagnostic: the already-delivered button edge remains live.
 					changed, err := pointerLockSetter(true)
 					if err == nil && changed {
+						pointerLockSticky.Store(true)
 						BeginRobloxDirectPointerFallback(ev.X, ev.Y)
 						// Publish fallback only after its virtual origin is ready. The
 						// X11 bridge normally serializes this stream, but this ordering
@@ -889,6 +906,7 @@ func handleX11InputEvent(ev x11.InputEvent) {
 				locked, available := RobloxMainWindowMouseLocked()
 				rmbPointerFallback.Store(false)
 				if !available || !locked {
+					pointerLockSticky.Store(false)
 					_, _ = pointerLockSetter(false)
 				}
 			default:

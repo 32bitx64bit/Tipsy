@@ -336,12 +336,8 @@ func (w *Window) drainInputLocked() ([]InputEvent, bool) {
 			}
 			w.width, w.height = width, height
 			if w.pointerCaptured {
-				if w.pointerAnchorX >= width {
-					w.pointerAnchorX = width - 1
-				}
-				if w.pointerAnchorY >= height {
-					w.pointerAnchorY = height - 1
-				}
+				w.pointerAnchorX = width / 2
+				w.pointerAnchorY = height / 2
 			}
 			evs = append(evs, InputEvent{Kind: InputResize, Width: width, Height: height})
 		case C.TIPSY_INPUT_TEXT:
