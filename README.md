@@ -339,9 +339,9 @@ git clone https://github.com/32bitx64bit/Tipsy.git
 cd Tipsy
 
 ./scripts/bootstrap.sh
-go test ./...
-go build -o bin/tipsy ./cmd/tipsy
-go build -o bin/tipsy-gui ./cmd/tipsy-gui
+GOAMD64=v2 go test ./...
+GOAMD64=v2 go build -o bin/tipsy ./cmd/tipsy
+GOAMD64=v2 go build -o bin/tipsy-gui ./cmd/tipsy-gui
 ```
 
 `bootstrap.sh` never fails with a one-liner: it reports Go, architecture, Qt, X11, and a C compiler, then tells you what is missing.

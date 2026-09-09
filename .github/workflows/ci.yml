@@ -9,6 +9,9 @@ on:
   pull_request:
   workflow_dispatch:
 
+env:
+  GOAMD64: v2
+
 jobs:
   test:
     name: gofmt, vet, test, build

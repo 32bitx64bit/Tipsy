@@ -40,6 +40,7 @@ cleanup() {
 trap cleanup EXIT HUP INT TERM
 
 cd "${tipsy_repo}"
+export GOAMD64=v2
 tipsy_ldflags="-buildid= -s -w -X github.com/tipsy-linux/tipsy/internal/version.Version=${tipsy_version}"
 go build -buildvcs=false -mod=readonly -trimpath -ldflags "$tipsy_ldflags" -o "${tipsy_work}/tipsy" ./cmd/tipsy
 go build -buildvcs=false -mod=readonly -trimpath -ldflags "$tipsy_ldflags" -o "${tipsy_work}/tipsy-gui" ./cmd/tipsy-gui

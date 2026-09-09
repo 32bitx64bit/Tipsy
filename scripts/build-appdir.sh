@@ -151,6 +151,7 @@ export LC_ALL=C.UTF-8
 export TZ=UTC
 export GOOS=linux
 export GOARCH=amd64
+export GOAMD64=v2
 export CGO_ENABLED=1
 export GOTOOLCHAIN=local
 export GOPROXY=off
