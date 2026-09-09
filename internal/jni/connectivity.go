@@ -83,13 +83,13 @@ func jniInt(n int32) C.jobject {
 
 func packJint(v int32) *C.jvalue {
 	sl := make([]C.jvalue, 1)
-	C.tipsy_jvalue_set_i(&sl[0], C.jint(v))
+	jvalueSetI(&sl[0], C.jint(v))
 	return &sl[0]
 }
 
 func packJobject(obj C.jobject) *C.jvalue {
 	sl := make([]C.jvalue, 1)
-	C.tipsy_jvalue_set_l(&sl[0], obj)
+	jvalueSetL(&sl[0], obj)
 	return &sl[0]
 }
 
@@ -251,7 +251,7 @@ func (vm *VM) classNameFromArg(args *C.jvalue, i int) string {
 	if args == nil {
 		return ""
 	}
-	o := vm.get(jobjectToID(uintptr(C.tipsy_jvalue_l_at(args, C.int(i)))))
+	o := vm.get(jobjectToID(uintptr(jvalueLAt(args, i))))
 	if o == nil {
 		return ""
 	}
@@ -324,7 +324,7 @@ func (vm *VM) dispatchConnectivity(o *Object, class, name, sig string, args *C.j
 	case "getNetworkCapabilities(Landroid/net/Network;)Landroid/net/NetworkCapabilities;":
 		netObj := (*Object)(nil)
 		if args != nil {
-			netObj = vm.get(jobjectToID(uintptr(C.tipsy_jvalue_l_at(args, 0))))
+			netObj = vm.get(jobjectToID(uintptr(jvalueLAt(args, 0))))
 		}
 		if netObj == nil {
 			return jnull(), true

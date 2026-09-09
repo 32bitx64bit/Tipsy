@@ -109,7 +109,7 @@ func luaTextBoxPayload(vm *VM, args *C.jvalue) (string, int) {
 	if vm == nil || args == nil {
 		return "", 0
 	}
-	id := jobjectToID(uintptr(C.tipsy_jvalue_l_at(args, 0)))
+	id := jobjectToID(uintptr(jvalueLAt(args, 0)))
 	vm.mu.RLock()
 	defer vm.mu.RUnlock()
 	if o := vm.objects[id]; o != nil {

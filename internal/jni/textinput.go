@@ -274,7 +274,7 @@ func (vm *VM) dispatchTextInput(o *Object, class, name, sig string, args *C.jval
 	if isShow {
 		var handle int64
 		if args != nil {
-			handle = int64(C.tipsy_jvalue_j(args))
+			handle = int64(jvalueJ(args))
 		}
 		configure := jvalueIAt(args, 1) != 0
 		initial, infoPresent, config := keyboardPayload(vm, args)
@@ -325,8 +325,8 @@ func keyboardPayload(vm *VM, args *C.jvalue) (initial string, infoPresent int, c
 	if vm == nil || args == nil {
 		return "", 0, config
 	}
-	initID := jobjectToID(uintptr(C.tipsy_jvalue_l_at(args, 2)))
-	infoID := jobjectToID(uintptr(C.tipsy_jvalue_l_at(args, 3)))
+	initID := jobjectToID(uintptr(jvalueLAt(args, 2)))
+	infoID := jobjectToID(uintptr(jvalueLAt(args, 3)))
 	vm.mu.Lock()
 	if o := vm.objects[initID]; o != nil {
 		initial = strings.ToValidUTF8(string(o.bytes), "\uFFFD")
@@ -1002,7 +1002,7 @@ func (vm *VM) dispatchTextConnection(o *Object, class, name, sig string, args *C
 		// text: they are never dereferenced here.
 		var ref int64
 		if args != nil {
-			ref = jobjectToID(uintptr(C.tipsy_jvalue_l_at(args, 0)))
+			ref = jobjectToID(uintptr(jvalueLAt(args, 0)))
 		}
 		textConnection.mu.Lock()
 		textConnection.setStateCount++
@@ -1160,7 +1160,7 @@ func seedNativeTextBoxInfoConstructor(vm *VM, obj C.jobject, sig string, args *C
 		dst.fields["textWrapped"] = jvalueIAt(args, 13) != 0
 		dst.fields["editable"] = jvalueIAt(args, 14) != 0
 	case nativeTextBoxInfoCopySig:
-		srcID := jobjectToID(uintptr(C.tipsy_jvalue_l_at(args, 0)))
+		srcID := jobjectToID(uintptr(jvalueLAt(args, 0)))
 		if src := vm.objects[srcID]; src != nil {
 			for k, v := range src.fields {
 				dst.fields[k] = v
@@ -1174,10 +1174,10 @@ func seedNativeTextBoxInfoConstructor(vm *VM, obj C.jobject, sig string, args *C
 // int slot, [B object id, and one NativeTextBoxInfo object id.
 func testPackKeyboardArgs(handle int64, flag int32, initID, boxesID int64) *C.jvalue {
 	sl := make([]C.jvalue, 4)
-	C.tipsy_jvalue_set_j(&sl[0], C.jlong(handle))
-	C.tipsy_jvalue_set_i(&sl[1], C.jint(flag))
-	C.tipsy_jvalue_set_l(&sl[2], idToJobject(initID))
-	C.tipsy_jvalue_set_l(&sl[3], idToJobject(boxesID))
+	jvalueSetJ(&sl[0], C.jlong(handle))
+	jvalueSetI(&sl[1], C.jint(flag))
+	jvalueSetL(&sl[2], idToJobject(initID))
+	jvalueSetL(&sl[3], idToJobject(boxesID))
 	return &sl[0]
 }
 
@@ -1196,7 +1196,7 @@ func testPackNativeTextBoxInfoArgs(x, y, width, height, fontSize float32, multil
 	}
 	for i, v := range []int32{boolInt(multiline), xAlignment, yAlignment, int32(textColor), font,
 		textInputType, returnKeyType, boolInt(manualFocusRelease), boolInt(textWrapped), boolInt(editable)} {
-		C.tipsy_jvalue_set_i(&sl[5+i], C.jint(v))
+		jvalueSetI(&sl[5+i], C.jint(v))
 	}
 	return &sl[0]
 }

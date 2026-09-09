@@ -26,7 +26,7 @@ var argCaptureLogged sync.Map
 // packJlong packs a 64-bit jvalue argument slot (test and capture helper).
 func packJlong(v int64) *C.jvalue {
 	sl := make([]C.jvalue, 1)
-	C.tipsy_jvalue_set_j(&sl[0], C.jlong(v))
+	jvalueSetJ(&sl[0], C.jlong(v))
 	return &sl[0]
 }
 
@@ -100,7 +100,7 @@ func logLifecycleStubArgs(class, name, sig string, args *C.jvalue) {
 	if args == nil {
 		return
 	}
-	v := int64(C.tipsy_jvalue_j(args))
+	v := int64(jvalueJ(args))
 	key := method + "|" + strconv.FormatInt(v, 10)
 	if _, dup := argCaptureLogged.LoadOrStore(key, struct{}{}); dup {
 		return
