@@ -70,7 +70,7 @@ Description: Run the official Roblox Android client on Linux
  Tipsy is an open-source Linux compatibility runtime for the official
  unmodified Roblox Android x86-64 client. Roblox itself is not included
  and must be installed through the in-app setup assistant.
-Depends: libqt6core6 | libqt6core6t64, libqt6gui6 | libqt6gui6t64, libqt6widgets6 | libqt6widgets6t64, libx11-6, libxext6, libxrandr2, libxtst6, libxi6, libegl1, libgles2, libpango-1.0-0, libcairo2, libpulse0
+Depends: libqt6core6 | libqt6core6t64, libqt6gui6 | libqt6gui6t64, libqt6widgets6 | libqt6widgets6t64, libx11-6, libx11-xcb1, libxcb1, libxext6, libxrandr2, libxtst6, libxi6, libegl1, libgles2, libpango-1.0-0, libpangocairo-1.0-0, libpangoft2-1.0-0, libcairo2, libpulse0
 Homepage: https://github.com/32bitx64bit/Tipsy
 Installed-Size: $installed_size
 EOF
@@ -80,26 +80,22 @@ set -e
 if command -v update-desktop-database >/dev/null 2>&1; then
   update-desktop-database -q /usr/share/applications || true
 fi
-#DEBHELPER#
 exit 0
 EOF
 chmod 0755 "$stage/DEBIAN/postinst"
-
-printf 'build-deb: stage usage:\n' >&2
-du -sh "$stage" >&2
-df -h "$stage" "$work" >&2
-find "$stage" -type f -printf '%12s %p\n' | sort -nr | head -8 >&2
-weird=$(find "$stage" ! -type f ! -type d ! -type l -print -quit)
-[[ -z "$weird" ]] || fail "stage contains non-regular entry: $weird"
 
 # gzip: universally accepted by APT, far faster and leaner than the xz default.
 dpkg-deb --root-owner-group -Zgzip --build "$stage" "$work/$deb_name"
 mv -- "$work/$deb_name" "$output_dir/$deb_name"
 
 # Sanity: package opens, ships both binaries and both desktop files.
-dpkg-deb --contents "$output_dir/$deb_name" | grep -q 'usr/bin/tipsy$' || fail 'deb is missing usr/bin/tipsy'
-dpkg-deb --contents "$output_dir/$deb_name" | grep -q 'usr/bin/tipsy-gui$' || fail 'deb is missing usr/bin/tipsy-gui'
-dpkg-deb --contents "$output_dir/$deb_name" | grep -q 'Tipsy.Play.desktop' || fail 'deb is missing the Play desktop file'
+# Capture the listing once instead of piping it into `grep -q`: grep exits on
+# the first match, the tar inside dpkg-deb then dies on EPIPE (GitHub's runner
+# ignores SIGPIPE), and `pipefail` would turn a passing check into a failure.
+contents=$(dpkg-deb --contents "$output_dir/$deb_name") || fail 'deb cannot be listed'
+grep -q 'usr/bin/tipsy$' <<<"$contents" || fail 'deb is missing usr/bin/tipsy'
+grep -q 'usr/bin/tipsy-gui$' <<<"$contents" || fail 'deb is missing usr/bin/tipsy-gui'
+grep -q 'Tipsy.Play.desktop' <<<"$contents" || fail 'deb is missing the Play desktop file'
 if command -v lintian >/dev/null 2>&1; then
   lintian --no-tag-display-limit "$output_dir/$deb_name" || \
     printf 'build-deb: WARNING: lintian reported issues\n' >&2

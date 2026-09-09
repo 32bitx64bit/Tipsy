@@ -51,6 +51,11 @@ mkdir -p "$stage"
 DESTDIR="$stage" PREFIX=/usr VERSION="$version" "$repo/scripts/install-desktop.sh"
 
 cat > "$work/rpmbuild/SPECS/tipsy.spec" <<EOF
+# The Go binaries are already stripped (-s -w): no debuginfo subpackage, or
+# rpmbuild fails on an empty debugfiles.list / picks the wrong output RPM.
+%global debug_package %{nil}
+%global _build_id_links none
+
 Name:           tipsy
 Version:        $version
 Release:        1
@@ -58,9 +63,8 @@ Summary:        Run the official Roblox Android client on Linux
 License:        GPL-3.0-or-later
 URL:            https://github.com/32bitx64bit/Tipsy
 BuildArch:      x86_64
-Requires:       qt6-qtbase-gui, libX11, libXext, libXrandr, libXtst, libXi, mesa-libEGL, mesa-libGLES, pango, cairo, pulseaudio-libs
+Requires:       qt6-qtbase-gui, libX11, libX11-xcb, libxcb, libXext, libXrandr, libXtst, libXi, mesa-libEGL, mesa-libGLES, pango, cairo, pulseaudio-libs
 Provides:       tipsy = %{version}-%{release}
-BuildRoot:      %{_tmppath}/%{name}-%{version}-root
 
 %description
 Tipsy is an open-source Linux compatibility runtime for the official
@@ -92,11 +96,14 @@ fi
 EOF
 
 rpmbuild --define "_topdir $work/rpmbuild" -bb "$work/rpmbuild/SPECS/tipsy.spec"
-built=$(find "$work/rpmbuild/RPMS" -name '*.rpm' | head -n 1)
-[[ -n "$built" && -f "$built" ]] || fail 'rpmbuild produced no RPM'
-mv -- "$built" "$output_dir/$rpm_name"
+mapfile -t built < <(find "$work/rpmbuild/RPMS" -name '*.rpm')
+[[ ${#built[@]} -eq 1 && -f "${built[0]}" ]] || fail "rpmbuild produced ${#built[@]} RPMs, expected exactly one"
+mv -- "${built[0]}" "$output_dir/$rpm_name"
 
+# Listing captured once, not piped into `grep -q` (EPIPE + pipefail false failure).
 rpm -qpi "$output_dir/$rpm_name" >/dev/null || fail 'built RPM is unreadable'
-rpm -qpl "$output_dir/$rpm_name" | grep -q '/usr/bin/tipsy-gui' || fail 'rpm is missing /usr/bin/tipsy-gui'
+files=$(rpm -qpl "$output_dir/$rpm_name") || fail 'built RPM cannot be listed'
+grep -q '^/usr/bin/tipsy$' <<<"$files" || fail 'rpm is missing /usr/bin/tipsy'
+grep -q '^/usr/bin/tipsy-gui$' <<<"$files" || fail 'rpm is missing /usr/bin/tipsy-gui'
 
 printf 'RPM: %s\n' "$output_dir/$rpm_name"

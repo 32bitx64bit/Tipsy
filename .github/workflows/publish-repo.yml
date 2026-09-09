@@ -13,6 +13,8 @@ name: Publish Linux repositories
 #
 # Design: Tipsy owns source+builds; Tipsy-repo owns hosting. APT/DNF/Flatpak
 # updates are owned by those package managers; only AppImage uses latest.json.
+# The release tag pins the compiled source; packaging/ and scripts/ are taken
+# from this workflow's own commit so packaging fixes never need a new tag.
 
 on:
   # UI-created releases (real user actor) arrive via `release`. Releases
@@ -61,6 +63,9 @@ jobs:
       - name: Resolve version and stable gate
         id: resolve
         shell: bash
+        env:
+          # gh needs an explicit token; GITHUB_TOKEN is not a default env var.
+          GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
           if [[ "${{ github.event_name }}" == release ]]; then
@@ -83,7 +88,7 @@ jobs:
                 | sed -e 's|^refs/tags/||' -e 's|\^{}$||' | sort -uV | tail -n 1)
             fi
             [[ -n "${tag:-}" ]] || { echo "could not resolve release tag" >&2; exit 1; }
-            prerelease=$(GH_TOKEN="$GITHUB_TOKEN" gh release view "$tag" \
+            prerelease=$(gh release view "$tag" \
               --repo "$SOURCE_REPO" --json isPrerelease --jq .isPrerelease)
           else
             tag="v${{ inputs.version }}"
@@ -113,6 +118,27 @@ jobs:
           ref: ${{ needs.prepare.outputs.tag }}
           fetch-depth: 0
           persist-credentials: false
+
+      - name: Use packaging tooling from this workflow's commit
+        # The tag pins the source that gets compiled. The packaging recipes and
+        # CI scripts follow the workflow file instead, so a packaging-only fix
+        # on main can be re-published for an existing release without cutting
+        # a new upstream version (the same split Debian makes between upstream
+        # version and packaging revision). Binaries never embed these scripts.
+        shell: bash
+        env:
+          WORKFLOW_SHA: ${{ github.workflow_sha }}
+        run: |
+          set -euo pipefail
+          tag_sha=$(git rev-parse HEAD)
+          if [[ "$WORKFLOW_SHA" == "$tag_sha" ]]; then
+            echo "Packaging tooling already matches the release tag ($tag_sha)."
+            exit 0
+          fi
+          git cat-file -e "$WORKFLOW_SHA^{commit}" || git fetch --no-tags origin "$WORKFLOW_SHA"
+          git checkout --no-overlay "$WORKFLOW_SHA" -- packaging scripts
+          echo "Source: $tag_sha; packaging/ and scripts/: $WORKFLOW_SHA"
+          git status --short -- packaging scripts
 
       - name: Require cross-repository credentials
         shell: bash
@@ -291,8 +317,10 @@ jobs:
           else
             echo "NOTICE: re-indexing Flatpak repo without a new bundle."
           fi
+          # Signs the summary and prunes old Flatpak commits in one rewrite.
           bash "$repo/scripts/update-flatpak-repo.sh" --repo-root "$repo" \
-            --gpg-key "$TIPSY_GPG_KEY_ID" "${bundle_args[@]}"
+            --gpg-key "$TIPSY_GPG_KEY_ID" --keep 3 "${bundle_args[@]}"
+          # .deb/.rpm files only; the OSTree repo was pruned (signed) above.
           bash "$repo/scripts/prune-old-packages.sh" --repo-root "$repo" --keep 3
         env:
           TIPSY_GPG_KEY_ID: ${{ secrets.TIPSY_GPG_KEY_ID }}
@@ -416,9 +444,12 @@ jobs:
           get_ok "$base/flatpak/tipsy.flatpakrepo"
           get_ok "$base/flatpak/repo/summary"
 
-          # The APT index must actually offer this version.
-          curl -fsSL --max-time 60 "$base/apt/dists/stable/main/binary-amd64/Packages" \
-            | grep -q "^Version: $version$" || fail "APT Packages index does not offer $version"
+          # The APT index must actually offer this version. (Fetched to a file
+          # rather than piped into grep -q: with pipefail an early grep exit
+          # would surface as a curl write error.)
+          curl -fsSL --max-time 60 -o Packages "$base/apt/dists/stable/main/binary-amd64/Packages" \
+            || fail "could not fetch the APT Packages index"
+          grep -q "^Version: $version$" Packages || fail "APT Packages index does not offer $version"
 
           echo "## Live verification passed for $version" >> "$GITHUB_STEP_SUMMARY"
           echo "All repository URLs serve the new release." >> "$GITHUB_STEP_SUMMARY"
