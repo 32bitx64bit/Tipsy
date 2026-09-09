@@ -1,8 +1,9 @@
 <div align="center">
 
-<img src="tipsy.png" width="128" alt="Tipsy">
-
-# Tipsy
+<h1>
+  <img src="tipsy.png" width="72" alt="" align="absmiddle">
+  Tipsy
+</h1>
 
 **Open-source Linux compatibility runtime for the official unmodified Roblox Android client.**
 
