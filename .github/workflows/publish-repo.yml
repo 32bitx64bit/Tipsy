@@ -136,6 +136,20 @@ jobs:
           check-latest: false
           cache: false
 
+      - name: Free runner disk space (Qt + Go builds need gigabytes)
+        shell: bash
+        run: |
+          set -euo pipefail
+          df -h / /tmp
+          # Hosted toolchains we never use; hostedtoolcache is left alone
+          # because setup-go owns it. Docker prune and apt clean included.
+          sudo rm -rf /usr/share/dotnet /opt/ghc /opt/hostedtoolcache/CodeQL \
+            /usr/local/lib/android /usr/local/share/boost \
+            /usr/share/swift 2>/dev/null || true
+          docker system prune -af >/dev/null 2>&1 || true
+          sudo apt-get clean
+          df -h / /tmp
+
       - name: Install native and packaging tools
         shell: bash
         run: |
