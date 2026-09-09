@@ -143,7 +143,7 @@ func TestVulkanPresentStatsDisabledSkipsHotPath(t *testing.T) {
 	SetVulkanPresentStats(true)
 	resetVulkanPresentStats()
 	t.Cleanup(func() {
-		SetVulkanPresentStats(true)
+		SetVulkanPresentStats(false)
 		resetVulkanPresentStats()
 	})
 
@@ -185,11 +185,23 @@ func TestVulkanWSIBindRequiresDisplayAndWindow(t *testing.T) {
 	}
 }
 
+func TestVulkanPresentStatsFollowGraphicsInfoLogger(t *testing.T) {
+	t.Cleanup(func() {
+		SetVulkanPresentStats(false)
+		resetVulkanPresentStats()
+	})
+	SetVulkanPresentStats(!presentStatsLoggerEnabled())
+	SetVulkanPresentStats(presentStatsLoggerEnabled())
+	if got, want := VulkanPresentStatsEnabled(), presentStatsLoggerEnabled(); got != want {
+		t.Fatalf("Vulkan present stats enabled=%v, want logger Info gate %v", got, want)
+	}
+}
+
 func TestVulkanPresentTimingGatingAndResults(t *testing.T) {
 	cursor := SetVulkanPresentTiming(false)
 	t.Cleanup(func() {
 		SetVulkanPresentTiming(false)
-		SetVulkanPresentStats(true)
+		SetVulkanPresentStats(false)
 		resetVulkanPresentStats()
 	})
 	SetVulkanPresentStats(true)
@@ -372,7 +384,10 @@ func TestVulkanPresentTimingToggleWhileRecording(t *testing.T) {
 
 func BenchmarkVulkanPresentTiming(b *testing.B) {
 	SetVulkanPresentStats(true)
-	b.Cleanup(func() { SetVulkanPresentTiming(false) })
+	b.Cleanup(func() {
+		SetVulkanPresentTiming(false)
+		SetVulkanPresentStats(false)
+	})
 	for _, enabled := range []bool{false, true} {
 		name := "disabled"
 		if enabled {
@@ -380,6 +395,29 @@ func BenchmarkVulkanPresentTiming(b *testing.B) {
 		}
 		b.Run(name, func(b *testing.B) {
 			SetVulkanPresentTiming(enabled)
+			b.ReportAllocs()
+			b.ResetTimer()
+			for i := 0; i < b.N; i++ {
+				testVulkanNotePresentSuccess()
+			}
+		})
+	}
+}
+
+func BenchmarkVulkanPresentStats(b *testing.B) {
+	SetVulkanPresentTiming(false)
+	b.Cleanup(func() {
+		SetVulkanPresentStats(false)
+		resetVulkanPresentStats()
+	})
+	for _, enabled := range []bool{false, true} {
+		name := "disabled"
+		if enabled {
+			name = "enabled"
+		}
+		b.Run(name, func(b *testing.B) {
+			SetVulkanPresentStats(enabled)
+			resetVulkanPresentStats()
 			b.ReportAllocs()
 			b.ResetTimer()
 			for i := 0; i < b.N; i++ {

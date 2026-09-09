@@ -149,7 +149,8 @@ static unsigned long wsi_xid;
 static xcb_connection_t *wsi_xcb;
 
 static _Atomic int vk_vsync_enabled;
-static _Atomic int vk_present_stats_enabled = 1;
+/* Default off. Go enables this when the 2s graphics Info logger will emit. */
+static _Atomic int vk_present_stats_enabled;
 static _Atomic uint64_t vk_successful_presents;
 static _Atomic uint64_t vk_first_present_ns;
 static _Atomic uint64_t vk_last_present_ns;

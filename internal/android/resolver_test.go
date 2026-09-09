@@ -86,6 +86,73 @@ func TestEGLSwapStatsReportsSuccessfulPresentRate(t *testing.T) {
 	}
 }
 
+func TestEGLSwapStatsDisabledSkipsHotPath(t *testing.T) {
+	SetEGLPresentStats(true)
+	resetEGLSwapStats()
+	t.Cleanup(func() {
+		SetEGLPresentStats(false)
+		resetEGLSwapStats()
+	})
+
+	SetEGLPresentStats(false)
+	if EGLPresentStatsEnabled() {
+		t.Fatal("SetEGLPresentStats(false) left stats enabled")
+	}
+	testEGLNoteSuccessfulSwap()
+	got := EGLSwapStats()
+	if got.SuccessfulSwaps != 0 {
+		t.Fatalf("disabled hot path recorded %+v", got)
+	}
+
+	testEGLRecordSwap(1_000_000_000)
+	if EGLSwapStats().SuccessfulSwaps != 1 {
+		t.Fatal("tipsy_test_egl_record_swap must record while stats are disabled")
+	}
+
+	resetEGLSwapStats()
+	SetEGLPresentStats(true)
+	testEGLNoteSuccessfulSwap()
+	testEGLNoteSuccessfulSwap()
+	got = EGLSwapStats()
+	if got.SuccessfulSwaps != 2 {
+		t.Fatalf("enabled swap stats = %+v", got)
+	}
+}
+
+func TestEGLPresentStatsFollowGraphicsInfoLogger(t *testing.T) {
+	t.Cleanup(func() {
+		SetEGLPresentStats(false)
+		resetEGLSwapStats()
+	})
+	SetEGLPresentStats(false)
+	SetEGLVSync(false)
+	if got, want := EGLPresentStatsEnabled(), presentStatsLoggerEnabled(); got != want {
+		t.Fatalf("SetEGLVSync present stats enabled=%v, want logger Info gate %v", got, want)
+	}
+}
+
+func BenchmarkEGLSwapStats(b *testing.B) {
+	b.Cleanup(func() {
+		SetEGLPresentStats(false)
+		resetEGLSwapStats()
+	})
+	for _, enabled := range []bool{false, true} {
+		name := "disabled"
+		if enabled {
+			name = "enabled"
+		}
+		b.Run(name, func(b *testing.B) {
+			SetEGLPresentStats(enabled)
+			resetEGLSwapStats()
+			b.ReportAllocs()
+			b.ResetTimer()
+			for i := 0; i < b.N; i++ {
+				testEGLNoteSuccessfulSwap()
+			}
+		})
+	}
+}
+
 func TestEGLSwapIntervalPolicyVSyncOffForcesZero(t *testing.T) {
 	t.Cleanup(func() { SetEGLVSync(false) })
 	testEGLRecordSwap(1_000_000_000)

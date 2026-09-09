@@ -119,6 +119,7 @@ func SetEGLVSync(enabled bool) {
 	}
 	C.tipsy_egl_set_vsync(value)
 	C.tipsy_egl_reset_swap_stats()
+	SetEGLPresentStats(presentStatsLoggerEnabled())
 	logging.Logger(logging.CatGraphics).Info("Android EGL VSync policy configured", "vsync", enabled)
 }
 
@@ -134,6 +135,10 @@ func EGLSwapStats() EGLSwapStatistics {
 	stats.Elapsed = time.Duration(uint64(lastNS) - uint64(firstNS))
 	stats.RateFPS = float64(stats.SuccessfulSwaps-1) / stats.Elapsed.Seconds()
 	return stats
+}
+
+func resetEGLSwapStats() {
+	C.tipsy_egl_reset_swap_stats()
 }
 
 func testEGLRecordSwap(nowNS uint64) {

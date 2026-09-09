@@ -42,6 +42,8 @@ static egl_swap_interval_fn host_eglSwapInterval;
 static egl_swap_buffers_fn host_eglSwapBuffers;
 static egl_get_error_fn host_eglGetError;
 static _Atomic int egl_vsync_enabled;
+/* Default off. Go enables this when the 2s graphics Info logger will emit. */
+static _Atomic int egl_present_stats_enabled;
 static _Atomic uint64_t egl_successful_swaps;
 static _Atomic uint64_t egl_first_swap_ns;
 static _Atomic uint64_t egl_last_swap_ns;
@@ -182,6 +184,29 @@ static uint64_t tipsy_monotonic_ns(void)
 	return (uint64_t)ts.tv_sec * 1000000000ull + (uint64_t)ts.tv_nsec;
 }
 
+static void tipsy_egl_note_successful_swap(void)
+{
+	uint64_t now_ns;
+
+	if (!atomic_load_explicit(&egl_present_stats_enabled, memory_order_relaxed)) {
+		return;
+	}
+	now_ns = tipsy_monotonic_ns();
+	if (now_ns != 0) {
+		tipsy_egl_record_successful_swap(now_ns);
+	}
+}
+
+void tipsy_egl_set_present_stats(int enabled)
+{
+	atomic_store_explicit(&egl_present_stats_enabled, enabled != 0, memory_order_relaxed);
+}
+
+int tipsy_egl_present_stats_enabled(void)
+{
+	return atomic_load_explicit(&egl_present_stats_enabled, memory_order_relaxed);
+}
+
 void tipsy_egl_reset_swap_stats(void)
 {
 	atomic_store_explicit(&egl_successful_swaps, 0, memory_order_release);
@@ -206,6 +231,11 @@ void tipsy_egl_swap_stats(uint64_t *successful_swaps, uint64_t *first_ns,
 void tipsy_test_egl_record_swap(uint64_t now_ns)
 {
 	tipsy_egl_record_successful_swap(now_ns);
+}
+
+void tipsy_test_egl_note_successful_swap(void)
+{
+	tipsy_egl_note_successful_swap();
 }
 
 void tipsy_egl_set_vsync(int enabled)
@@ -270,7 +300,6 @@ EGLBoolean tipsy_eglSwapInterval(EGLDisplay dpy, EGLint interval)
 EGLBoolean tipsy_eglSwapBuffers(EGLDisplay dpy, EGLSurface surface)
 {
 	EGLBoolean ok;
-	uint64_t now_ns;
 
 	ensure_egl();
 	if (host_eglSwapBuffers == NULL) {
@@ -279,10 +308,7 @@ EGLBoolean tipsy_eglSwapBuffers(EGLDisplay dpy, EGLSurface surface)
 	}
 	ok = host_eglSwapBuffers(dpy, surface);
 	if (ok == TIPSY_EGL_TRUE) {
-		now_ns = tipsy_monotonic_ns();
-		if (now_ns != 0) {
-			tipsy_egl_record_successful_swap(now_ns);
-		}
+		tipsy_egl_note_successful_swap();
 	}
 	return ok;
 }

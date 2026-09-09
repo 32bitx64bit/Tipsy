@@ -42,9 +42,7 @@ func BindVulkanWSI(display, xid uintptr) error {
 	if C.tipsy_vk_bind_wsi(C.uintptr_t(display), C.uintptr_t(xid)) != 0 {
 		return fmt.Errorf("graphics: vulkan WSI bind requires a live X11 display and window")
 	}
-	if !logging.Logger(logging.CatGraphics).Enabled(context.Background(), slog.LevelInfo) {
-		SetVulkanPresentStats(false)
-	}
+	SetVulkanPresentStats(presentStatsLoggerEnabled())
 	seedPresentRateWindow()
 	logging.Logger(logging.CatGraphics).Info("Android Vulkan WSI bound to X11 window",
 		"xcb", C.tipsy_vk_host_has_xcb_surface() != 0,
@@ -115,10 +113,16 @@ func resetVulkanPresentStats() {
 	resetPresentRateWindow()
 }
 
+// presentStatsLoggerEnabled is true when graphics Info will emit, which is
+// the same gate as launch.go's 2s present-stats ticker.
+func presentStatsLoggerEnabled() bool {
+	return logging.Logger(logging.CatGraphics).Enabled(context.Background(), slog.LevelInfo)
+}
+
 // SetVulkanPresentStats enables or disables vkQueuePresentKHR success
-// counters. Production defaults to on so launch.go's 2s Info logs keep working.
-// When off, present is a host call with no clock or stats atomics beyond the
-// relaxed enable load.
+// counters. Both EGL and Vulkan default off: a successful present is a host
+// call plus one relaxed enable load. BindVulkanWSI and SetEGLVSync turn the
+// matching backend on only when the graphics Info logger will emit.
 func SetVulkanPresentStats(enabled bool) {
 	v := C.int(0)
 	if enabled {
@@ -131,6 +135,23 @@ func SetVulkanPresentStats(enabled bool) {
 // observation counter.
 func VulkanPresentStatsEnabled() bool {
 	return C.tipsy_vk_present_stats_enabled() != 0
+}
+
+// SetEGLPresentStats enables or disables eglSwapBuffers clock+counter
+// bookkeeping. Default off; SetEGLVSync enables it when the 2s Info logger
+// will emit. When off, swap is a host call plus one relaxed enable load.
+func SetEGLPresentStats(enabled bool) {
+	v := C.int(0)
+	if enabled {
+		v = 1
+	}
+	C.tipsy_egl_set_present_stats(v)
+}
+
+// EGLPresentStatsEnabled reports whether successful swaps sample the clock
+// and increment the observation counter.
+func EGLPresentStatsEnabled() bool {
+	return C.tipsy_egl_present_stats_enabled() != 0
 }
 
 // VulkanPresentStats returns a process-atomic observation of successful
@@ -362,4 +383,8 @@ func vulkanWSIBound() bool {
 
 func testVulkanNotePresentResult(result int32, nowNS uint64) {
 	C.tipsy_test_vk_note_present_result(C.int32_t(result), C.uint64_t(nowNS))
+}
+
+func testEGLNoteSuccessfulSwap() {
+	C.tipsy_test_egl_note_successful_swap()
 }

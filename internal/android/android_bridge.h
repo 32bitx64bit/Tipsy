@@ -151,10 +151,13 @@ void *tipsy_android_lookup(const char *lib, const char *name);
  * A rejected policy interval falls back to the exact client request. */
 void tipsy_egl_set_vsync(int enabled);
 int tipsy_egl_vsync_enabled(void);
+void tipsy_egl_set_present_stats(int enabled);
+int tipsy_egl_present_stats_enabled(void);
 void tipsy_egl_swap_stats(uint64_t *successful_swaps, uint64_t *first_ns,
                           uint64_t *last_ns);
 void tipsy_egl_reset_swap_stats(void);
 void tipsy_test_egl_record_swap(uint64_t now_ns);
+void tipsy_test_egl_note_successful_swap(void);
 int tipsy_test_egl_proc_is_wrapped(const char *name);
 int tipsy_test_egl_swap_interval_policy(int vsync, int requested,
 										int policy_result, int policy_error,
