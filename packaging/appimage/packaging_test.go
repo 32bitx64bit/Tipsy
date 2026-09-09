@@ -563,9 +563,39 @@ func TestWorkflowDependenciesAreImmutableAndLeastPrivilege(t *testing.T) {
 			t.Errorf("workflow retains unsafe/mutable setting %q", forbidden)
 		}
 	}
-	for _, required := range []string{"permissions:\n  contents: read", "persist-credentials: false", `go-version: "1.27.1"`} {
+	for _, required := range []string{
+		"permissions:\n  contents: read",
+		"persist-credentials: false",
+		`go-version: "1.27.1"`,
+		"scripts/ci-install-native.sh",
+		"scripts/ci-test-build.sh",
+		"ubuntu-22.04",
+		"ubuntu-24.04",
+		"debian:bookworm-slim",
+		"fedora:43",
+	} {
 		if !strings.Contains(text, required) {
 			t.Errorf("workflow is missing %q", required)
+		}
+	}
+	install, err := os.ReadFile(filepath.Join(repoRoot(t), "scripts", "ci-install-native.sh"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	installText := string(install)
+	for _, required := range []string{"libpulse-dev", "libxi-dev", "xvfb", "pulseaudio-libs-devel", "libXi-devel", "pkg-config --exists"} {
+		if !strings.Contains(installText, required) {
+			t.Errorf("ci-install-native.sh is missing %q", required)
+		}
+	}
+	testBuild, err := os.ReadFile(filepath.Join(repoRoot(t), "scripts", "ci-test-build.sh"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	testText := string(testBuild)
+	for _, required := range []string{"go vet ./...", "go test", "go build -o bin/tipsy ./cmd/tipsy", "go build -o bin/tipsy-gui ./cmd/tipsy-gui", "Xvfb"} {
+		if !strings.Contains(testText, required) {
+			t.Errorf("ci-test-build.sh is missing %q", required)
 		}
 	}
 }
@@ -616,6 +646,7 @@ func TestReleaseWorkflowSecurityIfPresent(t *testing.T) {
 		"release-candidate-keyless",
 		"libcap2-bin",
 		"libpulse-dev",
+		"libxi-dev",
 		"libpulse-simple",
 		"actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02",
 		"actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093",

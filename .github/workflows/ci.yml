@@ -9,14 +9,23 @@ on:
   pull_request:
   workflow_dispatch:
 
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
 env:
   GOAMD64: v2
+  CGO_ENABLED: "1"
+
+defaults:
+  run:
+    shell: bash
 
 jobs:
-  test:
-    name: gofmt, vet, test, build
+  format:
+    name: gofmt
     runs-on: ubuntu-24.04
-    timeout-minutes: 30
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
@@ -28,6 +37,8 @@ jobs:
           cache: false
 
       - name: Format
+        env:
+          CGO_ENABLED: "0"
         run: |
           unformatted=$(gofmt -l .)
           if [ -n "$unformatted" ]; then
@@ -36,39 +47,84 @@ jobs:
             exit 1
           fi
 
-      - name: Native headers
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y gcc pkg-config libx11-dev libx11-xcb-dev libxext-dev libpango1.0-dev libegl1-mesa-dev libgles2-mesa-dev libxrandr-dev libxtst-dev xvfb
-          pkg-config --exists x11 x11-xcb xrandr xext pangocairo pangoft2 cairo-xlib egl glesv2 xtst
-          test -f /usr/include/X11/Xlib-xcb.h
-
-      - name: Vet
-        run: go vet ./...
-
-      - name: Test
-        run: go test ./...
-
-      - name: Build CLI
-        run: go build -o bin/tipsy ./cmd/tipsy
-
-  gui:
-    name: GUI build (required)
-    runs-on: ubuntu-24.04
-    timeout-minutes: 30
+  ubuntu:
+    name: ${{ matrix.name }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: Ubuntu 24.04
+            os: ubuntu-24.04
+          - name: Ubuntu 22.04
+            os: ubuntu-22.04
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
           persist-credentials: false
+
       - uses: actions/setup-go@d35c59abb061a4a6fb18e82ac0862c26744d6ab5 # v5.5.0
         with:
           go-version: "1.27.1"
           cache: false
-      - name: Qt 6 and native headers
+
+      - name: Native headers and Qt 6
+        run: scripts/ci-install-native.sh
+
+      - name: Vet, test, and build
+        run: scripts/ci-test-build.sh
+
+  distro:
+    name: ${{ matrix.name }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    container: ${{ matrix.image }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: Debian Bookworm
+            image: debian:bookworm-slim
+          - name: Fedora 43
+            image: fedora:43
+    steps:
+      - name: Install git for checkout
         run: |
-          sudo apt-get update
-          sudo apt-get install -y qt6-base-dev g++ pkg-config libx11-dev libx11-xcb-dev libxext-dev libpango1.0-dev libegl1-mesa-dev libgles2-mesa-dev libxrandr-dev libxtst-dev
-          pkg-config --exists x11 x11-xcb xrandr xext pangocairo pangoft2 cairo-xlib egl glesv2 xtst
-          test -f /usr/include/X11/Xlib-xcb.h
-      - name: Build GUI
-        run: go build -o bin/tipsy-gui ./cmd/tipsy-gui
+          set -euo pipefail
+          if command -v apt-get >/dev/null 2>&1; then
+            export DEBIAN_FRONTEND=noninteractive
+            apt-get update
+            apt-get install -y --no-install-recommends ca-certificates curl git
+          else
+            dnf install -y --setopt=install_weak_deps=False ca-certificates curl git
+          fi
+
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-go@d35c59abb061a4a6fb18e82ac0862c26744d6ab5 # v5.5.0
+        with:
+          go-version: "1.27.1"
+          cache: false
+
+      - name: Native headers and Qt 6
+        run: scripts/ci-install-native.sh
+
+      - name: Vet, test, and build
+        run: scripts/ci-test-build.sh
+
+  result:
+    name: CI
+    if: always()
+    needs: [format, ubuntu, distro]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - name: Required jobs succeeded
+        run: |
+          set -euo pipefail
+          test "${{ needs.format.result }}" = "success"
+          test "${{ needs.ubuntu.result }}" = "success"
+          test "${{ needs.distro.result }}" = "success"

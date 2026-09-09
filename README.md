@@ -291,6 +291,8 @@ The GUI (`cmd/tipsy-gui`) is presentation only. Package provenance, extraction, 
 
 ### 1. Toolchain
 
+GitHub Actions runs `gofmt`, then `go vet`, the full `go test` suite under Xvfb, and CLI/GUI builds on Ubuntu 22.04, Ubuntu 24.04, Debian Bookworm, and Fedora 43.
+
 | Tool | Version |
 | --- | --- |
 | Go | **1.27.1** (matches `go.mod` and CI) |
@@ -301,7 +303,7 @@ Install Go from [go.dev/dl](https://go.dev/dl/) if your distro’s package is ol
 
 ### 2. Distribution packages
 
-**Debian / Ubuntu** (same set CI uses, plus Pulse and XInput used by the runtime):
+**Debian / Ubuntu** (same set CI uses):
 
 ```sh
 sudo apt-get update
