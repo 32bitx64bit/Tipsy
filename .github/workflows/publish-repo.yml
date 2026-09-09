@@ -315,3 +315,70 @@ jobs:
             git commit -m "repo: publish ${{ needs.prepare.outputs.version }}"
             git push origin HEAD:main
           fi
+
+  verify-live:
+    # Post-publish smoke test against the real Pages deployment. The push above
+    # is already live-safe (strict-verified); this job only alerts when the
+    # public site does not converge, e.g. a stuck Pages deploy. It needs no
+    # secrets: everything checked is public.
+    needs: [prepare, publish]
+    if: needs.prepare.outputs.do_publish == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Wait for Pages, then verify the live repositories
+        shell: bash
+        run: |
+          set -euo pipefail
+          version='${{ needs.prepare.outputs.version }}'
+          base="$PAGES_BASE"
+          fail() { echo "::error::$*" >&2; exit 1; }
+
+          # Pages deploys take a few minutes and vary; poll instead of a fixed sleep.
+          deadline=$(( SECONDS + 900 ))
+          while (( SECONDS < deadline )); do
+            live=$(curl -fsSL --max-time 30 "$base/latest.json" 2>/dev/null || true)
+            if [[ -n "$live" ]] && \
+               [[ "$(printf '%s' "$live" | python3 -c 'import json,sys; print(json.load(sys.stdin).get("version", ""))')" == "$version" ]]; then
+              echo "Pages serves latest.json version $version."
+              break
+            fi
+            echo "Waiting for Pages to serve $version ... ($(date -u +%H:%M:%SZ))"
+            sleep 30
+          done
+          [[ -n "${live:-}" ]] || fail "latest.json never became reachable within 15 minutes"
+          printf '%s' "$live" | python3 -c 'import json,sys; print(json.load(sys.stdin).get("version", ""))' | grep -qx "$version" \
+            || fail "live latest.json is not version $version after 15 minutes"
+
+          # Manifest schema on the live file.
+          printf '%s' "$live" | python3 - <<'PY'
+          import json, re, sys
+          manifest = json.load(sys.stdin)
+          assert manifest["channel"] == "stable", "channel is not stable"
+          assert manifest["assets"], "no assets in live manifest"
+          for key, asset in manifest["assets"].items():
+              assert asset["url"].startswith("https://"), f"{key} URL is not HTTPS"
+              assert re.fullmatch(r"[0-9a-f]{64}", asset["sha256"]), f"{key} has a malformed sha256"
+          print(f'live manifest ok ({len(manifest["assets"])} assets)')
+          PY
+
+          get_ok() { curl -fsSL --max-time 60 -o /dev/null "$1" || fail "not reachable: $1"; echo "ok: $1"; }
+          head_ok() { curl -fsSI --max-time 60 "$1" >/dev/null || fail "not reachable: $1"; echo "ok: $1"; }
+
+          get_ok "$base/latest.json.sig"
+          get_ok "$base/keys/tipsy-signing-key.asc"
+          get_ok "$base/apt/dists/stable/InRelease"
+          get_ok "$base/apt/dists/stable/main/binary-amd64/Packages"
+          head_ok "$base/apt/pool/tipsy_${version}_amd64.deb"
+          get_ok "$base/rpm/x86_64/repodata/repomd.xml"
+          head_ok "$base/rpm/x86_64/tipsy-${version}-1.x86_64.rpm"
+          get_ok "$base/rpm/tipsy.repo"
+          get_ok "$base/flatpak/tipsy.flatpakrepo"
+          get_ok "$base/flatpak/repo/summary"
+
+          # The APT index must actually offer this version.
+          curl -fsSL --max-time 60 "$base/apt/dists/stable/main/binary-amd64/Packages" \
+            | grep -q "^Version: $version$" || fail "APT Packages index does not offer $version"
+
+          echo "## Live verification passed for $version" >> "$GITHUB_STEP_SUMMARY"
+          echo "All repository URLs serve the new release." >> "$GITHUB_STEP_SUMMARY"
