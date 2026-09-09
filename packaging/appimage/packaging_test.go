@@ -424,7 +424,7 @@ func TestReleaseGuardRejectsFileCapabilities(t *testing.T) {
 	}
 }
 
-func TestReleaseInputLockSeparatesGitHubSignedAndTUF(t *testing.T) {
+func TestReleaseInputLockSeparatesGitHubSignedAndOfficial(t *testing.T) {
 	repo := repoRoot(t)
 	script := filepath.Join(repo, "scripts", "release-lock.py")
 	lock := filepath.Join(repo, "scripts", "release-inputs.lock.json")
@@ -436,7 +436,7 @@ func TestReleaseInputLockSeparatesGitHubSignedAndTUF(t *testing.T) {
 	}
 	output, err := exec.Command(script, "--lock", lock, "--mode", "official").CombinedOutput()
 	if err == nil || !strings.Contains(string(output), "pinned builder image digest") {
-		t.Fatalf("GitHub-signed lock did not block the stricter TUF build: %v\n%s", err, output)
+		t.Fatalf("GitHub-signed lock did not block the stricter official build: %v\n%s", err, output)
 	}
 	digest, err := exec.Command(script, "--lock", lock, "--mode", "developer", "--digest").Output()
 	if err != nil || !regexp.MustCompile(`^[0-9a-f]{64}\n$`).Match(digest) {

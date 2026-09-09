@@ -14,11 +14,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/tipsy-linux/tipsy/internal/config"
 	"github.com/tipsy-linux/tipsy/internal/integrity"
-	"github.com/tipsy-linux/tipsy/internal/releasemeta"
 	"github.com/tipsy-linux/tipsy/internal/runtime"
-	"github.com/tipsy-linux/tipsy/internal/securitypolicy"
 	"github.com/tipsy-linux/tipsy/internal/setupsvc"
 )
 
@@ -150,27 +147,12 @@ func TestResolveLaunchAuthorityPersistsExplicitDevelopmentState(t *testing.T) {
 	}
 }
 
-func TestResolveLaunchAuthorityReturnsOfficialStateOnlyAfterProductionVerification(t *testing.T) {
+func TestResolveLaunchAuthorityReturnsOfficialStateForIdentifiedAppImage(t *testing.T) {
 	xdg := t.TempDir()
 	t.Setenv("XDG_CONFIG_HOME", filepath.Join(xdg, "config"))
 	t.Setenv("XDG_DATA_HOME", filepath.Join(xdg, "data"))
-	if err := config.Save(testOfficialConfig()); err != nil {
-		t.Fatal(err)
-	}
-	now := time.Date(2026, 9, 6, 12, 0, 0, 0, time.UTC)
-	policy := testRobloxPolicy(now)
 	deps := authorityDependencies{
-		now:      func() time.Time { return now },
-		readRoot: func(string) ([]byte, error) { return []byte("root"), nil },
-		verifyRelease: func(releasemeta.VerifyOptions) (releasemeta.Result, error) {
-			return releasemeta.Result{
-				Verified: true, State: releasemeta.OfficialVerified,
-				ProductionRootBound: true, ProductionEvidenceBound: true,
-			}, nil
-		},
-		readPolicy: func(string, releasemeta.Result, time.Time) (securitypolicy.RobloxPolicy, error) {
-			return policy, nil
-		},
+		identifyOfficialRelease: func(context.Context) error { return nil },
 	}
 	state, authority, err := resolveLaunchAuthorityState(context.Background(), false, deps)
 	if err != nil {

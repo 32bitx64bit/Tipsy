@@ -39,12 +39,7 @@ func cmdSetup(ctx context.Context, args []string, stdout, stderr io.Writer) int 
 		fmt.Fprintln(stderr, logging.Redact(err.Error()))
 		return 1
 	}
-	service := setupsvc.New()
-	installedVersion := int64(0)
-	if snapshot, snapshotErr := service.Snapshot(ctx); snapshotErr == nil {
-		installedVersion = snapshot.VersionCode
-	}
-	authority, err := resolveAuthority(ctx, cfg, installedVersion, defaultAuthorityDependencies())
+	authority, err := resolveAuthority(ctx, cfg, defaultAuthorityDependencies())
 	if err != nil {
 		fmt.Fprintln(stderr, logging.Redact(err.Error()))
 		return 1
@@ -52,6 +47,7 @@ func cmdSetup(ctx context.Context, args []string, stdout, stderr io.Writer) int 
 	if authority.Mode == setupsvc.DevelopmentUnrestricted {
 		printDevelopmentWarning(stderr)
 	}
+	service := setupsvc.New()
 	service.Trust = authority.Trust
 	res, err := service.Install(ctx, setupsvc.InstallRequest{Mode: setupsvc.InstallLocal, LocalPaths: f.rest}, nil)
 	if err != nil {

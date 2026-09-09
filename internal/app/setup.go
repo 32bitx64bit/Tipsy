@@ -30,11 +30,7 @@ func packageAuthorizationTrust(ctx context.Context, approveDevelopment bool, dep
 	if err != nil {
 		return setupsvc.TrustPolicy{}, err
 	}
-	installedVersion := int64(0)
-	if snapshot, snapshotErr := setupsvc.New().Snapshot(ctx); snapshotErr == nil {
-		installedVersion = snapshot.VersionCode
-	}
-	authority, err := resolveAuthority(ctx, cfg, installedVersion, deps)
+	authority, err := resolveAuthority(ctx, cfg, deps)
 	if err == nil {
 		return authority.Trust, nil
 	}

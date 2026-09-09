@@ -5,56 +5,49 @@ package app
 
 import (
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
-	"encoding/json"
 	"errors"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
-	"time"
 
 	"github.com/tipsy-linux/tipsy/internal/config"
 	"github.com/tipsy-linux/tipsy/internal/integrity"
-	"github.com/tipsy-linux/tipsy/internal/keylessrelease"
-	"github.com/tipsy-linux/tipsy/internal/releasemeta"
 	"github.com/tipsy-linux/tipsy/internal/runtime"
-	"github.com/tipsy-linux/tipsy/internal/securitypolicy"
 	"github.com/tipsy-linux/tipsy/internal/setupsvc"
 )
 
-func TestResolveAuthorityNeverInfersOfficialFromMissingH0(t *testing.T) {
-	_, err := resolveAuthority(context.Background(), &config.Config{}, 0, defaultAuthorityDependencies())
+func TestResolveAuthorityNeverInfersOfficialWithoutAppImage(t *testing.T) {
+	_, err := resolveAuthority(context.Background(), &config.Config{}, defaultAuthorityDependencies())
 	if !errors.Is(err, ErrDevelopmentConsentRequired) {
 		t.Fatalf("missing authority error = %v", err)
 	}
 	cfg := &config.Config{}
 	cfg.ApproveDevelopment()
-	got, err := resolveAuthority(context.Background(), cfg, 0, defaultAuthorityDependencies())
+	got, err := resolveAuthority(context.Background(), cfg, defaultAuthorityDependencies())
 	if err != nil || got.Mode != setupsvc.DevelopmentUnrestricted || got.Trust.Mode != setupsvc.DevelopmentUnrestricted || got.Trust.RobloxPolicy != nil {
 		t.Fatalf("explicit development resolution = %+v, %v", got, err)
 	}
 }
 
-func TestResolveAuthorityPrefersVerifiedGitHubReleaseOverDevelopmentConsent(t *testing.T) {
+func TestResolveAuthorityPrefersOfficialAppImageOverDevelopmentConsent(t *testing.T) {
 	cfg := &config.Config{}
 	cfg.ApproveDevelopment()
 	deps := defaultAuthorityDependencies()
-	deps.verifyGitHubRelease = func(context.Context) error { return nil }
-	got, err := resolveAuthority(context.Background(), cfg, 0, deps)
+	deps.identifyOfficialRelease = func(context.Context) error { return nil }
+	got, err := resolveAuthority(context.Background(), cfg, deps)
 	if err != nil || got.Mode != setupsvc.OfficialVerified || got.Trust.Mode != setupsvc.OfficialVerified || !got.Trust.ReleaseAuthenticated || got.Trust.RobloxPolicy != nil {
 		t.Fatalf("authority=%+v err=%v", got, err)
 	}
 }
 
-func TestResolveAuthorityRejectsBrokenGitHubReleaseInsteadOfDevelopmentFallback(t *testing.T) {
+func TestResolveAuthorityRejectsBrokenAppImageInsteadOfDevelopmentFallback(t *testing.T) {
 	cfg := &config.Config{}
 	cfg.ApproveDevelopment()
-	broken := errors.New("GitHub identity mismatch")
+	broken := errors.New("running executable is outside the AppImage payload")
 	deps := defaultAuthorityDependencies()
-	deps.verifyGitHubRelease = func(context.Context) error { return broken }
-	_, err := resolveAuthority(context.Background(), cfg, 0, deps)
+	deps.identifyOfficialRelease = func(context.Context) error { return broken }
+	_, err := resolveAuthority(context.Background(), cfg, deps)
 	if !errors.Is(err, broken) || errors.Is(err, ErrDevelopmentConsentRequired) {
 		t.Fatalf("err=%v", err)
 	}
@@ -64,8 +57,8 @@ func TestResolveAuthorityAllowsDevelopmentOnlyOutsideAppImage(t *testing.T) {
 	cfg := &config.Config{}
 	cfg.ApproveDevelopment()
 	deps := defaultAuthorityDependencies()
-	deps.verifyGitHubRelease = func(context.Context) error { return keylessrelease.ErrUnavailable }
-	got, err := resolveAuthority(context.Background(), cfg, 0, deps)
+	deps.identifyOfficialRelease = func(context.Context) error { return errOfficialReleaseUnavailable }
+	got, err := resolveAuthority(context.Background(), cfg, deps)
 	if err != nil || got.Mode != setupsvc.DevelopmentUnrestricted || got.Trust.ReleaseAuthenticated {
 		t.Fatalf("authority=%+v err=%v", got, err)
 	}
@@ -76,7 +69,7 @@ func TestPackageAuthorizationTrustUsesDevelopmentWhenOfficialReleaseIsUnavailabl
 	t.Setenv("XDG_CONFIG_HOME", filepath.Join(xdg, "config"))
 	t.Setenv("XDG_DATA_HOME", filepath.Join(xdg, "data"))
 	deps := defaultAuthorityDependencies()
-	deps.verifyGitHubRelease = func(context.Context) error { return keylessrelease.ErrUnavailable }
+	deps.identifyOfficialRelease = func(context.Context) error { return errOfficialReleaseUnavailable }
 
 	trust, err := packageAuthorizationTrust(context.Background(), false, deps)
 	if err != nil || trust.Mode != setupsvc.DevelopmentUnrestricted || trust.ReleaseAuthenticated || trust.RobloxPolicy != nil || trust.PackageName != "com.roblox.client" {
@@ -89,98 +82,28 @@ func TestPackageAuthorizationTrustUsesDevelopmentWhenOfficialReleaseIsUnavailabl
 	}
 }
 
-func TestPackageAuthorizationTrustKeepsVerifiedGitHubReleaseOfficial(t *testing.T) {
+func TestPackageAuthorizationTrustKeepsOfficialAppImageOfficial(t *testing.T) {
 	xdg := t.TempDir()
 	t.Setenv("XDG_CONFIG_HOME", filepath.Join(xdg, "config"))
 	t.Setenv("XDG_DATA_HOME", filepath.Join(xdg, "data"))
 	deps := defaultAuthorityDependencies()
-	deps.verifyGitHubRelease = func(context.Context) error { return nil }
+	deps.identifyOfficialRelease = func(context.Context) error { return nil }
 	trust, err := packageAuthorizationTrust(context.Background(), true, deps)
 	if err != nil || trust.Mode != setupsvc.OfficialVerified || !trust.ReleaseAuthenticated || trust.RobloxPolicy != nil {
-		t.Fatalf("verified GitHub package trust = %+v, %v", trust, err)
+		t.Fatalf("verified AppImage package trust = %+v, %v", trust, err)
 	}
 }
 
-func TestPackageAuthorizationTrustRejectsBrokenGitHubReleaseInsteadOfDevelopmentFallback(t *testing.T) {
+func TestPackageAuthorizationTrustRejectsBrokenAppImageInsteadOfDevelopmentFallback(t *testing.T) {
 	xdg := t.TempDir()
 	t.Setenv("XDG_CONFIG_HOME", filepath.Join(xdg, "config"))
 	t.Setenv("XDG_DATA_HOME", filepath.Join(xdg, "data"))
-	broken := errors.New("GitHub identity mismatch")
+	broken := errors.New("running executable is outside the AppImage payload")
 	deps := defaultAuthorityDependencies()
-	deps.verifyGitHubRelease = func(context.Context) error { return broken }
+	deps.identifyOfficialRelease = func(context.Context) error { return broken }
 	trust, err := packageAuthorizationTrust(context.Background(), true, deps)
 	if !errors.Is(err, broken) || trust.Mode == setupsvc.DevelopmentUnrestricted {
 		t.Fatalf("broken official package trust = %+v, %v", trust, err)
-	}
-}
-
-func TestResolveAuthorityRequiresProductionBoundReleaseAndPassesPolicy(t *testing.T) {
-	now := time.Date(2026, 9, 6, 12, 0, 0, 0, time.UTC)
-	policy := testRobloxPolicy(now)
-	cfg := testOfficialConfig()
-	called := false
-	deps := authorityDependencies{
-		now:      func() time.Time { return now },
-		readRoot: func(string) ([]byte, error) { return []byte("root"), nil },
-		verifyRelease: func(options releasemeta.VerifyOptions) (releasemeta.Result, error) {
-			called = len(options.InitialRoot) != 0 && options.TargetsDir == cfg.OfficialVerification.TargetsDir && options.Now.Equal(now)
-			return releasemeta.Result{Verified: true, State: releasemeta.OfficialVerified, ProductionRootBound: true, ProductionEvidenceBound: true}, nil
-		},
-		readPolicy: func(string, releasemeta.Result, time.Time) (securitypolicy.RobloxPolicy, error) { return policy, nil },
-	}
-	got, err := resolveAuthority(context.Background(), cfg, 3000, deps)
-	if err != nil || !called {
-		t.Fatalf("official authority = %+v, %v; verifier called=%v", got, err, called)
-	}
-	if got.Mode != setupsvc.OfficialVerified || got.Trust.Mode != setupsvc.OfficialVerified || got.Trust.RobloxPolicy == nil ||
-		got.Trust.RobloxPolicy.Validity.Sequence != policy.Validity.Sequence || got.Trust.InstalledVersionCode != 3000 || got.Trust.MinimumPolicySequence != policy.Validity.Sequence {
-		t.Fatalf("official trust did not consume authenticated policy: %+v", got.Trust)
-	}
-
-	deps.verifyRelease = func(releasemeta.VerifyOptions) (releasemeta.Result, error) {
-		return releasemeta.Result{Verified: true, State: releasemeta.DevelopmentUnrestricted}, nil
-	}
-	if _, err := resolveAuthority(context.Background(), cfg, 0, deps); err == nil {
-		t.Fatal("development release result granted official package authority")
-	}
-}
-
-func TestReadAuthenticatedRobloxPolicyPinsTUFDigest(t *testing.T) {
-	now := time.Date(2026, 9, 6, 12, 0, 0, 0, time.UTC)
-	policy := testRobloxPolicy(now)
-	raw, err := json.Marshal(policy)
-	if err != nil {
-		t.Fatal(err)
-	}
-	digest := sha256.Sum256(raw)
-	hexDigest := hex.EncodeToString(digest[:])
-	target := "policies/roblox/" + hexDigest + ".json"
-	root := t.TempDir()
-	path := filepath.Join(root, filepath.FromSlash(target))
-	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(path, raw, 0o400); err != nil {
-		t.Fatal(err)
-	}
-	result := releasemeta.Result{Evidence: []releasemeta.EvidenceStatus{{Kind: "roblox_policy", Target: target, SHA256: hexDigest}}}
-	got, err := readAuthenticatedRobloxPolicy(root, result, now)
-	if err != nil || got.Validity.Sequence != policy.Validity.Sequence {
-		t.Fatalf("policy = %+v, %v", got, err)
-	}
-	result.Evidence[0].SHA256 = strings.Repeat("0", 64)
-	if _, err := readAuthenticatedRobloxPolicy(root, result, now); err == nil {
-		t.Fatal("policy whose digest differs from TUF evidence was accepted")
-	}
-	result.Evidence[0].SHA256 = hexDigest
-	if err := os.Remove(path); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.Symlink("elsewhere", path); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := readAuthenticatedRobloxPolicy(root, result, now); err == nil {
-		t.Fatal("symlink policy target was accepted")
 	}
 }
 
@@ -337,25 +260,4 @@ func TestNilGenerationResultFailsClosedAndCanRepair(t *testing.T) {
 		t.Fatalf("repaired nil generation = %#v, %v", got, err)
 	}
 	defer got.Close()
-}
-
-func testOfficialConfig() *config.Config {
-	return &config.Config{OfficialVerification: &config.OfficialVerification{
-		InitialRootPath: "/release/root.json", MetadataDir: "/release/metadata", TargetsDir: "/release/targets",
-		ArtifactPath: "/release/Tipsy.AppImage", TargetPath: "stable/linux/x86_64/artifact.AppImage", Channel: "stable", StateDir: "/release/state",
-	}}
-}
-
-func testRobloxPolicy(now time.Time) securitypolicy.RobloxPolicy {
-	return securitypolicy.RobloxPolicy{
-		Schema: "tipsy.roblox-policy.v1",
-		Validity: securitypolicy.Validity{
-			Sequence: 7, NotBefore: now.Add(-time.Hour).Format(time.RFC3339), Expires: now.Add(time.Hour).Format(time.RFC3339),
-		},
-		PackageName: "com.roblox.client", Platform: "android", Architecture: "x86_64",
-		MinVersionCode: 2908, MaxVersionCode: 4000, AllowedSplits: []string{"base", "config.x86_64"},
-		SignerLineages: []securitypolicy.SignerLineage{{
-			ID: "roblox-main", SHA256: []string{strings.Repeat("a", 64)}, MinVersionCode: 2908, MaxVersionCode: 4000,
-		}},
-	}
 }

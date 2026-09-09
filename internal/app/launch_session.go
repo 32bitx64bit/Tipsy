@@ -99,11 +99,7 @@ func resolveLaunchAuthorityState(ctx context.Context, approveDevelopment bool, d
 	if err != nil {
 		return LaunchAuthorityState{}, authorityResolution{}, err
 	}
-	installedVersion := int64(0)
-	if snapshot, snapshotErr := setupsvc.New().Snapshot(ctx); snapshotErr == nil {
-		installedVersion = snapshot.VersionCode
-	}
-	authority, err := resolveAuthority(ctx, cfg, installedVersion, deps)
+	authority, err := resolveAuthority(ctx, cfg, deps)
 	if err != nil {
 		return LaunchAuthorityState{DevelopmentConsentRequired: errors.Is(err, ErrDevelopmentConsentRequired)}, authorityResolution{}, err
 	}

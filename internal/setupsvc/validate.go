@@ -46,10 +46,9 @@ func DefaultLimits() Limits {
 
 type TrustPolicy struct {
 	Mode AuthorizationMode
-	// ReleaseAuthenticated is set only after Tipsy's own immutable AppImage
-	// has passed the compiled GitHub OIDC/Sigstore release verifier. It permits
-	// the compiled Roblox signer floor to authorize an official session when a
-	// separate TUF Roblox policy is intentionally not configured.
+	// ReleaseAuthenticated is set after AppRun identified a GitHub AppImage
+	// payload. It permits the compiled Roblox signer floor to authorize an
+	// official session. The running binary does not re-verify itself.
 	ReleaseAuthenticated     bool
 	PackageName              string
 	AllowedCertificateSHA256 []string
@@ -89,8 +88,8 @@ func OfficialTrustPolicy() TrustPolicy {
 }
 
 // WithAuthenticatedRobloxPolicy returns the conservative compiled trust floor
-// intersected with an already authenticated and decoded P2 roblox-policy TUF
-// target. The APK candidate itself is never a policy source.
+// intersected with an already decoded roblox-policy document. The APK
+// candidate itself is never a policy source.
 func WithAuthenticatedRobloxPolicy(policy securitypolicy.RobloxPolicy, installedVersionCode int64, minimumPolicySequence uint64) TrustPolicy {
 	trust := OfficialTrustPolicy()
 	trust.RobloxPolicy = &policy
@@ -100,8 +99,8 @@ func WithAuthenticatedRobloxPolicy(policy securitypolicy.RobloxPolicy, installed
 }
 
 // KeylessReleaseTrustPolicy keeps the conservative compiled Roblox signer,
-// split, and minimum-version floor. It is usable only after the surrounding
-// app authority has cryptographically authenticated the exact Tipsy AppImage.
+// split, and minimum-version floor after AppRun has identified a GitHub
+// AppImage payload. It does not re-verify the running binary.
 func KeylessReleaseTrustPolicy() TrustPolicy {
 	trust := OfficialTrustPolicy()
 	trust.ReleaseAuthenticated = true

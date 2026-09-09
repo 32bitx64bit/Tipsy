@@ -237,7 +237,7 @@ func TestProductionInstallDoesNotInstallWhenOfficialReleaseVerificationFails(t *
 	t.Parallel()
 	positive := setupsvc.InstallSnapshot{Installed: true, Readiness: setupsvc.ReadinessLaunchInputs}
 	backend := &readinessBackendFixture{install: &setupsvc.InstallResult{Snapshot: positive}}
-	broken := errors.New("official GitHub release verification: obtain keyless release bundle: release bundle download returned HTTP 404")
+	broken := errors.New("official AppImage identity: running executable is outside the AppImage payload")
 	service := &productionService{
 		installer: backend,
 		packageTrust: func(context.Context) (setupsvc.TrustPolicy, error) {

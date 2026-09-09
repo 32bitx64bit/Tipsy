@@ -22,26 +22,11 @@ type DevelopmentConsent struct {
 	Acknowledged bool   `json:"acknowledged"`
 }
 
-// OfficialVerification points at a locally available TUF repository and the
-// artifact it authenticates. These locations are inputs, never trust roots by
-// themselves: releasemeta must still bind the root and Sigstore evidence to
-// compiled production identities before OfficialVerified is possible.
-type OfficialVerification struct {
-	InitialRootPath string `json:"initialRootPath,omitempty"`
-	MetadataDir     string `json:"metadataDir,omitempty"`
-	TargetsDir      string `json:"targetsDir,omitempty"`
-	ArtifactPath    string `json:"artifactPath,omitempty"`
-	TargetPath      string `json:"targetPath,omitempty"`
-	Channel         string `json:"channel,omitempty"`
-	StateDir        string `json:"stateDir,omitempty"`
-}
-
 type Config struct {
-	DataDir              string                `json:"dataDir,omitempty"`
-	LogLevel             string                `json:"logLevel,omitempty"`
-	LogCategories        []string              `json:"logCategories,omitempty"`
-	DevelopmentConsent   *DevelopmentConsent   `json:"developmentConsent,omitempty"`
-	OfficialVerification *OfficialVerification `json:"officialVerification,omitempty"`
+	DataDir            string              `json:"dataDir,omitempty"`
+	LogLevel           string              `json:"logLevel,omitempty"`
+	LogCategories      []string            `json:"logCategories,omitempty"`
+	DevelopmentConsent *DevelopmentConsent `json:"developmentConsent,omitempty"`
 }
 
 func (c *Config) DevelopmentApproved() bool {

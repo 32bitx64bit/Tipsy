@@ -11,9 +11,9 @@ export LD_LIBRARY_PATH="$appdir/usr/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
 export QT_PLUGIN_PATH="$appdir/usr/plugins"
 export QT_QPA_PLATFORM_PLUGIN_PATH="$appdir/usr/plugins/platforms"
 
-# The executable verifies this outer file against the independently published
-# GitHub OIDC/Sigstore sidecar before granting OfficialVerified. APPIMAGE is
-# supplied by the AppImage runtime; source builds never receive this handoff.
+# AppRun identifies a GitHub AppImage payload so tipsy can use OfficialVerified
+# with the compiled Roblox signer floor. Cryptographic AppImage admission stays
+# in release CI (cosign). Source builds never receive this handoff.
 if [ -n "${APPIMAGE:-}" ]; then
 	case "$APPIMAGE" in
 		/*)

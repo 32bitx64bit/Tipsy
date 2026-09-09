@@ -1,6 +1,5 @@
-// Package securitypolicy decodes the bounded, data-only policies carried by
-// authenticated TUF targets. It deliberately has no execution, networking, or
-// plugin surface.
+// Package securitypolicy decodes bounded, data-only Roblox trust policies.
+// It deliberately has no execution, networking, or plugin surface.
 package securitypolicy
 
 import (
