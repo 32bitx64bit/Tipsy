@@ -291,7 +291,7 @@ The GUI (`cmd/tipsy-gui`) is presentation only. Package provenance, extraction, 
 
 ### 1. Toolchain
 
-GitHub Actions runs `gofmt`, then `go vet`, the full `go test` suite under Xvfb, and CLI/GUI builds on Ubuntu 22.04, Ubuntu 24.04, Debian Bookworm, and Fedora 43.
+GitHub Actions runs `gofmt`, then `go vet`, the full `go test` suite under Xvfb, and CLI/GUI builds on Ubuntu 22.04, Ubuntu 24.04, Debian Bookworm, and Fedora 43. Ubuntu 22.04’s `qt6-base-dev` 6.2.4 ships no Qt 6 pkg-config files; CI synthesizes them from `qmake6`.
 
 | Tool | Version |
 | --- | --- |
@@ -309,9 +309,9 @@ Install Go from [go.dev/dl](https://go.dev/dl/) if your distro’s package is ol
 sudo apt-get update
 sudo apt-get install -y gcc g++ pkg-config \
   libx11-dev libx11-xcb-dev libxext-dev libxrandr-dev libxtst-dev libxi-dev \
-  libegl1-mesa-dev libgles2-mesa-dev \
+  libegl1-mesa-dev libgles2-mesa-dev libgl1-mesa-dev libcairo2-dev \
   libpango1.0-dev libpulse-dev \
-  qt6-base-dev
+  qt6-base-dev qt6-base-dev-tools
 ```
 
 **Fedora**
@@ -320,8 +320,8 @@ sudo apt-get install -y gcc g++ pkg-config \
 sudo dnf install golang gcc gcc-c++ pkgconf-pkg-config \
   qt6-qtbase-devel \
   libX11-devel libXext-devel libXrandr-devel libXtst-devel libXi-devel \
-  mesa-libEGL-devel mesa-libGLES-devel \
-  pango-devel pulseaudio-libs-devel
+  mesa-libEGL-devel mesa-libGLES-devel mesa-libGL-devel \
+  pango-devel cairo-devel pulseaudio-libs-devel
 ```
 
 **Arch Linux / CachyOS**

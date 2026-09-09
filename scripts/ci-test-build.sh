@@ -18,6 +18,9 @@ command -v Xvfb >/dev/null 2>&1 || fail 'Xvfb is not on PATH'
 export CGO_ENABLED="${CGO_ENABLED:-1}"
 export GOAMD64="${GOAMD64:-v2}"
 export QT_QPA_PLATFORM="${QT_QPA_PLATFORM:-offscreen}"
+if [ -d /tmp/tipsy-ci-pkgconfig ]; then
+	export PKG_CONFIG_PATH="/tmp/tipsy-ci-pkgconfig${PKG_CONFIG_PATH:+:$PKG_CONFIG_PATH}"
+fi
 
 display_num=99
 export DISPLAY=":${display_num}"

@@ -583,7 +583,7 @@ func TestWorkflowDependenciesAreImmutableAndLeastPrivilege(t *testing.T) {
 		t.Fatal(err)
 	}
 	installText := string(install)
-	for _, required := range []string{"libpulse-dev", "libxi-dev", "xvfb", "pulseaudio-libs-devel", "libXi-devel", "pkg-config --exists"} {
+	for _, required := range []string{"libpulse-dev", "libxi-dev", "xvfb", "pulseaudio-libs-devel", "libXi-devel", "pkg-config --exists", "qmake6", "Qt6Widgets.pc"} {
 		if !strings.Contains(installText, required) {
 			t.Errorf("ci-install-native.sh is missing %q", required)
 		}
@@ -593,7 +593,7 @@ func TestWorkflowDependenciesAreImmutableAndLeastPrivilege(t *testing.T) {
 		t.Fatal(err)
 	}
 	testText := string(testBuild)
-	for _, required := range []string{"go vet ./...", "go test", "go build -o bin/tipsy ./cmd/tipsy", "go build -o bin/tipsy-gui ./cmd/tipsy-gui", "Xvfb"} {
+	for _, required := range []string{"go vet ./...", "go test", "go build -o bin/tipsy ./cmd/tipsy", "go build -o bin/tipsy-gui ./cmd/tipsy-gui", "Xvfb", "/tmp/tipsy-ci-pkgconfig"} {
 		if !strings.Contains(testText, required) {
 			t.Errorf("ci-test-build.sh is missing %q", required)
 		}
