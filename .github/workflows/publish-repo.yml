@@ -425,10 +425,13 @@ jobs:
           printf '%s' "$live" | python3 -c 'import json,sys; print(json.load(sys.stdin).get("version", ""))' | grep -qx "$version" \
             || fail "live latest.json is not version $version after 15 minutes"
 
-          # Manifest schema on the live file.
-          printf '%s' "$live" | python3 - <<'PY'
+          # Manifest schema on the live file. (Passed as a file: with `python3 -`
+          # the heredoc is stdin, so the script could not also read JSON there.)
+          printf '%s' "$live" > live.json
+          python3 - live.json <<'PY'
           import json, re, sys
-          manifest = json.load(sys.stdin)
+          with open(sys.argv[1], encoding="utf-8") as handle:
+              manifest = json.load(handle)
           assert manifest["channel"] == "stable", "channel is not stable"
           assert manifest["assets"], "no assets in live manifest"
           for key, asset in manifest["assets"].items():
