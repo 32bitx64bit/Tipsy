@@ -1,9 +1,14 @@
-# Tipsy Flatpak manifest (requires first-build validation; see build-flatpak.sh).
-# Bump `runtime-version` to the current stable KDE runtime before release.
+# Tipsy Flatpak manifest, built by packaging/flatpak/build-flatpak.sh, which
+# rewrites `tag: main` to the release tag and @VERSION@ to the version.
+# Runtime: the current stable KDE runtime (Qt 6.10 on freedesktop 25.08, whose
+# golang SDK extension provides the go toolchain). Bump runtime-version when
+# Flathub retires this branch (`flatpak remote-ls flathub | grep org.kde.Sdk`).
 app-id: io.github.tipsy_linux.Tipsy
 runtime: org.kde.Platform
-runtime-version: '6.8'
+runtime-version: '6.10'
 sdk: org.kde.Sdk
+sdk-extensions:
+  - org.freedesktop.Sdk.Extension.golang
 command: tipsy-gui
 finish-args:
   - --share=ipc
@@ -20,23 +25,38 @@ modules:
     buildsystem: simple
     build-options:
       append-path: /usr/lib/sdk/golang/bin
+      # Each build-command runs in its own shell, so the toolchain settings
+      # live here rather than in an `export` line.
+      env:
+        CGO_ENABLED: '1'
+        GOAMD64: v2
+        GOFLAGS: -buildvcs=false -mod=readonly -modcacherw -trimpath
+        GOTOOLCHAIN: local
+        GOCACHE: /run/build/tipsy/.gocache
+        GOMODCACHE: /run/build/tipsy/.gomodcache
+        GOPATH: /run/build/tipsy/.gopath
+      build-args:
+        # go.mod dependencies (miqt, x/sys) are fetched from the module proxy
+        # at build time; this is a self-hosted repository, not Flathub.
+        - --share=network
     sources:
-      # The publish workflow rewrites `tag` to the release tag being built.
       - type: git
         url: https://github.com/32bitx64bit/Tipsy.git
         tag: main
     build-commands:
-      - export GOAMD64=v2 CGO_ENABLED=1
-      - go build -buildvcs=false -mod=readonly -trimpath
-          -ldflags "-buildid= -s -w" -o /app/bin/tipsy ./cmd/tipsy
-      - go build -buildvcs=false -mod=readonly -trimpath
-          -ldflags "-buildid= -s -w" -o /app/bin/tipsy-gui ./cmd/tipsy-gui
+      - mkdir -p /app/bin
+      - go build -ldflags "-buildid= -s -w -X github.com/tipsy-linux/tipsy/internal/version.Version=@VERSION@"
+          -o /app/bin/tipsy ./cmd/tipsy
+      - go build -ldflags "-buildid= -s -w -X github.com/tipsy-linux/tipsy/internal/version.Version=@VERSION@"
+          -o /app/bin/tipsy-gui ./cmd/tipsy-gui
+      # Flatpak only exports icons and desktop files named after the app id.
+      - install -Dm0644 tipsy.png /app/share/icons/hicolor/512x512/apps/io.github.tipsy_linux.Tipsy.png
       - install -Dm0644 share/applications/io.github.tipsy_linux.Tipsy.Play.desktop
           /app/share/applications/io.github.tipsy_linux.Tipsy.Play.desktop
       - install -Dm0644 share/applications/io.github.tipsy_linux.Tipsy.Settings.desktop
           /app/share/applications/io.github.tipsy_linux.Tipsy.Settings.desktop
+      - sed -i 's/^Icon=tipsy$/Icon=io.github.tipsy_linux.Tipsy/' /app/share/applications/io.github.tipsy_linux.Tipsy.*.desktop
       - install -Dm0644 share/metainfo/io.github.tipsy_linux.Tipsy.metainfo.xml
           /app/share/metainfo/io.github.tipsy_linux.Tipsy.metainfo.xml
-      - install -Dm0644 tipsy.png /app/share/icons/hicolor/512x512/apps/tipsy.png
       - install -Dm0644 LICENSE /app/share/licenses/tipsy/LICENSE
       - install -Dm0644 NOTICE /app/share/licenses/tipsy/NOTICE

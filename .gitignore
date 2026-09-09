@@ -62,3 +62,6 @@ lib/*.so
 *.o
 *.a
 moc_*.cpp
+
+# flatpak-builder state (build-flatpak.sh uses --state-dir; manual runs default here)
+.flatpak-builder/

@@ -33,9 +33,9 @@ on:
         required: true
         type: string
       flatpak:
-        description: "Also build the Flatpak bundle (enable after first-build validation)"
+        description: "Build the Flatpak bundle (official packaging; untick only to debug the APT/RPM path)"
         required: false
-        default: false
+        default: true
         type: boolean
 
 permissions:
@@ -209,14 +209,29 @@ jobs:
             --version '${{ needs.prepare.outputs.version }}' --output-dir dist
           ls -la dist/
 
-      - name: Optionally build the Flatpak bundle
-        if: inputs.flatpak == true
+      - name: Build the Flatpak bundle
+        # Official packaging: built on every publish. Only a manual dispatch
+        # can opt out (inputs.* is empty for release/workflow_run events).
+        if: github.event_name != 'workflow_dispatch' || inputs.flatpak == true
         shell: bash
         run: |
           set -euo pipefail
-          sudo apt-get install -y --no-install-recommends flatpak-builder
+          sudo apt-get install -y --no-install-recommends flatpak flatpak-builder bubblewrap
+          # flatpak-builder sandboxes each build with bubblewrap, which needs
+          # unprivileged user namespaces. Ubuntu 24.04 gates those behind
+          # AppArmor; the bwrap profile normally allows it, so only relax the
+          # sysctl on this throwaway VM if a probe shows bwrap cannot start.
+          if ! bwrap --ro-bind / / --unshare-user true 2>/dev/null; then
+            echo "bwrap probe failed; allowing unprivileged user namespaces for this run"
+            sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+            bwrap --ro-bind / / --unshare-user true
+          fi
+          # Runtimes (org.kde.Sdk + golang extension, ~3 GB) come from Flathub
+          # into the runner user's installation; the script adds the remote.
           bash packaging/flatpak/build-flatpak.sh \
-            --version '${{ needs.prepare.outputs.version }}' --output-dir dist
+            --version '${{ needs.prepare.outputs.version }}' \
+            --tag '${{ needs.prepare.outputs.tag }}' --output-dir dist
+          ls -la dist/Tipsy-*.flatpak
 
       - name: Write SHA256SUMS and stage publish set
         shell: bash
@@ -230,7 +245,7 @@ jobs:
           mkdir -p ../publish
           cp Tipsy-*-x86_64.AppImage tipsy_*_amd64.deb tipsy-*.rpm SHA256SUMS ../publish/
           cp Tipsy-*.flatpak ../publish/ 2>/dev/null || \
-            echo "NOTICE: no Flatpak bundle (first-build validation pending; repo structure still published)."
+            echo "NOTICE: no Flatpak bundle (disabled for this dispatch); the Flatpak repo is only re-indexed."
 
       - name: Create or update the Tipsy-repo Release (idempotent)
         env:
@@ -453,6 +468,7 @@ jobs:
           get_ok "$base/rpm/tipsy.repo"
           get_ok "$base/flatpak/tipsy.flatpakrepo"
           get_ok "$base/flatpak/repo/summary"
+          get_ok "$base/flatpak/repo/summary.sig"
 
           # The APT index must actually offer this version. (Fetched to a file
           # rather than piped into grep -q: with pipefail an early grep exit

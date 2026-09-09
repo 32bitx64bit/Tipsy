@@ -52,9 +52,8 @@ Roblox itself is proprietary and is **never** redistributed, patched, or committ
 One copy-paste block per distro. Afterwards open **Tipsy - Settings** and run
 the setup assistant to install the official Roblox client (never included).
 
-> The APT and DNF repositories populate with the first published release —
-> until then, use the AppImage. The Flatpak remote exists, but installs work
-> once the first Flatpak bundle is published.
+> The APT, DNF, and Flatpak repositories populate with the first published
+> release — until then, use the AppImage.
 
 **Debian / Ubuntu**
 
@@ -545,8 +544,10 @@ Performance claims versus other Linux Roblox runtimes are out of scope until the
 
 `scripts/build-appdir.sh` produces a versioned AppDir and archive with bundled Qt/XCB runtime libraries and license notices. `scripts/build-appimage.sh` wraps that AppDir with a **pinned local** `appimagetool`. Payloads are guarded: no APK, `libroblox.so`, or Roblox fonts.
 
-A self-hosted Flatpak repository is published alongside APT/RPM (first bundle
-ships after build validation). Native packages never replace AppImage.
+`packaging/deb`, `packaging/rpm`, and `packaging/flatpak` build the native
+packages and the Flatpak bundle (KDE 6.10 runtime, Go from the Flathub SDK
+extension) that every publish pushes to the self-hosted APT/RPM/Flatpak
+repositories. Native packages never replace AppImage.
 
 ---
 
