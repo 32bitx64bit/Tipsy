@@ -48,6 +48,26 @@ func TestOffscreenVisualProof(t *testing.T) {
 	}
 	icon := brandIcon()
 	win := newMainWindow(service, icon)
+	// Appearance changes are immediate and separate from the settings draft.
+	win.appearanceButtons[appearanceDark].Click()
+	if loadAppearance() != appearanceDark || !win.appearanceIsDark || !win.appearanceButtons[appearanceDark].IsChecked() {
+		t.Fatal("dark appearance was not persisted and reflected by the footer selector")
+	}
+	win.appearanceButtons[appearanceLight].Click()
+	if loadAppearance() != appearanceLight || win.appearanceIsDark {
+		t.Fatal("light appearance did not apply immediately")
+	}
+	win.appearanceButtons[appearanceSystem].Click()
+	if loadAppearance() != appearanceSystem || !win.appearanceButtons[appearanceSystem].IsChecked() || win.appearanceButtons[appearanceLight].IsChecked() || win.appearanceButtons[appearanceDark].IsChecked() {
+		t.Fatal("System appearance controls are inconsistent")
+	}
+	if mode := appearanceMode(os.Getenv("TIPSY_GUI_TEST_APPEARANCE")); validAppearance(mode) {
+		win.chooseAppearance(mode)
+	}
+	if win.preferenceFPS.Text() != "60 FPS" || win.preferenceVSync.Text() != "Off" || win.preferenceWindow.Text() != "Windowed" {
+		t.Fatal("home does not show saved launch preferences")
+	}
+
 	win.Show()
 	qt.QCoreApplication_ProcessEvents()
 	qt.QCoreApplication_ProcessEvents()
@@ -56,7 +76,7 @@ func TestOffscreenVisualProof(t *testing.T) {
 	if pixmap.IsNull() {
 		t.Fatal("offscreen Qt returned an empty window grab")
 	}
-	if pixmap.Width() < 1000 || pixmap.Height() < 650 {
+	if pixmap.Width() < 640 || pixmap.Height() < 650 {
 		t.Fatalf("unexpected visual proof size %dx%d", pixmap.Width(), pixmap.Height())
 	}
 	if os.Getenv("TIPSY_GUI_EXPECT_HIDPI") == "1" && pixmap.DevicePixelRatio() < 1.5 {
@@ -141,7 +161,36 @@ func TestOffscreenVisualProof(t *testing.T) {
 			t.Fatalf("save settings visual proof to %s", settingsPath)
 		}
 	}
+
+	// Popups and dialogs must share the live application palette, not only the
+	// central window stylesheet. Retain window-only synthetic visual evidence.
+	win.settingsRenderer.ShowPopup()
+	qt.QCoreApplication_ProcessEvents()
+	if path := os.Getenv("TIPSY_GUI_SCREENSHOT"); path != "" {
+		ext := filepath.Ext(path)
+		if !win.settingsRenderer.View().Window().Grab().Save2(strings.TrimSuffix(path, ext)+"-renderer-popup"+ext, "PNG") {
+			t.Fatal("save renderer popup")
+		}
+	}
+	win.settingsRenderer.HidePopup()
+	dialog := qt.NewQMessageBox6(qt.QMessageBox__Information, "Settings saved", "Restart Roblox to apply the saved graphics preferences.", qt.QMessageBox__Ok, win.win.QWidget)
+	dialog.Show()
+	qt.QCoreApplication_ProcessEvents()
+	if path := os.Getenv("TIPSY_GUI_SCREENSHOT"); path != "" {
+		ext := filepath.Ext(path)
+		if !dialog.Grab().Save2(strings.TrimSuffix(path, ext)+"-dialog"+ext, "PNG") {
+			t.Fatal("save themed dialog")
+		}
+	}
+	dialog.Close()
+	dialog.Delete()
+	win.win.ActivateWindow()
+	qt.QApplication_SetActiveWindow(win.win.QWidget)
+	qt.QCoreApplication_ProcessEvents()
 	win.settingsVSync.SetChecked(true)
+	if win.preferenceVSync.Text() != "Off" {
+		t.Fatal("unsaved draft changed the home summary")
+	}
 	qt.QCoreApplication_ProcessEvents()
 	if !win.settingsVSync.IsChecked() || win.settingsVSync.Text() != vsyncToggleText(true) {
 		t.Fatalf("checked VSync state is not unmistakable: checked=%v text=%q", win.settingsVSync.IsChecked(), win.settingsVSync.Text())
@@ -259,10 +308,14 @@ func TestOffscreenVisualProof(t *testing.T) {
 	originalConfirm := confirmDevelopmentLaunch
 	defer func() { confirmDevelopmentLaunch = originalConfirm }()
 	confirmDevelopmentLaunch = func(*qt.QWidget) bool { return false }
-	started, err := win.startAuthorizedLaunch(context.Background(), guimodel.LaunchRequest{})
-	if err != nil || started {
-		t.Fatalf("declined development authority started=%v err=%v", started, err)
+	if !win.beginLaunch(launchFromHome, guimodel.LaunchRequest{}) {
+		t.Fatal("launch preparation did not start")
 	}
+	waitGUI(t, func() bool { return !win.launchPreparing })
+	if !win.launchFailure {
+		t.Fatal("declined development launch did not show failure")
+	}
+
 	if got := win.playAuthority.Text(); !strings.Contains(got, "Approval required") || !strings.Contains(got, "OfficialVerified") {
 		t.Fatalf("missing-consent warning was not visible: %q", got)
 	}
@@ -273,11 +326,18 @@ func TestOffscreenVisualProof(t *testing.T) {
 	}
 	confirmDevelopmentLaunch = func(*qt.QWidget) bool { return true }
 	win.playButton.Click()
-	select {
-	case <-service.launchEntered:
-	case <-time.After(time.Second):
-		t.Fatal("offscreen launch backend was not entered")
+	waitGUI(t, func() bool {
+		select {
+		case <-service.launchEntered:
+			return true
+		default:
+			return false
+		}
+	})
+	if win.externalProgress != nil || !win.launchBusy.IsVisible() {
+		t.Fatal("in-GUI Play did not keep its busy state in the main window")
 	}
+
 	if got := win.playAuthority.Text(); got != service.authority.Warning {
 		t.Fatalf("development warning was not propagated exactly: %q", got)
 	}
@@ -290,6 +350,12 @@ func TestOffscreenVisualProof(t *testing.T) {
 	}
 	close(service.launchReady)
 	waitForLaunchState(t, win.launch, guimodel.LaunchRunning)
+	// Started can arrive between GUI timer ticks. Native close must not quit
+	// the in-process host before refresh disables quit-on-last-window and hides.
+	win.win.Close()
+	if !win.win.IsVisible() {
+		t.Fatal("close during acknowledged-start timer gap dismissed the host")
+	}
 	win.refreshLaunchState()
 	if win.win.IsVisible() || !win.launcherHidden {
 		t.Fatal("launcher remained visible after the client acknowledged startup")
@@ -309,7 +375,7 @@ func TestOffscreenVisualProof(t *testing.T) {
 	app.Delete()
 }
 
-func TestPlayModeSkipsLauncherWhenInstalled(t *testing.T) {
+func TestPlayModeUsesProgressWhenInstalled(t *testing.T) {
 	t.Setenv("QT_QPA_PLATFORM", "offscreen")
 	t.Setenv("XDG_CONFIG_HOME", filepath.Join(t.TempDir(), "config"))
 	t.Setenv("XDG_DATA_HOME", filepath.Join(t.TempDir(), "data"))
@@ -330,11 +396,18 @@ func TestPlayModeSkipsLauncherWhenInstalled(t *testing.T) {
 	win.startInMode(guiModePlay, "")
 	qt.QCoreApplication_ProcessEvents()
 
-	select {
-	case <-service.launchEntered:
-	case <-time.After(time.Second):
-		t.Fatal("play mode did not start the client")
+	waitGUI(t, func() bool {
+		select {
+		case <-service.launchEntered:
+			return true
+		default:
+			return false
+		}
+	})
+	if win.externalProgress == nil || !win.externalProgress.dialog.IsVisible() {
+		t.Fatal("external launch lacks progress window")
 	}
+
 	if win.win.IsVisible() {
 		t.Fatal("play mode showed the settings window before launching")
 	}
@@ -452,4 +525,17 @@ func (visualService) ApplySettings(context.Context, guimodel.Settings) (guimodel
 
 func (visualService) ResetSettings(context.Context) (guimodel.Settings, error) {
 	return guimodel.DefaultSettings(), nil
+}
+
+func waitGUI(t *testing.T, ready func() bool) {
+	t.Helper()
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		qt.QCoreApplication_ProcessEvents()
+		if ready() {
+			return
+		}
+		time.Sleep(time.Millisecond)
+	}
+	t.Fatal("timed out waiting for synthetic GUI state")
 }

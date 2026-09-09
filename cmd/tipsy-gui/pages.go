@@ -15,121 +15,154 @@ import (
 )
 
 func (w *mainWindow) buildHomePage() *qt.QWidget {
-	page, layout, scroll := newPage("Home", "A focused place to launch, update, and tune Roblox on Linux.")
-
-	hero, heroLayout := newCard("heroCard")
-	heroLayout.SetContentsMargins(30, 26, 30, 26)
-	heroLayout.SetSpacing(16)
-	copy := qt.NewQWidget2()
-	copyLayout := qt.NewQVBoxLayout(copy)
-	copyLayout.SetContentsMargins(0, 0, 0, 0)
-	copyLayout.SetSpacing(8)
-	eyebrow := qt.NewQLabel3("AUTHENTICATED BEFORE LAUNCH")
-	setObjectName(eyebrow.QObject, "heroEyebrow")
-	copyLayout.AddWidget(eyebrow.QWidget)
-	title := qt.NewQLabel3("Roblox on Linux.\nWithout the beige launcher.")
-	setObjectName(title.QObject, "heroTitle")
-	title.SetWordWrap(true)
-	copyLayout.AddWidget(title.QWidget)
-	w.playState = qt.NewQLabel3("Your Roblox sign-in remains in the client, not in Tipsy")
-	setObjectName(w.playState.QObject, "heroBody")
+	content := qt.NewQWidget2()
+	setObjectName(content.QObject, "pageContent")
+	content.SetMaximumWidth(720)
+	layout := qt.NewQVBoxLayout(content)
+	layout.SetContentsMargins(28, 28, 28, 22)
+	layout.SetSpacing(14)
+	mark := qt.NewQLabel2()
+	mark.SetPixmap(w.icon.Pixmap2(88, 88))
+	mark.SetAlignment(qt.AlignCenter)
+	mark.SetAccessibleName("Tipsy logo")
+	mark.SetFixedHeight(96)
+	layout.AddWidget(mark.QWidget)
+	w.installBadge = qt.NewQLabel3("CHECKING")
+	setObjectName(w.installBadge.QObject, "statusNeutral")
+	w.installBadge.SetAlignment(qt.AlignCenter)
+	badgeRow := qt.NewQHBoxLayout2()
+	badgeRow.AddStretch()
+	badgeRow.AddWidget(w.installBadge.QWidget)
+	badgeRow.AddStretch()
+	layout.AddLayout(badgeRow.QLayout)
+	w.homeTitle = qt.NewQLabel3("Ready when you are.")
+	setObjectName(w.homeTitle.QObject, "launchTitle")
+	w.homeTitle.SetAlignment(qt.AlignCenter)
+	w.homeTitle.SetWordWrap(true)
+	layout.AddWidget(w.homeTitle.QWidget)
+	subtitle := qt.NewQLabel3("Launch Roblox with your settings.")
+	setObjectName(subtitle.QObject, "launchSubtitle")
+	subtitle.SetAlignment(qt.AlignCenter)
+	subtitle.SetWordWrap(true)
+	layout.AddWidget(subtitle.QWidget)
+	w.playState = qt.NewQLabel2()
+	setObjectName(w.playState.QObject, "mutedText")
+	w.playState.SetAlignment(qt.AlignCenter)
 	w.playState.SetWordWrap(true)
 	w.playState.SetAccessibleName("Launch status")
-	copyLayout.AddWidget(w.playState.QWidget)
+	layout.AddWidget(w.playState.QWidget)
 	w.playAuthority = qt.NewQLabel3("Launch authority will be verified before Roblox starts.")
 	setObjectName(w.playAuthority.QObject, "noticeInfo")
 	w.playAuthority.SetWordWrap(true)
 	w.playAuthority.SetAccessibleName("Launch security state")
-	copyLayout.AddWidget(w.playAuthority.QWidget)
-	copyLayout.AddSpacing(8)
-	w.playButton = qt.NewQPushButton3("Play Roblox")
+	w.playAuthority.Hide()
+	layout.AddWidget(w.playAuthority.QWidget)
+	layout.AddSpacing(4)
+	w.playButton = qt.NewQPushButton3("▶   Play Roblox")
 	setObjectName(w.playButton.QObject, "playButton")
 	w.playButton.SetAccessibleName("Play Roblox")
 	w.playButton.SetDefault(true)
 	w.playButton.OnClicked(func() { w.launchRoblox() })
-	copyLayout.AddWidget(w.playButton.QWidget)
+	layout.AddWidget(w.playButton.QWidget)
 	w.pageEntry = append(w.pageEntry, w.playButton.QWidget)
-	copyLayout.AddStretch()
-	heroLayout.AddWidget2(copy, 1)
-	mark := qt.NewQLabel2()
-	mark.SetPixmap(w.icon.Pixmap2(104, 104))
-	mark.SetFixedSize2(104, 104)
-	mark.SetAlignment(qt.AlignCenter)
-	mark.SetAccessibleName("Tipsy logo")
-	heroLayout.AddWidget(mark.QWidget)
-	layout.AddWidget(hero.QWidget)
-
-	row := qt.NewQWidget2()
-	rowLayout := qt.NewQGridLayout(row)
-	rowLayout.SetContentsMargins(0, 0, 0, 0)
-	rowLayout.SetSpacing(16)
-
-	installCard, installLayout := newVerticalCard("card")
-	cardTop := qt.NewQHBoxLayout2()
-	cardTop.AddWidget(sectionLabel("Installation").QWidget)
-	cardTop.AddStretch()
-	w.installBadge = qt.NewQLabel3("CHECKING")
-	setObjectName(w.installBadge.QObject, "statusNeutral")
-	cardTop.AddWidget(w.installBadge.QWidget)
-	installLayout.AddLayout(cardTop.QLayout)
-	w.installVersion = qt.NewQLabel3("Checking…")
-	setObjectName(w.installVersion.QObject, "metricValue")
-	installLayout.AddWidget(w.installVersion.QWidget)
-	w.installDetail = qt.NewQLabel3("Reading the installed client status.")
-	setObjectName(w.installDetail.QObject, "mutedText")
-	w.installDetail.SetWordWrap(true)
-	installLayout.AddWidget(w.installDetail.QWidget)
-	manage := qt.NewQPushButton3("Manage installation")
+	w.launchBusy = qt.NewQProgressBar2()
+	w.launchBusy.SetRange(0, 0)
+	w.launchBusy.SetTextVisible(false)
+	w.launchBusy.SetAccessibleName("Roblox startup in progress")
+	w.launchBusy.Hide()
+	layout.AddWidget(w.launchBusy.QWidget)
+	layout.AddSpacing(4)
+	card, cardLayout := newVerticalCard("card")
+	cardLayout.SetContentsMargins(18, 10, 18, 6)
+	cardLayout.SetSpacing(0)
+	heading := qt.NewQHBoxLayout2()
+	heading.AddWidget(sectionLabel("Launch preferences").QWidget)
+	heading.AddStretch()
+	edit := qt.NewQPushButton3("Edit  →")
+	setObjectName(edit.QObject, "linkButton")
+	edit.SetAccessibleName("Edit launch preferences")
+	edit.OnClicked(func() { w.selectPage(2) })
+	heading.AddWidget(edit.QWidget)
+	cardLayout.AddLayout(heading.QLayout)
+	for _, item := range []struct {
+		name  string
+		label **qt.QLabel
+	}{{"Frame rate", &w.preferenceFPS}, {"VSync", &w.preferenceVSync}, {"Window", &w.preferenceWindow}} {
+		row, rowLayout := newCard("preferenceRow")
+		rowLayout.SetContentsMargins(0, 12, 0, 12)
+		rowLayout.AddWidget(qt.NewQLabel3(item.name).QWidget)
+		rowLayout.AddStretch()
+		value := qt.NewQLabel2()
+		value.SetAccessibleName("Saved " + item.name)
+		rowLayout.AddWidget(value.QWidget)
+		*item.label = value
+		cardLayout.AddWidget(row.QWidget)
+	}
+	// Retain the descriptive profile for accessibility and existing state adapters;
+	// the visible summary below is deliberately based on Saved, never Draft.
+	w.settingsProfile = qt.NewQLabel(content)
+	w.settingsProfile.Hide()
+	w.refreshSettingsProfile()
+	layout.AddWidget(card.QWidget)
+	install, installLayout := newCard("preferenceRow")
+	installLayout.SetContentsMargins(0, 12, 0, 0)
+	w.homeClientMark = qt.NewQLabel3("✓")
+	setObjectName(w.homeClientMark.QObject, "clientReadyIcon")
+	w.homeClientMark.SetAlignment(qt.AlignCenter)
+	w.homeClientMark.SetFixedSize2(24, 24)
+	installLayout.AddWidget(w.homeClientMark.QWidget)
+	w.homeClient = qt.NewQLabel3("Checking client…")
+	installLayout.AddWidget(w.homeClient.QWidget)
+	installLayout.AddStretch()
+	manage := qt.NewQPushButton3("Manage")
 	setObjectName(manage.QObject, "secondaryButton")
-	manage.SetAccessibleDescription("Open the installation and update page")
+	manage.SetAccessibleName("Manage installation")
 	manage.OnClicked(func() { w.selectPage(1) })
 	installLayout.AddWidget(manage.QWidget)
-	rowLayout.AddWidget2(installCard.QWidget, 0, 0)
-
-	settingsCard, settingsLayout := newVerticalCard("card")
-	settingsLayout.AddWidget(sectionLabel("Graphics profile").QWidget)
-	profile := w.settings.View().Draft
-	profileText := settingsProfileText(profile)
-	w.settingsProfile = qt.NewQLabel3(profileText)
-	setObjectName(w.settingsProfile.QObject, "metricValueSmall")
-	w.settingsProfile.SetWordWrap(true)
-	settingsLayout.AddWidget(w.settingsProfile.QWidget)
-	note := qt.NewQLabel3("Changes are written through the shared client-settings backend and take effect after a Roblox restart.")
-	setObjectName(note.QObject, "mutedText")
-	note.SetWordWrap(true)
-	settingsLayout.AddWidget(note.QWidget)
-	openSettings := qt.NewQPushButton3("Open settings")
-	setObjectName(openSettings.QObject, "secondaryButton")
-	openSettings.SetAccessibleDescription("Open renderer, frame-rate, VSync, texture quality, and default-monitor settings")
-	openSettings.OnClicked(func() { w.selectPage(2) })
-	settingsLayout.AddWidget(openSettings.QWidget)
-	rowLayout.AddWidget2(settingsCard.QWidget, 0, 1)
-	rowLayout.SetColumnStretch(0, 1)
-	rowLayout.SetColumnStretch(1, 1)
-	twoColumns := true
-	row.OnResizeEvent(func(super func(event *qt.QResizeEvent), event *qt.QResizeEvent) {
-		super(event)
-		wantTwoColumns := event.Size().Width() >= 620
-		if wantTwoColumns == twoColumns {
-			return
-		}
-		rowLayout.RemoveWidget(installCard.QWidget)
-		rowLayout.RemoveWidget(settingsCard.QWidget)
-		if wantTwoColumns {
-			rowLayout.AddWidget2(installCard.QWidget, 0, 0)
-			rowLayout.AddWidget2(settingsCard.QWidget, 0, 1)
-			rowLayout.SetColumnStretch(1, 1)
-		} else {
-			rowLayout.AddWidget2(installCard.QWidget, 0, 0)
-			rowLayout.AddWidget2(settingsCard.QWidget, 1, 0)
-			rowLayout.SetColumnStretch(1, 0)
-		}
-		twoColumns = wantTwoColumns
-	})
-
-	layout.AddWidget(row)
+	layout.AddWidget(install.QWidget)
+	w.installVersion = qt.NewQLabel(content)
+	w.installVersion.Hide()
+	w.installDetail = qt.NewQLabel(content)
+	w.installDetail.Hide()
 	layout.AddStretch()
-	return w.registerPage(page, scroll)
+	scroll := qt.NewQScrollArea2()
+	scroll.SetWidgetResizable(true)
+	scroll.SetFrameShape(qt.QFrame__NoFrame)
+	scroll.SetFocusPolicy(qt.NoFocus)
+	scroll.SetHorizontalScrollBarPolicy(qt.ScrollBarAlwaysOff)
+	scroll.SetAlignment(qt.AlignHCenter | qt.AlignTop)
+	scroll.SetWidget(content)
+	return w.registerPage(scroll.QWidget, scroll)
+}
+
+func (w *mainWindow) refreshLaunchPreferences() {
+	if w.preferenceFPS == nil {
+		return
+	}
+	saved := w.settings.View().Saved
+	fps := "Auto"
+	if saved.FPSMode == guimodel.FPSLimited {
+		fps = fmt.Sprintf("%d FPS", saved.FrameRate)
+	}
+	if saved.FPSMode == guimodel.FPSUnlimited {
+		fps = "Unlimited"
+	}
+	vsync := "Off"
+	if saved.VSync {
+		vsync = "On"
+	}
+	window := "Windowed"
+	if saved.StartFullscreen {
+		window = "Fullscreen"
+	}
+	if w.settingsErr != nil {
+		fps, vsync, window = "Unavailable", "Unavailable", "Unavailable"
+	}
+	w.preferenceFPS.SetText(fps)
+	w.preferenceVSync.SetText(vsync)
+	w.preferenceWindow.SetText(window)
+	w.preferenceFPS.SetToolTip("Saved launch preference; actual frame rate depends on the client and hardware")
+	w.preferenceWindow.SetToolTip("Saved startup preference for the next Roblox window")
 }
 
 func (w *mainWindow) buildInstallPage() *qt.QWidget {
@@ -187,7 +220,7 @@ func (w *mainWindow) buildInstallPage() *qt.QWidget {
 }
 
 func (w *mainWindow) buildSettingsPage() *qt.QWidget {
-	page, layout, scroll := newPage("Settings", "Tune the official client without hand-editing XML or launch flags.")
+	page, layout, scroll := newPage("Settings", "Adjust graphics, window, and integration preferences.")
 
 	w.settingsClientStatus = qt.NewQLabel3("Client launch readiness is being checked.")
 	w.settingsClientStatus.SetWordWrap(true)
@@ -595,6 +628,15 @@ func (w *mainWindow) buildDiagnosticsPage() *qt.QWidget {
 	setObjectName(privacy.QObject, "noticeInfo")
 	pathsLayout.AddWidget(privacy.QWidget)
 	layout.AddWidget(pathsCard.QWidget)
+	aboutRow := qt.NewQHBoxLayout2()
+	about := qt.NewQPushButton3("About Tipsy")
+	about.OnClicked(func() { showAboutMessage(w.win.QWidget) })
+	aboutRow.AddWidget(about.QWidget)
+	aboutQt := qt.NewQPushButton3("About Qt")
+	aboutQt.OnClicked(qt.QApplication_AboutQt)
+	aboutRow.AddWidget(aboutQt.QWidget)
+	aboutRow.AddStretch()
+	layout.AddLayout(aboutRow.QLayout)
 	layout.AddStretch()
 	return w.registerPage(page, scroll)
 }
@@ -612,16 +654,28 @@ func (w *mainWindow) runDoctor() {
 	var rows []string
 	var details []string
 	for _, check := range report.Checks {
-		color, marker := "#66758f", "•"
+		color, marker := "#68717e", "•"
+		if w.appearanceIsDark {
+			color = "#a8b1bf"
+		}
 		switch check.Status {
 		case guimodel.CheckReady:
-			color, marker = "#14805e", "✓"
+			color, marker = "#227d48", "✓"
+			if w.appearanceIsDark {
+				color = "#7ade9d"
+			}
 		case guimodel.CheckWarning:
-			color, marker = "#946500", "!"
+			color, marker = "#805c10", "!"
+			if w.appearanceIsDark {
+				color = "#f0cb78"
+			}
 		case guimodel.CheckBlocked:
-			color, marker = "#bd3155", "×"
+			color, marker = "#ac2447", "×"
+			if w.appearanceIsDark {
+				color = "#ffa6bc"
+			}
 		}
-		rows = append(rows, fmt.Sprintf("<p><span style='color:%s;font-size:18px'><b>%s</b></span>&nbsp;&nbsp;<b>%s</b><br><span style='color:#66758f'>%s</span></p>", color, marker, html.EscapeString(check.Name), html.EscapeString(check.Detail)))
+		rows = append(rows, fmt.Sprintf("<p><span style='color:%s;font-size:18px'><b>%s</b></span>&nbsp;&nbsp;<b>%s</b><br><span>%s</span></p>", color, marker, html.EscapeString(check.Name), html.EscapeString(check.Detail)))
 		line := check.Name + ": " + check.Detail
 		if check.Remedy != "" {
 			line += "\n  Next: " + check.Remedy
@@ -686,9 +740,9 @@ func vsyncDisplay(settings guimodel.Settings) string {
 
 func vsyncToggleText(enabled bool) string {
 	if enabled {
-		return "✓ VSync enabled — presentation follows the active monitor refresh rate"
+		return "✓ On — synchronize to the display"
 	}
-	return "VSync off — presentation is not synchronized to the monitor refresh rate"
+	return "Off — allow tearing"
 }
 
 func textureDisplay(settings guimodel.Settings) string {
@@ -700,9 +754,9 @@ func textureDisplay(settings guimodel.Settings) string {
 
 func lowTextureToggleText(enabled bool) string {
 	if enabled {
-		return "✓ Low texture mode — lower-resolution textures to save memory and VRAM"
+		return "✓ Low-resolution textures — save memory and VRAM"
 	}
-	return "High-quality textures — default; uses more memory and VRAM"
+	return "High-quality textures (default)"
 }
 
 func discordDisplay(settings guimodel.Settings) string {
@@ -717,16 +771,16 @@ func discordDisplay(settings guimodel.Settings) string {
 
 func discordPresenceToggleText(enabled bool) string {
 	if enabled {
-		return "✓ Discord Rich Presence — friends see Game name - Tipsy"
+		return "✓ On — share the current experience"
 	}
-	return "Discord Rich Presence off — Tipsy will not set a Discord activity"
+	return "Off — hide Discord activity"
 }
 
 func discordJoinToggleText(enabled bool) string {
 	if enabled {
-		return "✓ Join button — opens the public Roblox experience page"
+		return "✓ On — link to the public experience"
 	}
-	return "Join button off — Discord activity has no Join control"
+	return "Off — hide the Join button"
 }
 
 func fullscreenStartDisplay(settings guimodel.Settings) string {
@@ -738,9 +792,9 @@ func fullscreenStartDisplay(settings guimodel.Settings) string {
 
 func startFullscreenToggleText(enabled bool) string {
 	if enabled {
-		return "✓ Start Roblox fullscreen — Tipsy asks the desktop to fullscreen new Roblox windows"
+		return "✓ On — start in fullscreen"
 	}
-	return "Start Roblox fullscreen off — new Roblox windows open windowed"
+	return "Off — start in a window"
 }
 
 func displayTargetDisplay(settings guimodel.Settings) string {

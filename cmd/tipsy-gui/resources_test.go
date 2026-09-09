@@ -35,7 +35,7 @@ func TestDesktopEntriesTargetPlayAndSettings(t *testing.T) {
 			file: "io.github.tipsy_linux.Tipsy.Play.desktop",
 			lines: []string{
 				"Name=Tipsy - Play\n",
-				"Exec=tipsy launch %u\n",
+				"Exec=tipsy-gui --play %u\n",
 				"Icon=tipsy\n",
 				"Terminal=false\n",
 				"MimeType=x-scheme-handler/roblox;x-scheme-handler/roblox-player;\n",
@@ -51,7 +51,6 @@ func TestDesktopEntriesTargetPlayAndSettings(t *testing.T) {
 				"Exec=tipsy-gui %u\n",
 				"Icon=tipsy\n",
 				"Terminal=false\n",
-				"MimeType=x-scheme-handler/roblox;x-scheme-handler/roblox-player;\n",
 				"StartupWMClass=tipsy-gui\n",
 				"Categories=Game;\n",
 				"X-AppImage-Integrate=false\n",
@@ -76,7 +75,7 @@ func TestDesktopEntriesTargetPlayAndSettings(t *testing.T) {
 }
 
 func TestThemeUsesTipsyBrandPalette(t *testing.T) {
-	for _, color := range []string{"#091329", "#126cf3", "#dff515"} {
+	for _, color := range []string{"#141820", "#2d6bff", "#ffffff"} {
 		if !strings.Contains(appStyleSheet, color) {
 			t.Errorf("theme missing brand color %s", color)
 		}

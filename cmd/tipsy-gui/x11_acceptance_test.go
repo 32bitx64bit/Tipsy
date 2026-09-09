@@ -51,6 +51,9 @@ func TestX11Acceptance(t *testing.T) {
 
 	service := newAcceptanceService()
 	win := newMainWindow(service, brandIcon())
+	if mode := appearanceMode(os.Getenv("TIPSY_GUI_TEST_APPEARANCE")); validAppearance(mode) {
+		win.chooseAppearance(mode)
+	}
 	defer win.win.Delete()
 	win.Show()
 	pumpEvents()
@@ -223,6 +226,10 @@ func testWizardSurface(t *testing.T, win *mainWindow, service *acceptanceService
 
 func testMainSurface(t *testing.T, win *mainWindow, service *acceptanceService) {
 	t.Helper()
+	// Restore the launcher after the synthetic wizard closes before testing
+	// its keyboard focus; the window manager may still have the wizard active.
+	win.win.ActivateWindow()
+	qt.QApplication_SetActiveWindow(win.win.QWidget)
 	win.refreshSnapshot()
 	pumpEvents()
 	for page, name := range []string{"Home", "Installation", "Settings", "Diagnostics"} {
@@ -363,7 +370,7 @@ func testMainSurface(t *testing.T, win *mainWindow, service *acceptanceService) 
 	}
 	service.prepareLaunch()
 	win.playButton.Click()
-	service.waitForLaunchStart(t)
+	waitGUI(t, func() bool { return service.launchCalls() == 1 })
 	win.refreshLaunchState()
 	if win.playButton.IsEnabled() || win.playButton.Text() != "Launching…" || !strings.Contains(win.playState.Text(), "X11 window") {
 		t.Fatal("Play did not enter asynchronous launching state")
@@ -433,7 +440,11 @@ func captureAtSizes(t *testing.T, widget *qt.QWidget, prefix string) {
 func captureMainPageAtSizes(t *testing.T, win *mainWindow, page int, prefix string) {
 	t.Helper()
 	win.selectPage(page)
-	for _, size := range acceptanceSizesForRun() {
+	sizes := acceptanceSizesForRun()
+	if os.Getenv("TIPSY_GUI_ACCEPTANCE_HIDPI") != "1" {
+		sizes = append([]acceptanceSize{{width: 640, height: 560, name: "640x560"}, {width: 680, height: 820, name: "launchpad"}}, sizes...)
+	}
+	for _, size := range sizes {
 		win.win.Resize(size.width, size.height)
 		win.pages[page].VerticalScrollBar().SetValue(0)
 		pumpEvents()

@@ -28,43 +28,59 @@ type mainWindow struct {
 	setupLoadErr error
 	settingsErr  error
 
-	playButton              *qt.QPushButton
-	playState               *qt.QLabel
-	playAuthority           *qt.QLabel
-	installBadge            *qt.QLabel
-	installVersion          *qt.QLabel
-	installDetail           *qt.QLabel
-	installPageBadge        *qt.QLabel
-	installPageVer          *qt.QLabel
-	installPageDetail       *qt.QLabel
-	settingsRenderer        *qt.QComboBox
-	settingsFPSMode         *qt.QComboBox
-	settingsFPS             *qt.QSpinBox
-	settingsVSync           *qt.QCheckBox
-	settingsLowTexture      *qt.QCheckBox
-	settingsDiscordPresence *qt.QCheckBox
-	settingsDiscordJoin     *qt.QCheckBox
-	settingsDisplay         *qt.QComboBox
-	settingsStartFullscreen *qt.QCheckBox
-	settingsDisplayKeys     []string
-	settingsSyncing         bool
-	settingsApply           *qt.QPushButton
-	settingsReset           *qt.QPushButton
-	settingsHint            *qt.QLabel
-	doctorSummary           *qt.QLabel
-	doctorDetails           *qt.QPlainTextEdit
-	settingsProfile         *qt.QLabel
-	settingsClientStatus    *qt.QLabel
-	pageEntry               []*qt.QWidget
-	wizardScrolls           map[*qt.QWizardPage]*qt.QScrollArea
+	appearance                                       appearanceMode
+	appearanceIsDark                                 bool
+	systemDarkFallback                               bool
+	appearanceButtons                                map[appearanceMode]*qt.QPushButton
+	preferenceFPS, preferenceVSync, preferenceWindow *qt.QLabel
+	homeTitle, homeClient, homeClientMark            *qt.QLabel
+	playButton                                       *qt.QPushButton
+	playState                                        *qt.QLabel
+	playAuthority                                    *qt.QLabel
+	installBadge                                     *qt.QLabel
+	installVersion                                   *qt.QLabel
+	installDetail                                    *qt.QLabel
+	installPageBadge                                 *qt.QLabel
+	installPageVer                                   *qt.QLabel
+	installPageDetail                                *qt.QLabel
+	settingsRenderer                                 *qt.QComboBox
+	settingsFPSMode                                  *qt.QComboBox
+	settingsFPS                                      *qt.QSpinBox
+	settingsVSync                                    *qt.QCheckBox
+	settingsLowTexture                               *qt.QCheckBox
+	settingsDiscordPresence                          *qt.QCheckBox
+	settingsDiscordJoin                              *qt.QCheckBox
+	settingsDisplay                                  *qt.QComboBox
+	settingsStartFullscreen                          *qt.QCheckBox
+	settingsDisplayKeys                              []string
+	settingsSyncing                                  bool
+	settingsApply                                    *qt.QPushButton
+	settingsReset                                    *qt.QPushButton
+	settingsHint                                     *qt.QLabel
+	doctorSummary                                    *qt.QLabel
+	doctorDetails                                    *qt.QPlainTextEdit
+	settingsProfile                                  *qt.QLabel
+	settingsClientStatus                             *qt.QLabel
+	pageEntry                                        []*qt.QWidget
+	wizardScrolls                                    map[*qt.QWizardPage]*qt.QScrollArea
 
-	installReadiness setupsvc.ReadinessState
-	lastLaunchState  guimodel.LaunchState
-	launchTimer      *qt.QTimer
-	launcherHidden   bool
+	installReadiness       setupsvc.ReadinessState
+	lastLaunchState        guimodel.LaunchState
+	launchTimer            *qt.QTimer
+	launcherHidden         bool
+	launchOrigin           launchOrigin
+	externalProgress       *launchProgressWindow
+	launchBusy             *qt.QProgressBar
+	launchPreparing        bool
+	launchPreparation      chan launchPreparation
+	launchRequest          guimodel.LaunchRequest
+	launchFailure          bool
+	launchConsentRequested bool
+	launchInitializing     bool
+	launchInitialization   chan launchInitialization
 }
 
-func newMainWindow(service guimodel.Service, icon *qt.QIcon) *mainWindow {
+func newWindowBase(service guimodel.Service, icon *qt.QIcon) *mainWindow {
 	w := &mainWindow{
 		service:  service,
 		icon:     icon,
@@ -72,16 +88,21 @@ func newMainWindow(service guimodel.Service, icon *qt.QIcon) *mainWindow {
 		settings: guimodel.NewSettingsModel(service),
 		launch:   guimodel.NewLaunchModel(service),
 	}
-	w.setupLoadErr = w.setup.Load(context.Background())
-	w.settingsErr = w.settings.Load(context.Background())
 
 	w.win = qt.NewQMainWindow2()
-	w.win.SetWindowTitle("Tipsy - Settings")
+	w.win.SetWindowTitle("Tipsy")
 	w.win.SetWindowIcon(icon)
-	w.win.Resize(1080, 720)
-	w.win.SetMinimumSize2(780, 560)
-	w.addMenuBar()
-	w.buildShell()
+	w.win.Resize(680, 820)
+	w.win.SetMinimumSize2(640, 560)
+	w.win.OnCloseEvent(func(super func(*qt.QCloseEvent), event *qt.QCloseEvent) {
+		state := w.launch.View().State
+		if w.launchInitializing || w.launchPreparing || state == guimodel.LaunchStarting || state == guimodel.LaunchRunning {
+			event.Ignore()
+			return
+		}
+		super(event)
+	})
+	w.initAppearance()
 
 	w.status = qt.NewQStatusBar2()
 	w.status.SetSizeGripEnabled(true)
@@ -91,8 +112,21 @@ func newMainWindow(service guimodel.Service, icon *qt.QIcon) *mainWindow {
 	w.launchTimer = qt.NewQTimer2(w.win.QObject)
 	w.launchTimer.OnTimeout(w.refreshLaunchState)
 	w.launchTimer.Start(125)
-	w.refreshSnapshot()
 	return w
+}
+
+func newMainWindow(service guimodel.Service, icon *qt.QIcon) *mainWindow {
+	w := newWindowBase(service, icon)
+	w.setupLoadErr = w.setup.Load(context.Background())
+	w.settingsErr = w.settings.Load(context.Background())
+	w.finishShell()
+	return w
+}
+
+func (w *mainWindow) finishShell() {
+	w.buildShell()
+	w.syncAppearanceButtons()
+	w.presentSnapshot()
 }
 
 func (w *mainWindow) Show() {
@@ -102,21 +136,7 @@ func (w *mainWindow) Show() {
 
 func (w *mainWindow) startInMode(mode, uri string) {
 	if (mode == guiModePlay || uri != "") && !w.FirstRun() {
-		qt.QGuiApplication_SetQuitOnLastWindowClosed(false)
-		started, err := w.startAuthorizedLaunch(context.Background(), guimodel.LaunchRequest{URI: uri})
-		if err != nil {
-			qt.QGuiApplication_SetQuitOnLastWindowClosed(true)
-			w.Show()
-			qt.QMessageBox_Warning(w.win.QWidget, "Could not launch Roblox", err.Error())
-			return
-		}
-		if !started {
-			qt.QGuiApplication_SetQuitOnLastWindowClosed(true)
-			w.Show()
-			return
-		}
-		w.lastLaunchState = guimodel.LaunchStarting
-		w.refreshLaunchState()
+		w.beginLaunch(launchFromExternal, guimodel.LaunchRequest{URI: uri})
 		return
 	}
 	w.Show()
@@ -132,44 +152,18 @@ func (w *mainWindow) FirstRun() bool {
 func (w *mainWindow) buildShell() {
 	root := qt.NewQWidget2()
 	setObjectName(root.QObject, "appRoot")
-	outer := qt.NewQHBoxLayout(root)
+	outer := qt.NewQVBoxLayout(root)
 	outer.SetContentsMargins(0, 0, 0, 0)
 	outer.SetSpacing(0)
-
-	sidebar := qt.NewQWidget2()
-	setObjectName(sidebar.QObject, "sidebar")
-	sidebar.SetFixedWidth(224)
-	side := qt.NewQVBoxLayout(sidebar)
-	side.SetContentsMargins(22, 26, 22, 22)
-	side.SetSpacing(8)
-
-	brand := qt.NewQWidget2()
-	brandRow := qt.NewQHBoxLayout(brand)
-	brandRow.SetContentsMargins(0, 0, 0, 0)
-	brandRow.SetSpacing(12)
-	logo := qt.NewQLabel2()
-	logo.SetPixmap(w.icon.Pixmap2(46, 46))
-	logo.SetFixedSize2(46, 46)
-	logo.SetAccessibleName("Tipsy logo")
-	brandRow.AddWidget(logo.QWidget)
-	wordmark := qt.NewQLabel3("Tipsy")
-	setObjectName(wordmark.QObject, "wordmark")
-	brandRow.AddWidget(wordmark.QWidget)
-	brandRow.AddStretch()
-	side.AddWidget(brand)
-
-	strap := qt.NewQLabel3("ROBLOX ON LINUX")
-	setObjectName(strap.QObject, "eyebrowOnDark")
-	side.AddWidget(strap.QWidget)
-	side.AddSpacing(22)
-
-	for i, item := range []struct {
-		text string
-		tip  string
-	}{
+	top := qt.NewQWidget2()
+	setObjectName(top.QObject, "topNavigation")
+	row := qt.NewQHBoxLayout(top)
+	row.SetContentsMargins(16, 0, 16, 0)
+	row.SetSpacing(0)
+	for i, item := range []struct{ text, tip string }{
 		{"Home", "Play Roblox and see installation status"},
 		{"Installation", "Install, update, or repair Roblox"},
-		{"Settings", "Renderer, frame-rate, VSync, texture quality, and default-monitor settings"},
+		{"Settings", "Configure launch preferences"},
 		{"Diagnostics", "System readiness, paths, and logs"},
 	} {
 		button := qt.NewQPushButton3(item.text)
@@ -183,29 +177,45 @@ func (w *mainWindow) buildShell() {
 		index := i
 		button.OnClicked(func() { w.selectPage(index) })
 		w.nav = append(w.nav, button)
-		side.AddWidget(button.QWidget)
+		row.AddWidget2(button.QWidget, 1)
 	}
 	w.nav[0].SetChecked(true)
-	side.AddStretch()
-
-	privacy := qt.NewQLabel3("Official client only\nCredentials stay inside Roblox")
-	setObjectName(privacy.QObject, "sidebarNote")
-	privacy.SetWordWrap(true)
-	side.AddWidget(privacy.QWidget)
-	build := qt.NewQLabel3("Tipsy " + version.String())
-	setObjectName(build.QObject, "sidebarVersion")
-	side.AddWidget(build.QWidget)
-
+	outer.AddWidget(top)
 	w.stack = qt.NewQStackedWidget2()
 	setObjectName(w.stack.QObject, "contentStack")
 	w.stack.AddWidget(w.buildHomePage())
 	w.stack.AddWidget(w.buildInstallPage())
 	w.stack.AddWidget(w.buildSettingsPage())
 	w.stack.AddWidget(w.buildDiagnosticsPage())
-
-	outer.AddWidget(sidebar)
 	outer.AddWidget2(w.stack.QWidget, 1)
+	footer := qt.NewQWidget2()
+	setObjectName(footer.QObject, "appearanceBar")
+	foot := qt.NewQHBoxLayout(footer)
+	foot.SetContentsMargins(26, 14, 26, 14)
+	foot.SetSpacing(0)
+	foot.AddWidget(qt.NewQLabel3("Appearance").QWidget)
+	foot.AddStretch()
+	w.appearanceButtons = map[appearanceMode]*qt.QPushButton{}
+	for _, item := range []struct {
+		mode  appearanceMode
+		label string
+	}{{appearanceSystem, "System"}, {appearanceLight, "Light"}, {appearanceDark, "Dark"}} {
+		button := qt.NewQPushButton3(item.label)
+		setObjectName(button.QObject, "appearanceButton")
+		button.SetCheckable(true)
+		button.SetAccessibleName("Appearance: " + item.label)
+		mode := item.mode
+		button.OnClicked(func() { w.chooseAppearance(mode) })
+		w.appearanceButtons[mode] = button
+		foot.AddWidget(button.QWidget)
+	}
+	w.appearanceButtons[appearanceSystem].SetToolTip("Follow the desktop color scheme; use the platform palette when no preference is provided")
+	outer.AddWidget(footer)
 	w.win.SetCentralWidget(root)
+	quit := qt.NewQAction2("Quit")
+	quit.SetShortcut(qt.NewQKeySequence2("Ctrl+Q"))
+	quit.OnTriggered(qt.QCoreApplication_Quit)
+	w.win.AddAction(quit)
 }
 
 func (w *mainWindow) registerPage(page *qt.QWidget, scroll *qt.QScrollArea) *qt.QWidget {
@@ -229,33 +239,17 @@ func (w *mainWindow) selectPage(index int) {
 	}
 }
 
-func (w *mainWindow) addMenuBar() {
-	bar := qt.NewQMenuBar2()
-
-	fileMenu := bar.AddMenuWithTitle("&File")
-	setup := fileMenu.AddActionWithText("Run &setup…")
-	setup.OnTriggered(func() { w.ShowSetupWizard(false) })
-	fileMenu.AddSeparator()
-	quit := fileMenu.AddActionWithText("&Quit")
-	quit.SetShortcut(qt.NewQKeySequence2("Ctrl+Q"))
-	quit.OnTriggered(qt.QCoreApplication_Quit)
-
-	helpMenu := bar.AddMenuWithTitle("&Help")
-	diagnostics := helpMenu.AddActionWithText("System &diagnostics")
-	diagnostics.OnTriggered(func() { w.selectPage(3) })
-	about := helpMenu.AddActionWithText("&About Tipsy")
-	about.OnTriggered(func() { showAboutMessage(w.win.QWidget) })
-	aboutQt := helpMenu.AddActionWithText("About &Qt")
-	aboutQt.OnTriggered(qt.QApplication_AboutQt)
-	w.win.SetMenuBar(bar)
+func (w *mainWindow) refreshSnapshot() {
+	w.setupLoadErr = w.setup.Load(context.Background())
+	w.presentSnapshot()
 }
 
-func (w *mainWindow) refreshSnapshot() {
-	if err := w.setup.Load(context.Background()); err != nil {
-		w.setupLoadErr = err
+func (w *mainWindow) presentSnapshot() {
+	if w.setupLoadErr != nil {
 		w.setInstallText("", "Unavailable", "Installation verification is unavailable. Open Setup and check the privacy-safe logs before trying again.")
 		return
 	}
+
 	w.setupLoadErr = nil
 	snapshot := w.setup.View().Snapshot
 	versionText := snapshot.Version
@@ -342,6 +336,21 @@ func installPresentation(readiness setupsvc.ReadinessState) installUIPresentatio
 
 func (w *mainWindow) setInstallText(readiness setupsvc.ReadinessState, versionText, detail string) {
 	w.installReadiness = readiness
+	if w.homeTitle != nil {
+		title, client := "Ready when you are.", "Client installed"
+		switch readiness {
+		case setupsvc.ReadinessNotInstalled:
+			title, client = "Let’s get you set up.", "Client not installed"
+		case setupsvc.ReadinessRejected:
+			title, client = "Your client needs attention.", "Client verification rejected"
+		case setupsvc.ReadinessLaunchInputs:
+		default:
+			title, client = "Let’s check your client.", "Client status unavailable"
+		}
+		w.homeTitle.SetText(title)
+		w.homeClient.SetText(client)
+		w.homeClientMark.SetVisible(readiness == setupsvc.ReadinessLaunchInputs)
+	}
 	presentation := installPresentation(readiness)
 	for _, badge := range []*qt.QLabel{w.installBadge, w.installPageBadge} {
 		if badge == nil {
@@ -369,6 +378,7 @@ func (w *mainWindow) setInstallText(readiness setupsvc.ReadinessState, versionTe
 		state := w.launch.View().State
 		if state != guimodel.LaunchStarting && state != guimodel.LaunchRunning {
 			w.playState.SetText(presentation.idleText)
+			w.playState.SetVisible(readiness != setupsvc.ReadinessLaunchInputs)
 		}
 	}
 	if w.settingsClientStatus != nil {
@@ -379,39 +389,7 @@ func (w *mainWindow) setInstallText(readiness setupsvc.ReadinessState, versionTe
 }
 
 func (w *mainWindow) launchRoblox() bool {
-	started, err := w.startAuthorizedLaunch(context.Background(), guimodel.LaunchRequest{})
-	if err != nil {
-		qt.QMessageBox_Warning(w.win.QWidget, "Could not launch Roblox", err.Error())
-		return false
-	}
-	if !started {
-		return false
-	}
-	w.lastLaunchState = guimodel.LaunchStarting
-	w.refreshLaunchState()
-	return true
-}
-
-func (w *mainWindow) startAuthorizedLaunch(ctx context.Context, request guimodel.LaunchRequest) (bool, error) {
-	authority, err := w.service.PrepareLaunch(ctx, false)
-	if authority.DevelopmentConsentRequired {
-		w.setLaunchAuthority(authority)
-		if !confirmDevelopmentLaunch(w.win.QWidget) {
-			if w.status != nil {
-				w.status.ShowMessage2("Development launch was not authorized.", 6000)
-			}
-			return false, nil
-		}
-		authority, err = w.service.PrepareLaunch(ctx, true)
-	}
-	w.setLaunchAuthority(authority)
-	if err != nil {
-		return false, err
-	}
-	if err := w.launch.StartRequest(ctx, request); err != nil {
-		return false, err
-	}
-	return true, nil
+	return w.beginLaunch(launchFromHome, guimodel.LaunchRequest{})
 }
 
 var confirmDevelopmentLaunch = func(parent *qt.QWidget) bool {
@@ -452,42 +430,56 @@ func (w *mainWindow) setLaunchAuthority(authority guimodel.LaunchAuthority) {
 		w.playAuthority.SetText("Launch authority will be verified before Roblox starts.")
 		setObjectName(w.playAuthority.QObject, "noticeInfo")
 	}
+	w.playAuthority.SetVisible(authority.DevelopmentConsentRequired || authority.Mode == string(setupsvc.DevelopmentUnrestricted))
 	refreshStyle(w.playAuthority.QWidget)
 }
 
 func (w *mainWindow) refreshLaunchState() {
+	if w.launchInitializing {
+		w.pollLaunchInitialization()
+		return
+	}
+	if w.playButton == nil {
+		return
+	}
+	w.pollLaunchPreparation()
 	view := w.launch.View()
 	if view.State == guimodel.LaunchRunning && !w.launcherHidden {
-		// Roblox runs in-process, so the application event loop must remain
-		// alive after its launcher surface goes away. A later runtime failure
-		// restores this window and its normal last-window behavior.
 		qt.QGuiApplication_SetQuitOnLastWindowClosed(false)
 		w.win.Hide()
+		if w.externalProgress != nil {
+			w.externalProgress.active = false
+			w.externalProgress.dialog.Hide()
+		}
 		w.launcherHidden = true
 	}
-	if w.playButton != nil {
-		running := view.State == guimodel.LaunchStarting || view.State == guimodel.LaunchRunning
-		w.playButton.SetEnabled(!running && w.setup.View().Snapshot.LaunchReady())
-		if view.State == guimodel.LaunchStarting {
-			w.playButton.SetText("Launching…")
-			w.playState.SetText("Starting the official client in its own X11 window")
-		} else if view.State == guimodel.LaunchRunning {
-			w.playButton.SetText("Roblox is running")
-			w.playState.SetText("The Tipsy launcher closes while Roblox is running")
+	busy := w.launchPreparing || view.State == guimodel.LaunchStarting
+	running := busy || view.State == guimodel.LaunchRunning
+	w.playButton.SetEnabled(!running && w.setup.View().Snapshot.LaunchReady())
+	w.launchBusy.SetVisible(busy && w.launchOrigin == launchFromHome)
+	if busy {
+		w.playButton.SetText("Launching…")
+		if w.launchPreparing {
+			w.playState.SetText("Checking launch authorization…")
 		} else {
-			w.playButton.SetText("Play Roblox")
+			w.playState.SetText("Starting the official client in its own X11 window")
+		}
+		setObjectName(w.playState.QObject, "mutedText")
+		w.playState.Show()
+	} else if view.State == guimodel.LaunchRunning {
+		w.playButton.SetText("Roblox is running")
+	} else {
+		w.playButton.SetText("▶   Play Roblox")
+		if !w.launchFailure {
 			w.playState.SetText(installPresentation(w.installReadiness).idleText)
 		}
 	}
-	if view.State == guimodel.LaunchFailed && w.lastLaunchState != guimodel.LaunchFailed {
-		if w.launcherHidden {
-			placeWidgetOnDisplay(w.win.QWidget, configuredDisplay(w))
-			w.win.Show()
-			w.launcherHidden = false
-			qt.QGuiApplication_SetQuitOnLastWindowClosed(true)
+	if !w.launchPreparing && !w.launchFailure && view.State == guimodel.LaunchFailed && w.lastLaunchState != guimodel.LaunchFailed {
+		message := safeLaunchFailure
+		if view.Started {
+			message = safeRuntimeFailure
 		}
-		qt.QMessageBox_Critical(w.win.QWidget, "Roblox closed with an error", view.Error)
-		w.status.ShowMessage2("Roblox could not be launched.", 6000)
+		w.showLaunchFailure(message)
 	}
 	if view.State == guimodel.LaunchExited && view.Started {
 		qt.QCoreApplication_Quit()
@@ -501,6 +493,7 @@ func (w *mainWindow) refreshSettingsProfile() {
 	}
 	profile := w.settings.View().Saved
 	w.settingsProfile.SetText(settingsProfileText(profile))
+	w.refreshLaunchPreferences()
 }
 
 func showAboutMessage(parent *qt.QWidget) {

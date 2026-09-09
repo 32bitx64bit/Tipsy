@@ -85,12 +85,12 @@ func TestDesktopEntriesAreDistinctPinTargets(t *testing.T) {
 	}
 	playText := string(play)
 	settingsText := string(settings)
-	for _, required := range []string{"Name=Tipsy - Play", "Exec=tipsy launch %u", "StartupWMClass=roblox", "MimeType=x-scheme-handler/roblox;x-scheme-handler/roblox-player;", "X-AppImage-Integrate=false"} {
+	for _, required := range []string{"Name=Tipsy - Play", "Exec=tipsy-gui --play %u", "StartupWMClass=roblox", "MimeType=x-scheme-handler/roblox;x-scheme-handler/roblox-player;", "X-AppImage-Integrate=false"} {
 		if !strings.Contains(playText, required+"\n") {
 			t.Errorf("Play desktop entry missing %q", required)
 		}
 	}
-	for _, required := range []string{"Name=Tipsy - Settings", "Exec=tipsy-gui %u", "StartupWMClass=tipsy-gui", "Categories=Game;", "MimeType=x-scheme-handler/roblox;x-scheme-handler/roblox-player;", "X-AppImage-Integrate=false"} {
+	for _, required := range []string{"Name=Tipsy - Settings", "Exec=tipsy-gui %u", "StartupWMClass=tipsy-gui", "Categories=Game;", "X-AppImage-Integrate=false"} {
 		if !strings.Contains(settingsText, required+"\n") {
 			t.Errorf("Settings desktop entry missing %q", required)
 		}
@@ -100,6 +100,9 @@ func TestDesktopEntriesAreDistinctPinTargets(t *testing.T) {
 	}
 	if strings.Contains(settingsText, "StartupWMClass=roblox") {
 		t.Fatal("Settings desktop entry must not share the Play window class")
+	}
+	if strings.Contains(settingsText, "MimeType=x-scheme-handler/") {
+		t.Fatal("Settings desktop entry must not compete with Play for Roblox URI handling")
 	}
 }
 
@@ -1054,7 +1057,7 @@ func TestAppRunDispatchesPlayAndSettings(t *testing.T) {
 		assertStubLog(t, logPath, "tipsy-gui")
 	})
 
-	t.Run("play with runtime launches client", func(t *testing.T) {
+	t.Run("play with runtime opens progress", func(t *testing.T) {
 		logPath := filepath.Join(t.TempDir(), "stub.log")
 		xdg := t.TempDir()
 		if err := os.MkdirAll(filepath.Join(xdg, "tipsy", "runtime", "lib", "x86_64"), 0o755); err != nil {
@@ -1066,10 +1069,10 @@ func TestAppRunDispatchesPlayAndSettings(t *testing.T) {
 		if output, err := command.CombinedOutput(); err != nil {
 			t.Fatalf("play: %v\n%s", err, output)
 		}
-		assertStubLog(t, logPath, "tipsy launch")
+		assertStubLog(t, logPath, "tipsy-gui --play")
 	})
 
-	t.Run("rewritten launch argument plays", func(t *testing.T) {
+	t.Run("explicit launch keeps cli behavior", func(t *testing.T) {
 		logPath := filepath.Join(t.TempDir(), "stub.log")
 		xdg := t.TempDir()
 		if err := os.MkdirAll(filepath.Join(xdg, "tipsy", "runtime", "lib", "x86_64"), 0o755); err != nil {
@@ -1096,7 +1099,18 @@ func TestAppRunDispatchesPlayAndSettings(t *testing.T) {
 		if output, err := command.CombinedOutput(); err != nil {
 			t.Fatalf("uri: %v\n%s", err, output)
 		}
-		assertStubLog(t, logPath, "tipsy launch roblox://experiences/start?placeId=1818")
+		assertStubLog(t, logPath, "tipsy-gui --play roblox://experiences/start?placeId=1818")
+	})
+
+	t.Run("website uri without runtime reaches gui setup", func(t *testing.T) {
+		logPath := filepath.Join(t.TempDir(), "stub.log")
+		command := exec.Command(filepath.Join(appdir, "AppRun"), "--no-integrate", "roblox://experiences/start?placeId=1818")
+		command.Dir = appdir
+		command.Env = stubEnv(t, logPath, "")
+		if output, err := command.CombinedOutput(); err != nil {
+			t.Fatalf("first-run uri: %v\n%s", err, output)
+		}
+		assertStubLog(t, logPath, "tipsy-gui roblox://experiences/start?placeId=1818")
 	})
 
 	t.Run("settings plus website uri still launches client", func(t *testing.T) {
@@ -1111,7 +1125,7 @@ func TestAppRunDispatchesPlayAndSettings(t *testing.T) {
 		if output, err := command.CombinedOutput(); err != nil {
 			t.Fatalf("settings uri: %v\n%s", err, output)
 		}
-		assertStubLog(t, logPath, "tipsy launch roblox://experiences/start?placeId=1818")
+		assertStubLog(t, logPath, "tipsy-gui --play roblox://experiences/start?placeId=1818")
 	})
 
 	t.Run("settings invocation name", func(t *testing.T) {
@@ -1123,6 +1137,31 @@ func TestAppRunDispatchesPlayAndSettings(t *testing.T) {
 			t.Fatalf("argv0 settings: %v\n%s", err, output)
 		}
 		assertStubLog(t, logPath, "tipsy-gui")
+	})
+
+	t.Run("missing gui fails without cli fallback", func(t *testing.T) {
+		appdir := fakeRunnableAppDir(t)
+		if err := os.Remove(filepath.Join(appdir, "usr", "bin", "tipsy-gui")); err != nil {
+			t.Fatal(err)
+		}
+		logPath := filepath.Join(t.TempDir(), "stub.log")
+		xdg := t.TempDir()
+		if err := os.MkdirAll(filepath.Join(xdg, "tipsy", "runtime", "lib", "x86_64"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		command := exec.Command(filepath.Join(appdir, "AppRun"), "--play", "--no-integrate")
+		command.Dir = appdir
+		command.Env = stubEnv(t, logPath, xdg)
+		output, err := command.CombinedOutput()
+		if err == nil {
+			t.Fatalf("missing GUI unexpectedly succeeded: %s", output)
+		}
+		if got := strings.TrimSpace(string(output)); got != "Tipsy: bundled graphical launcher is unavailable." {
+			t.Fatalf("missing GUI output=%q", got)
+		}
+		if _, statErr := os.Stat(logPath); !os.IsNotExist(statErr) {
+			t.Fatalf("CLI fallback ran or wrote a log: %v", statErr)
+		}
 	})
 }
 
@@ -1188,8 +1227,8 @@ func TestAppRunWritesPinEntries(t *testing.T) {
 	if !strings.Contains(settingsText, `Exec="`+appImage+`" --settings %u`+"\n") {
 		t.Fatalf("Settings pin Exec is wrong: %s", settingsText)
 	}
-	if !strings.Contains(settingsText, "MimeType=x-scheme-handler/roblox;x-scheme-handler/roblox-player;\n") {
-		t.Fatalf("Settings pin is missing Roblox URI handlers: %s", settingsText)
+	if strings.Contains(settingsText, "MimeType=x-scheme-handler/") {
+		t.Fatalf("Settings pin must not compete for Roblox URI handling: %s", settingsText)
 	}
 	if !strings.Contains(playText, "[Desktop Action Settings]\n") {
 		t.Fatalf("Play pin is missing a Settings action: %s", playText)
@@ -1291,8 +1330,8 @@ func TestAppRunKeepsPlayVisibleForProtocolHandlers(t *testing.T) {
 	if !strings.Contains(string(play), "MimeType=x-scheme-handler/roblox;x-scheme-handler/roblox-player;\n") {
 		t.Fatalf("Play pin lost URI handlers: %s", play)
 	}
-	if !strings.Contains(string(settings), "MimeType=x-scheme-handler/roblox;x-scheme-handler/roblox-player;\n") {
-		t.Fatalf("Settings pin lost URI handlers: %s", settings)
+	if strings.Contains(string(settings), "MimeType=x-scheme-handler/") {
+		t.Fatalf("Settings pin must not compete for Roblox URI handling: %s", settings)
 	}
 	icon := filepath.Join(xdg, "icons", "hicolor", "256x256", "apps", "io.github.tipsy_linux.Tipsy.png")
 	if !strings.Contains(string(settings), "Icon="+icon+"\n") {

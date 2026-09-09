@@ -223,6 +223,7 @@ runtime_is_ready() {
 }
 
 mode=
+cli_launch=
 integrate=1
 invoked=$(basename -- "${ARGV0:-}")
 case "$invoked" in
@@ -242,14 +243,17 @@ while [ $# -gt 0 ]; do
 			;;
 		--play)
 			mode=play
+			cli_launch=
 			shift
 			;;
 		--settings)
 			mode=settings
+			cli_launch=
 			shift
 			;;
 		launch)
 			mode=play
+			cli_launch=1
 			shift
 			;;
 		--no-integrate)
@@ -275,12 +279,26 @@ if [ "$integrate" -eq 1 ]; then
 	(integrate_pin_entries) || true
 fi
 
-if [ "$mode" = settings ]; then
-	exec "$appdir/usr/bin/tipsy-gui" "$@"
-fi
-
-if runtime_is_ready; then
+if [ -n "$cli_launch" ]; then
 	exec "$appdir/usr/bin/tipsy" launch "$@"
 fi
 
-exec "$appdir/usr/bin/tipsy-gui" "$@"
+gui="$appdir/usr/bin/tipsy-gui"
+require_gui() {
+	if [ ! -x "$gui" ]; then
+		printf '%s\n' 'Tipsy: bundled graphical launcher is unavailable.' >&2
+		exit 1
+	fi
+}
+
+require_gui
+
+if [ "$mode" = settings ]; then
+	exec "$gui" "$@"
+fi
+
+if runtime_is_ready; then
+	exec "$gui" --play "$@"
+fi
+
+exec "$gui" "$@"

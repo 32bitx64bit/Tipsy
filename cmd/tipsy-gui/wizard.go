@@ -314,7 +314,7 @@ func (w *mainWindow) buildDoctorWizardPage() *qt.QWizardPage {
 				marker = "×"
 			}
 			if check.Remedy != "" {
-				suffix = "<br><span style='color:#66758f'>Next: " + html.EscapeString(check.Remedy) + "</span>"
+				suffix = "<br><span>Next: " + html.EscapeString(check.Remedy) + "</span>"
 			}
 			label := qt.NewQLabel3(fmt.Sprintf("<b>%s&nbsp;&nbsp;%s</b><br>%s%s", marker, html.EscapeString(check.Name), html.EscapeString(check.Detail), suffix))
 			label.SetTextFormat(qt.RichText)
@@ -377,7 +377,7 @@ func (w *mainWindow) buildSourceWizardPage() (*qt.QWizardPage, *qt.QRadioButton,
 
 func (w *mainWindow) buildInstallWizardPage() (*qt.QWizardPage, *qt.QProgressBar, *qt.QLabel, *qt.QLabel, *qt.QLabel, *qt.QPushButton, *qt.QPushButton) {
 	page := qt.NewQWizardPage2()
-	layout := w.newWizardPageLayout(page, "Preparing Roblox", "Download, package checks, verification, and extraction are performed by the shared setup backend.")
+	layout := w.newWizardPageLayout(page, "Preparing Roblox", "Prepare the Roblox client for installation.")
 	layout.SetSpacing(14)
 	phase := qt.NewQLabel3("Preparing")
 	setObjectName(phase.QObject, "wizardProgressTitle")

@@ -19,20 +19,26 @@ func main() {
 
 	mode, uri, qtArgs := splitGUIArgs(os.Args)
 	app := qt.NewQApplication(qtArgs)
+	defer app.Delete()
 	qt.QCoreApplication_SetOrganizationName("tipsy-linux")
 	qt.QCoreApplication_SetOrganizationDomain("tipsy-linux.github.io")
 	qt.QCoreApplication_SetApplicationName("tipsy-gui")
 	qt.QCoreApplication_SetApplicationVersion(version.String())
-	qt.QGuiApplication_SetApplicationDisplayName("Tipsy - Settings")
+	qt.QGuiApplication_SetApplicationDisplayName("Tipsy")
 	qt.QGuiApplication_SetDesktopFileName("io.github.tipsy_linux.Tipsy.Settings")
 	qt.QGuiApplication_SetQuitOnLastWindowClosed(true)
 	qt.QApplication_SetStyleWithStyle("Fusion")
-	app.SetStyleSheet(appStyleSheet)
 
 	icon := brandIcon()
 	qt.QGuiApplication_SetWindowIcon(icon)
 
-	win := newMainWindow(newProductionService(), icon)
-	win.startInMode(mode, uri)
+	service := newProductionService()
+	if mode == guiModePlay || uri != "" {
+		win := newWindowBase(service, icon)
+		win.startExternalInitialization(uri)
+	} else {
+		win := newMainWindow(service, icon)
+		win.startInMode(mode, uri)
+	}
 	qt.QApplication_Exec()
 }
