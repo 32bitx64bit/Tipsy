@@ -104,8 +104,26 @@ EOF
 	export_qt_pc_path
 }
 
+# GitHub-hosted images preinstall third-party APT sources (Chrome, Microsoft,
+# Azure CLI, ...). Any one of them failing to sync makes `apt-get update` exit
+# 100, and only the distribution archive is needed here. Never touched outside
+# Actions so a developer's machine keeps its own sources.
+drop_third_party_apt_sources() {
+	[ -n "${GITHUB_ACTIONS:-}" ] || return 0
+	local f
+	for f in /etc/apt/sources.list.d/*; do
+		[ -e "$f" ] || continue
+		if grep -Eq 'ubuntu\.com|debian\.org' "$f"; then
+			continue
+		fi
+		printf 'ci-install-native: dropping third-party apt source %s\n' "$f" >&2
+		as_root rm -f -- "$f"
+	done
+}
+
 if command -v apt-get >/dev/null 2>&1; then
 	export DEBIAN_FRONTEND=noninteractive
+	drop_third_party_apt_sources
 	as_root apt-get update
 	as_root apt-get install -y --no-install-recommends \
 		ca-certificates curl gcc g++ git pkg-config xvfb \
