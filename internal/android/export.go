@@ -74,6 +74,34 @@ func resetTestLogCounters() {
 	C.tipsy_android_reset_log_counters()
 }
 
+func testGettid() int32 {
+	return int32(C.tipsy_gettid())
+}
+
+func testGettidSys() int32 {
+	return int32(C.tipsy_test_gettid_sys())
+}
+
+func testGettidSameThread() int {
+	return int(C.tipsy_test_gettid_same_thread())
+}
+
+func testGettidTwoThreads() int {
+	return int(C.tipsy_test_gettid_two_threads())
+}
+
+func testGettidAtforkChild() int {
+	return int(C.tipsy_test_gettid_atfork_child())
+}
+
+func testGettidNS(n int, cached bool) int64 {
+	cachedFlag := C.int(0)
+	if cached {
+		cachedFlag = 1
+	}
+	return int64(C.tipsy_test_gettid_ns(C.int(n), cachedFlag))
+}
+
 func testAndroidLogSkipCount() uint64 {
 	return uint64(C.tipsy_android_log_skip_count())
 }

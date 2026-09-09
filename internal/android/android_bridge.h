@@ -218,6 +218,13 @@ int32_t tipsy_ANativeWindow_getHeight(void *window);
 int32_t tipsy_ANativeWindow_getFormat(void *window);
 int32_t tipsy_ANativeWindow_setBuffersGeometry(void *window, int32_t width, int32_t height, int32_t format);
 
+int32_t tipsy_gettid(void);
+int32_t tipsy_test_gettid_sys(void);
+int tipsy_test_gettid_same_thread(void);
+int tipsy_test_gettid_two_threads(void);
+int tipsy_test_gettid_atfork_child(void);
+int64_t tipsy_test_gettid_ns(int n, int cached);
+
 ALooper *tipsy_ALooper_forThread(void);
 ALooper *tipsy_ALooper_prepare(int opts);
 int tipsy_ALooper_pollOnce(int timeoutMillis, int *outFd, int *outEvents, void **outData);

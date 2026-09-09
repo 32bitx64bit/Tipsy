@@ -2014,7 +2014,135 @@ void tipsy_arc4random_buf(void *buf, size_t n)
 }
 
 
+static __thread pid_t tls_tid;
+static pthread_once_t gettid_once = PTHREAD_ONCE_INIT;
+static int gettid_atfork_ok;
+
+static void tipsy_gettid_atfork_child(void)
+{
+	tls_tid = 0;
+}
+
+static void tipsy_gettid_init(void)
+{
+	gettid_atfork_ok = pthread_atfork(NULL, NULL, tipsy_gettid_atfork_child) == 0;
+}
+
 int32_t tipsy_gettid(void)
 {
+	pid_t tid = tls_tid;
+	if (tid != 0) {
+		return (int32_t)tid;
+	}
+	pthread_once(&gettid_once, tipsy_gettid_init);
+	tid = (pid_t)syscall(SYS_gettid);
+	if (gettid_atfork_ok) {
+		tls_tid = tid;
+	}
+	return (int32_t)tid;
+}
+
+int32_t tipsy_test_gettid_sys(void)
+{
 	return (int32_t)syscall(SYS_gettid);
+}
+
+int tipsy_test_gettid_same_thread(void)
+{
+	int32_t sys = (int32_t)syscall(SYS_gettid);
+	int32_t a = tipsy_gettid();
+	int32_t b = tipsy_gettid();
+	if (a != sys || b != sys || a <= 0) {
+		return -1;
+	}
+	return 0;
+}
+
+struct gettid_probe {
+	int32_t wrap;
+	int32_t sys;
+};
+
+static void *tipsy_test_gettid_thread(void *arg)
+{
+	struct gettid_probe *p = arg;
+	p->wrap = tipsy_gettid();
+	p->sys = (int32_t)syscall(SYS_gettid);
+	return NULL;
+}
+
+int tipsy_test_gettid_two_threads(void)
+{
+	struct gettid_probe a = {0};
+	struct gettid_probe b = {0};
+	pthread_t ta, tb;
+
+	if (pthread_create(&ta, NULL, tipsy_test_gettid_thread, &a) != 0) {
+		return -1;
+	}
+	if (pthread_create(&tb, NULL, tipsy_test_gettid_thread, &b) != 0) {
+		return -2;
+	}
+	pthread_join(ta, NULL);
+	pthread_join(tb, NULL);
+	if (a.wrap != a.sys || b.wrap != b.sys || a.wrap <= 0 || b.wrap <= 0) {
+		return -3;
+	}
+	if (a.wrap == b.wrap) {
+		return -4;
+	}
+	return 0;
+}
+
+int tipsy_test_gettid_atfork_child(void)
+{
+	int32_t parent_wrap = tipsy_gettid();
+	int32_t parent_sys = (int32_t)syscall(SYS_gettid);
+	pid_t pid;
+	int st = 0;
+
+	if (parent_wrap != parent_sys || parent_wrap <= 0) {
+		return -1;
+	}
+	pid = fork();
+	if (pid < 0) {
+		return -2;
+	}
+	if (pid == 0) {
+		int32_t child_wrap = tipsy_gettid();
+		int32_t child_sys = (int32_t)syscall(SYS_gettid);
+		_exit((child_wrap == child_sys && child_wrap != parent_wrap && child_wrap > 0) ? 0 : 1);
+	}
+	if (waitpid(pid, &st, 0) != pid) {
+		return -3;
+	}
+	if (!WIFEXITED(st) || WEXITSTATUS(st) != 0) {
+		return -4;
+	}
+	if (tipsy_gettid() != parent_wrap) {
+		return -5;
+	}
+	return 0;
+}
+
+int64_t tipsy_test_gettid_ns(int n, int cached)
+{
+	struct timespec a, b;
+	int i;
+
+	if (n < 0) {
+		return -1;
+	}
+	clock_gettime(CLOCK_MONOTONIC, &a);
+	if (cached) {
+		for (i = 0; i < n; i++) {
+			(void)tipsy_gettid();
+		}
+	} else {
+		for (i = 0; i < n; i++) {
+			(void)syscall(SYS_gettid);
+		}
+	}
+	clock_gettime(CLOCK_MONOTONIC, &b);
+	return (int64_t)(b.tv_sec - a.tv_sec) * 1000000000LL + (int64_t)(b.tv_nsec - a.tv_nsec);
 }
