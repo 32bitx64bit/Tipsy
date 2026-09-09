@@ -29,6 +29,7 @@ Roblox itself is proprietary and is **never** redistributed, patched, or committ
 
 ## Contents
 
+- [Install](#install)
 - [Start here](#start-here)
 - [Requirements](#requirements)
 - [Install the Roblox client](#install-the-roblox-client)
@@ -43,6 +44,58 @@ Roblox itself is proprietary and is **never** redistributed, patched, or committ
 - [What Tipsy is not](#what-tipsy-is-not)
 - [Packaging](#packaging)
 - [License](#license)
+
+---
+
+## Install
+
+One copy-paste block per distro. Afterwards open **Tipsy - Settings** and run
+the setup assistant to install the official Roblox client (never included).
+
+> The APT and DNF repositories populate with the first published release —
+> until then, use the AppImage. The Flatpak remote exists, but installs work
+> once the first Flatpak bundle is published.
+
+**Debian / Ubuntu**
+
+```sh
+sudo mkdir -p /etc/apt/keyrings
+curl -fsSL https://32bitx64bit.github.io/Tipsy-repo/keys/tipsy-signing-key.asc \
+  | sudo tee /etc/apt/keyrings/tipsy.asc > /dev/null
+echo "deb [arch=amd64 signed-by=/etc/apt/keyrings/tipsy.asc] \
+https://32bitx64bit.github.io/Tipsy-repo/apt stable main" \
+  | sudo tee /etc/apt/sources.list.d/tipsy.list
+sudo apt update
+sudo apt install -y tipsy
+```
+
+**Fedora / compatible RPM systems**
+
+```sh
+sudo curl -fsSL -o /etc/yum.repos.d/tipsy.repo \
+  https://32bitx64bit.github.io/Tipsy-repo/rpm/tipsy.repo
+sudo dnf install -y tipsy
+```
+
+**Flatpak**
+
+```sh
+flatpak remote-add --if-not-exists tipsy \
+  https://32bitx64bit.github.io/Tipsy-repo/flatpak/tipsy.flatpakrepo
+flatpak install -y tipsy io.github.tipsy_linux.Tipsy
+```
+
+**AppImage (any distro)**
+
+```sh
+# Download Tipsy-<version>-x86_64.AppImage from
+# https://github.com/32bitx64bit/Tipsy-repo/releases/latest
+chmod +x Tipsy-*-x86_64.AppImage
+./Tipsy-*-x86_64.AppImage
+```
+
+Updates arrive through your package manager (`apt upgrade`, `dnf upgrade`,
+`flatpak update`). Only AppImage updates itself inside the app.
 
 ---
 
@@ -492,7 +545,8 @@ Performance claims versus other Linux Roblox runtimes are out of scope until the
 
 `scripts/build-appdir.sh` produces a versioned AppDir and archive with bundled Qt/XCB runtime libraries and license notices. `scripts/build-appimage.sh` wraps that AppDir with a **pinned local** `appimagetool`. Payloads are guarded: no APK, `libroblox.so`, or Roblox fonts.
 
-Flatpak is planned later and does not replace AppImage.
+A self-hosted Flatpak repository is published alongside APT/RPM (first bundle
+ships after build validation). Native packages never replace AppImage.
 
 ---
 
