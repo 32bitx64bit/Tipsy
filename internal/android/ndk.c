@@ -15,9 +15,14 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/epoll.h>
+#include <sys/types.h>
 #include <time.h>
 #include <unistd.h>
 #include <sys/syscall.h>
+#include <sys/wait.h>
+
+enum { TIPSY_FUTEX_WAKE_BITSET_PRIVATE = 0x8a };
+enum { TIPSY_FUTEX_WAIT_BITSET_PRIVATE = 0x89 };
 
 extern void GoAndroid_LogWrite(int prio, char *tag, char *text);
 extern void GoAndroid_LogMissing(char *name);
@@ -41,6 +46,17 @@ struct ALooper {
 	int epfd;
 	int wake_r;
 	int wake_w;
+	int watch_epfd;
+	int stop_r;
+	int stop_w;
+	pthread_t watcher;
+	int watcher_on;
+	_Atomic int watcher_stop;
+	pthread_cond_t *parked_cond;
+	pthread_mutex_t *parked_mutex;
+	int *parked_futex;
+	int pending_wake;
+	int looper_woke;
 	pthread_mutex_t lock;
 	struct FdRec fds[MAX_LOOPER_FDS];
 };
@@ -494,6 +510,147 @@ int tipsy_system_property_get(const char *name, char *value)
 	return 0;
 }
 
+static void looper_close_watch_fds(ALooper *l)
+{
+	if (l->watch_epfd >= 0) {
+		close(l->watch_epfd);
+		l->watch_epfd = -1;
+	}
+	if (l->stop_r >= 0) {
+		close(l->stop_r);
+		l->stop_r = -1;
+	}
+	if (l->stop_w >= 0) {
+		close(l->stop_w);
+		l->stop_w = -1;
+	}
+}
+
+static void looper_signal_parked(ALooper *l)
+{
+	pthread_cond_t *c;
+	pthread_mutex_t *m;
+	int *futex;
+
+	if (l == NULL || l->magic != TIPSY_ALOOPER_MAGIC) {
+		return;
+	}
+	pthread_mutex_lock(&l->lock);
+	c = l->parked_cond;
+	m = l->parked_mutex;
+	futex = l->parked_futex;
+	if (c == NULL && futex == NULL) {
+		l->pending_wake = 1;
+		pthread_mutex_unlock(&l->lock);
+		return;
+	}
+	l->looper_woke = 1;
+	pthread_mutex_unlock(&l->lock);
+	if (c != NULL && m != NULL) {
+		/* Take the parked mutex after dropping the looper lock so this
+		 * cannot race past pthread_cond_wait (waiter holds m until then). */
+		pthread_mutex_lock(m);
+		pthread_cond_broadcast(c);
+		pthread_mutex_unlock(m);
+	} else if (c != NULL) {
+		pthread_cond_broadcast(c);
+	}
+	if (futex != NULL) {
+		(void)syscall(SYS_futex, futex, TIPSY_FUTEX_WAKE_BITSET_PRIVATE,
+			0x7fffffff, NULL, NULL, 0xffffffffu);
+	}
+}
+
+static void *looper_watcher(void *arg)
+{
+	ALooper *l = arg;
+	struct epoll_event ev;
+
+#if defined(__linux__)
+	(void)pthread_setname_np(pthread_self(), "tip.looper");
+#endif
+	while (!atomic_load_explicit(&l->watcher_stop, memory_order_relaxed)) {
+		int n = epoll_wait(l->watch_epfd, &ev, 1, -1);
+		if (atomic_load_explicit(&l->watcher_stop, memory_order_relaxed)) {
+			break;
+		}
+		if (n < 0) {
+			if (errno == EINTR) {
+				continue;
+			}
+			break;
+		}
+		if (n == 0) {
+			continue;
+		}
+		if (ev.data.fd == l->stop_r) {
+			break;
+		}
+		looper_signal_parked(l);
+	}
+	return NULL;
+}
+
+static void looper_start_watcher(ALooper *l)
+{
+	int stop[2];
+	int watch;
+	struct epoll_event ev;
+
+	l->watch_epfd = -1;
+	l->stop_r = -1;
+	l->stop_w = -1;
+	l->watcher_on = 0;
+	atomic_store_explicit(&l->watcher_stop, 0, memory_order_relaxed);
+	watch = epoll_create1(EPOLL_CLOEXEC);
+	if (watch < 0) {
+		return;
+	}
+	if (pipe2(stop, O_CLOEXEC | O_NONBLOCK) != 0) {
+		close(watch);
+		return;
+	}
+	l->watch_epfd = watch;
+	l->stop_r = stop[0];
+	l->stop_w = stop[1];
+	memset(&ev, 0, sizeof ev);
+	ev.events = EPOLLIN;
+	ev.data.fd = l->stop_r;
+	if (epoll_ctl(l->watch_epfd, EPOLL_CTL_ADD, l->stop_r, &ev) != 0) {
+		goto fail;
+	}
+	/* Nested ET: one edge when the owner epfd becomes ready. Does not
+	 * consume inner events; pollOnce(0) still sees them. */
+	ev.events = EPOLLIN | EPOLLET;
+	ev.data.fd = l->epfd;
+	if (epoll_ctl(l->watch_epfd, EPOLL_CTL_ADD, l->epfd, &ev) != 0) {
+		goto fail;
+	}
+	if (pthread_create(&l->watcher, NULL, looper_watcher, l) != 0) {
+		goto fail;
+	}
+	l->watcher_on = 1;
+	return;
+fail:
+	looper_close_watch_fds(l);
+}
+
+static void looper_stop_watcher(ALooper *l)
+{
+	if (l == NULL) {
+		return;
+	}
+	atomic_store_explicit(&l->watcher_stop, 1, memory_order_relaxed);
+	if (l->stop_w >= 0) {
+		char b = 1;
+		(void)write(l->stop_w, &b, 1);
+	}
+	if (l->watcher_on) {
+		(void)pthread_join(l->watcher, NULL);
+		l->watcher_on = 0;
+	}
+}
+
 static ALooper *looper_create(void)
 {
 	ALooper *l = calloc(1, sizeof(*l));
@@ -503,6 +660,9 @@ static ALooper *looper_create(void)
 	}
 	l->magic = TIPSY_ALOOPER_MAGIC;
 	l->refs = 1;
+	l->watch_epfd = -1;
+	l->stop_r = -1;
+	l->stop_w = -1;
 	l->epfd = epoll_create1(EPOLL_CLOEXEC);
 	if (l->epfd < 0) {
 		free(l);
@@ -523,6 +683,7 @@ static ALooper *looper_create(void)
 		ev.data.fd = l->wake_r;
 		epoll_ctl(l->epfd, EPOLL_CTL_ADD, l->wake_r, &ev);
 	}
+	looper_start_watcher(l);
 	return l;
 }
 
@@ -532,11 +693,13 @@ static void looper_free(ALooper *l)
 	if (l == NULL) {
 		return;
 	}
+	looper_stop_watcher(l);
 	for (i = 0; i < MAX_LOOPER_FDS; i++) {
 		if (l->fds[i].used) {
 			epoll_ctl(l->epfd, EPOLL_CTL_DEL, l->fds[i].fd, NULL);
 		}
 	}
+	looper_close_watch_fds(l);
 	close(l->wake_r);
 	close(l->wake_w);
 	close(l->epfd);
@@ -738,6 +901,7 @@ void tipsy_ALooper_wake(ALooper *looper)
 		return;
 	}
 	(void)write(looper->wake_w, &b, 1);
+	looper_signal_parked(looper);
 }
 
 static void poll_looper_nested(void);
@@ -784,12 +948,124 @@ static void poll_looper_nested(void)
 	}
 }
 
+static int looper_should_nest(void)
+{
+	return tls_looper != NULL || g_cond_wait_poll;
+}
+
+static int looper_can_event_park(void)
+{
+	return tls_looper != NULL && tls_looper->magic == TIPSY_ALOOPER_MAGIC &&
+		tls_looper->watcher_on;
+}
+
+int tipsy_looper_can_park(void)
+{
+	return looper_can_event_park();
+}
+
+static int looper_arm_cond(pthread_cond_t *c, pthread_mutex_t *m)
+{
+	ALooper *l = tls_looper;
+	int pending;
+
+	if (l == NULL || l->magic != TIPSY_ALOOPER_MAGIC) {
+		return 0;
+	}
+	pthread_mutex_lock(&l->lock);
+	l->parked_cond = c;
+	l->parked_mutex = m;
+	pending = l->pending_wake || l->looper_woke;
+	if (pending) {
+		l->pending_wake = 0;
+		l->looper_woke = 0;
+		l->parked_cond = NULL;
+		l->parked_mutex = NULL;
+	}
+	pthread_mutex_unlock(&l->lock);
+	return pending;
+}
+
+static int looper_disarm_cond(void)
+{
+	ALooper *l = tls_looper;
+	int woke = 0;
+
+	if (l == NULL || l->magic != TIPSY_ALOOPER_MAGIC) {
+		return 0;
+	}
+	pthread_mutex_lock(&l->lock);
+	l->parked_cond = NULL;
+	l->parked_mutex = NULL;
+	woke = l->looper_woke || l->pending_wake;
+	l->looper_woke = 0;
+	l->pending_wake = 0;
+	pthread_mutex_unlock(&l->lock);
+	return woke;
+}
+
+static void looper_poll_unlocked(pthread_mutex_t *m)
+{
+	pthread_mutex_unlock(m);
+	poll_looper_nested();
+	pthread_mutex_lock(m);
+}
+
+int tipsy_looper_park_futex(int *uaddr)
+{
+	ALooper *l = tls_looper;
+	int pending;
+
+	if (l == NULL || l->magic != TIPSY_ALOOPER_MAGIC || uaddr == NULL) {
+		return 0;
+	}
+	pthread_mutex_lock(&l->lock);
+	l->parked_futex = uaddr;
+	pending = l->pending_wake || l->looper_woke;
+	if (pending) {
+		l->pending_wake = 0;
+		l->looper_woke = 0;
+		l->parked_futex = NULL;
+	}
+	pthread_mutex_unlock(&l->lock);
+	return pending;
+}
+
+void tipsy_looper_unpark_futex(void)
+{
+	ALooper *l = tls_looper;
+
+	if (l == NULL || l->magic != TIPSY_ALOOPER_MAGIC) {
+		return;
+	}
+	pthread_mutex_lock(&l->lock);
+	l->parked_futex = NULL;
+	pthread_mutex_unlock(&l->lock);
+}
+
+int tipsy_looper_consume_wake(void)
+{
+	ALooper *l = tls_looper;
+	int woke = 0;
+
+	if (l == NULL || l->magic != TIPSY_ALOOPER_MAGIC) {
+		return 0;
+	}
+	pthread_mutex_lock(&l->lock);
+	woke = l->looper_woke || l->pending_wake;
+	l->looper_woke = 0;
+	l->pending_wake = 0;
+	pthread_mutex_unlock(&l->lock);
+	return woke;
+}
+
 int tipsy_pthread_cond_wait(void *cond, void *mutex)
 {
 	pthread_cond_t *c = cond;
 	pthread_mutex_t *m = mutex;
 	struct timespec ts;
 	int rc;
+	int woke;
 	uint64_t diag_started;
 
 	if (c == NULL || m == NULL) {
@@ -800,10 +1076,32 @@ int tipsy_pthread_cond_wait(void *cond, void *mutex)
 	 * native thread each have a TLS ALooper. Nest pollOnce on whichever
 	 * thread owns one so posted fds run during cond_wait. Workers with
 	 * no looper keep a vanilla wait. */
-	if (tls_looper == NULL && !g_cond_wait_poll) {
+	if (!looper_should_nest()) {
 		return pthread_cond_wait(c, m);
 	}
 	diag_started = tipsy_stutter_wait_begin(TIPSY_STUTTER_WAIT_COND);
+	if (looper_can_event_park()) {
+		if (looper_arm_cond(c, m)) {
+			looper_poll_unlocked(m);
+			tipsy_stutter_wait_end(TIPSY_STUTTER_WAIT_COND, diag_started);
+			return 0;
+		}
+		rc = pthread_cond_wait(c, m);
+		woke = looper_disarm_cond();
+		if (rc == EINVAL) {
+			rc = pthread_cond_wait(c, m);
+			tipsy_stutter_wait_end(TIPSY_STUTTER_WAIT_COND, diag_started);
+			return rc;
+		}
+		if (woke) {
+			looper_poll_unlocked(m);
+		}
+		tipsy_stutter_wait_end(TIPSY_STUTTER_WAIT_COND, diag_started);
+		if (rc == 0 || woke) {
+			return 0;
+		}
+		return rc;
+	}
 	if (clock_gettime(CLOCK_REALTIME, &ts) != 0) {
 		rc = pthread_cond_wait(c, m);
 		tipsy_stutter_wait_end(TIPSY_STUTTER_WAIT_COND, diag_started);
@@ -832,9 +1130,7 @@ int tipsy_pthread_cond_wait(void *cond, void *mutex)
 	/* Mutex is held after timeout. Release so complete() / looper
 	 * callbacks can take it; return 0 as a legal spurious wakeup so
 	 * the caller rechecks bit 2 of +0x70. */
-	pthread_mutex_unlock(m);
-	poll_looper_nested();
-	pthread_mutex_lock(m);
+	looper_poll_unlocked(m);
 	tipsy_stutter_wait_end(TIPSY_STUTTER_WAIT_COND, diag_started);
 	return 0;
 }
@@ -846,16 +1142,59 @@ int tipsy_pthread_cond_timedwait(void *cond, void *mutex, void *abstime)
 	const struct timespec *deadline = abstime;
 	struct timespec ts, now;
 	int rc;
+	int woke;
 	uint64_t diag_started;
 
 	if (c == NULL || m == NULL || deadline == NULL) {
 		errno = EINVAL;
 		return EINVAL;
 	}
-	if (tls_looper == NULL && !g_cond_wait_poll) {
+	if (!looper_should_nest()) {
 		return pthread_cond_timedwait(c, m, deadline);
 	}
 	diag_started = tipsy_stutter_wait_begin(TIPSY_STUTTER_WAIT_TIMEDCOND);
+	if (looper_can_event_park()) {
+		for (;;) {
+			if (clock_gettime(CLOCK_REALTIME, &now) != 0) {
+				rc = pthread_cond_timedwait(c, m, deadline);
+				tipsy_stutter_wait_end(TIPSY_STUTTER_WAIT_TIMEDCOND, diag_started);
+				return rc;
+			}
+			if (now.tv_sec > deadline->tv_sec ||
+			    (now.tv_sec == deadline->tv_sec && now.tv_nsec >= deadline->tv_nsec)) {
+				tipsy_stutter_wait_end(TIPSY_STUTTER_WAIT_TIMEDCOND, diag_started);
+				return ETIMEDOUT;
+			}
+			if (looper_arm_cond(c, m)) {
+				looper_poll_unlocked(m);
+				continue;
+			}
+			rc = pthread_cond_timedwait(c, m, deadline);
+			woke = looper_disarm_cond();
+			if (rc == 0) {
+				if (woke) {
+					looper_poll_unlocked(m);
+				}
+				tipsy_stutter_wait_end(TIPSY_STUTTER_WAIT_TIMEDCOND, diag_started);
+				return 0;
+			}
+			if (rc == ETIMEDOUT) {
+				if (woke) {
+					looper_poll_unlocked(m);
+					continue;
+				}
+				tipsy_stutter_wait_end(TIPSY_STUTTER_WAIT_TIMEDCOND, diag_started);
+				return ETIMEDOUT;
+			}
+			if (rc == EINVAL) {
+				rc = pthread_cond_timedwait(c, m, deadline);
+				tipsy_stutter_wait_end(TIPSY_STUTTER_WAIT_TIMEDCOND, diag_started);
+				return rc;
+			}
+			tipsy_stutter_wait_end(TIPSY_STUTTER_WAIT_TIMEDCOND, diag_started);
+			return rc;
+		}
+	}
 	for (;;) {
 		if (clock_gettime(CLOCK_REALTIME, &now) != 0) {
 			rc = pthread_cond_timedwait(c, m, deadline);
@@ -892,15 +1231,40 @@ int tipsy_pthread_cond_timedwait(void *cond, void *mutex, void *abstime)
 			tipsy_stutter_wait_end(TIPSY_STUTTER_WAIT_TIMEDCOND, diag_started);
 			return rc;
 		}
-		pthread_mutex_unlock(m);
-		poll_looper_nested();
-		pthread_mutex_lock(m);
+		looper_poll_unlocked(m);
 	}
 }
 
 static int g_test_cb_fired;
 static pthread_cond_t g_test_cv = PTHREAD_COND_INITIALIZER;
 static pthread_mutex_t g_test_mu = PTHREAD_MUTEX_INITIALIZER;
+static _Atomic int g_test_helper_rc;
+
+static int timespec_expired(const struct timespec *deadline)
+{
+	struct timespec now;
+
+	if (clock_gettime(CLOCK_REALTIME, &now) != 0) {
+		return 1;
+	}
+	return now.tv_sec > deadline->tv_sec ||
+		(now.tv_sec == deadline->tv_sec && now.tv_nsec >= deadline->tv_nsec);
+}
+
+static int test_wait_helper_rc(int spins)
+{
+	int i;
+	int rc;
+
+	for (i = 0; i < spins; i++) {
+		rc = atomic_load_explicit(&g_test_helper_rc, memory_order_relaxed);
+		if (rc != 0) {
+			return rc;
+		}
+		usleep(10000);
+	}
+	return -2;
+}
 
 static int test_cond_cb(int fd, int events, void *data)
 {
@@ -924,6 +1288,21 @@ static void *test_write_pipe(void *arg)
 	return NULL;
 }
 
+static int test_cond_wait_until_cb(void)
+{
+	struct timespec deadline;
+
+	clock_gettime(CLOCK_REALTIME, &deadline);
+	deadline.tv_sec += 2;
+	while (!g_test_cb_fired) {
+		(void)tipsy_pthread_cond_wait(&g_test_cv, &g_test_mu);
+		if (timespec_expired(&deadline)) {
+			break;
+		}
+	}
+	return g_test_cb_fired;
+}
+
 int tipsy_test_cond_wait_polls_looper(void)
 {
 	ALooper *l;
@@ -936,6 +1315,12 @@ int tipsy_test_cond_wait_polls_looper(void)
 	if (l == NULL || pipe2(fds, O_CLOEXEC | O_NONBLOCK) != 0) {
 		g_cond_wait_poll = 0;
 		return -1;
+	}
+	if (!l->watcher_on) {
+		close(fds[0]);
+		close(fds[1]);
+		g_cond_wait_poll = 0;
+		return -4;
 	}
 	if (tipsy_ALooper_addFd(l, fds[0], 1, ALOOPER_EVENT_INPUT, test_cond_cb, NULL) < 0) {
 		close(fds[0]);
@@ -952,20 +1337,7 @@ int tipsy_test_cond_wait_polls_looper(void)
 		g_cond_wait_poll = 0;
 		return -3;
 	}
-	{
-		struct timespec deadline, now;
-
-		clock_gettime(CLOCK_REALTIME, &deadline);
-		deadline.tv_sec += 2;
-		while (!g_test_cb_fired) {
-			(void)tipsy_pthread_cond_wait(&g_test_cv, &g_test_mu);
-			clock_gettime(CLOCK_REALTIME, &now);
-			if (now.tv_sec > deadline.tv_sec ||
-			    (now.tv_sec == deadline.tv_sec && now.tv_nsec >= deadline.tv_nsec)) {
-				break;
-			}
-		}
-	}
+	(void)test_cond_wait_until_cb();
 	pthread_mutex_unlock(&g_test_mu);
 	pthread_join(th, NULL);
 	g_cond_wait_poll = 0;
@@ -973,6 +1345,389 @@ int tipsy_test_cond_wait_polls_looper(void)
 	close(fds[0]);
 	close(fds[1]);
 	return g_test_cb_fired;
+}
+
+static void *test_wake_looper(void *arg)
+{
+	ALooper *l = arg;
+
+	usleep(5000);
+	tipsy_ALooper_wake(l);
+	return NULL;
+}
+
+int tipsy_test_cond_wait_wake_unblocks(void)
+{
+	ALooper *l;
+	pthread_t th;
+	int unblocked = 0;
+	struct timespec deadline;
+
+	g_cond_wait_poll = 1;
+	l = tipsy_ALooper_prepare(ALOOPER_PREPARE_ALLOW_NON_CALLBACKS);
+	if (l == NULL || !l->watcher_on) {
+		g_cond_wait_poll = 0;
+		return -1;
+	}
+	pthread_mutex_lock(&g_test_mu);
+	if (pthread_create(&th, NULL, test_wake_looper, l) != 0) {
+		pthread_mutex_unlock(&g_test_mu);
+		g_cond_wait_poll = 0;
+		return -2;
+	}
+	clock_gettime(CLOCK_REALTIME, &deadline);
+	deadline.tv_sec += 2;
+	(void)tipsy_pthread_cond_wait(&g_test_cv, &g_test_mu);
+	if (!timespec_expired(&deadline)) {
+		unblocked = 1;
+	}
+	pthread_mutex_unlock(&g_test_mu);
+	pthread_join(th, NULL);
+	g_cond_wait_poll = 0;
+	return unblocked;
+}
+
+int tipsy_test_cond_wait_lost_wakeup(void)
+{
+	ALooper *l;
+	int fds[2];
+	char b = 1;
+	struct timespec start, end;
+	long elapsed_ms;
+
+	g_test_cb_fired = 0;
+	g_cond_wait_poll = 1;
+	l = tipsy_ALooper_prepare(ALOOPER_PREPARE_ALLOW_NON_CALLBACKS);
+	if (l == NULL || !l->watcher_on || pipe2(fds, O_CLOEXEC | O_NONBLOCK) != 0) {
+		g_cond_wait_poll = 0;
+		return -1;
+	}
+	if (tipsy_ALooper_addFd(l, fds[0], 1, ALOOPER_EVENT_INPUT, test_cond_cb, NULL) < 0) {
+		close(fds[0]);
+		close(fds[1]);
+		g_cond_wait_poll = 0;
+		return -2;
+	}
+	/* Event before arm: watcher sets pending_wake; cond_wait must not hang. */
+	(void)write(fds[1], &b, 1);
+	usleep(20000);
+	clock_gettime(CLOCK_MONOTONIC, &start);
+	pthread_mutex_lock(&g_test_mu);
+	(void)test_cond_wait_until_cb();
+	pthread_mutex_unlock(&g_test_mu);
+	clock_gettime(CLOCK_MONOTONIC, &end);
+	g_cond_wait_poll = 0;
+	tipsy_ALooper_removeFd(l, fds[0]);
+	close(fds[0]);
+	close(fds[1]);
+	if (!g_test_cb_fired) {
+		return -3;
+	}
+	elapsed_ms = (end.tv_sec - start.tv_sec) * 1000L +
+		(end.tv_nsec - start.tv_nsec) / 1000000L;
+	if (elapsed_ms > 1500) {
+		return -4;
+	}
+	return 1;
+}
+
+static void *test_idle_wake(void *arg)
+{
+	usleep(5000);
+	tipsy_ALooper_wake(arg);
+	return NULL;
+}
+
+int tipsy_test_idle_unblocks_on_wake(void)
+{
+	ALooper *l;
+	pthread_t th;
+	struct timespec start, end;
+	long elapsed_ms;
+	int rc;
+
+	l = tipsy_ALooper_prepare(ALOOPER_PREPARE_ALLOW_NON_CALLBACKS);
+	if (l == NULL) {
+		return -1;
+	}
+	if (pthread_create(&th, NULL, test_idle_wake, l) != 0) {
+		return -2;
+	}
+	clock_gettime(CLOCK_MONOTONIC, &start);
+	rc = tipsy_native_main_idle(-1);
+	clock_gettime(CLOCK_MONOTONIC, &end);
+	pthread_join(th, NULL);
+	if (rc == ALOOPER_POLL_ERROR) {
+		return -3;
+	}
+	elapsed_ms = (end.tv_sec - start.tv_sec) * 1000L +
+		(end.tv_nsec - start.tv_nsec) / 1000000L;
+	if (elapsed_ms > 1500) {
+		return -4;
+	}
+	return 1;
+}
+
+static int test_fallback_cb(int fd, int events, void *data)
+{
+	char b;
+	pthread_cond_t *cv = data;
+
+	(void)events;
+	(void)read(fd, &b, 1);
+	g_test_cb_fired = 1;
+	pthread_cond_signal(cv);
+	return 1;
+}
+
+static void *test_fallback_thread(void *arg)
+{
+	ALooper *l;
+	int fds[2];
+	pthread_t writer;
+	pthread_cond_t cv = PTHREAD_COND_INITIALIZER;
+	pthread_mutex_t mu = PTHREAD_MUTEX_INITIALIZER;
+	struct timespec deadline;
+
+	(void)arg;
+	g_test_cb_fired = 0;
+	g_cond_wait_poll = 1;
+	l = tipsy_ALooper_prepare(ALOOPER_PREPARE_ALLOW_NON_CALLBACKS);
+	if (l == NULL) {
+		atomic_store_explicit(&g_test_helper_rc, -1, memory_order_relaxed);
+		return NULL;
+	}
+	if (!l->watcher_on) {
+		atomic_store_explicit(&g_test_helper_rc, -4, memory_order_relaxed);
+		return NULL;
+	}
+	looper_stop_watcher(l);
+	if (l->watcher_on) {
+		atomic_store_explicit(&g_test_helper_rc, -5, memory_order_relaxed);
+		return NULL;
+	}
+	if (pipe2(fds, O_CLOEXEC | O_NONBLOCK) != 0 ||
+	    tipsy_ALooper_addFd(l, fds[0], 1, ALOOPER_EVENT_INPUT, test_fallback_cb, &cv) < 0) {
+		atomic_store_explicit(&g_test_helper_rc, -2, memory_order_relaxed);
+		return NULL;
+	}
+	pthread_mutex_lock(&mu);
+	if (pthread_create(&writer, NULL, test_write_pipe, (void *)(intptr_t)fds[1]) != 0) {
+		pthread_mutex_unlock(&mu);
+		atomic_store_explicit(&g_test_helper_rc, -3, memory_order_relaxed);
+		return NULL;
+	}
+	clock_gettime(CLOCK_REALTIME, &deadline);
+	deadline.tv_sec += 2;
+	while (!g_test_cb_fired) {
+		(void)tipsy_pthread_cond_wait(&cv, &mu);
+		if (timespec_expired(&deadline)) {
+			break;
+		}
+	}
+	pthread_mutex_unlock(&mu);
+	pthread_join(writer, NULL);
+	tipsy_ALooper_removeFd(l, fds[0]);
+	close(fds[0]);
+	close(fds[1]);
+	g_cond_wait_poll = 0;
+	atomic_store_explicit(&g_test_helper_rc, g_test_cb_fired ? 1 : -6, memory_order_relaxed);
+	return NULL;
+}
+
+int tipsy_test_cond_wait_fallback_without_watcher(void)
+{
+	pthread_t th;
+	int rc;
+
+	atomic_store_explicit(&g_test_helper_rc, 0, memory_order_relaxed);
+	if (pthread_create(&th, NULL, test_fallback_thread, NULL) != 0) {
+		return -3;
+	}
+	rc = test_wait_helper_rc(250);
+	if (rc != -2) {
+		pthread_join(th, NULL);
+	}
+	return rc;
+}
+
+static void *test_shutdown_thread(void *arg)
+{
+	ALooper *l;
+
+	(void)arg;
+	l = tipsy_ALooper_prepare(ALOOPER_PREPARE_ALLOW_NON_CALLBACKS);
+	if (l == NULL || !l->watcher_on) {
+		atomic_store_explicit(&g_test_helper_rc, -1, memory_order_relaxed);
+		return NULL;
+	}
+	tipsy_ALooper_acquire(l);
+	tipsy_ALooper_release(l);
+	tipsy_ALooper_release(l);
+	atomic_store_explicit(&g_test_helper_rc, 1, memory_order_relaxed);
+	return NULL;
+}
+
+int tipsy_test_looper_watcher_shutdown(void)
+{
+	pthread_t th;
+	int rc;
+
+	atomic_store_explicit(&g_test_helper_rc, 0, memory_order_relaxed);
+	if (pthread_create(&th, NULL, test_shutdown_thread, NULL) != 0) {
+		return -3;
+	}
+	rc = test_wait_helper_rc(200);
+	if (rc != -2) {
+		pthread_join(th, NULL);
+	}
+	return rc;
+}
+
+static int test_futex_wake(int *word)
+{
+	return (int)syscall(SYS_futex, word, TIPSY_FUTEX_WAKE_BITSET_PRIVATE,
+		0x7fffffff, NULL, NULL, 0xffffffffu);
+}
+
+/* Mirrors native/call.c park_poll_futex with a 2s liveness bound so tests
+ * fail closed instead of hanging the suite. */
+static int test_park_poll_futex(int *uaddr, unsigned val, int *looper_retries)
+{
+	struct timespec deadline;
+	long rc;
+
+	if (clock_gettime(CLOCK_MONOTONIC, &deadline) != 0) {
+		return -1;
+	}
+	deadline.tv_sec += 2;
+	if (looper_retries != NULL) {
+		*looper_retries = 0;
+	}
+	for (;;) {
+		struct timespec now;
+
+		if (clock_gettime(CLOCK_MONOTONIC, &now) != 0) {
+			return -1;
+		}
+		if (now.tv_sec > deadline.tv_sec ||
+		    (now.tv_sec == deadline.tv_sec && now.tv_nsec >= deadline.tv_nsec)) {
+			errno = ETIMEDOUT;
+			return -1;
+		}
+		if (tipsy_looper_park_futex(uaddr)) {
+			(void)tipsy_native_main_idle(0);
+			if (looper_retries != NULL) {
+				(*looper_retries)++;
+			}
+			continue;
+		}
+		rc = syscall(SYS_futex, uaddr, TIPSY_FUTEX_WAIT_BITSET_PRIVATE,
+			(int)val, &deadline, NULL, 0xffffffffu);
+		tipsy_looper_unpark_futex();
+		if (tipsy_looper_consume_wake()) {
+			(void)tipsy_native_main_idle(0);
+			if (looper_retries != NULL) {
+				(*looper_retries)++;
+			}
+			continue;
+		}
+		if (rc == 0 || errno == EAGAIN) {
+			return 0;
+		}
+		if (errno == EINTR) {
+			(void)tipsy_native_main_idle(0);
+			continue;
+		}
+		return -1;
+	}
+}
+
+static void *test_futex_real_wake_helper(void *arg)
+{
+	int *word = arg;
+
+	usleep(5000);
+	(void)test_futex_wake(word);
+	return NULL;
+}
+
+static void *test_futex_looper_wake_helper(void *arg)
+{
+	ALooper *l = arg;
+
+	usleep(5000);
+	tipsy_ALooper_wake(l);
+	return NULL;
+}
+
+static void *test_futex_delayed_real_wake(void *arg)
+{
+	int *word = arg;
+
+	usleep(35000);
+	(void)test_futex_wake(word);
+	return NULL;
+}
+
+static void test_looper_quiesce(void)
+{
+	(void)tipsy_looper_consume_wake();
+	if (tls_looper != NULL) {
+		(void)tipsy_native_main_idle(0);
+		(void)tipsy_looper_consume_wake();
+	}
+}
+
+int tipsy_test_futex_real_wake_vs_looper_wake(void)
+{
+	ALooper *l;
+	pthread_t th;
+	pthread_t th2;
+	int word;
+	int looper_retries = 0;
+	int rc;
+
+	l = tipsy_ALooper_prepare(ALOOPER_PREPARE_ALLOW_NON_CALLBACKS);
+	if (l == NULL || !l->watcher_on) {
+		return -1;
+	}
+	test_looper_quiesce();
+
+	word = 0;
+	if (pthread_create(&th, NULL, test_futex_real_wake_helper, &word) != 0) {
+		return -2;
+	}
+	rc = test_park_poll_futex(&word, 0, &looper_retries);
+	pthread_join(th, NULL);
+	if (rc != 0) {
+		return -3;
+	}
+	if (looper_retries != 0) {
+		return -4;
+	}
+
+	test_looper_quiesce();
+	word = 0;
+	looper_retries = 0;
+	if (pthread_create(&th, NULL, test_futex_looper_wake_helper, l) != 0) {
+		return -5;
+	}
+	if (pthread_create(&th2, NULL, test_futex_delayed_real_wake, &word) != 0) {
+		(void)test_futex_wake(&word);
+		pthread_join(th, NULL);
+		return -6;
+	}
+	rc = test_park_poll_futex(&word, 0, &looper_retries);
+	pthread_join(th, NULL);
+	pthread_join(th2, NULL);
+	if (rc != 0) {
+		return -7;
+	}
+	if (looper_retries < 1) {
+		return -8;
+	}
+	return 1;
 }
 
 AAssetManager *tipsy_AAssetManager_singleton(void)
@@ -1257,6 +2012,7 @@ void tipsy_arc4random_buf(void *buf, size_t n)
 	}
 	close(fd);
 }
+
 
 int32_t tipsy_gettid(void)
 {

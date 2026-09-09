@@ -25,6 +25,10 @@
  * tests leave them NULL and keep a cond_wait idle loop. */
 int tipsy_native_main_idle(int timeout_ms) __attribute__((weak));
 void tipsy_native_main_wake(void) __attribute__((weak));
+int tipsy_looper_can_park(void) __attribute__((weak));
+int tipsy_looper_park_futex(int *uaddr) __attribute__((weak));
+void tipsy_looper_unpark_futex(void) __attribute__((weak));
+int tipsy_looper_consume_wake(void) __attribute__((weak));
 uint64_t tipsy_stutter_wait_begin(int path) __attribute__((weak));
 void tipsy_stutter_wait_slice(int path) __attribute__((weak));
 void tipsy_stutter_wait_end(int path, uint64_t started_ns) __attribute__((weak));
@@ -129,7 +133,7 @@ static void *native_main_thunk(void *arg)
 		while (g_pending == NULL || g_pending->done) {
 			if (tipsy_native_main_idle != NULL) {
 				pthread_mutex_unlock(&g_mu);
-				int rc = tipsy_native_main_idle(16);
+				int rc = tipsy_native_main_idle(-1);
 				pthread_mutex_lock(&g_mu);
 				if (g_pending != NULL && !g_pending->done) {
 					break;
@@ -281,7 +285,38 @@ long tipsy_park_poll_futex(int *uaddr, unsigned val)
 	}
 	for (;;) {
 		struct timespec ts;
+		int can_park = tipsy_looper_can_park != NULL && tipsy_looper_can_park();
 
+		if (can_park && tipsy_looper_park_futex != NULL &&
+		    tipsy_looper_park_futex(uaddr)) {
+			(void)tipsy_native_main_idle(0);
+			continue;
+		}
+		if (can_park) {
+			rc = syscall(SYS_futex, uaddr, TIPSY_FUTEX_WAIT_BITSET_PRIVATE,
+				(int)val, NULL, NULL, 0xffffffffu);
+			if (tipsy_looper_unpark_futex != NULL) {
+				tipsy_looper_unpark_futex();
+			}
+			if (tipsy_looper_consume_wake != NULL && tipsy_looper_consume_wake()) {
+				(void)tipsy_native_main_idle(0);
+				continue;
+			}
+			if (rc == 0 || errno == EAGAIN) {
+				if (tipsy_stutter_wait_end != NULL) {
+					tipsy_stutter_wait_end(TIPSY_STUTTER_WAIT_FUTEX_PUMP, diag_started);
+				}
+				return 0;
+			}
+			if (errno == EINTR) {
+				(void)tipsy_native_main_idle(0);
+				continue;
+			}
+			if (tipsy_stutter_wait_end != NULL) {
+				tipsy_stutter_wait_end(TIPSY_STUTTER_WAIT_FUTEX_PUMP, diag_started);
+			}
+			return rc;
+		}
 		if (clock_gettime(CLOCK_MONOTONIC, &ts) != 0) {
 			return syscall(SYS_futex, uaddr, TIPSY_FUTEX_WAIT_BITSET_PRIVATE,
 				(int)val, NULL, NULL, 0xffffffffu);

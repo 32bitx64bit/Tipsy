@@ -23,8 +23,9 @@ int tipsy_on_native_main(void);
 int tipsy_native_main_idle(int timeout_ms);
 void tipsy_native_main_wake(void);
 
-/* Slice Roblox parking-lot SYS_futex (0x29cfa14, FUTEX_WAIT_BITSET|
- * PRIVATE, timeout NULL, val3=-1) so Main can ALooper_pollOnce. */
+/* Park Roblox parking-lot SYS_futex (0x29cfa14, FUTEX_WAIT_BITSET|
+ * PRIVATE, val3=-1) so Main can ALooper_pollOnce. Event-driven when the
+ * TLS looper watcher is running; 16 ms slices otherwise. */
 long tipsy_park_poll_futex(int *uaddr, unsigned val);
 void *tipsy_park_poll_futex_addr(void);
 

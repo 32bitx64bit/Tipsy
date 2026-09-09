@@ -224,9 +224,19 @@ int tipsy_ALooper_pollOnce(int timeoutMillis, int *outFd, int *outEvents, void *
 
 int tipsy_native_main_idle(int timeout_ms);
 void tipsy_native_main_wake(void);
+int tipsy_looper_can_park(void);
+int tipsy_looper_park_futex(int *uaddr);
+void tipsy_looper_unpark_futex(void);
+int tipsy_looper_consume_wake(void);
 int tipsy_pthread_cond_wait(void *cond, void *mutex);
 int tipsy_pthread_cond_timedwait(void *cond, void *mutex, void *abstime);
 int tipsy_test_cond_wait_polls_looper(void);
+int tipsy_test_cond_wait_wake_unblocks(void);
+int tipsy_test_cond_wait_lost_wakeup(void);
+int tipsy_test_cond_wait_fallback_without_watcher(void);
+int tipsy_test_looper_watcher_shutdown(void);
+int tipsy_test_idle_unblocks_on_wake(void);
+int tipsy_test_futex_real_wake_vs_looper_wake(void);
 void tipsy_stutter_wait_set_enabled(int enabled);
 int tipsy_stutter_wait_enabled(void);
 uint64_t tipsy_stutter_wait_begin(int path);

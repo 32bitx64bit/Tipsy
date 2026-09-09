@@ -337,6 +337,42 @@ func TestALooperNestedPollFromCondWait(t *testing.T) {
 	}
 }
 
+func TestALooperWakeUnblocksCondWait(t *testing.T) {
+	if rc := condWaitWakeUnblocks(); rc != 1 {
+		t.Fatalf("ALooper_wake did not unblock tipsy_pthread_cond_wait, rc=%d", rc)
+	}
+}
+
+func TestALooperLostWakeupCondWait(t *testing.T) {
+	if rc := condWaitLostWakeup(); rc != 1 {
+		t.Fatalf("lost-wakeup pending_wake did not run the fd callback, rc=%d", rc)
+	}
+}
+
+func TestALooperWatcherFailureFallsBackToSlices(t *testing.T) {
+	if rc := condWaitFallbackWithoutWatcher(); rc != 1 {
+		t.Fatalf("cond_wait without watcher did not nest-poll via 16ms slices, rc=%d", rc)
+	}
+}
+
+func TestALooperWatcherShutdownJoins(t *testing.T) {
+	if rc := looperWatcherShutdown(); rc != 1 {
+		t.Fatalf("watcher shutdown did not join, rc=%d", rc)
+	}
+}
+
+func TestNativeMainIdleUnblocksOnWake(t *testing.T) {
+	if rc := idleUnblocksOnWake(); rc != 1 {
+		t.Fatalf("tipsy_native_main_idle(-1) did not return after ALooper_wake, rc=%d", rc)
+	}
+}
+
+func TestALooperFutexRealWakeVsLooperWake(t *testing.T) {
+	if rc := futexRealWakeVsLooperWake(); rc != 1 {
+		t.Fatalf("futex real-wake vs looper-wake, rc=%d", rc)
+	}
+}
+
 func TestGetaddrinfoIsWrapper(t *testing.T) {
 	for _, name := range []string{"getaddrinfo", "freeaddrinfo", "getnameinfo", "gai_strerror"} {
 		ours, err := Provider().Lookup("libc.so", name)

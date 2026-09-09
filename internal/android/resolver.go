@@ -237,6 +237,30 @@ func condWaitPollsLooper() int {
 	return int(C.tipsy_test_cond_wait_polls_looper())
 }
 
+func condWaitWakeUnblocks() int {
+	return int(C.tipsy_test_cond_wait_wake_unblocks())
+}
+
+func condWaitLostWakeup() int {
+	return int(C.tipsy_test_cond_wait_lost_wakeup())
+}
+
+func condWaitFallbackWithoutWatcher() int {
+	return int(C.tipsy_test_cond_wait_fallback_without_watcher())
+}
+
+func looperWatcherShutdown() int {
+	return int(C.tipsy_test_looper_watcher_shutdown())
+}
+
+func idleUnblocksOnWake() int {
+	return int(C.tipsy_test_idle_unblocks_on_wake())
+}
+
+func futexRealWakeVsLooperWake() int {
+	return int(C.tipsy_test_futex_real_wake_vs_looper_wake())
+}
+
 func audioTestPlayback(rate, channels, bytes uint32) (uint64, uint32, int) {
 	var written C.uint64_t
 	var callbacks C.uint32_t
