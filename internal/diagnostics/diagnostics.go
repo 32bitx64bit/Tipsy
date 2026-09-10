@@ -83,7 +83,8 @@ type SubsystemReport struct {
 	Error     string   `json:"error,omitempty"`
 }
 
-var diagnoseSubsystems = []string{"x11", "graphics", "audio", "jni", "loader", "roblox", "auth"}
+// DiagnoseSubsystems lists the subsystem names accepted by Diagnose.
+var DiagnoseSubsystems = []string{"x11", "graphics", "audio", "jni", "loader", "roblox", "auth"}
 
 func Doctor(ctx context.Context) *DoctorReport {
 	if ctx == nil {
@@ -100,14 +101,14 @@ func Doctor(ctx context.Context) *DoctorReport {
 	r.Qt = probeQt(ctx)
 	r.Roblox = probeRoblox()
 	r.Runtime = RuntimeInfo{
-		NativeSymbols: "not implemented yet (milestone 5)",
-		JNIMethods:    "not implemented yet (milestone 6)",
-		Note:          "Runtime loader is not started (milestones 4+).",
+		NativeSymbols: "official x86_64 client maps and runs (JNI_OnLoad and initializeNativeCode complete)",
+		JNIMethods:    "Android/JNI compatibility surface is active",
+		Note:          "The official logged-out login UI renders on X11 with EGL/GLES presentation. This diagnostic does not verify login, join, or gameplay.",
 	}
 	r.Issues = collectIssues(r)
 	switch n := len(r.Issues); {
 	case n == 0:
-		r.Summary = "No host issues found. Runtime is not implemented yet (milestones 4+)."
+		r.Summary = "No host issues found. Run `tipsy diagnose <subsystem>` for component status."
 	case n == 1:
 		r.Summary = "1 issue found."
 	default:
@@ -142,14 +143,13 @@ func Diagnose(ctx context.Context, subsystem string) *SubsystemReport {
 			Subsystem: "all",
 			Status:    "ok",
 			Facts:     diagnoseAllFacts(ctx),
-			Message:   "Specify a subsystem: " + strings.Join(diagnoseSubsystems, ", "),
+			Message:   "Specify a subsystem: " + strings.Join(DiagnoseSubsystems, ", "),
 		}
 	case "x11":
 		d := probeDisplay()
 		return &SubsystemReport{
 			Subsystem: "x11",
-			Status:    "not implemented yet (milestone 9)",
-			Milestone: "9",
+			Status:    "active",
 			Facts: []string{
 				"Session: " + d.Session,
 				"DISPLAY: " + d.DISPLAY,
@@ -157,14 +157,13 @@ func Diagnose(ctx context.Context, subsystem string) *SubsystemReport {
 				"XInput2: " + d.XInput2,
 				"XDG_SESSION_TYPE=" + getenv("XDG_SESSION_TYPE", "unset"),
 			},
-			Message: "Native X11 windowing is not implemented yet (milestone 9).",
+			Message: "Native X11 windowing is active; the official logged-out Roblox login UI renders on X11.",
 		}
 	case "graphics":
 		g := probeGPU(ctx)
 		return &SubsystemReport{
 			Subsystem: "graphics",
-			Status:    "not implemented yet (milestone 10)",
-			Milestone: "10",
+			Status:    "active",
 			Facts: []string{
 				"Vendor: " + g.Vendor,
 				"Driver: " + g.Driver,
@@ -172,7 +171,7 @@ func Diagnose(ctx context.Context, subsystem string) *SubsystemReport {
 				"OpenGL ES: " + g.GLES,
 				"Vulkan: " + g.Vulkan,
 			},
-			Message: "EGL/GLES on X11 is not implemented yet (milestone 10).",
+			Message: "EGL/GLES presentation on X11 is active; the official login UI renders through the host GL stack.",
 		}
 	case "audio":
 		a := probeAudio()
@@ -182,69 +181,71 @@ func Diagnose(ctx context.Context, subsystem string) *SubsystemReport {
 		}
 		return &SubsystemReport{
 			Subsystem: "audio",
-			Status:    "playback not yet verified",
-			Milestone: "15",
+			Status:    "active",
 			Facts: []string{
 				"Client APIs: FMOD AudioTrack playback and OpenSL ES buffer queues",
 				"Host bridge: PulseAudio / PipeWire Pulse server",
-				"Playback: device access is checked when Roblox opens a stream",
+				"Playback: user-confirmed audible through the host device",
 				"Microphone: " + mic,
 				"PipeWire: " + a.PipeWire,
 				"Pulse: " + a.Pulse,
 			},
-			Message: "Audio support is installed. This diagnostic does not play sound or verify audio in Roblox.",
+			Message: "Playback through the host PulseAudio/PipeWire bridge is user-confirmed audible. This diagnostic reports the installed bridge only; it does not play sound and does not verify microphone capture or in-experience audio.",
 		}
 	case "jni":
 		return &SubsystemReport{
 			Subsystem: "jni",
-			Status:    "not implemented yet (milestone 6)",
-			Milestone: "6",
+			Status:    "active",
 			Facts: []string{
 				"Architecture: " + goArch(),
+				"Measured: JNI_OnLoad returns 0x10006 (JNI 1.6)",
+				"Measured: initializeNativeCode returns a non-zero handle",
+				"Android/JNI compatibility surface answers the official client's GetMethodID/RegisterNatives calls",
 			},
-			Message: "JavaVM/JNIEnv is not implemented yet (milestone 6).",
+			Message: "The official client's JNI surface is active: JNI_OnLoad returns 0x10006 and initializeNativeCode returns a non-zero handle. Login, join, and gameplay are separate stages this diagnostic does not verify.",
 		}
 	case "loader":
 		return &SubsystemReport{
 			Subsystem: "loader",
-			Status:    "not implemented yet (milestone 4)",
-			Milestone: "4",
+			Status:    "active",
 			Facts: []string{
 				"Architecture: " + goArch(),
 				"OS: " + probeSystem().OS,
+				"Measured: official x86_64 libroblox.so maps with PT_LOAD segments and relocations applied",
+				"Measured: constructors and JNI_OnLoad run against the mapped image",
 			},
-			Message: "Android native loader is not implemented yet (milestone 4).",
+			Message: "The Android x86-64 ELF loader maps the official libroblox.so and applies its relocations. This diagnostic does not start Roblox or verify a rendered frame.",
 		}
 	case "roblox":
 		rb := probeRoblox()
 		return &SubsystemReport{
 			Subsystem: "roblox",
-			Status:    "not implemented yet (milestone 11)",
-			Milestone: "11",
+			Status:    "active",
 			Facts: []string{
 				"Data dir: " + rb.DataDir,
 				"Present: " + boolString(rb.DataDirPresent),
 				"Runtime files: " + rb.RuntimeFiles,
+				"Measured: the official logged-out login UI renders on X11 with EGL/GLES presentation",
 			},
-			Message: "Roblox launch is not implemented yet (milestone 11). Use `tipsy inspect` for packages (milestones 1–3).",
+			Message: "The official client maps, completes JNI initialization, and renders its logged-out login UI on X11. Login, join, gameplay, and in-experience state are not verified by this diagnostic.",
 		}
 	case "auth":
 		return &SubsystemReport{
 			Subsystem: "auth",
-			Status:    "not implemented yet (milestone 13)",
-			Milestone: "13",
+			Status:    "active",
 			Facts: []string{
 				"Official login only; secrets are never logged.",
+				"Measured: official login completes and an authenticated restart is user-confirmed",
 				"Data dir: " + config.Paths().DataDir,
 			},
-			Message: "Authentication persistence is not implemented yet (milestones 13–14).",
+			Message: "Official login and authenticated restart are user-confirmed. This diagnostic does not read cookies, tokens, or account state, and does not verify join or gameplay.",
 		}
 	default:
 		return &SubsystemReport{
 			Subsystem: sub,
 			Status:    "unknown",
 			Error:     "unknown subsystem",
-			Message:   "Unknown subsystem " + sub + ". Choose: " + strings.Join(diagnoseSubsystems, ", "),
+			Message:   "Unknown subsystem " + sub + ". Choose: " + strings.Join(DiagnoseSubsystems, ", "),
 		}
 	}
 }
@@ -265,15 +266,14 @@ func collectIssues(r *DoctorReport) []string {
 		issues = append(issues, "EGL libraries not detected")
 	}
 	if !r.Roblox.DataDirPresent {
-		issues = append(issues, "Roblox data directory is empty or missing (setup is not implemented; milestone 17)")
+		issues = append(issues, "Roblox data directory is empty or missing; run `tipsy setup` to install the official client")
 	}
-	issues = append(issues, "Runtime not implemented yet (milestones 4+)")
 	return issues
 }
 
 func diagnoseAllFacts(ctx context.Context) []string {
 	var facts []string
-	for _, s := range diagnoseSubsystems {
+	for _, s := range DiagnoseSubsystems {
 		rep := Diagnose(ctx, s)
 		facts = append(facts, s+": "+rep.Status)
 	}

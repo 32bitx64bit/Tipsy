@@ -44,10 +44,11 @@ func TestFormatDoctor(t *testing.T) {
 			Note:           "Package cookies and tokens are not read.",
 		},
 		Runtime: RuntimeInfo{
-			NativeSymbols: "not implemented yet (milestone 5)",
-			JNIMethods:    "not implemented yet (milestone 6)",
+			NativeSymbols: "official x86_64 client maps and runs (JNI_OnLoad and initializeNativeCode complete)",
+			JNIMethods:    "Android/JNI compatibility surface is active",
+			Note:          "The official logged-out login UI renders on X11 with EGL/GLES presentation.",
 		},
-		Issues:  []string{"Runtime not implemented yet (milestones 4+)"},
+		Issues:  []string{"DISPLAY is unset"},
 		Summary: "1 issue found.",
 	}
 	got := FormatDoctor(r)
@@ -161,31 +162,56 @@ func TestDiagnoseUnknown(t *testing.T) {
 	}
 }
 
-func TestDiagnoseUnimplemented(t *testing.T) {
+func TestDiagnoseImplementedSubsystems(t *testing.T) {
+	t.Parallel()
+	for _, sub := range DiagnoseSubsystems {
+		t.Run(sub, func(t *testing.T) {
+			t.Parallel()
+			r := Diagnose(context.Background(), sub)
+			if r.Status != "active" || r.Milestone != "" {
+				t.Fatalf("status=%q milestone=%q", r.Status, r.Milestone)
+			}
+			for _, text := range []string{r.Status, r.Message} {
+				if strings.Contains(text, "not implemented yet") {
+					t.Fatalf("%s still claims unimplemented: %q", sub, text)
+				}
+			}
+			if sub == "x11" || sub == "graphics" || sub == "roblox" {
+				if !strings.Contains(r.Message, "login UI") {
+					t.Fatalf("message omits the verified login UI state: %q", r.Message)
+				}
+			}
+			if text := FormatSubsystem(r); strings.Contains(text, "not implemented yet") {
+				t.Fatalf("format still claims unimplemented:\n%s", text)
+			}
+		})
+	}
+}
+
+func TestDiagnoseMeasuredState(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
-		sub, milestone string
+		sub   string
+		wants []string
 	}{
-		{"x11", "9"},
-		{"graphics", "10"},
-		{"jni", "6"},
-		{"loader", "4"},
-		{"roblox", "11"},
-		{"auth", "13"},
+		{"jni", []string{"JNI_OnLoad returns 0x10006", "initializeNativeCode returns a non-zero handle"}},
+		{"loader", []string{"libroblox.so maps", "relocations applied"}},
+		{"roblox", []string{"login UI renders on X11"}},
+		{"auth", []string{"authenticated restart is user-confirmed"}},
+		{"audio", []string{"user-confirmed audible"}},
 	}
 	for _, tt := range tests {
 		t.Run(tt.sub, func(t *testing.T) {
 			t.Parallel()
 			r := Diagnose(context.Background(), tt.sub)
-			if !strings.Contains(r.Status, "not implemented yet") {
-				t.Fatalf("status = %s", r.Status)
-			}
-			if r.Milestone != tt.milestone {
-				t.Fatalf("milestone = %s, want %s", r.Milestone, tt.milestone)
-			}
 			text := FormatSubsystem(r)
-			if !strings.Contains(text, "not implemented yet") {
-				t.Fatalf("format missing status:\n%s", text)
+			if strings.Contains(text, "not implemented yet") {
+				t.Fatalf("%s still claims unimplemented:\n%s", tt.sub, text)
+			}
+			for _, want := range tt.wants {
+				if !strings.Contains(text, want) {
+					t.Fatalf("%s missing measured state %q:\n%s", tt.sub, want, text)
+				}
 			}
 		})
 	}
@@ -194,11 +220,11 @@ func TestDiagnoseUnimplemented(t *testing.T) {
 func TestDiagnoseAudioBridge(t *testing.T) {
 	t.Setenv("TIPSY_DISABLE_MICROPHONE", "true")
 	r := Diagnose(context.Background(), "audio")
-	if r.Status != "playback not yet verified" || r.Milestone != "15" {
+	if r.Status != "active" || r.Milestone != "" {
 		t.Fatalf("audio status=%q milestone=%q", r.Status, r.Milestone)
 	}
 	text := FormatSubsystem(r)
-	for _, want := range []string{"FMOD AudioTrack", "OpenSL ES", "PulseAudio", "disabled by TIPSY_DISABLE_MICROPHONE", "does not play sound"} {
+	for _, want := range []string{"FMOD AudioTrack", "OpenSL ES", "PulseAudio", "disabled by TIPSY_DISABLE_MICROPHONE", "does not play sound", "microphone capture"} {
 		if !strings.Contains(text, want) {
 			t.Fatalf("audio diagnostics missing %q:\n%s", want, text)
 		}

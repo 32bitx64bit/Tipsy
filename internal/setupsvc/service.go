@@ -77,7 +77,7 @@ func (s *Service) Snapshot(ctx context.Context) (InstallSnapshot, error) {
 		if kind != ErrCanceled {
 			snapshot.Readiness = ReadinessRejected
 			logging.Logger(logging.CatAPK).Error("installed Roblox client readiness verification failed",
-				"kind", string(kind), "readiness", string(snapshot.Readiness))
+				"kind", string(kind), "readiness", string(snapshot.Readiness), "cause", err.Error())
 		}
 		return snapshot, setupError(kind, "installation status", snapshotFailureDetail(kind), err)
 	}
