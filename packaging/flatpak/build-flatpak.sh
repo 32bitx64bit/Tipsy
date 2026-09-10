@@ -7,6 +7,10 @@
 # Usage:
 #   packaging/flatpak/build-flatpak.sh --version 1.2.3 --output-dir dist
 #                                      [--tag v1.2.3] [--mode developer|official]
+#                                      [--render-manifest OUT.yaml]
+#
+# --render-manifest writes the rewritten manifest to OUT.yaml and exits without
+# flatpak; packaging/flatpak/flatpak_test.go uses it to pin the rewrite.
 #
 # --mode official (GitHub Actions only) marks the bundle release-repository-signed
 # so the installed Flatpak runs OfficialVerified; the default developer build
@@ -23,27 +27,52 @@ version=
 output_dir=
 tag=
 mode=developer
+render_manifest=
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --version) [[ $# -ge 2 ]] || fail 'missing --version value'; version=$2; shift 2 ;;
     --output-dir) [[ $# -ge 2 ]] || fail 'missing --output-dir value'; output_dir=$2; shift 2 ;;
     --tag) [[ $# -ge 2 ]] || fail 'missing --tag value'; tag=$2; shift 2 ;;
     --mode) [[ $# -ge 2 ]] || fail 'missing --mode value'; mode=$2; shift 2 ;;
-    -h|--help) sed -n '2,17p' "$0"; exit 0 ;;
+    --render-manifest) [[ $# -ge 2 ]] || fail 'missing --render-manifest value'; render_manifest=$2; shift 2 ;;
+    -h|--help) sed -n '2,21p' "$0"; exit 0 ;;
     *) fail "unknown argument: $1" ;;
   esac
 done
 
 [[ "$version" =~ ^[0-9A-Za-z][0-9A-Za-z._+~-]*$ ]] || fail 'invalid version'
-[[ -n "$output_dir" ]] || fail '--output-dir is required'
 [[ -n "$tag" ]] || tag="v$version"
 [[ "$tag" =~ ^[0-9A-Za-z][0-9A-Za-z._/+~-]*$ ]] || fail 'invalid tag'
 [[ "$mode" == developer || "$mode" == official ]] || fail 'mode must be developer or official'
 release_kind=development-unrestricted
 [[ "$mode" != official ]] || release_kind=release-repository-signed
-command -v flatpak >/dev/null 2>&1 || fail 'flatpak is missing'
 
 repo=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
+app_id=io.github.tipsy_linux.Tipsy
+
+# Rewrite the checked-in manifest for this release and verify every
+# substitution landed. The version appears twice: in the go ldflags (that
+# line wraps after the -X assignment, so match the assignment, not a closing
+# quote) and in build-info.json.
+render_manifest() {
+  local out=$1
+  sed -e "s|^\(\s*\)tag: main$|\1tag: $tag|" -e "s|@VERSION@|$version|g" \
+    -e "s|@RELEASE_KIND@|$release_kind|g" \
+    "$repo/packaging/flatpak/$app_id.yaml" > "$out"
+  grep -q "^\s*tag: $tag\$" "$out" || fail 'manifest tag rewrite failed'
+  grep -qF -- "internal/version.Version=$version" "$out" || fail 'manifest version rewrite failed'
+  grep -qF -- "\"version\":\"$version\"" "$out" || fail 'manifest build-info version rewrite failed'
+  grep -qF -- "\"releaseKind\":\"$release_kind\"" "$out" || fail 'manifest release-kind rewrite failed'
+  ! grep -q '@VERSION@\|@RELEASE_KIND@' "$out" || fail 'manifest still has an unexpanded placeholder'
+}
+
+if [[ -n "$render_manifest" ]]; then
+  render_manifest "$render_manifest"
+  exit 0
+fi
+
+[[ -n "$output_dir" ]] || fail '--output-dir is required'
+command -v flatpak >/dev/null 2>&1 || fail 'flatpak is missing'
 mkdir -p "$output_dir"
 output_dir=$(CDPATH= cd -- "$output_dir" && pwd)
 bundle="$output_dir/Tipsy-${version}.flatpak"
@@ -73,16 +102,9 @@ cleanup() {
 }
 trap cleanup EXIT HUP INT TERM
 
-manifest="$work/io.github.tipsy_linux.Tipsy.yaml"
-sed -e "s|^\(\s*\)tag: main$|\1tag: $tag|" -e "s|@VERSION@|$version|g" \
-  -e "s|@RELEASE_KIND@|$release_kind|g" \
-  "$repo/packaging/flatpak/io.github.tipsy_linux.Tipsy.yaml" > "$manifest"
-grep -q "tag: $tag\$" "$manifest" || fail 'manifest tag rewrite failed'
-grep -q "Version=$version\"" "$manifest" || fail 'manifest version rewrite failed'
-grep -q "\"releaseKind\":\"$release_kind\"" "$manifest" || fail 'manifest release-kind rewrite failed'
-! grep -q '@VERSION@\|@RELEASE_KIND@' "$manifest" || fail 'manifest still has an unexpanded placeholder'
+manifest="$work/$app_id.yaml"
+render_manifest "$manifest"
 
-app_id=io.github.tipsy_linux.Tipsy
 # --state-dir keeps flatpak-builder's cache out of the source checkout
 # (its default is ./.flatpak-builder in the current directory).
 "${builder[@]}" --user --install-deps-from=flathub --disable-rofiles-fuse \
