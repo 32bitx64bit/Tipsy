@@ -13,7 +13,6 @@ import "C"
 
 import (
 	"sync"
-	"unsafe"
 
 	"github.com/tipsy-linux/tipsy/internal/logging"
 )
@@ -41,8 +40,11 @@ func (vm *VM) dispatchNativeUser(o *Object, class, name, sig string, args *C.jva
 		logging.Logger(logging.CatJNI).Info("[jni] native-user",
 			"method", name, "nonEmpty", true, "spoof", "pc")
 	}
-	env := unsafe.Pointer(nil)
-	if vm != nil {
+	// Use the calling thread's env when it is attached so the returned
+	// string's local ref lands in that thread's frame; vm.envRaw is only the
+	// fallback for callers with no attached env (tests, native main).
+	env := currentEnvPtr()
+	if env == nil && vm != nil {
 		env = vm.envRaw
 	}
 	return vm.internString(env, &immortalNativeUserPlatform, nativeUserPlatformName), true

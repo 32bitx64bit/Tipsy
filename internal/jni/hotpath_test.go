@@ -97,6 +97,29 @@ func TestGetArrayElementsStillCopies(t *testing.T) {
 	}
 }
 
+func TestReleaseArrayElementsCommitDoesNotFree(t *testing.T) {
+	vm, err := NewVM()
+	if err != nil {
+		t.Fatal(err)
+	}
+	arr := testNewByteObject(vm, []byte{1, 2, 3, 4})
+	p, _ := testGetArrayElements(vm.envRaw, arr)
+	sl := unsafe.Slice((*byte)(p), 4)
+	sl[0] = 9
+	// mode 1 == JNI_COMMIT: copy back and keep the caller's buffer.
+	testReleaseArrayElements(vm.envRaw, arr, p, 1)
+	if got := vm.get(arr).bytes[0]; got != 9 {
+		t.Fatalf("JNI_COMMIT copy-back = %d, want 9", got)
+	}
+	// The caller still owns the buffer after COMMIT: further writes must not
+	// fault, and a later ABORT release (mode 2) frees without copying.
+	sl[0] = 8
+	testReleaseArrayElements(vm.envRaw, arr, p, 2)
+	if got := vm.get(arr).bytes[0]; got != 9 {
+		t.Fatalf("JNI_ABORT must not copy back: %d, want 9", got)
+	}
+}
+
 func TestExceptionCheckNoPending(t *testing.T) {
 	vm, err := NewVM()
 	if err != nil {

@@ -73,7 +73,10 @@ func init() {
 		p := ""
 		if o != nil {
 			p = o.str
-			if id, ok := o.fields["tipsy.pathString"].(int64); ok && id != 0 {
+			vm.mu.RLock()
+			id, ok := o.fields["tipsy.pathString"].(int64)
+			vm.mu.RUnlock()
+			if ok && id != 0 {
 				if vm.get(id) != nil {
 					vm.addLocal(env, id)
 					return idToJobject(id), true
@@ -173,7 +176,9 @@ func init() {
 		return func(vm *VM, env unsafe.Pointer, o *Object, obj C.jobject, args *C.jvalue) (C.jobject, bool) {
 			value := ""
 			if o != nil {
+				vm.mu.RLock()
 				value, _ = o.fields[field].(string)
+				vm.mu.RUnlock()
 			}
 			vm.mu.Lock()
 			s := vm.newStringOn(env, value)
@@ -278,7 +283,10 @@ func init() {
 	registerCore("getName()Ljava/lang/String;", func(vm *VM, env unsafe.Pointer, o *Object, obj C.jobject, args *C.jvalue) (C.jobject, bool) {
 		n := oClassName(o)
 		if o != nil {
-			if name, ok := o.fields["name"].(string); ok {
+			vm.mu.RLock()
+			name, ok := o.fields["name"].(string)
+			vm.mu.RUnlock()
+			if ok {
 				n = name
 			}
 		}
@@ -296,14 +304,21 @@ func init() {
 	registerCore("size()I", func(vm *VM, env unsafe.Pointer, o *Object, obj C.jobject, args *C.jvalue) (C.jobject, bool) {
 		n := 0
 		if o != nil {
+			vm.mu.RLock()
 			n = len(o.elems)
+			vm.mu.RUnlock()
 		}
 		return C.jobject(unsafe.Pointer(uintptr(n))), true
 	})
 	registerCore("isEmpty()Z", func(vm *VM, env unsafe.Pointer, o *Object, obj C.jobject, args *C.jvalue) (C.jobject, bool) {
 		empty := 1
-		if o != nil && len(o.elems) > 0 {
-			empty = 0
+		if o != nil {
+			vm.mu.RLock()
+			n := len(o.elems)
+			vm.mu.RUnlock()
+			if n > 0 {
+				empty = 0
+			}
 		}
 		return C.jobject(unsafe.Pointer(uintptr(empty))), true
 	})
@@ -312,10 +327,13 @@ func init() {
 			return jnull(), true
 		}
 		idx := int(jvalueIAt(args, 0))
+		vm.mu.RLock()
 		if idx < 0 || idx >= len(o.elems) {
+			vm.mu.RUnlock()
 			return jnull(), true
 		}
 		id := o.elems[idx]
+		vm.mu.RUnlock()
 		if vm.objectsAlive(id) {
 			vm.addLocal(env, id)
 		}
@@ -348,13 +366,15 @@ func init() {
 		if o == nil {
 			return jnull(), true
 		}
+		vm.mu.RLock()
 		listID, _ := o.fields["list"].(int64)
 		idx, _ := o.fields["index"].(int32)
-		list := vm.get(listID)
+		list := vm.objects[listID]
 		n := 0
 		if list != nil {
 			n = len(list.elems)
 		}
+		vm.mu.RUnlock()
 		if int(idx) < n {
 			return C.jobject(unsafe.Pointer(uintptr(1))), true
 		}
@@ -364,14 +384,15 @@ func init() {
 		if o == nil {
 			return jnull(), true
 		}
+		vm.mu.Lock()
 		listID, _ := o.fields["list"].(int64)
 		idx, _ := o.fields["index"].(int32)
-		list := vm.get(listID)
+		list := vm.objects[listID]
 		if list == nil || int(idx) < 0 || int(idx) >= len(list.elems) {
+			vm.mu.Unlock()
 			return jnull(), true
 		}
 		elem := list.elems[idx]
-		vm.mu.Lock()
 		o.fields["index"] = idx + 1
 		if vm.objects[elem] != nil {
 			vm.addLocalOnLocked(env, elem)
@@ -405,21 +426,4 @@ func (vm *VM) objectsAlive(id int64) bool {
 		return false
 	}
 	return vm.get(id) != nil
-}
-
-func (vm *VM) dispatchCore(o *Object, obj C.jobject, class, name, sig string, args *C.jvalue) (C.jobject, bool) {
-	if h := lookupCoreHandler(name, sig); h != nil {
-		env := unsafe.Pointer(nil)
-		if vm != nil {
-			env = vm.envRaw
-		}
-		return h(vm, env, obj, args, 0)
-	}
-	if o != nil {
-		if v, ok := vm.fieldGetter(o, name, sig); ok {
-			return v, true
-		}
-	}
-	_ = class
-	return jnull(), false
 }

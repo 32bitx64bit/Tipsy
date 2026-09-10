@@ -434,5 +434,11 @@ var implementedMethods = map[string]bool{
 }
 
 func isImplementedMethod(name, sig string) bool {
-	return implementedMethods[name+sig]
+	if implementedMethods[name+sig] {
+		return true
+	}
+	// Register-handled identities are the source of truth; consulting them
+	// here keeps this hand-maintained list from drifting when a new
+	// registerCore entry is added without a matching list entry.
+	return lookupCoreHandler(name, sig) != nil
 }

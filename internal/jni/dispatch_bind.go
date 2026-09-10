@@ -17,60 +17,29 @@ import (
 	"unsafe"
 )
 
+// Test-only helpers (callAResult/callA/wrapHandlerHits) live in this
+// production file because Go test files cannot import "C": the underlying
+// JNI entry points carry cgo types in their signatures.
+
+// familyFn is one dispatch family. Method expressions bind the receiver, so
+// each concrete dispatcher can be listed directly; only dispatchInsets needs
+// an adapter because its signature has no receiver object.
 type familyFn func(vm *VM, o *Object, class, name, sig string, args *C.jvalue) (C.jobject, bool)
 
-func familyFmod(vm *VM, o *Object, class, name, sig string, args *C.jvalue) (C.jobject, bool) {
-	return vm.dispatchFmodAudio(o, class, name, sig, args)
-}
-
-func familyInput(vm *VM, o *Object, class, name, sig string, args *C.jvalue) (C.jobject, bool) {
-	return vm.dispatchInput(o, class, name, sig, args)
-}
-
-func familyConnectivity(vm *VM, o *Object, class, name, sig string, args *C.jvalue) (C.jobject, bool) {
-	return vm.dispatchConnectivity(o, class, name, sig, args)
-}
-
-func familyInsets(vm *VM, o *Object, class, name, sig string, args *C.jvalue) (C.jobject, bool) {
-	_ = o
-	return vm.dispatchInsets(class, name, sig, args)
-}
-
-func familyNativeHelper(vm *VM, o *Object, class, name, sig string, args *C.jvalue) (C.jobject, bool) {
-	return vm.dispatchNativeHelper(o, class, name, sig, args)
-}
-
-func familyNativeUser(vm *VM, o *Object, class, name, sig string, args *C.jvalue) (C.jobject, bool) {
-	return vm.dispatchNativeUser(o, class, name, sig, args)
-}
-
-func familyAuthCookies(vm *VM, o *Object, class, name, sig string, args *C.jvalue) (C.jobject, bool) {
-	return vm.dispatchAuthCookies(o, class, name, sig, args)
-}
-
-func familyTextInput(vm *VM, o *Object, class, name, sig string, args *C.jvalue) (C.jobject, bool) {
-	return vm.dispatchTextInput(o, class, name, sig, args)
-}
-
-func familyTextConnection(vm *VM, o *Object, class, name, sig string, args *C.jvalue) (C.jobject, bool) {
-	return vm.dispatchTextConnection(o, class, name, sig, args)
-}
-
-func familyLuaTextBox(vm *VM, o *Object, class, name, sig string, args *C.jvalue) (C.jobject, bool) {
-	return vm.dispatchLuaTextBox(o, class, name, sig, args)
-}
-
 var dispatchFamilies = []familyFn{
-	familyFmod,
-	familyInput,
-	familyConnectivity,
-	familyInsets,
-	familyNativeHelper,
-	familyNativeUser,
-	familyAuthCookies,
-	familyTextInput,
-	familyTextConnection,
-	familyLuaTextBox,
+	(*VM).dispatchFmodAudio,
+	(*VM).dispatchInput,
+	(*VM).dispatchConnectivity,
+	func(vm *VM, o *Object, class, name, sig string, args *C.jvalue) (C.jobject, bool) {
+		_ = o
+		return vm.dispatchInsets(class, name, sig, args)
+	},
+	(*VM).dispatchNativeHelper,
+	(*VM).dispatchNativeUser,
+	(*VM).dispatchAuthCookies,
+	(*VM).dispatchTextInput,
+	(*VM).dispatchTextConnection,
+	(*VM).dispatchLuaTextBox,
 }
 
 func initCallHandler(vm *VM, env unsafe.Pointer, obj C.jobject, args *C.jvalue, retKind rune) (C.jobject, bool) {
@@ -193,6 +162,10 @@ func packCallResult(out *C.jvalue, retKind C.jint, v C.jobject) {
 	default:
 	}
 }
+
+// callAResult and callA are test-facing wrappers: Go test files in this
+// package cannot import "C", so the C-typed CallA entry point is invoked
+// through this small production shim.
 
 type callAResult struct {
 	l int64

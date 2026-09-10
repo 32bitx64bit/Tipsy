@@ -17,8 +17,18 @@ func resetArgCaptureForTest() {
 	})
 }
 
+// setDiagnosticsForTest toggles the cached TIPSY_DIAG flag for one test.
+// diagnosticsEnabled is cached at process start, so t.Setenv alone cannot
+// flip it after init.
+func setDiagnosticsForTest(t *testing.T, on bool) {
+	t.Helper()
+	prev := diagnosticsOn.Load()
+	diagnosticsOn.Store(on)
+	t.Cleanup(func() { diagnosticsOn.Store(prev) })
+}
+
 func TestFindClassNameDiagnostic(t *testing.T) {
-	t.Setenv("TIPSY_DIAG", "1")
+	setDiagnosticsForTest(t, true)
 	vm, err := NewVM()
 	if err != nil {
 		t.Fatal(err)
@@ -56,7 +66,7 @@ func TestFindClassNameDiagnostic(t *testing.T) {
 }
 
 func TestLifecycleHandleDiagnostic(t *testing.T) {
-	t.Setenv("TIPSY_DIAG", "1")
+	setDiagnosticsForTest(t, true)
 	vm, err := NewVM()
 	if err != nil {
 		t.Fatal(err)

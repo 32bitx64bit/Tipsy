@@ -12,11 +12,25 @@ package jni
 import "C"
 
 import (
-	"strconv"
 	"sync"
-	"sync/atomic"
 
 	"github.com/tipsy-linux/tipsy/internal/logging"
+)
+
+// argCaptureKey identifies one observation-only argument capture without
+// formatting a key string: kind distinguishes the capture, name carries the
+// method/class identity, and value/flag carry the approved aggregate.
+type argCaptureKey struct {
+	kind  uint8
+	name  string
+	value int64
+	flag  bool
+}
+
+const (
+	argCaptureFindClass   uint8 = 1
+	argCaptureOrientation uint8 = 2
+	argCaptureLifecycle   uint8 = 3
 )
 
 // argCaptureLogged dedupes the observation-only argument diagnostics: one
@@ -39,23 +53,11 @@ func logFindClassName(name string) {
 	if !diagnosticsEnabled() || name == "" {
 		return
 	}
-	key := "findClass|" + name
+	key := argCaptureKey{kind: argCaptureFindClass, name: name}
 	if _, dup := argCaptureLogged.LoadOrStore(key, struct{}{}); dup {
 		return
 	}
 	logging.Logger(logging.CatJNI).Info("[jni] findClass-name", "class", name)
-}
-
-// orientationAnnounces counts the engine's gameActivity_onScreenOrientationChanged
-// announcements observed at stub-dispatch time (observation-only).
-var orientationAnnounces uint64
-
-// OrientationAnnouncements reports how many gameActivity_onScreenOrientationChanged
-// calls the engine actually made (observed on the stub path; once the
-// receiver is dispatched this counter stays at its pre-receiver value and
-// NativeHelperOrientationAnnouncements takes over).
-func OrientationAnnouncements() uint64 {
-	return atomic.LoadUint64(&orientationAnnounces)
 }
 
 // logLifecycleStubArgs records the raw J-handle argument of the only two
@@ -77,8 +79,7 @@ func logLifecycleStubArgs(class, name, sig string, args *C.jvalue) {
 		}
 		orient := jvalueIAt(args, 0)
 		flag := jvalueIAt(args, 1) != 0
-		atomic.AddUint64(&orientationAnnounces, 1)
-		key := "orientationAnnounce|" + strconv.Itoa(int(orient)) + "|" + strconv.FormatBool(flag)
+		key := argCaptureKey{kind: argCaptureOrientation, value: int64(orient), flag: flag}
 		if _, dup := argCaptureLogged.LoadOrStore(key, struct{}{}); dup {
 			return
 		}
@@ -101,7 +102,7 @@ func logLifecycleStubArgs(class, name, sig string, args *C.jvalue) {
 		return
 	}
 	v := int64(jvalueJ(args))
-	key := method + "|" + strconv.FormatInt(v, 10)
+	key := argCaptureKey{kind: argCaptureLifecycle, name: method, value: v}
 	if _, dup := argCaptureLogged.LoadOrStore(key, struct{}{}); dup {
 		return
 	}

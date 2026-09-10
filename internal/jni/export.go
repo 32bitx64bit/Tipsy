@@ -32,6 +32,13 @@ func logMissingMethod(class, name, sig string) {
 	logging.Logger(logging.CatJNI).Error("[jni] missing method: " + methodLogName(class, name, sig))
 }
 
+// stubDispatchKey identifies one dispatch-time stub fallback without
+// formatting a key string on every fallback call.
+type stubDispatchKey struct {
+	class, name, sig string
+	retKind          rune
+}
+
 // stubDispatchLogged dedupes the dispatch-time stub-fallback diagnostic:
 // one log per unique class.name+sig|retKind for the life of the process.
 var stubDispatchLogged sync.Map
@@ -42,7 +49,7 @@ var stubDispatchLogged sync.Map
 // return and side effect is preserved exactly. It never fires for methods
 // vm.dispatch handles (implemented paths, <init>, field getters).
 func logStubDispatch(class, name, sig string, retKind rune) {
-	key := methodLogName(class, name, sig) + "|" + string(retKind)
+	key := stubDispatchKey{class: class, name: name, sig: sig, retKind: retKind}
 	if _, dup := stubDispatchLogged.LoadOrStore(key, struct{}{}); dup {
 		return
 	}
@@ -113,7 +120,10 @@ func classNameOf(vm *VM, cls C.jclass) string {
 		return ""
 	}
 	if o.class != nil && o.class.name == "java/lang/Class" {
-		if n, ok := o.fields["name"].(string); ok {
+		vm.mu.RLock()
+		n, ok := o.fields["name"].(string)
+		vm.mu.RUnlock()
+		if ok {
 			return n
 		}
 	}
@@ -427,7 +437,9 @@ func (vm *VM) fieldGetter(o *Object, name, sig string) (C.jobject, bool) {
 	if o == nil || !strings.HasPrefix(sig, "()") {
 		return jnull(), false
 	}
+	vm.mu.RLock()
 	val, ok := o.fields[name]
+	vm.mu.RUnlock()
 	if !ok {
 		return jnull(), false
 	}
@@ -629,7 +641,9 @@ func GoJNI_GetField(env *C.JNIEnv, obj C.jobject, clazz C.jclass, fieldID C.jfie
 		vm.stubField(name, sig, retKind, out)
 		return
 	}
+	vm.mu.RLock()
 	val, exists := o.fields[name]
+	vm.mu.RUnlock()
 	if !exists {
 		vm.stubField(name, sig, retKind, out)
 		return
@@ -728,10 +742,16 @@ func GoJNI_SetField(env *C.JNIEnv, obj C.jobject, clazz C.jclass, fieldID C.jfie
 	}
 }
 
+// maxGuestStringUnits bounds GoJNI_NewString's guest-provided length before
+// allocation. 16 Mi UTF-16 units (32 MiB) is far beyond any string the
+// official client constructs through this entry point, and keeps a bogus
+// positive jsize from forcing a multi-gigabyte allocation.
+const maxGuestStringUnits = 16 << 20
+
 //export GoJNI_NewString
 func GoJNI_NewString(env *C.JNIEnv, unicode *C.jchar, len C.jsize) C.jstring {
 	vm := vmFromEnv(unsafe.Pointer(env))
-	if vm == nil {
+	if vm == nil || len < 0 || len > maxGuestStringUnits {
 		return jstringOf(jnull())
 	}
 	n := int(len)
@@ -863,6 +883,35 @@ func GoJNI_ReleaseStringUTFChars(env *C.JNIEnv, str C.jstring, chars *C.char) {
 	}
 }
 
+// unitRegion validates a JNI string-region request and returns its start and
+// length in UTF-16/code units. Negative start or length is invalid (never
+// reach unsafe.Slice or slice indexing with a negative count). The
+// `start > total || length > total-start` form cannot overflow on huge
+// positive start/length the way `start+length > total` can.
+func unitRegion(start, length, total int) (s, n int, ok bool) {
+	if start < 0 || length < 0 || start > total || length > total-start {
+		return 0, 0, false
+	}
+	return start, length, true
+}
+
+// byteRegion validates a JNI primitive-array-region request and returns its
+// byte offset and byte length. Negative start or length is invalid; es is the
+// element size in bytes. Bounds are checked in element units so a huge
+// positive start/length cannot wrap start*es or length*es.
+func byteRegion(start, length, total, es int) (off, n int, ok bool) {
+	if start < 0 || length < 0 || es <= 0 || total < 0 {
+		return 0, 0, false
+	}
+	units := total / es
+	if start > units || length > units-start {
+		return 0, 0, false
+	}
+	off = start * es
+	n = length * es
+	return off, n, true
+}
+
 //export GoJNI_GetStringRegion
 func GoJNI_GetStringRegion(env *C.JNIEnv, str C.jstring, start, length C.jsize, buf *C.jchar) {
 	vm := vmFromEnv(unsafe.Pointer(env))
@@ -874,8 +923,8 @@ func GoJNI_GetStringRegion(env *C.JNIEnv, str C.jstring, start, length C.jsize, 
 		return
 	}
 	u := utf16.Encode([]rune(o.str))
-	s, n := int(start), int(length)
-	if s < 0 || s+n > len(u) {
+	s, n, ok := unitRegion(int(start), int(length), len(u))
+	if !ok {
 		return
 	}
 	dst := unsafe.Slice((*uint16)(unsafe.Pointer(buf)), n)
@@ -893,8 +942,8 @@ func GoJNI_GetStringUTFRegion(env *C.JNIEnv, str C.jstring, start, length C.jsiz
 		return
 	}
 	b := []byte(o.str)
-	s, n := int(start), int(length)
-	if s < 0 || s+n > len(b) {
+	s, n, ok := unitRegion(int(start), int(length), len(b))
+	if !ok {
 		return
 	}
 	dst := unsafe.Slice((*byte)(unsafe.Pointer(buf)), n)
@@ -911,7 +960,10 @@ func GoJNI_GetArrayLength(env *C.JNIEnv, array C.jarray) C.jsize {
 	if o == nil {
 		return 0
 	}
-	return C.jsize(arrayLength(o))
+	vm.mu.RLock()
+	n := arrayLength(o)
+	vm.mu.RUnlock()
+	return C.jsize(n)
 }
 
 // arrayLength translates primitive backing bytes into JNI element counts.
@@ -962,10 +1014,17 @@ func GoJNI_GetObjectArrayElement(env *C.JNIEnv, array C.jobjectArray, index C.js
 		return jnull()
 	}
 	o := vm.get(jobjectToID(uintptr(array)))
-	if o == nil || int(index) < 0 || int(index) >= len(o.elems) {
+	if o == nil {
 		return jnull()
 	}
-	id := o.elems[index]
+	i := int(index)
+	vm.mu.RLock()
+	if i < 0 || i >= len(o.elems) {
+		vm.mu.RUnlock()
+		return jnull()
+	}
+	id := o.elems[i]
+	vm.mu.RUnlock()
 	if id == 0 {
 		return jnull()
 	}
@@ -982,13 +1041,18 @@ func GoJNI_SetObjectArrayElement(env *C.JNIEnv, array C.jobjectArray, index C.js
 		return
 	}
 	o := vm.get(jobjectToID(uintptr(array)))
-	if o == nil || int(index) < 0 || int(index) >= len(o.elems) {
+	if o == nil {
 		return
 	}
-	vm.mu.Lock()
+	i := int(index)
 	newID := jobjectToID(uintptr(val))
-	vm.replaceHeapEdgeLocked(o, o.elems[index], newID)
-	o.elems[index] = newID
+	vm.mu.Lock()
+	if i < 0 || i >= len(o.elems) {
+		vm.mu.Unlock()
+		return
+	}
+	vm.replaceHeapEdgeLocked(o, o.elems[i], newID)
+	o.elems[i] = newID
 	vm.mu.Unlock()
 }
 
@@ -1065,7 +1129,11 @@ func GoJNI_ReleaseArrayElements(env *C.JNIEnv, array C.jarray, elems unsafe.Poin
 	if o != nil && mode != C.JNI_ABORT && len(o.bytes) > 0 {
 		copy(o.bytes, unsafe.Slice((*byte)(elems), len(o.bytes)))
 	}
-	C.free(elems)
+	// JNI_COMMIT copies back but keeps the buffer owned by the caller; only
+	// mode 0 (copy+free) and JNI_ABORT (free only) release it.
+	if mode != C.JNI_COMMIT {
+		C.free(elems)
+	}
 }
 
 type criticalPin struct {
@@ -1123,9 +1191,8 @@ func GoJNI_GetArrayRegion(env *C.JNIEnv, array C.jarray, start, length C.jsize, 
 		return
 	}
 	es := elemSize(int(typeKind))
-	off := int(start) * es
-	n := int(length) * es
-	if off < 0 || off+n > len(o.bytes) {
+	off, n, ok := byteRegion(int(start), int(length), len(o.bytes), es)
+	if !ok {
 		return
 	}
 	copy(unsafe.Slice((*byte)(buf), n), o.bytes[off:off+n])
@@ -1142,13 +1209,17 @@ func GoJNI_SetArrayRegion(env *C.JNIEnv, array C.jarray, start, length C.jsize, 
 		return
 	}
 	es := elemSize(int(typeKind))
-	off := int(start) * es
-	n := int(length) * es
-	if off < 0 || off+n > len(o.bytes) {
+	off, n, ok := byteRegion(int(start), int(length), len(o.bytes), es)
+	if !ok {
 		return
 	}
 	copy(o.bytes[off:off+n], unsafe.Slice((*byte)(buf), n))
 }
+
+// maxRegisteredNatives bounds one RegisterNatives batch before unsafe.Slice.
+// The official client registers small batches (tens); a bogus positive count
+// must fail with JNI_ERR instead of slicing past the real C array.
+const maxRegisteredNatives = 1 << 14
 
 //export GoJNI_RegisterNatives
 func GoJNI_RegisterNatives(env *C.JNIEnv, clazz C.jclass, methods *C.JNINativeMethod, nMethods C.jint) C.jint {
@@ -1158,6 +1229,9 @@ func GoJNI_RegisterNatives(env *C.JNIEnv, clazz C.jclass, methods *C.JNINativeMe
 	}
 	cn := classNameOf(vm, clazz)
 	n := int(nMethods)
+	if n < 0 || n > maxRegisteredNatives {
+		return C.JNI_ERR
+	}
 	slice := unsafe.Slice(methods, n)
 	vm.mu.Lock()
 	defer vm.mu.Unlock()
@@ -1176,6 +1250,22 @@ func GoJNI_UnregisterNatives(env *C.JNIEnv, clazz C.jclass) C.jint {
 	_ = env
 	_ = clazz
 	return C.JNI_OK
+}
+
+// testRegisterNativesCount calls GoJNI_RegisterNatives with a non-nil
+// one-entry native method table and the given count, translating the JNI
+// result to a Go int (0=OK, -1=ERR) because test files in this package
+// cannot name C constants.
+func testRegisterNativesCount(n int32) int {
+	methods := make([]C.JNINativeMethod, 1)
+	switch GoJNI_RegisterNatives(nil, jclassNull(), &methods[0], C.jint(n)) {
+	case C.JNI_OK:
+		return 0
+	case C.JNI_ERR:
+		return -1
+	default:
+		return -2
+	}
 }
 
 //export GoJNI_MonitorEnter
