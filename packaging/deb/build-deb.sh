@@ -42,6 +42,9 @@ command -v go >/dev/null 2>&1 || fail 'go is missing'
 
 repo=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
 maintainer=${MAINTAINER:-"Tipsy Contributors <32bitx64bit@users.noreply.github.com>"}
+[[ "$maintainer" != *$'\n'* && "$maintainer" != *$'\r'* ]] || fail 'invalid MAINTAINER (must be a single line)'
+maintainer_re='^[^[:cntrl:]<>]+ <[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}>$'
+[[ "$maintainer" =~ $maintainer_re ]] || fail 'invalid MAINTAINER (expected "Name <email>")'
 deb_arch=amd64
 deb_name="tipsy_${version}_${deb_arch}.deb"
 
