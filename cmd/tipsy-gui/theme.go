@@ -117,19 +117,42 @@ func brandIcon() *qt.QIcon {
 	if path := brandIconPath(); path != "" {
 		return qt.NewQIcon4(path)
 	}
-	return qt.QIcon_FromTheme("applications-games")
+	names := brandIconFallbackNames()
+	fallback := qt.QIcon_FromTheme(names[len(names)-1])
+	return qt.QIcon_FromTheme2(names[0], fallback)
+}
+
+// brandIconFallbackNames are theme names tried, in order, when no brand PNG
+// exists on disk. System packages install "tipsy"; the last entry is a neutral
+// executable icon. A gamepad theme default (applications-games) must never be
+// used, because that is exactly what hides a missing brand file.
+func brandIconFallbackNames() []string {
+	return []string{"tipsy", "application-x-executable"}
 }
 
 func brandIconPath() string {
+	exeDir := ""
+	if exe, err := os.Executable(); err == nil {
+		exeDir = filepath.Dir(exe)
+	}
+	return firstExistingIcon(brandIconCandidates(exeDir))
+}
+
+// brandIconCandidates returns the locations searched for the brand PNG, in
+// priority order. exeDir may be empty when os.Executable fails. Flatpak only
+// exports icons named after the app id, so the app-id filenames are searched
+// in addition to tipsy.png; the GUI itself never sees the exported name.
+func brandIconCandidates(exeDir string) []string {
 	var candidates []string
 	if override := os.Getenv("TIPSY_ICON_PATH"); override != "" {
 		candidates = append(candidates, override)
 	}
-	if exe, err := os.Executable(); err == nil {
-		dir := filepath.Dir(exe)
+	if exeDir != "" {
 		candidates = append(candidates,
-			filepath.Join(dir, "tipsy.png"),
-			filepath.Join(dir, "..", "share", "icons", "hicolor", "512x512", "apps", "tipsy.png"),
+			filepath.Join(exeDir, "tipsy.png"),
+			filepath.Join(exeDir, "..", "share", "icons", "hicolor", "512x512", "apps", "tipsy.png"),
+			filepath.Join(exeDir, "..", "share", "icons", "hicolor", "512x512", "apps", "io.github.tipsy_linux.Tipsy.png"),
+			filepath.Join(exeDir, "..", "share", "icons", "hicolor", "256x256", "apps", "io.github.tipsy_linux.Tipsy.png"),
 		)
 	}
 	if cwd, err := os.Getwd(); err == nil {
@@ -142,6 +165,10 @@ func brandIconPath() string {
 		"/usr/local/share/icons/hicolor/512x512/apps/tipsy.png",
 		"/usr/share/icons/hicolor/512x512/apps/tipsy.png",
 	)
+	return candidates
+}
+
+func firstExistingIcon(candidates []string) string {
 	for _, candidate := range candidates {
 		info, err := os.Stat(candidate)
 		if err == nil && info.Mode().IsRegular() {

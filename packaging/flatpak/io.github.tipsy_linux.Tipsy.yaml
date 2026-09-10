@@ -55,8 +55,13 @@ modules:
           -X github.com/tipsy-linux/tipsy/internal/version.Channel=stable" -o /app/bin/tipsy ./cmd/tipsy
       - go build -ldflags "-buildid= -s -w -X github.com/tipsy-linux/tipsy/internal/version.Version=@VERSION@
           -X github.com/tipsy-linux/tipsy/internal/version.Channel=stable" -o /app/bin/tipsy-gui ./cmd/tipsy-gui
-      # Flatpak only exports icons and desktop files named after the app id.
+      # Flatpak only exports icons and desktop files named after the app id, so
+      # the app-id file must exist under its exported name. tipsy.png is
+      # installed alongside it because the GUI resolves its brand icon from
+      # ../share/icons/hicolor/512x512/apps/tipsy.png inside the sandbox
+      # (cmd/tipsy-gui/theme.go); without it the window falls back to a theme icon.
       - install -Dm0644 tipsy.png /app/share/icons/hicolor/512x512/apps/io.github.tipsy_linux.Tipsy.png
+      - install -Dm0644 tipsy.png /app/share/icons/hicolor/512x512/apps/tipsy.png
       - install -Dm0644 share/applications/io.github.tipsy_linux.Tipsy.Play.desktop
           /app/share/applications/io.github.tipsy_linux.Tipsy.Play.desktop
       - install -Dm0644 share/applications/io.github.tipsy_linux.Tipsy.Settings.desktop
