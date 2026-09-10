@@ -18,7 +18,7 @@ func TestInstalledVersionNameFromMeta(t *testing.T) {
 	if got := installedVersionName(dir); got != "2.736.1408" {
 		t.Fatalf("version=%q", got)
 	}
-	if got := robloxUserAgent("2.736.1408"); got != "Roblox/2.736.1408 (Linux; Android 8.0.0; tipsy)" {
+	if got := robloxUserAgent("2.736.1408"); got != robloxUserAgentWinInet {
 		t.Fatalf("ua=%q", got)
 	}
 }
@@ -37,7 +37,7 @@ func TestInstalledVersionNameMissingOrEmpty(t *testing.T) {
 	if got := installedVersionName(dir); got != "" {
 		t.Fatalf("empty versionName=%q", got)
 	}
-	if got := robloxUserAgent(""); got != "Roblox/0 (Linux; Android 8.0.0; tipsy)" {
+	if got := robloxUserAgent(""); got != robloxUserAgentWinInet {
 		t.Fatalf("empty ua=%q", got)
 	}
 }

@@ -83,6 +83,7 @@ func (vm *VM) seedClasses() {
 		"com/roblox/client/LocalStorageManager",
 		"com/roblox/client/flags/NativeFlagsInitResult",
 		"com/roblox/engine/jni/locale/NativeLocaleJavaInterface",
+		"com/roblox/engine/jni/user/NativeUserJavaInterface",
 		"com/roblox/engine/jni/NativeGLInterface",
 		"com/roblox/engine/jni/NativeGLJavaInterface",
 		"com/roblox/engine/jni/NativeInputInterface",

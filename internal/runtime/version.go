@@ -12,7 +12,12 @@ import (
 	"github.com/tipsy-linux/tipsy/internal/apk"
 )
 
-const robloxUserAgentSuffix = " (Linux; Android 8.0.0; tipsy)"
+// robloxUserAgentWinInet is the only `Roblox/` token in official
+// libroblox.so 2.736.1408 (read-only strings). Ticket redeem already sends
+// the same header. Owner-licensed Playable-Devices spoof: InitParams
+// and HTTP use this Windows-player UA instead of the Android/tipsy
+// suffix. Client-settings URL stays AndroidApp.
+const robloxUserAgentWinInet = "Roblox/WinInet"
 
 // installedVersionName returns meta.json versionName from an extracted
 // runtime directory. Missing or empty meta is honest: callers get "".
@@ -31,13 +36,11 @@ func installedVersionName(runtimeDir string) string {
 	return strings.TrimSpace(meta.VersionName)
 }
 
-// robloxUserAgent is the HTTP / InitParams UA the Android client sends.
-// An empty versionName becomes "0" so callers still send a UA without
-// inventing a previous APK version.
+// robloxUserAgent is the HTTP / InitParams UA. VersionName is accepted
+// so callers keep the installed APK version for DeviceParams; the UA
+// itself is the licensed WinInet token, not an Android form-factor
+// string.
 func robloxUserAgent(versionName string) string {
-	v := strings.TrimSpace(versionName)
-	if v == "" {
-		v = "0"
-	}
-	return "Roblox/" + v + robloxUserAgentSuffix
+	_ = versionName
+	return robloxUserAgentWinInet
 }

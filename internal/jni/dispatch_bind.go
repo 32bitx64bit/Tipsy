@@ -40,6 +40,10 @@ func familyNativeHelper(vm *VM, o *Object, class, name, sig string, args *C.jval
 	return vm.dispatchNativeHelper(o, class, name, sig, args)
 }
 
+func familyNativeUser(vm *VM, o *Object, class, name, sig string, args *C.jvalue) (C.jobject, bool) {
+	return vm.dispatchNativeUser(o, class, name, sig, args)
+}
+
 func familyAuthCookies(vm *VM, o *Object, class, name, sig string, args *C.jvalue) (C.jobject, bool) {
 	return vm.dispatchAuthCookies(o, class, name, sig, args)
 }
@@ -62,6 +66,7 @@ var dispatchFamilies = []familyFn{
 	familyConnectivity,
 	familyInsets,
 	familyNativeHelper,
+	familyNativeUser,
 	familyAuthCookies,
 	familyTextInput,
 	familyTextConnection,
