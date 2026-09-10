@@ -59,26 +59,57 @@ func callDisplayRefreshRateExports(env *jni.Env, class, currentFn, supportedFn u
 	return nil
 }
 
+// displayRefreshExports caches the named-export lookups and class handle
+// resolved on the first publication. The Roblox exports and this VM's class
+// handles are stable for the launch session, so a monitor-change republish
+// must not repeat dlsym/FindClass work. Caching is keyed by module because a
+// different authenticated module gets fresh handles.
+type displayRefreshExports struct {
+	mod         *loader.Module
+	class       uintptr
+	currentFn   uintptr
+	supportedFn uintptr
+}
+
+var displayRefreshHandleCache displayRefreshExports
+
+func resolveDisplayRefreshExports(mod *loader.Module, env *jni.Env) (displayRefreshExports, error) {
+	if cached := displayRefreshHandleCache; cached.mod == mod && cached.class != 0 &&
+		cached.currentFn != 0 && cached.supportedFn != 0 {
+		return cached, nil
+	}
+	currentFn, err := mod.Lookup(currentDisplayRefreshRateSym)
+	if err != nil {
+		return displayRefreshExports{}, fmt.Errorf("%s: %w", currentDisplayRefreshRateSym, err)
+	}
+	if currentFn == 0 {
+		return displayRefreshExports{}, fmt.Errorf("%s resolved to nil", currentDisplayRefreshRateSym)
+	}
+	supportedFn, err := mod.Lookup(supportedRefreshRatesSym)
+	if err != nil {
+		return displayRefreshExports{}, fmt.Errorf("%s: %w", supportedRefreshRatesSym, err)
+	}
+	if supportedFn == 0 {
+		return displayRefreshExports{}, fmt.Errorf("%s resolved to nil", supportedRefreshRatesSym)
+	}
+	class := env.FindClass("com/roblox/engine/jni/NativeGLInterface")
+	if class == 0 {
+		return displayRefreshExports{}, fmt.Errorf("display refresh class unavailable")
+	}
+	resolved := displayRefreshExports{mod: mod, class: class, currentFn: currentFn, supportedFn: supportedFn}
+	displayRefreshHandleCache = resolved
+	return resolved, nil
+}
+
 func publishDisplayRefreshRates(mod *loader.Module, env *jni.Env, currentHz float32, supportedHz []float32) error {
 	if mod == nil || env == nil {
 		return fmt.Errorf("display refresh JNI unavailable")
 	}
-	currentFn, err := mod.Lookup(currentDisplayRefreshRateSym)
+	exports, err := resolveDisplayRefreshExports(mod, env)
 	if err != nil {
-		return fmt.Errorf("%s: %w", currentDisplayRefreshRateSym, err)
+		return err
 	}
-	if currentFn == 0 {
-		return fmt.Errorf("%s resolved to nil", currentDisplayRefreshRateSym)
-	}
-	supportedFn, err := mod.Lookup(supportedRefreshRatesSym)
-	if err != nil {
-		return fmt.Errorf("%s: %w", supportedRefreshRatesSym, err)
-	}
-	if supportedFn == 0 {
-		return fmt.Errorf("%s resolved to nil", supportedRefreshRatesSym)
-	}
-	class := env.FindClass("com/roblox/engine/jni/NativeGLInterface")
-	if err := callDisplayRefreshRateExports(env, class, currentFn, supportedFn, currentHz, supportedHz); err != nil {
+	if err := callDisplayRefreshRateExports(env, exports.class, exports.currentFn, exports.supportedFn, currentHz, supportedHz); err != nil {
 		return err
 	}
 	logging.Logger(logging.CatGraphics).Info("published Android display refresh rates",

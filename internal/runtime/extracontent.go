@@ -8,7 +8,6 @@ import (
 	"compress/gzip"
 	"context"
 	"crypto/md5"
-	"encoding/binary"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
@@ -133,11 +132,6 @@ func ensurePatchFromConfig(ctx context.Context, assetsDir, cfgPath string) error
 	if cacheName, err := otaRbxmCacheName(cfg.AssetID, cfg.AssetVersion); err == nil {
 		dests = append(dests, otaRbxmCacheDests(assetsDir, cacheName)...)
 	}
-	if strings.Contains(rel, "DataModelPatch.rbxm") {
-		if id, err := otaHttpContentID(cfg.AssetID, cfg.AssetVersion); err == nil {
-			plantedOTAContentID = id
-		}
-	}
 	// Bundled ExtraContent (UniversalApp, InExperience) is already on disk
 	// and may not match LocalAssetHash (that hash is for a specific OTA
 	// version). Do not refetch or overwrite a present rbxm.
@@ -223,38 +217,6 @@ func otaRbxmCacheName(assetID, version string) (string, error) {
 		return "", fmt.Errorf("invalid OTA cache id")
 	}
 	return otaRbxmCachePrefix + assetID + "_" + version + otaRbxmCacheSuffix, nil
-}
-
-// 0x24d4300 memcmp 30 bytes vs https://www.roblox.com/asset/? (0xa28390).
-// Query keys id / version (0x24d4560 / 0x24d4571) format
-// DataModelPatch_{id}_{version}_cache.
-const otaHttpAssetPrefix = "https://www.roblox.com/asset/?"
-
-var plantedOTAContentID string
-
-func otaHttpContentID(assetID, version string) (string, error) {
-	if !decimalID(assetID) {
-		return "", fmt.Errorf("invalid OTA http id")
-	}
-	s := otaHttpAssetPrefix + "id=" + assetID
-	if version != "" {
-		if !decimalID(version) {
-			return "", fmt.Errorf("invalid OTA http version")
-		}
-		s += "&version=" + version
-	}
-	return s, nil
-}
-
-func plantWalkOTAContentID(page []byte, strOff, bufOff, bufCap int, bufAt uintptr) {
-	id := plantedOTAContentID
-	if id == "" || len(id) > bufCap || strOff < 0 || bufOff+len(id) > len(page) {
-		return
-	}
-	copy(page[bufOff:], id)
-	binary.LittleEndian.PutUint64(page[strOff:], 1)
-	binary.LittleEndian.PutUint64(page[strOff+8:], uint64(len(id)))
-	binary.LittleEndian.PutUint64(page[strOff+16:], uint64(bufAt))
 }
 
 func decimalID(s string) bool {
@@ -384,7 +346,9 @@ func fetchOfficialAsset(ctx context.Context, assetID, version string) ([]byte, e
 	if err != nil {
 		return nil, err
 	}
-	req.Header.Set("User-Agent", robloxUserAgent(installedVersionName(RuntimeDir())))
+	// The licensed UA is version-independent, so do not read meta.json from
+	// RuntimeDir just to feed an ignored parameter.
+	req.Header.Set("User-Agent", robloxUserAgent(""))
 	req.Header.Set("Accept", "*/*")
 	resp, err := assetHTTPClient.Do(req)
 	if err != nil {

@@ -87,8 +87,11 @@ func cloneFlagMap(m map[string]any) map[string]any {
 	return out
 }
 
-func loadAndroidAppSettings(cachePath, version string) (string, int, error) {
-	overrides, overrideErr := clientsettings.New().LoadOverrides(context.Background())
+func loadAndroidAppSettings(ctx context.Context, cachePath, version string) (string, int, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	overrides, overrideErr := clientsettings.New().LoadOverrides(ctx)
 	if overrideErr != nil {
 		// A settings-permission/symlink failure must not prevent use of the
 		// official client settings; the rejected override is simply not applied.
@@ -105,7 +108,7 @@ func loadAndroidAppSettings(cachePath, version string) (string, int, error) {
 	} else if policyApplied {
 		logging.Logger(logging.CatGameActivity).Info("desktop app policy override applied", "presentation_fields", 4)
 	}
-	body, err := fetchAndroidAppSettings(version)
+	body, err := fetchAndroidAppSettings(ctx, version)
 	if err != nil {
 		if cachePath != "" {
 			if cached, rerr := os.ReadFile(cachePath); rerr == nil && len(cached) > 2 {
@@ -137,8 +140,14 @@ func withDesktopAppPolicyOverride(cachePath string, overrides map[string]any) (m
 	return overrides, true, nil
 }
 
-func fetchAndroidAppSettings(version string) ([]byte, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+func fetchAndroidAppSettings(ctx context.Context, version string) ([]byte, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	// The bounded timeout stays; the launch context additionally lets a
+	// cancelled launch abort this startup fetch immediately instead of
+	// blocking the path for the full window.
+	ctx, cancel := context.WithTimeout(ctx, 20*time.Second)
 	defer cancel()
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, androidAppSettingsURL, nil)
 	if err != nil {

@@ -28,13 +28,12 @@ func setRobloxPreferencesFile(mod *loader.Module, env *jni.Env) {
 // NativeHelper initializes CookieProtocol's official callback. Cookie content
 // never enters diagnostics, flags, account stubs, or engine memory patches.
 func configureRobloxCookieBridge(vm *jni.VM, mod *loader.Module, env *jni.Env, path string) error {
-	const baseURL = "https://www.roblox.com/"
 	const registerSym = "Java_com_roblox_universalapp_cookie_JNICookieProtocol_updateOnSetCookieHandler"
 	register, err := mod.Lookup(registerSym)
 	if err != nil || register == 0 {
 		return fmt.Errorf("official cookie callback unavailable")
 	}
-	if err = vm.ConfigureAuthCookies(path, baseURL); err != nil {
+	if err = vm.ConfigureAuthCookies(path, robloxBaseURL); err != nil {
 		return fmt.Errorf("prepare official cookie storage: %w", err)
 	}
 	protocol := env.AllocObject(env.FindClass("com/roblox/universalapp/cookie/JNICookieProtocol"))
@@ -67,12 +66,11 @@ func configureRobloxCookieBridge(vm *jni.VM, mod *loader.Module, env *jni.Env, p
 // The native cookie setter filters against its configured origin; calling
 // restore before nativeSetBaseUrl silently discards valid saved cookies.
 func restoreRobloxCookieHeader(env *jni.Env, header string, invoke func(symbol string, settings, first, second uintptr) error) error {
-	const baseURL = "https://www.roblox.com/"
 	settings := env.FindClass("com/roblox/engine/jni/NativeSettingsInterface")
-	if err := invoke("Java_com_roblox_engine_jni_NativeSettingsInterface_nativeSetBaseUrl", settings, env.NewStringUTF(baseURL), env.NewStringUTF("https://api.roblox.com/")); err != nil {
+	if err := invoke("Java_com_roblox_engine_jni_NativeSettingsInterface_nativeSetBaseUrl", settings, env.NewStringUTF(robloxBaseURL), env.NewStringUTF("https://api.roblox.com/")); err != nil {
 		return err
 	}
-	return invoke("Java_com_roblox_engine_jni_NativeSettingsInterface_nativeSetMultipleCookies", settings, env.NewStringUTF(baseURL), env.NewStringUTF(header))
+	return invoke("Java_com_roblox_engine_jni_NativeSettingsInterface_nativeSetMultipleCookies", settings, env.NewStringUTF(robloxBaseURL), env.NewStringUTF(header))
 }
 
 // logNativeCookieRestoreState is an opt-in, read-only check of the named APK
@@ -88,7 +86,7 @@ func logNativeCookieRestoreState(mod *loader.Module, env *jni.Env, phase string)
 		logging.Logger(logging.CatFilesystem).Info("official cookie readback unavailable")
 		return
 	}
-	result := loader.CallP8(fn, env.Raw(), env.FindClass("com/roblox/engine/jni/NativeSettingsInterface"), env.NewStringUTF("https://www.roblox.com/"), 0, 0, 0, 0, 0)
+	result := loader.CallP8(fn, env.Raw(), env.FindClass("com/roblox/engine/jni/NativeSettingsInterface"), env.NewStringUTF(robloxBaseURL), 0, 0, 0, 0, 0)
 	if result == 0 {
 		logging.Logger(logging.CatFilesystem).Info("official cookie readback unavailable")
 		return

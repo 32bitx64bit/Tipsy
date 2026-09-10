@@ -132,8 +132,9 @@ func (p *clientPresenter) refreshRates() (float32, []float32) {
 	if p == nil {
 		return 0, nil
 	}
-	// A raw combined snapshot preserves unknown-on-failure for retry. The EGL
-	// policy accessor intentionally retains stale rates, so cannot do that.
+	// WindowRefreshRates performs a fresh combined XRandR query and reports
+	// zero current / empty supported on failure, so the caller can keep the
+	// generation pending for retry instead of publishing stale rates.
 	current, supported := graphics.WindowRefreshRates(p.xdpy, p.xid)
 	return float32(current), supported
 }
@@ -170,7 +171,9 @@ func (p *displayRefreshPublication) update(version uint64, query func() (float32
 
 func (p *clientPresenter) stop() {
 	if p != nil && p.egl != nil {
-		p.egl.StopSwapThread()
+		if err := p.egl.StopSwapThread(); err != nil {
+			logging.Logger(logging.CatGraphics).Error("EGL sentinel present failed", "err", err)
+		}
 	}
 }
 
@@ -232,13 +235,21 @@ func bindClientPresenter(win *x11.Window, settings clientsettings.Settings) (*cl
 	}
 	presenter.egl = eglSurf
 	configureEGLPresentationPolicy(settings)
-	_ = eglSurf.Swap()
+	// The C sentinel thread owns the first present: it makes the context
+	// current, clears the back buffer to opaque black, presents exactly one
+	// frame, then retires once the client presenter is observed
+	// (internal/graphics egl.c). Tipsy must not swap first here: an undefined
+	// pre-clear present would flash garbage and race the sentinel's single
+	// defined frame.
 	if err := eglSurf.ReleaseCurrent(); err != nil {
 		_ = eglSurf.Close()
 		return nil, fmt.Errorf("egl release: %w", err)
 	}
 	if err := eglSurf.StartSwapThread(); err != nil {
-		logging.Logger(logging.CatRuntime).Info("EGL swap thread skipped", "err", err)
+		// The sentinel thread is best-effort observation/paint only: the
+		// official client still owns its own presentation, so a failed start
+		// stays non-fatal but must not be silent.
+		logging.Logger(logging.CatGraphics).Error("EGL sentinel present unavailable", "err", err)
 	}
 	return presenter, nil
 }

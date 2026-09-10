@@ -33,7 +33,7 @@ func importWebsiteAuth(ctx context.Context, cookiePath string, req *rbxuri.Reque
 		logging.Logger(logging.CatAuth).Info("website authentication ticket not redeemed", "err", err)
 		return nil
 	}
-	if err := jni.ImportAuthSetCookies(cookiePath, "https://www.roblox.com/", result.Origin, result.SetCookie); err != nil {
+	if err := jni.ImportAuthSetCookies(cookiePath, robloxBaseURL, result.Origin, result.SetCookie); err != nil {
 		return fmt.Errorf("persist website session: %w", err)
 	}
 	req.TicketRedeemed = true

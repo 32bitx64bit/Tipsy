@@ -49,6 +49,11 @@ type AuthorizedGeneration interface {
 
 var ErrAuthorizedGenerationRequired = errors.New("runtime: authenticated runtime generation is required")
 
+// robloxBaseURL is the official production site origin shared by the cookie,
+// NativeSettings, and protocol-launch surface. Path-specific endpoints append
+// to this origin.
+const robloxBaseURL = "https://www.roblox.com/"
+
 func authorizedNativeDescriptorSet(ctx context.Context, generation AuthorizedGeneration) (*integrity.NativeDescriptorSet, error) {
 	if generation == nil {
 		return nil, ErrAuthorizedGenerationRequired

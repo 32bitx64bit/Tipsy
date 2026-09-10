@@ -272,7 +272,7 @@ func dispatchGameActivityLifecycle(ctx context.Context, vm *jni.VM, mod *loader.
 	content := assetContentDir(assets)
 	setRobloxAssetPath(mod, env, activity, content)
 	handleColdStartProtocolLaunch(mod, env, activity, req)
-	startRobloxApp(mod, env, activity, files, version)
+	startRobloxApp(ctx, mod, env, activity, files, version)
 	// Official MainScreenController ON_CREATE publishes Display 0's current
 	// and supported refresh rates after native/client-settings initialization
 	// and before resume/surface/V2Start. Reproduce that named JNI boundary
@@ -370,10 +370,16 @@ func setRobloxAssetPath(mod *loader.Module, env *jni.Env, activity uintptr, cont
 }
 
 func setRobloxCacheAndFiles(mod *loader.Module, env *jni.Env, activity uintptr, files, cache string) {
-	files, cache = absExistingDir(files), absExistingDir(cache)
-	if files == "" || cache == "" {
+	absFiles, absCache := absExistingDir(files), absExistingDir(cache)
+	if absFiles == "" || absCache == "" {
+		// Honest structured failure instead of a silent skip: the official
+		// cache/files setters and LocalStorageManager stay unavailable, which
+		// can surface later as missing-API failures. Paths are not secrets.
+		logging.Logger(logging.CatGameActivity).Error("Android cache/files directories unavailable",
+			"files_unavailable", absFiles == "", "cache_unavailable", absCache == "")
 		return
 	}
+	files, cache = absFiles, absCache
 	callRobloxJNI(mod, env.Raw(), activity, setCacheDirSym, env.NewStringUTF(cache))
 	callRobloxJNI(mod, env.Raw(), activity, setFilesDirSym, env.NewStringUTF(files))
 	initRobloxLocalStorageManager(mod, env, files, cache)
@@ -389,8 +395,8 @@ func initRobloxLocalStorageManager(mod *loader.Module, env *jni.Env, files, cach
 	loader.CallP8(fn, env.Raw(), thiz, am, env.NewStringUTF(files), env.NewStringUTF(cache), 0, 0, 0)
 }
 
-func startRobloxApp(mod *loader.Module, env *jni.Env, activity uintptr, files, version string) {
-	flags, _, err := loadAndroidAppSettings(filepath.Join(files, "ClientAppSettings.json"), version)
+func startRobloxApp(ctx context.Context, mod *loader.Module, env *jni.Env, activity uintptr, files, version string) {
+	flags, _, err := loadAndroidAppSettings(ctx, filepath.Join(files, "ClientAppSettings.json"), version)
 	if err != nil || flags == "" {
 		logging.Logger(logging.CatGameActivity).Info("client settings unavailable", "err", err)
 		return
@@ -431,7 +437,7 @@ func startLoggedOutAppBridge(mod *loader.Module, env *jni.Env) {
 	}
 	logging.Logger(logging.CatGameActivity).Info("calling logged-out JNI bridge", "sym", appStartSym)
 	loader.CallP8(fn, env.Raw(), bridge,
-		env.NewStringUTF("https://www.roblox.com/"), env.NewStringUTF(""), 0,
+		env.NewStringUTF(robloxBaseURL), env.NewStringUTF(""), 0,
 		env.NewStringUTF(""), env.NewStringUTF(""), env.NewStringUTF(""))
 }
 

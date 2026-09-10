@@ -121,7 +121,10 @@ func Launch(ctx context.Context, opt LaunchOptions) error {
 	}
 	// Android app-private files are owner-only by default. Keep that invariant
 	// for files the unmodified client creates itself, not only files Tipsy
-	// prepares directly.
+	// prepares directly. Scoping this to the storage-prep/import window was
+	// audited and rejected: the native client creates cache, log, and pref
+	// files for the whole session, so save+restore around prep would silently
+	// widen those defaults again.
 	oldUmask := syscall.Umask(0o077)
 	defer syscall.Umask(oldUmask)
 	if opt.Width <= 0 {
@@ -451,6 +454,11 @@ func Launch(ctx context.Context, opt LaunchOptions) error {
 					shutdownClient("wm-delete-window")
 					return nil
 				}
+				// Every other pump failure takes the same orderly teardown:
+				// terminateNativeCode must join before the cookie fsync boundary
+				// and the deferred module handoff, exactly like the ctx-done and
+				// WM-delete paths. The pump error stays the returned error.
+				shutdownClient("x11-pump-error")
 				return err
 			}
 			// XIM commits and editor-navigation keys mutate the focused snapshot
