@@ -14,7 +14,8 @@ import "C"
 import (
 	"net"
 	"strings"
-	"unsafe"
+	"sync"
+	"time"
 )
 
 // Android ConnectivityManager.TYPE_* / NetworkCapabilities constants
@@ -41,7 +42,46 @@ const (
 // auth and not a security bypass.
 var hostNetworkUp = detectHostNetwork
 
+// hostNetworkTTL bounds how long one interface scan may answer connectivity
+// queries. The engine polls several ConnectivityManager/Network getters per
+// frame; net.Interfaces() is a syscall-backed scan, so a short honest cache
+// keeps polling from becoming a hot path while network changes still show up
+// within the TTL, not fabricated or sticky forever.
+const hostNetworkTTL = 2 * time.Second
+
+var hostNetworkCache struct {
+	mu      sync.Mutex
+	checked time.Time
+	up      bool
+}
+
+// probeHostNetworkFn is the interface scan behind the cache. It is a package
+// variable so tests can count probes without real interfaces; production
+// never replaces it.
+var probeHostNetworkFn = probeHostNetwork
+
 func detectHostNetwork() bool {
+	hostNetworkCache.mu.Lock()
+	defer hostNetworkCache.mu.Unlock()
+	if !hostNetworkCache.checked.IsZero() && time.Since(hostNetworkCache.checked) < hostNetworkTTL {
+		return hostNetworkCache.up
+	}
+	up := probeHostNetworkFn()
+	hostNetworkCache.up = up
+	hostNetworkCache.checked = time.Now()
+	return up
+}
+
+// resetHostNetworkCacheForTest forgets the cached result. Test seam only;
+// production never resets within a process.
+func resetHostNetworkCacheForTest() {
+	hostNetworkCache.mu.Lock()
+	hostNetworkCache.checked = time.Time{}
+	hostNetworkCache.up = false
+	hostNetworkCache.mu.Unlock()
+}
+
+func probeHostNetwork() bool {
 	ifs, err := net.Interfaces()
 	if err != nil {
 		return false
@@ -72,13 +112,13 @@ func detectHostNetwork() bool {
 
 func jniBool(v bool) C.jobject {
 	if v {
-		return C.jobject(unsafe.Pointer(uintptr(1)))
+		return C.jobject(uintptr(1))
 	}
 	return jnull()
 }
 
 func jniInt(n int32) C.jobject {
-	return C.jobject(unsafe.Pointer(uintptr(uint32(n))))
+	return C.jobject(uintptr(uint32(n)))
 }
 
 func packJint(v int32) *C.jvalue {
@@ -105,6 +145,9 @@ func classIs(o *Object, name string) bool {
 	return false
 }
 
+// seedConnectivity writes the static class/field snapshot directly without
+// vm.mu: it is called only from seedClasses during NewVM, before globalVM is
+// published and before any other goroutine can observe the VM.
 func (vm *VM) seedConnectivity() {
 	object := vm.classes["java/lang/Object"]
 	for _, name := range []string{
@@ -167,6 +210,11 @@ func (vm *VM) seedConnectivity() {
 	}
 }
 
+// enumField returns the seeded enum singleton for class.name. It does not
+// lock: every caller must already hold vm.mu for reading — the write lock from
+// newNetworkInfoLocked's *Locked callers, or a read lock from
+// dispatchConnectivity's getState/getDetailedState. Taking RLock here while a
+// caller holds the write side would self-deadlock.
 func (vm *VM) enumField(class, name string) C.jobject {
 	cls := vm.classes[class]
 	if cls == nil || cls.obj == nil {
@@ -255,8 +303,11 @@ func (vm *VM) classNameFromArg(args *C.jvalue, i int) string {
 	if o == nil {
 		return ""
 	}
-	if n, ok := o.fields["name"].(string); ok {
-		return n
+	vm.mu.RLock()
+	name, ok := o.fields["name"].(string)
+	vm.mu.RUnlock()
+	if ok {
+		return name
 	}
 	return o.str
 }
@@ -274,6 +325,10 @@ func connectivityIdentity(class, name, sig string) bool {
 	return name == "getSystemService" && sig == "(Ljava/lang/Class;)Ljava/lang/Object;"
 }
 
+// dispatchConnectivity is reached from the family chain in resolveDispatch,
+// whose callers (GoJNI_CallA, callDispatchOrStubEnv, VM.dispatch) never hold
+// vm.mu. Shared Object.field reads therefore copy under vm.mu.RLock; new
+// objects are built and mutated with vm.mu held.
 func (vm *VM) dispatchConnectivity(o *Object, class, name, sig string, args *C.jvalue) (C.jobject, bool) {
 	if !connectivityIdentity(class, name, sig) {
 		return jnull(), false
@@ -345,32 +400,44 @@ func (vm *VM) dispatchConnectivity(o *Object, class, name, sig string, args *C.j
 		if !classIs(o, "android/net/NetworkInfo") {
 			return jnull(), false
 		}
-		if b, ok := o.fields["connected"].(bool); ok {
-			return jniBool(b), true
+		vm.mu.RLock()
+		connected, hasConnected := o.fields["connected"].(bool)
+		vm.mu.RUnlock()
+		if hasConnected {
+			return jniBool(connected), true
 		}
 		return jniBool(hostNetworkUp()), true
 	case "isAvailable()Z":
 		if !classIs(o, "android/net/NetworkInfo") {
 			return jnull(), false
 		}
-		if b, ok := o.fields["available"].(bool); ok {
-			return jniBool(b), true
+		vm.mu.RLock()
+		available, hasAvailable := o.fields["available"].(bool)
+		vm.mu.RUnlock()
+		if hasAvailable {
+			return jniBool(available), true
 		}
 		return jniBool(hostNetworkUp()), true
 	case "isRoaming()Z":
 		if !classIs(o, "android/net/NetworkInfo") {
 			return jnull(), false
 		}
-		if b, ok := o.fields["roaming"].(bool); ok {
-			return jniBool(b), true
+		vm.mu.RLock()
+		roaming, hasRoaming := o.fields["roaming"].(bool)
+		vm.mu.RUnlock()
+		if hasRoaming {
+			return jniBool(roaming), true
 		}
 		return jniBool(false), true
 	case "getType()I":
 		if !classIs(o, "android/net/NetworkInfo") {
 			return jnull(), false
 		}
-		if n, ok := o.fields["type"].(int32); ok {
-			return jniInt(n), true
+		vm.mu.RLock()
+		typ, hasType := o.fields["type"].(int32)
+		vm.mu.RUnlock()
+		if hasType {
+			return jniInt(typ), true
 		}
 		return jniInt(typeWifi), true
 	case "getTypeName()Ljava/lang/String;":
@@ -378,8 +445,11 @@ func (vm *VM) dispatchConnectivity(o *Object, class, name, sig string, args *C.j
 			return jnull(), false
 		}
 		s := "WIFI"
-		if n, ok := o.fields["typeName"].(string); ok {
-			s = n
+		vm.mu.RLock()
+		typeName, hasTypeName := o.fields["typeName"].(string)
+		vm.mu.RUnlock()
+		if hasTypeName {
+			s = typeName
 		}
 		vm.mu.Lock()
 		str := vm.newStringLocked(s)
@@ -389,8 +459,11 @@ func (vm *VM) dispatchConnectivity(o *Object, class, name, sig string, args *C.j
 		if !classIs(o, "android/net/NetworkInfo") {
 			return jnull(), false
 		}
-		if n, ok := o.fields["subtype"].(int32); ok {
-			return jniInt(n), true
+		vm.mu.RLock()
+		subtype, hasSubtype := o.fields["subtype"].(int32)
+		vm.mu.RUnlock()
+		if hasSubtype {
+			return jniInt(subtype), true
 		}
 		return jniInt(0), true
 	case "getSubtypeName()Ljava/lang/String;":
@@ -398,8 +471,11 @@ func (vm *VM) dispatchConnectivity(o *Object, class, name, sig string, args *C.j
 			return jnull(), false
 		}
 		s := ""
-		if n, ok := o.fields["subtypeName"].(string); ok {
-			s = n
+		vm.mu.RLock()
+		subtypeName, hasSubtypeName := o.fields["subtypeName"].(string)
+		vm.mu.RUnlock()
+		if hasSubtypeName {
+			s = subtypeName
 		}
 		vm.mu.Lock()
 		str := vm.newStringLocked(s)
@@ -407,7 +483,10 @@ func (vm *VM) dispatchConnectivity(o *Object, class, name, sig string, args *C.j
 		return idToJobject(str.id), true
 	case "getState()Landroid/net/NetworkInfo$State;":
 		if o != nil {
-			if id, ok := o.fields["state"].(int64); ok && id != 0 {
+			vm.mu.RLock()
+			id, hasState := o.fields["state"].(int64)
+			vm.mu.RUnlock()
+			if hasState && id != 0 {
 				return idToJobject(id), true
 			}
 		}
@@ -415,10 +494,16 @@ func (vm *VM) dispatchConnectivity(o *Object, class, name, sig string, args *C.j
 		if hostNetworkUp() {
 			name = "CONNECTED"
 		}
-		return vm.enumField("android/net/NetworkInfo$State", name), true
+		vm.mu.RLock()
+		e := vm.enumField("android/net/NetworkInfo$State", name)
+		vm.mu.RUnlock()
+		return e, true
 	case "getDetailedState()Landroid/net/NetworkInfo$DetailedState;":
 		if o != nil {
-			if id, ok := o.fields["detailedState"].(int64); ok && id != 0 {
+			vm.mu.RLock()
+			id, hasState := o.fields["detailedState"].(int64)
+			vm.mu.RUnlock()
+			if hasState && id != 0 {
 				return idToJobject(id), true
 			}
 		}
@@ -426,12 +511,17 @@ func (vm *VM) dispatchConnectivity(o *Object, class, name, sig string, args *C.j
 		if hostNetworkUp() {
 			name = "CONNECTED"
 		}
-		return vm.enumField("android/net/NetworkInfo$DetailedState", name), true
+		vm.mu.RLock()
+		e := vm.enumField("android/net/NetworkInfo$DetailedState", name)
+		vm.mu.RUnlock()
+		return e, true
 	case "hasCapability(I)Z":
 		if o == nil || !classIs(o, "android/net/NetworkCapabilities") {
 			return jnull(), false
 		}
+		vm.mu.RLock()
 		mask, _ := o.fields["capMask"].(int64)
+		vm.mu.RUnlock()
 		bit := jvalueIAt(args, 0)
 		if bit < 0 || bit > 62 {
 			return jniBool(false), true
@@ -441,7 +531,9 @@ func (vm *VM) dispatchConnectivity(o *Object, class, name, sig string, args *C.j
 		if o == nil || !classIs(o, "android/net/NetworkCapabilities") {
 			return jnull(), false
 		}
+		vm.mu.RLock()
 		mask, _ := o.fields["transportMask"].(int64)
+		vm.mu.RUnlock()
 		bit := jvalueIAt(args, 0)
 		if bit < 0 || bit > 62 {
 			return jniBool(false), true
@@ -452,10 +544,13 @@ func (vm *VM) dispatchConnectivity(o *Object, class, name, sig string, args *C.j
 			return jnull(), false
 		}
 		n := int64(0)
-		if v, ok := o.fields["networkHandle"].(int64); ok {
-			n = v
+		vm.mu.RLock()
+		handle, hasHandle := o.fields["networkHandle"].(int64)
+		vm.mu.RUnlock()
+		if hasHandle {
+			n = handle
 		}
-		return C.jobject(unsafe.Pointer(uintptr(n))), true
+		return C.jobject(uintptr(n)), true
 	case "getSystemService(Ljava/lang/Class;)Ljava/lang/Object;":
 		cn := vm.classNameFromArg(args, 0)
 		cn = strings.ReplaceAll(cn, ".", "/")

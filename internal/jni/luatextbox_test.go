@@ -263,7 +263,7 @@ func TestLuaTextBoxCommitStaysDormant(t *testing.T) {
 	if setAfter != setBefore || softAfter != softBefore || restartAfter != restartBefore {
 		t.Fatal("Lua-textbox announcements moved State transition counts")
 	}
-	if committed != 0 || TextInputCommitPending() {
+	if committed != 0 {
 		t.Fatal("Lua-textbox announcements fabricated committed text")
 	}
 }

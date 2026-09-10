@@ -414,6 +414,48 @@ func TestDispatchGameActivityPointerMarshaling(t *testing.T) {
 	}
 }
 
+// TestGameActivityEventObjectsAreBounded pins the per-edge allocation
+// contract: the GameActivity dispatchers reuse one MotionEvent and one
+// KeyEvent object per VM. A stream of input edges must neither grow the VM
+// object table nor leave per-edge JNI local references behind.
+func TestGameActivityEventObjectsAreBounded(t *testing.T) {
+	vm := inputTestVM(t, map[string]uintptr{
+		methodLogName(gameActivityClass, "onKeyDownNative", "(JLandroid/view/KeyEvent;)Z"):                      testRecordKeyFn(),
+		methodLogName(gameActivityClass, "onKeyUpNative", "(JLandroid/view/KeyEvent;)Z"):                        testRecordKeyFn(),
+		methodLogName(gameActivityClass, "onTouchEventNative", "(JLandroid/view/MotionEvent;IIIIIJJIIIIIIFF)Z"): testRecordTouchFn(),
+	})
+	SetGameActivityInputTarget(vm.Env().Raw(), 42, 77)
+
+	liveEvents := func(class string) (int, int32) {
+		vm.mu.RLock()
+		defer vm.mu.RUnlock()
+		n := 0
+		var refs int32
+		for _, o := range vm.objects {
+			if o.class != nil && o.class.name == class {
+				n++
+				refs += o.localRefs.Load()
+			}
+		}
+		return n, refs
+	}
+
+	for i := 0; i < 64; i++ {
+		if !DispatchGameActivityKey(int32(29+i%10), int32(10+i), i%2 == 0) {
+			t.Fatal("key dispatch failed")
+		}
+		if !DispatchGameActivityPointer(int32(i%3), float32(i), float32(i*2), 1) {
+			t.Fatal("pointer dispatch failed")
+		}
+	}
+	if n, refs := liveEvents(keyEventClass); n != 1 || refs != 0 {
+		t.Fatalf("KeyEvent objects=%d localRefs=%d, want one pooled object with no local reference", n, refs)
+	}
+	if n, refs := liveEvents(motionEventClass); n != 1 || refs != 0 {
+		t.Fatalf("MotionEvent objects=%d localRefs=%d, want one pooled object with no local reference", n, refs)
+	}
+}
+
 func TestInputDroppedWithoutTarget(t *testing.T) {
 	ClearGameActivityInputTarget()
 	testRecReset()

@@ -113,13 +113,48 @@ func PointerDeviceIsTouch() bool { return pointerDeviceIsTouch() }
 // A/B gate; production code calls it never.
 func ResetPointerDeviceMode() { pointerDevice.Once = sync.Once{} }
 
-// newMotionEventLocked builds a single-pointer MotionEvent object whose
+// inputEventPool reuses one MotionEvent and one KeyEvent per VM. The
+// engine's registered glue consumes the event object synchronously inside
+// onKeyDownNative/onTouchEventNative; creating a fresh object (plus its
+// 15-entry field map and a JNI local reference on the calling thread state)
+// for every X11 key/touch edge made object and local-reference growth
+// unbounded. Pooling keeps the delivered-field ABI and the synchronous call
+// semantics while making per-edge allocation flat. The pool is keyed by VM
+// because objects are VM-local, and holds at most one object per event class.
+type inputEventPoolEntry struct {
+	vm  *VM
+	obj *Object
+}
+
+var inputEventPool struct {
+	mu     sync.Mutex
+	key    inputEventPoolEntry
+	motion inputEventPoolEntry
+}
+
+// pooledInputEventLocked returns this VM's reusable event object for the
+// class, creating and marking it immortal on first use. The caller must hold
+// vm.mu and, when created is true, release the creation local reference with
+// vm.deleteLocal after unlocking (the object is immortal, so it stays alive
+// with no local reference held).
+func (vm *VM) pooledInputEventLocked(slot *inputEventPoolEntry, class string) (*Object, bool) {
+	inputEventPool.mu.Lock()
+	defer inputEventPool.mu.Unlock()
+	if slot.vm == vm && slot.obj != nil {
+		return slot.obj, false
+	}
+	cls := vm.ensureClassLocked(class)
+	o := vm.newObjectOn(vm.envRaw, cls)
+	o.markImmortal()
+	*slot = inputEventPoolEntry{vm: vm, obj: o}
+	return o, true
+}
+
+// resetMotionEventLocked fills the single-pointer MotionEvent fields whose
 // getters (dispatchInput) answer from real X11 pointer data, carrying the
 // selected device identity (desktop mouse by default, touch finger behind the
 // TIPSY_INPUT_DEVICE=touch gate).
-func (vm *VM) newMotionEventLocked(action int32, x, y float32, downTime, eventTime int64) *Object {
-	cls := vm.ensureClassLocked(motionEventClass)
-	o := vm.newObjectLocked(cls)
+func (vm *VM) resetMotionEventLocked(o *Object, action int32, x, y float32, downTime, eventTime int64) {
 	o.fields["action"] = action
 	o.fields["deviceId"] = int32(0)
 	o.fields["source"] = pointerSource()
@@ -135,14 +170,29 @@ func (vm *VM) newMotionEventLocked(action int32, x, y float32, downTime, eventTi
 	o.fields["y"] = y
 	o.fields["xPrecision"] = float32(1)
 	o.fields["yPrecision"] = float32(1)
+}
+
+// newMotionEventLocked builds a standalone single-pointer MotionEvent object.
+// Production dispatch uses pooledMotionEventLocked; this constructor remains
+// for the ABI-witness tests and one-off objects.
+func (vm *VM) newMotionEventLocked(action int32, x, y float32, downTime, eventTime int64) *Object {
+	cls := vm.ensureClassLocked(motionEventClass)
+	o := vm.newObjectLocked(cls)
+	vm.resetMotionEventLocked(o, action, x, y, downTime, eventTime)
 	return o
 }
 
-// newKeyEventLocked builds a KeyEvent object for a non-text key.
-// scanCode carries the raw X11 keycode (the closest honest hardware code).
-func (vm *VM) newKeyEventLocked(keyCode int32, pressed bool, downTime, eventTime int64, scanCode int32) *Object {
-	cls := vm.ensureClassLocked(keyEventClass)
-	o := vm.newObjectLocked(cls)
+// pooledMotionEventLocked resets the VM's reusable MotionEvent and reports
+// whether the caller must release its creation local reference.
+func (vm *VM) pooledMotionEventLocked(action int32, x, y float32, downTime, eventTime int64) (*Object, bool) {
+	o, created := vm.pooledInputEventLocked(&inputEventPool.motion, motionEventClass)
+	vm.resetMotionEventLocked(o, action, x, y, downTime, eventTime)
+	return o, created
+}
+
+// resetKeyEventLocked fills a KeyEvent object for a non-text key. scanCode
+// carries the raw X11 keycode (the closest honest hardware code).
+func (vm *VM) resetKeyEventLocked(o *Object, keyCode int32, pressed bool, downTime, eventTime int64, scanCode int32) {
 	if pressed {
 		o.fields["action"] = keyEventActionDown
 	} else {
@@ -158,19 +208,42 @@ func (vm *VM) newKeyEventLocked(keyCode int32, pressed bool, downTime, eventTime
 	o.fields["downTime"] = downTime
 	o.fields["eventTime"] = eventTime
 	o.fields["unicodeChar"] = int32(0)
+}
+
+// newKeyEventLocked builds a standalone KeyEvent object. Production dispatch
+// uses pooledKeyEventLocked; this constructor remains for the ABI-witness
+// tests and one-off objects.
+func (vm *VM) newKeyEventLocked(keyCode int32, pressed bool, downTime, eventTime int64, scanCode int32) *Object {
+	cls := vm.ensureClassLocked(keyEventClass)
+	o := vm.newObjectLocked(cls)
+	vm.resetKeyEventLocked(o, keyCode, pressed, downTime, eventTime, scanCode)
 	return o
+}
+
+// pooledKeyEventLocked resets the VM's reusable KeyEvent and reports whether
+// the caller must release its creation local reference.
+func (vm *VM) pooledKeyEventLocked(keyCode int32, pressed bool, downTime, eventTime int64, scanCode int32) (*Object, bool) {
+	o, created := vm.pooledInputEventLocked(&inputEventPool.key, keyEventClass)
+	vm.resetKeyEventLocked(o, keyCode, pressed, downTime, eventTime, scanCode)
+	return o, created
 }
 
 // dispatchInput serves the MotionEvent/KeyEvent getter surface the engine's
 // glue resolves via GetMethodID during initializeNativeCode (each name in
 // this switch is in the observed missing-method list at that call site).
-// Everything else falls through to the normal dispatch path.
+// Everything else falls through to the normal dispatch path. Callers arrive
+// through resolveDispatch/wrapStub (GoJNI_CallA, callDispatchOrStubEnv,
+// VM.dispatch), none of which hold vm.mu, so field reads take vm.mu.RLock to
+// pair with the vm.mu-held pooled-event reset writers.
 func (vm *VM) dispatchInput(o *Object, class, name, sig string, args *C.jvalue) (C.jobject, bool) {
 	if o == nil || (class != motionEventClass && class != keyEventClass) {
 		return jnull(), false
 	}
 	val := func(field string) int64 {
-		switch t := o.fields[field].(type) {
+		vm.mu.RLock()
+		v := o.fields[field]
+		vm.mu.RUnlock()
+		switch t := v.(type) {
 		case int32:
 			return int64(t)
 		case int64:
@@ -181,7 +254,10 @@ func (vm *VM) dispatchInput(o *Object, class, name, sig string, args *C.jvalue) 
 		return 0
 	}
 	floatVal := func(field string) float32 {
-		if f, ok := o.fields[field].(float32); ok {
+		vm.mu.RLock()
+		f, ok := o.fields[field].(float32)
+		vm.mu.RUnlock()
+		if ok {
 			return f
 		}
 		return 0
@@ -190,15 +266,15 @@ func (vm *VM) dispatchInput(o *Object, class, name, sig string, args *C.jvalue) 
 		// Observation-only: count the getter identity native consumed
 		// (name+sig, never the value) for the per-event consumption proof.
 		noteGetterCall(o.id, name, sig)
-		return C.jobject(unsafe.Pointer(uintptr(uint32(v)))), true
+		return C.jobject(uintptr(uint32(v))), true
 	}
 	longOut := func(v int64) (C.jobject, bool) {
 		noteGetterCall(o.id, name, sig)
-		return C.jobject(unsafe.Pointer(uintptr(v))), true
+		return C.jobject(uintptr(v)), true
 	}
 	floatOut := func(v float32) (C.jobject, bool) {
 		noteGetterCall(o.id, name, sig)
-		return C.jobject(unsafe.Pointer(uintptr(float32bits(v)))), true
+		return C.jobject(uintptr(float32bits(v))), true
 	}
 
 	switch name + sig {
@@ -365,7 +441,10 @@ func inputVM() *VM {
 
 func dropEvent(reason string) {
 	atomic.AddUint64(&inputStats.Dropped, 1)
-	logging.Logger(logging.CatJNI).Info("[jni] input dropped", "reason", reason)
+	// High-frequency honest drops (stray moves, unmapped buttons) must not
+	// flood the default Info log; the counter remains the authoritative
+	// diagnostic.
+	logging.Logger(logging.CatJNI).Debug("[jni] input dropped", "reason", reason)
 }
 
 // DispatchGameActivityFocus delivers a real X11 focus transition through
@@ -505,12 +584,21 @@ func dispatchGameActivityKey(keyCode int32, scanCode int32, pressed bool, repeat
 	}
 	down := keyGestureTime(now, keyCode, pressed, repeatCount)
 	vm.mu.Lock()
-	ev := vm.newKeyEventLocked(keyCode, pressed, down, now, scanCode)
+	ev, created := vm.pooledKeyEventLocked(keyCode, pressed, down, now, scanCode)
 	ev.fields["repeatCount"] = repeatCount
 	obj := idToJobject(ev.id)
+	evID := ev.id
 	vm.mu.Unlock()
+	if created {
+		// The pooled object is immortal; this drops the creation-time local
+		// reference from the VM's own env, so no per-edge reference remains.
+		vm.deleteLocal(evID)
+	}
 	consumed := C.tipsy_input_call_bool4(unsafe.Pointer(fn), C.uintptr_t(env), C.uintptr_t(activity), C.uintptr_t(handle), C.uintptr_t(obj)) != 0
-	traceEventGetterLine("key", ev.fields["action"].(int32), ev.id)
+	vm.mu.RLock()
+	action, _ := ev.fields["action"].(int32)
+	vm.mu.RUnlock()
+	traceEventGetterLine("key", action, ev.id)
 	atomic.AddUint64(&inputStats.KeyDelivered, 1)
 	if consumed {
 		atomic.AddUint64(&inputStats.KeyConsumed, 1)
@@ -564,9 +652,14 @@ func DispatchGameActivityPointer(action int32, x, y float32, buttonState int32) 
 		down = pointerGestureDownTime(now, false)
 	}
 	vm.mu.Lock()
-	ev := vm.newMotionEventLocked(action, x, y, down, now)
+	ev, created := vm.pooledMotionEventLocked(action, x, y, down, now)
 	obj := idToJobject(ev.id)
+	evID := ev.id
 	vm.mu.Unlock()
+	if created {
+		// See dispatchGameActivityKey: drop the creation local reference.
+		vm.deleteLocal(evID)
+	}
 	consumed := C.tipsy_input_call_touch(unsafe.Pointer(fn),
 		C.uintptr_t(env), C.uintptr_t(activity), C.uintptr_t(handle), C.uintptr_t(obj),
 		// i1..i5: pointerCount, historySize, deviceId, source, action

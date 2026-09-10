@@ -8,10 +8,49 @@ package jni
 import (
 	"bytes"
 	"strings"
+	"sync/atomic"
 	"testing"
 
 	"github.com/tipsy-linux/tipsy/internal/x11"
 )
+
+// resetTextInputConnectionForTest clears the Tipsy-owned connection state
+// (object handle, activation, and transition counts). Test seam only;
+// production never resets within a process. Keyboard announcements are
+// untouched. It lives in the test files because production never needs it;
+// testRbxRecReset bridges the C witness reset.
+func resetTextInputConnectionForTest() {
+	textConnection.mu.Lock()
+	textConnection.connID = 0
+	textConnection.tipsyHandle = 0
+	textConnection.nextHandle = 0
+	textConnection.active = false
+	textConnection.setStateCount = 0
+	textConnection.lastStateRef = 0
+	textConnection.softKeyboardCount = 0
+	textConnection.lastSoftActive = false
+	textConnection.lastSoftCounter = 0
+	textConnection.restartCount = 0
+	textConnection.committedCount = 0
+	textConnection.mu.Unlock()
+	wipeRbxTextEditor()
+	rbxTextEditor.mu.Lock()
+	rbxTextEditor.editCount = 0
+	rbxTextEditor.returnCount = 0
+	rbxTextEditor.mu.Unlock()
+	atomic.StoreUint64(&rbxTextDelivered.pass, 0)
+	atomic.StoreUint64(&rbxTextDelivered.returns, 0)
+	atomic.StoreUint64(&rbxTextDelivered.sync, 0)
+	atomic.StoreUint64(&rbxTextDelivered.dropped, 0)
+	atomic.StoreUint64(&rbxTextInfoRefresh.requested, 0)
+	atomic.StoreUint64(&rbxTextInfoRefresh.attempted, 0)
+	atomic.StoreUint64(&rbxTextInfoRefresh.applied, 0)
+	atomic.StoreUint64(&rbxTextInfoRefresh.missingTarget, 0)
+	atomic.StoreUint64(&rbxTextInfoRefresh.nullResult, 0)
+	atomic.StoreUint64(&rbxTextInfoRefresh.staleSession, 0)
+	atomic.StoreUint64(&rbxTextOverlayVersion, 0)
+	testRbxRecReset()
+}
 
 // TestStringGetBytesUTF8ForRobloxTextSync pins the standard-Java conversion
 // used internally by Roblox's syncTextboxTextAndCursorPosition2 wrapper. The
@@ -460,6 +499,78 @@ func TestNativeTextBoxInfoTextColorIsVerbatimARGB(t *testing.T) {
 		if gotSource != want || gotCopy != want {
 			t.Fatalf("raw ARGB = source=%#08x copy=%#08x, want %#08x", gotSource, gotCopy, want)
 		}
+	}
+}
+
+// TestRbxTextDeliveryReleasesJStringLocals pins the local-reference contract
+// for the RbxKeyboard delivery path: one Java String is created per edit,
+// shared by the synchronous selection-sync and nativePassText calls, and
+// released before returning. Live String objects must not grow with
+// keystrokes (the previous code created two never-released locals per edit,
+// each carrying the complete editor snapshot).
+func TestRbxTextDeliveryReleasesJStringLocals(t *testing.T) {
+	vm, err := NewVM()
+	if err != nil {
+		t.Fatal(err)
+	}
+	captureLogs(t)
+	resetTextInputConnectionForTest()
+	t.Cleanup(resetTextInputConnectionForTest)
+	t.Cleanup(ClearRobloxTextInputTarget)
+
+	env := vm.Env()
+	var syncStr, passStr uintptr
+	caller := func(fn, a0, a1, a2, a3, a4, a5, a6, a7 uintptr) int64 {
+		// sendRbxSelection/sendRbxText pass (env, class, jstring, ...); the
+		// shared String is a2 for the sync call and a3 for the pass call
+		// (which inserts the textbox handle first).
+		switch fn {
+		case testRbxRecordSyncFn():
+			syncStr = a2
+		case testRbxRecordPassFn():
+			passStr = a3
+		}
+		return 0
+	}
+	if !SetRobloxTextInputTarget(env, env.FindClass("com/roblox/engine/jni/NativeGLInterface"),
+		testRbxRecordPassFn(), testRbxRecordReturnFn(), testRbxRecordSyncFn(), 0, caller) {
+		t.Fatal("text target not ready")
+	}
+	initID, infoID := keyboardTestObjects(t, vm, nil, 1)
+	vm.dispatch(jnull(), nativeGLClass, "showKeyboard", showKeyboardSig,
+		testPackKeyboardArgs(77, 1, initID, infoID))
+
+	stringObjects := func() int {
+		vm.mu.RLock()
+		defer vm.mu.RUnlock()
+		n := 0
+		for _, o := range vm.objects {
+			if o.class != nil && o.class.name == "java/lang/String" {
+				n++
+			}
+		}
+		return n
+	}
+	before := stringObjects()
+	for i := 0; i < 8; i++ {
+		if !DispatchRobloxTextCommit("a") {
+			t.Fatal("commit not delivered")
+		}
+	}
+	// The selection sync and nativePassText borrowed one and the same
+	// immutable String within the commit above; both saw the same non-zero
+	// local reference (its lifetime ends inside the dispatcher).
+	if syncStr == 0 || syncStr != passStr {
+		t.Fatalf("sync/pass jstring = %#x/%#x, want one shared non-zero reference", syncStr, passStr)
+	}
+	if !DispatchRobloxTextKey(67, true) { // Backspace edits and publishes.
+		t.Fatal("backspace not consumed")
+	}
+	if !DispatchRobloxTextKey(21, true) { // Left is selection-only.
+		t.Fatal("left cursor not consumed")
+	}
+	if got := stringObjects(); got != before {
+		t.Fatalf("live String objects = %d, want %d (per-edit jstring locals must be released)", got, before)
 	}
 }
 
@@ -977,9 +1088,6 @@ func TestTextInputCommitStaysHonestWhenSilent(t *testing.T) {
 	}
 	captureLogs(t)
 
-	if TextInputCommitPending() {
-		t.Fatal("commit pending without a text buffer: synthesis would be fabrication")
-	}
 	if _, _, _, committed := TextInputStateTransitions(); committed != 0 {
 		t.Fatalf("committed = %d, want 0 without deltas", committed)
 	}
@@ -1026,7 +1134,7 @@ func TestTextInputPhysicalKeyPathUntouched(t *testing.T) {
 	if setAfter != setBefore || softAfter != softBefore || restartAfter != restartBefore {
 		t.Fatal("physical key edges moved State transition counts")
 	}
-	if committed != 0 || TextInputCommitPending() {
+	if committed != 0 {
 		t.Fatal("physical key edges fabricated committed text")
 	}
 }

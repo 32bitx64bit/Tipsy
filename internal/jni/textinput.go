@@ -636,7 +636,18 @@ func utf16Cursor(text []rune, cursor int) int {
 	if cursor > len(text) {
 		cursor = len(text)
 	}
-	return len(utf16.Encode(text[:cursor]))
+	// Allocation-free equivalent of len(utf16.Encode(text[:cursor])):
+	// astral runes count two units, surrogate/invalid runes encode as one
+	// U+FFFD unit. Keeps the per-edit cursor measurement off the allocator.
+	n := 0
+	for _, r := range text[:cursor] {
+		if l := utf16.RuneLen(r); l > 0 {
+			n += l
+		} else {
+			n++
+		}
+	}
+	return n
 }
 
 // DispatchRobloxTextCommit inserts genuine UTF-8 committed by X11 into the
@@ -694,6 +705,21 @@ func DispatchRobloxTextCommit(committed string) bool {
 	return true
 }
 
+// Android KeyEvent keycodes the focused RbxKeyboard EditText consumes as
+// editing/navigation commands. They are the AOSP android.view.KeyEvent
+// constants RbxKeyboard's own OnKeyListener switches on; printable text
+// arrives independently through InputText.
+const (
+	akeycodeDpadLeft    int32 = 21  // KEYCODE_DPAD_LEFT
+	akeycodeDpadRight   int32 = 22  // KEYCODE_DPAD_RIGHT
+	akeycodeEnter       int32 = 66  // KEYCODE_ENTER
+	akeycodeDel         int32 = 67  // KEYCODE_DEL (Backspace)
+	akeycodeForwardDel  int32 = 112 // KEYCODE_FORWARD_DEL
+	akeycodeMoveHome    int32 = 122 // KEYCODE_MOVE_HOME
+	akeycodeMoveEnd     int32 = 123 // KEYCODE_MOVE_END
+	akeycodeNumpadEnter int32 = 160 // KEYCODE_NUMPAD_ENTER
+)
+
 // DispatchRobloxTextKey gives the focused editor first refusal on physical
 // keys, matching Android focus ownership: when RbxKeyboard is active its
 // EditText, not the SurfaceView's nativePassKeyEvent listener, receives key
@@ -713,40 +739,40 @@ func DispatchRobloxTextKey(keyCode int32, pressed bool) bool {
 	changed, selectionChanged := false, false
 	submit := false
 	switch keyCode {
-	case 67: // AKEYCODE_DEL / Backspace
+	case akeycodeDel: // Backspace
 		if rbxTextEditor.cursor > 0 {
 			i := rbxTextEditor.cursor
 			rbxTextEditor.text = append(rbxTextEditor.text[:i-1], rbxTextEditor.text[i:]...)
 			rbxTextEditor.cursor--
 			changed = true
 		}
-	case 112: // AKEYCODE_FORWARD_DEL
+	case akeycodeForwardDel:
 		if rbxTextEditor.cursor < len(rbxTextEditor.text) {
 			i := rbxTextEditor.cursor
 			rbxTextEditor.text = append(rbxTextEditor.text[:i], rbxTextEditor.text[i+1:]...)
 			changed = true
 		}
-	case 21: // AKEYCODE_DPAD_LEFT
+	case akeycodeDpadLeft:
 		if rbxTextEditor.cursor > 0 {
 			rbxTextEditor.cursor--
 			selectionChanged = true
 		}
-	case 22: // AKEYCODE_DPAD_RIGHT
+	case akeycodeDpadRight:
 		if rbxTextEditor.cursor < len(rbxTextEditor.text) {
 			rbxTextEditor.cursor++
 			selectionChanged = true
 		}
-	case 122: // AKEYCODE_MOVE_HOME
+	case akeycodeMoveHome:
 		if rbxTextEditor.cursor != 0 {
 			rbxTextEditor.cursor = 0
 			selectionChanged = true
 		}
-	case 123: // AKEYCODE_MOVE_END
+	case akeycodeMoveEnd:
 		if rbxTextEditor.cursor != len(rbxTextEditor.text) {
 			rbxTextEditor.cursor = len(rbxTextEditor.text)
 			selectionChanged = true
 		}
-	case 66, 160: // Enter / numpad Enter
+	case akeycodeEnter, akeycodeNumpadEnter:
 		// RbxKeyboard ORs TYPE_TEXT_FLAG_MULTI_LINE when either native flag is
 		// set. TextWrapped therefore has the same editing/newline behavior as
 		// Multiline even when its raw multiline field is false.
@@ -763,8 +789,15 @@ func DispatchRobloxTextKey(keyCode int32, pressed bool) bool {
 	}
 	handle := rbxTextEditor.handle
 	manual := rbxTextEditor.config.manualFocusRelease
-	full := string(rbxTextEditor.text)
-	pos := utf16Cursor(rbxTextEditor.text, rbxTextEditor.cursor)
+	// The snapshot is only needed when an engine call will consume it. Enter
+	// with manual release and pure modifier/key presses need neither the copy
+	// nor the O(n) UTF-16 cursor measurement.
+	var full string
+	var pos int
+	if changed || selectionChanged || submit {
+		full = string(rbxTextEditor.text)
+		pos = utf16Cursor(rbxTextEditor.text, rbxTextEditor.cursor)
+	}
 	if submit && !manual {
 		for i := range rbxTextEditor.text {
 			rbxTextEditor.text[i] = 0
@@ -815,75 +848,115 @@ func DispatchRobloxTextKey(keyCode int32, pressed bool) bool {
 	return true
 }
 
+// releaseRbxTextJstring drops the local reference created by Env.NewString
+// for one editor snapshot. The reference was registered on the same Env that
+// performed the synchronous engine calls, so it is released there too; the
+// engine treats the argument as borrowed and may take its own global
+// reference if it needs to retain the String.
+func releaseRbxTextJstring(env *Env, str uintptr) {
+	if env == nil || env.vm == nil || str == 0 {
+		return
+	}
+	env.vm.deleteLocalRef(unsafe.Pointer(env.raw), jobjectToID(str))
+}
+
 func sendRbxText(handle int64, text string, submit bool, cursor int) bool {
 	// RbxKeyboard's TextWatcher and editor-action listener both call k()
 	// immediately before nativePassText. k() invokes this exact selection
 	// sync with the complete EditText snapshot; preserve that APK order.
-	if sendRbxSelection(text, cursor) {
-		atomic.AddUint64(&rbxTextDelivered.sync, 1)
-	}
+	//
+	// One Java String local reference serves the selection sync and
+	// nativePassText (a Java String is immutable, so sharing is exact), and
+	// it is released before returning. The target snapshot is taken under
+	// RLock and the engine calls run after the lock is dropped, so teardown
+	// can take the write lock without deadlocking against a live call.
 	rbxTextTarget.mu.RLock()
-	defer rbxTextTarget.mu.RUnlock()
-	if rbxTextTarget.env == nil || rbxTextTarget.class == 0 || rbxTextTarget.passFn == 0 || handle == 0 {
+	env := rbxTextTarget.env
+	class := rbxTextTarget.class
+	passFn := rbxTextTarget.passFn
+	syncFn := rbxTextTarget.syncFn
+	call := rbxTextTarget.call
+	rbxTextTarget.mu.RUnlock()
+	if env == nil || env.vm == nil || class == 0 {
 		return false
 	}
-	str := rbxTextTarget.env.NewString(text)
+	str := env.NewString(text)
 	if str == 0 {
 		return false
 	}
-	var z C.uchar
-	var zArg uintptr
-	if submit {
-		z = 1
-		zArg = 1
+	defer releaseRbxTextJstring(env, str)
+	if syncFn != 0 {
+		if call != nil {
+			call(syncFn, env.Raw(), class, str, uintptr(cursor), 0, 0, 0, 0)
+		} else {
+			C.tipsy_rbx_sync_selection(unsafe.Pointer(syncFn),
+				C.uintptr_t(env.Raw()), C.uintptr_t(class),
+				idToJobject(jobjectToID(str)), C.int(cursor))
+		}
+		atomic.AddUint64(&rbxTextDelivered.sync, 1)
 	}
-	if rbxTextTarget.call != nil {
-		rbxTextTarget.call(rbxTextTarget.passFn,
-			rbxTextTarget.env.Raw(), rbxTextTarget.class, uintptr(handle), str,
-			zArg, uintptr(cursor), 0, 0)
-		return true
+	delivered := false
+	if passFn != 0 && handle != 0 {
+		var z C.uchar
+		var zArg uintptr
+		if submit {
+			z = 1
+			zArg = 1
+		}
+		if call != nil {
+			call(passFn, env.Raw(), class, uintptr(handle), str, zArg, uintptr(cursor), 0, 0)
+		} else {
+			C.tipsy_rbx_pass_text(unsafe.Pointer(passFn),
+				C.uintptr_t(env.Raw()), C.uintptr_t(class),
+				C.longlong(handle), idToJobject(jobjectToID(str)), z, C.int(cursor))
+		}
+		delivered = true
 	}
-	C.tipsy_rbx_pass_text(unsafe.Pointer(rbxTextTarget.passFn),
-		C.uintptr_t(rbxTextTarget.env.Raw()), C.uintptr_t(rbxTextTarget.class),
-		C.longlong(handle), C.jobject(unsafe.Pointer(str)), z, C.int(cursor))
-	return true
+	return delivered
 }
 
 func sendRbxReturnPressed(handle int64) bool {
 	rbxTextTarget.mu.RLock()
-	defer rbxTextTarget.mu.RUnlock()
-	if rbxTextTarget.env == nil || rbxTextTarget.class == 0 || rbxTextTarget.returnFn == 0 || handle == 0 {
+	env := rbxTextTarget.env
+	class := rbxTextTarget.class
+	returnFn := rbxTextTarget.returnFn
+	call := rbxTextTarget.call
+	rbxTextTarget.mu.RUnlock()
+	if env == nil || class == 0 || returnFn == 0 || handle == 0 {
 		atomic.AddUint64(&rbxTextDelivered.dropped, 1)
 		return false
 	}
-	if rbxTextTarget.call != nil {
-		rbxTextTarget.call(rbxTextTarget.returnFn,
-			rbxTextTarget.env.Raw(), rbxTextTarget.class, uintptr(handle), 0, 0, 0, 0, 0)
+	if call != nil {
+		call(returnFn, env.Raw(), class, uintptr(handle), 0, 0, 0, 0, 0)
 		return true
 	}
-	C.tipsy_rbx_return_pressed(unsafe.Pointer(rbxTextTarget.returnFn),
-		C.uintptr_t(rbxTextTarget.env.Raw()), C.uintptr_t(rbxTextTarget.class), C.longlong(handle))
+	C.tipsy_rbx_return_pressed(unsafe.Pointer(returnFn),
+		C.uintptr_t(env.Raw()), C.uintptr_t(class), C.longlong(handle))
 	return true
 }
 
 func sendRbxSelection(text string, cursor int) bool {
 	rbxTextTarget.mu.RLock()
-	defer rbxTextTarget.mu.RUnlock()
-	if rbxTextTarget.env == nil || rbxTextTarget.class == 0 || rbxTextTarget.syncFn == 0 {
+	env := rbxTextTarget.env
+	class := rbxTextTarget.class
+	syncFn := rbxTextTarget.syncFn
+	call := rbxTextTarget.call
+	rbxTextTarget.mu.RUnlock()
+	if env == nil || env.vm == nil || class == 0 || syncFn == 0 {
 		return false
 	}
-	str := rbxTextTarget.env.NewString(text)
+	str := env.NewString(text)
 	if str == 0 {
 		return false
 	}
-	if rbxTextTarget.call != nil {
-		rbxTextTarget.call(rbxTextTarget.syncFn,
-			rbxTextTarget.env.Raw(), rbxTextTarget.class, str, uintptr(cursor), 0, 0, 0, 0)
-		return true
+	defer releaseRbxTextJstring(env, str)
+	if call != nil {
+		call(syncFn, env.Raw(), class, str, uintptr(cursor), 0, 0, 0, 0)
+	} else {
+		C.tipsy_rbx_sync_selection(unsafe.Pointer(syncFn),
+			C.uintptr_t(env.Raw()), C.uintptr_t(class),
+			idToJobject(jobjectToID(str)), C.int(cursor))
 	}
-	C.tipsy_rbx_sync_selection(unsafe.Pointer(rbxTextTarget.syncFn),
-		C.uintptr_t(rbxTextTarget.env.Raw()), C.uintptr_t(rbxTextTarget.class),
-		C.jobject(unsafe.Pointer(str)), C.int(cursor))
 	return true
 }
 
@@ -1082,51 +1155,6 @@ func TextInputLastSoftKeyboard() (active bool, counter int32) {
 	return textConnection.lastSoftActive, textConnection.lastSoftCounter
 }
 
-// TextInputCommitPending reports whether the opaque GameTextInput State path
-// has a delta ready. It remains false because State content is never read.
-// RbxKeyboard edits use DispatchRobloxTextCommit directly and do not queue
-// through this legacy gate.
-func TextInputCommitPending() bool {
-	return false
-}
-
-// resetTextInputConnectionForTest clears the Tipsy-owned connection state
-// (object handle, activation, and transition counts). Test seam only;
-// production never resets within a process. Keyboard announcements are
-// untouched.
-func resetTextInputConnectionForTest() {
-	textConnection.mu.Lock()
-	textConnection.connID = 0
-	textConnection.tipsyHandle = 0
-	textConnection.nextHandle = 0
-	textConnection.active = false
-	textConnection.setStateCount = 0
-	textConnection.lastStateRef = 0
-	textConnection.softKeyboardCount = 0
-	textConnection.lastSoftActive = false
-	textConnection.lastSoftCounter = 0
-	textConnection.restartCount = 0
-	textConnection.committedCount = 0
-	textConnection.mu.Unlock()
-	wipeRbxTextEditor()
-	rbxTextEditor.mu.Lock()
-	rbxTextEditor.editCount = 0
-	rbxTextEditor.returnCount = 0
-	rbxTextEditor.mu.Unlock()
-	atomic.StoreUint64(&rbxTextDelivered.pass, 0)
-	atomic.StoreUint64(&rbxTextDelivered.returns, 0)
-	atomic.StoreUint64(&rbxTextDelivered.sync, 0)
-	atomic.StoreUint64(&rbxTextDelivered.dropped, 0)
-	atomic.StoreUint64(&rbxTextInfoRefresh.requested, 0)
-	atomic.StoreUint64(&rbxTextInfoRefresh.attempted, 0)
-	atomic.StoreUint64(&rbxTextInfoRefresh.applied, 0)
-	atomic.StoreUint64(&rbxTextInfoRefresh.missingTarget, 0)
-	atomic.StoreUint64(&rbxTextInfoRefresh.nullResult, 0)
-	atomic.StoreUint64(&rbxTextInfoRefresh.staleSession, 0)
-	atomic.StoreUint64(&rbxTextOverlayVersion, 0)
-	C.tipsy_rbx_rec_reset()
-}
-
 // seedNativeTextBoxInfoConstructor executes the field-only behavior of the
 // exact APK model constructors that Roblox calls through NewObjectA. Generic
 // Java constructor execution remains out of scope; this narrow model is the
@@ -1205,6 +1233,7 @@ func testPackNativeTextBoxInfoArgs(x, y, width, height, fontSize float32, multil
 func testRbxRecordPassFn() uintptr   { return uintptr(C.tipsy_rbx_record_pass_fn()) }
 func testRbxRecordReturnFn() uintptr { return uintptr(C.tipsy_rbx_record_return_fn()) }
 func testRbxRecordSyncFn() uintptr   { return uintptr(C.tipsy_rbx_record_sync_fn()) }
+func testRbxRecReset()               { C.tipsy_rbx_rec_reset() }
 func testRbxRecHandle() uint64       { return uint64(C.tipsy_rbx_rec_handle_get()) }
 func testRbxRecText() uintptr        { return uintptr(C.tipsy_rbx_rec_text_get()) }
 func testRbxRecSubmit() bool         { return C.tipsy_rbx_rec_submit_get() != 0 }

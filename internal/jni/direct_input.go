@@ -287,13 +287,17 @@ func RobloxDirectInputStats() DirectInputStats {
 // after this getter becomes true, and its captured-pointer listener releases
 // capture when it becomes false.
 func RobloxMainWindowMouseLocked() (locked bool, available bool) {
+	// Snapshot-unlock-call: teardown takes the write lock, so the engine
+	// getter must run after this lock is dropped (dispatchRobloxDirectKey
+	// and the pointer dispatchers already follow the same pattern).
 	directInputTarget.mu.RLock()
-	defer directInputTarget.mu.RUnlock()
-	if directInputTarget.env == 0 || directInputTarget.class == 0 || directInputTarget.lockFn == 0 {
+	env, class, lockFn := directInputTarget.env, directInputTarget.class, directInputTarget.lockFn
+	directInputTarget.mu.RUnlock()
+	if env == 0 || class == 0 || lockFn == 0 {
 		return false, false
 	}
-	locked = C.tipsy_direct_mouse_locked(unsafe.Pointer(directInputTarget.lockFn),
-		C.uintptr_t(directInputTarget.env), C.uintptr_t(directInputTarget.class)) != 0
+	locked = C.tipsy_direct_mouse_locked(unsafe.Pointer(lockFn),
+		C.uintptr_t(env), C.uintptr_t(class)) != 0
 	atomic.AddUint64(&directInputStats.LockQueries, 1)
 	if locked {
 		atomic.AddUint64(&directInputStats.LockTrue, 1)
@@ -332,7 +336,9 @@ func DispatchRobloxDirectScroll(x, y, deltaX, deltaY float32) bool {
 
 func dropDirectEvent(reason string) {
 	atomic.AddUint64(&directInputStats.Dropped, 1)
-	logging.Logger(logging.CatJNI).Info("[jni] direct input dropped", "reason", reason)
+	// High-frequency honest drops must not flood the default Info log; the
+	// counter remains the authoritative diagnostic.
+	logging.Logger(logging.CatJNI).Debug("[jni] direct input dropped", "reason", reason)
 }
 
 func directButtonIndex(x11Button int32) (int32, bool) {
@@ -587,8 +593,9 @@ func dispatchRobloxDirectKey(x11Keycode, androidKeycode int32, pressed bool, rep
 	}
 
 	directKeyTarget.mu.RLock()
-	defer directKeyTarget.mu.RUnlock()
-	if directKeyTarget.env == 0 || directKeyTarget.class == 0 || directKeyTarget.fn == 0 {
+	env, class, fn := directKeyTarget.env, directKeyTarget.class, directKeyTarget.fn
+	directKeyTarget.mu.RUnlock()
+	if env == 0 || class == 0 || fn == 0 {
 		dropDirectEvent("key: no direct target wired")
 		return false
 	}
@@ -600,7 +607,7 @@ func dispatchRobloxDirectKey(x11Keycode, androidKeycode int32, pressed bool, rep
 	if pressed && repeatCount > 0 {
 		repeat = 1
 	}
-	C.tipsy_direct_key_event(unsafe.Pointer(directKeyTarget.fn), C.uintptr_t(directKeyTarget.env), C.uintptr_t(directKeyTarget.class),
+	C.tipsy_direct_key_event(unsafe.Pointer(fn), C.uintptr_t(env), C.uintptr_t(class),
 		down, C.int(scanCode), C.int(androidKeycode), repeat)
 	atomic.AddUint64(&directInputStats.KeyDelivered, 1)
 	return true

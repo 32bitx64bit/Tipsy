@@ -40,7 +40,10 @@ void tipsy_rbx_sync_selection(void *fn, uintptr_t env, uintptr_t cls,
 }
 
 // ABI witnesses used only by Go tests. They record ids/counts, never copy or
-// inspect the jstring payload.
+// inspect the jstring payload. Each String-twin witness takes its own JNI
+// local reference (like a real Java caller holding the argument) so the test
+// can still read the delivered snapshot after the dispatcher releases the
+// reference it created for the synchronous engine calls.
 static unsigned long long tipsy_rbx_rec_handle;
 static uintptr_t tipsy_rbx_rec_text;
 static int tipsy_rbx_rec_submit;
@@ -53,7 +56,10 @@ static int tipsy_rbx_rec_pass_sequence;
 static int tipsy_rbx_rec_sync_sequence;
 void tipsy_rbx_record_pass(JNIEnv *env, jclass cls, jlong handle,
 	jstring text, jboolean submit, jint cursor) {
-	(void)env; (void)cls;
+	(void)cls;
+	if (env != NULL && env->functions != NULL && text != NULL) {
+		env->functions->NewLocalRef(env, text);
+	}
 	tipsy_rbx_rec_handle = (unsigned long long)handle;
 	tipsy_rbx_rec_text = (uintptr_t)text;
 	tipsy_rbx_rec_submit = submit;
@@ -65,7 +71,11 @@ void tipsy_rbx_record_return(JNIEnv *env, jclass cls, jlong handle) {
 	(void)env; (void)cls; (void)handle; tipsy_rbx_rec_return_count++;
 }
 void tipsy_rbx_record_sync(JNIEnv *env, jclass cls, jstring text, jint cursor) {
-	(void)env; (void)cls; (void)text; tipsy_rbx_rec_cursor = cursor;
+	(void)cls;
+	if (env != NULL && env->functions != NULL && text != NULL) {
+		env->functions->NewLocalRef(env, text);
+	}
+	tipsy_rbx_rec_cursor = cursor;
 	tipsy_rbx_rec_sync_count++;
 	tipsy_rbx_rec_sync_sequence = ++tipsy_rbx_rec_sequence;
 }
