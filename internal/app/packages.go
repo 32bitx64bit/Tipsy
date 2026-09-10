@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"strings"
 
 	"github.com/tipsy-linux/tipsy/internal/apk"
 	"github.com/tipsy-linux/tipsy/internal/compat"
@@ -59,7 +60,9 @@ func cmdSetup(ctx context.Context, args []string, stdout, stderr io.Writer) int 
 	if snapshot.PackageName != "" {
 		fmt.Fprintf(stdout, "Package: %s %s (%d)\n", snapshot.PackageName, snapshot.VersionName, snapshot.VersionCode)
 	}
-	fmt.Fprintln(stdout, "Architecture: x86_64")
+	if len(snapshot.Architectures) > 0 {
+		fmt.Fprintf(stdout, "Architecture: %s\n", strings.Join(snapshot.Architectures, ", "))
+	}
 	return 0
 }
 
@@ -153,11 +156,19 @@ func loadConfigWithDevelopmentConsent(requested bool) (*config.Config, error) {
 	if err != nil {
 		return nil, err
 	}
-	if requested && !cfg.DevelopmentApproved() {
-		cfg.ApproveDevelopment()
-		if err := config.Save(cfg); err != nil {
-			return nil, fmt.Errorf("record explicit development authorization: %w", err)
-		}
+	if !requested || cfg.DevelopmentApproved() {
+		return cfg, nil
+	}
+	// Recording consent is a read-modify-write: Update holds the cross-process
+	// config lock across load→mutate→save so a concurrent `config set` on the
+	// same file cannot be clobbered by this stale snapshot.
+	err = config.Update(func(c *config.Config) error {
+		c.ApproveDevelopment()
+		cfg = c
+		return nil
+	})
+	if err != nil {
+		return nil, fmt.Errorf("record explicit development authorization: %w", err)
 	}
 	return cfg, nil
 }

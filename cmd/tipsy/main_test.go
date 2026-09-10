@@ -28,7 +28,6 @@ func TestRunWiresInterruptContextAndPreservesExitCode(t *testing.T) {
 	t.Parallel()
 
 	args := []string{"launch", "--probe"}
-	stdin := bytes.NewBufferString("input")
 	var stdout bytes.Buffer
 	var stderr bytes.Buffer
 	stopCalled := false
@@ -47,7 +46,7 @@ func TestRunWiresInterruptContextAndPreservesExitCode(t *testing.T) {
 			cancel()
 		}
 	}
-	runApp := func(ctx context.Context, gotArgs []string, gotStdin io.Reader, gotStdout, gotStderr io.Writer) int {
+	runApp := func(ctx context.Context, gotArgs []string, gotStdout, gotStderr io.Writer) int {
 		runnerCalled = true
 		if ctx == nil {
 			t.Fatal("runner context is nil")
@@ -58,13 +57,13 @@ func TestRunWiresInterruptContextAndPreservesExitCode(t *testing.T) {
 		if len(gotArgs) != len(args) || gotArgs[0] != args[0] || gotArgs[1] != args[1] {
 			t.Fatalf("runner args = %v, want %v", gotArgs, args)
 		}
-		if gotStdin != stdin || gotStdout != &stdout || gotStderr != &stderr {
+		if gotStdout != &stdout || gotStderr != &stderr {
 			t.Fatal("runner streams were not passed through unchanged")
 		}
 		return 37
 	}
 
-	if got := run(notify, runApp, args, stdin, &stdout, &stderr); got != 37 {
+	if got := run(notify, runApp, args, &stdout, &stderr); got != 37 {
 		t.Fatalf("run exit code = %d, want 37", got)
 	}
 	if !runnerCalled {
@@ -88,14 +87,14 @@ func TestRunPropagatesNotifierCancellation(t *testing.T) {
 			stopped <- struct{}{}
 		}
 	}
-	runApp := func(ctx context.Context, _ []string, _ io.Reader, _, _ io.Writer) int {
+	runApp := func(ctx context.Context, _ []string, _, _ io.Writer) int {
 		<-ctx.Done()
 		return 19
 	}
 
 	exited := make(chan int, 1)
 	go func() {
-		exited <- run(notify, runApp, nil, bytes.NewReader(nil), io.Discard, io.Discard)
+		exited <- run(notify, runApp, nil, io.Discard, io.Discard)
 	}()
 	(<-registered)()
 

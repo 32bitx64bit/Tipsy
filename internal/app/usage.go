@@ -31,15 +31,14 @@ Machine-readable output:
   tipsy inspect --json <paths...>
   tipsy report --json <paths...>
   tipsy doctor --json
-  tipsy doctor --report
 
 Never commit Roblox APKs or native libraries.
 `
 
-const doctorHelp = `Usage: tipsy doctor [--json] [--report]
+const doctorHelp = `Usage: tipsy doctor [--json]
 
 Print a host environment overview (OS, X11, GPU, audio, Qt, Roblox data dir).
---report is secret-redacted and suitable for sharing.
+Output is secret-redacted and suitable for sharing.
 `
 
 const diagnoseHelp = `Usage: tipsy diagnose [--json] [subsystem]

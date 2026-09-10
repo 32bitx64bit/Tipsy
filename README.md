@@ -474,7 +474,6 @@ All of these live in **Tipsy - Settings** and in `~/.config/tipsy/client-setting
 
 ```
 tipsy doctor              Host overview (OS, X11, GPU, audio, Qt, install)
-tipsy doctor --report     Same, secret-redacted and shareable
 tipsy inspect <apk...>    Inspect official APKs / splits
 tipsy setup <apk...>      Verify and install
 tipsy launch [--probe] [uri]

@@ -187,13 +187,29 @@ func TestRunDoctorJSON(t *testing.T) {
 	}
 }
 
+func TestRunDoctorRejectsRemovedReportFlag(t *testing.T) {
+	code, _, errOut := runArgs(t, "doctor", "--report")
+	if code != 2 {
+		t.Fatalf("exit %d, want 2; stderr=%s", code, errOut)
+	}
+	if !strings.Contains(errOut, "unknown flag --report") {
+		t.Fatalf("stderr=%s", errOut)
+	}
+}
+
 func TestRunDiagnoseX11(t *testing.T) {
 	code, out, errOut := runArgs(t, "diagnose", "x11")
 	if code != 0 {
 		t.Fatalf("exit %d stderr=%s", code, errOut)
 	}
-	if !strings.Contains(out, "not implemented yet") {
+	if !strings.Contains(out, "Status: active") {
 		t.Fatalf("output=%s", out)
+	}
+	if !strings.Contains(out, "Native X11 windowing") || !strings.Contains(out, "login UI") {
+		t.Fatalf("output=%s", out)
+	}
+	if strings.Contains(out, "not implemented yet") {
+		t.Fatalf("stale unimplemented claim: %s", out)
 	}
 }
 
@@ -238,6 +254,49 @@ func TestRunConfigPathAndSet(t *testing.T) {
 	}
 }
 
+func TestConfigSetPreservesConcurrentUpdate(t *testing.T) {
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+
+	entered := make(chan struct{})
+	release := make(chan struct{})
+	writerDone := make(chan error, 1)
+	go func() {
+		writerDone <- config.Update(func(c *config.Config) error {
+			c.DataDir = "/kept-by-concurrent-writer"
+			close(entered)
+			<-release
+			return nil
+		})
+	}()
+	<-entered
+
+	setDone := make(chan struct{})
+	go func() {
+		defer close(setDone)
+		code, _, errOut := runArgs(t, "config", "set", "logLevel", "debug")
+		if code != 0 {
+			t.Errorf("config set exit %d stderr=%s", code, errOut)
+		}
+	}()
+
+	// Let the setter reach the config lock: a bare Load before Save would
+	// already have read the pre-write snapshot by now.
+	time.Sleep(50 * time.Millisecond)
+	close(release)
+	if err := <-writerDone; err != nil {
+		t.Fatal(err)
+	}
+	<-setDone
+
+	c, err := config.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.DataDir != "/kept-by-concurrent-writer" || c.LogLevel != "debug" {
+		t.Fatalf("lost update: %+v", c)
+	}
+}
+
 func TestInspectRequiresPath(t *testing.T) {
 	code, _, errOut := runArgs(t, "inspect")
 	if code != 2 {
@@ -269,7 +328,7 @@ func TestReportRequiresPath(t *testing.T) {
 func runArgs(t *testing.T, args ...string) (int, string, string) {
 	t.Helper()
 	var stdout, stderr bytes.Buffer
-	code := Run(context.Background(), args, bytes.NewReader(nil), &stdout, &stderr)
+	code := Run(context.Background(), args, &stdout, &stderr)
 	return code, stdout.String(), stderr.String()
 }
 

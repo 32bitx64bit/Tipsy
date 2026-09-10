@@ -17,11 +17,10 @@ import (
 
 // Run dispatches a CLI invocation. args does not include the program name.
 // The returned int is the process exit code.
-func Run(ctx context.Context, args []string, stdin io.Reader, stdout, stderr io.Writer) int {
+func Run(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	_ = stdin
 
 	if len(args) == 0 {
 		printUsage(stderr)
@@ -78,7 +77,6 @@ func cmdDoctor(ctx context.Context, args []string, stdout, stderr io.Writer) int
 		fmt.Fprint(stdout, doctorHelp)
 		return 0
 	}
-	_ = f.report // same redacted text as default doctor; flag exists for shareable reports
 	if len(f.rest) != 0 {
 		fmt.Fprintf(stderr, "doctor: unexpected argument %q\n", f.rest[0])
 		return 2
@@ -165,7 +163,7 @@ func cmdConfig(args []string, stdout, stderr io.Writer) int {
 			return 1
 		}
 		fmt.Fprintf(stdout, "config file: %s\n", p.ConfigFile)
-		b, err := jsonIndent(c)
+		b, err := marshalIndent(c)
 		if err != nil {
 			fmt.Fprintln(stderr, err)
 			return 1
@@ -184,7 +182,7 @@ func cmdConfig(args []string, stdout, stderr io.Writer) int {
 			return 1
 		}
 		if len(args) == 1 {
-			b, err := jsonIndent(c)
+			b, err := marshalIndent(c)
 			if err != nil {
 				fmt.Fprintln(stderr, err)
 				return 1
@@ -204,16 +202,16 @@ func cmdConfig(args []string, stdout, stderr io.Writer) int {
 			fmt.Fprintln(stderr, "usage: tipsy config set <key> <value>")
 			return 2
 		}
-		c, err := config.Load()
-		if err != nil {
-			fmt.Fprintln(stderr, logging.Redact(err.Error()))
-			return 1
-		}
-		if err := configSet(c, args[1], strings.Join(args[2:], " ")); err != nil {
-			fmt.Fprintln(stderr, err)
+		var setErr error
+		err := config.Update(func(c *config.Config) error {
+			setErr = configSet(c, args[1], strings.Join(args[2:], " "))
+			return setErr
+		})
+		if setErr != nil {
+			fmt.Fprintln(stderr, setErr)
 			return 2
 		}
-		if err := config.Save(c); err != nil {
+		if err != nil {
 			fmt.Fprintln(stderr, logging.Redact(err.Error()))
 			return 1
 		}
@@ -269,10 +267,9 @@ func configSet(c *config.Config, key, value string) error {
 }
 
 type flags struct {
-	json   bool
-	report bool
-	help   bool
-	rest   []string
+	json bool
+	help bool
+	rest []string
 }
 
 func parseFlags(args []string) (flags, error) {
@@ -281,8 +278,6 @@ func parseFlags(args []string) (flags, error) {
 		switch a {
 		case "--json":
 			f.json = true
-		case "--report":
-			f.report = true
 		case "-h", "--help":
 			f.help = true
 		default:
@@ -300,8 +295,4 @@ func writeJSON(stdout io.Writer, data []byte) {
 	if len(data) == 0 || data[len(data)-1] != '\n' {
 		fmt.Fprintln(stdout)
 	}
-}
-
-func jsonIndent(v any) ([]byte, error) {
-	return marshalIndent(v)
 }
