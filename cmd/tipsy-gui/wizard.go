@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"html"
 	"path/filepath"
@@ -295,36 +296,84 @@ func (w *mainWindow) buildDoctorWizardPage() *qt.QWizardPage {
 	page := qt.NewQWizardPage2()
 	layout := w.newWizardPageLayout(page, "System readiness", "These checks are local and contain no Roblox credentials or account data.")
 	layout.SetSpacing(12)
-	report, err := w.service.Doctor(context.Background())
-	if err != nil {
-		label := qt.NewQLabel3("Readiness checks could not be completed:<br><br>" + html.EscapeString(err.Error()))
+	checks := qt.NewQWidget2()
+	checksLayout := qt.NewQVBoxLayout(checks)
+	checksLayout.SetContentsMargins(0, 0, 0, 0)
+	checksLayout.SetSpacing(12)
+	w.wizardDoctorChecks = checksLayout
+	status := qt.NewQLabel3("Running readiness checks…")
+	status.SetWordWrap(true)
+	setObjectName(status.QObject, "mutedText")
+	checksLayout.AddWidget(status.QWidget)
+	w.wizardDoctorStatus = status
+	layout.AddWidget(checks)
+	layout.AddStretch()
+	if w.service == nil {
+		w.wizardDoctorPending = false
+		w.renderWizardDoctor(doctorOutcome{err: errors.New("readiness checks are unavailable")})
+		return page
+	}
+	result := make(chan doctorOutcome, 1)
+	w.wizardDoctorResult = result
+	w.wizardDoctorPending = true
+	service := w.service
+	go func() {
+		summary, err := service.Doctor(context.Background())
+		result <- doctorOutcome{summary: summary, err: err}
+	}()
+	timer := qt.NewQTimer2(page.QObject)
+	timer.OnTimeout(w.pollWizardDoctor)
+	timer.Start(125)
+	return page
+}
+
+func (w *mainWindow) pollWizardDoctor() {
+	if !w.wizardDoctorPending || w.wizardDoctorResult == nil {
+		return
+	}
+	select {
+	case outcome := <-w.wizardDoctorResult:
+		w.wizardDoctorPending = false
+		w.wizardDoctorResult = nil
+		w.renderWizardDoctor(outcome)
+	default:
+	}
+}
+
+func (w *mainWindow) renderWizardDoctor(outcome doctorOutcome) {
+	if w.wizardDoctorChecks == nil {
+		return
+	}
+	if w.wizardDoctorStatus != nil {
+		w.wizardDoctorStatus.Hide()
+	}
+	if outcome.err != nil {
+		label := qt.NewQLabel3("Readiness checks could not be completed:<br><br>" + html.EscapeString(outcome.err.Error()))
 		label.SetWordWrap(true)
 		setObjectName(label.QObject, "noticeError")
-		layout.AddWidget(label.QWidget)
-	} else {
-		for _, check := range report.Checks {
-			marker := "•"
-			suffix := ""
-			switch check.Status {
-			case guimodel.CheckReady:
-				marker = "✓"
-			case guimodel.CheckWarning:
-				marker = "!"
-			case guimodel.CheckBlocked:
-				marker = "×"
-			}
-			if check.Remedy != "" {
-				suffix = "<br><span>Next: " + html.EscapeString(check.Remedy) + "</span>"
-			}
-			label := qt.NewQLabel3(fmt.Sprintf("<b>%s&nbsp;&nbsp;%s</b><br>%s%s", marker, html.EscapeString(check.Name), html.EscapeString(check.Detail), suffix))
-			label.SetTextFormat(qt.RichText)
-			label.SetWordWrap(true)
-			setObjectName(label.QObject, "wizardCheck")
-			layout.AddWidget(label.QWidget)
-		}
+		w.wizardDoctorChecks.AddWidget(label.QWidget)
+		return
 	}
-	layout.AddStretch()
-	return page
+	for _, check := range outcome.summary.Checks {
+		marker := "•"
+		suffix := ""
+		switch check.Status {
+		case guimodel.CheckReady:
+			marker = "✓"
+		case guimodel.CheckWarning:
+			marker = "!"
+		case guimodel.CheckBlocked:
+			marker = "×"
+		}
+		if check.Remedy != "" {
+			suffix = "<br><span>Next: " + html.EscapeString(check.Remedy) + "</span>"
+		}
+		label := qt.NewQLabel3(fmt.Sprintf("<b>%s&nbsp;&nbsp;%s</b><br>%s%s", marker, html.EscapeString(check.Name), html.EscapeString(check.Detail), suffix))
+		label.SetTextFormat(qt.RichText)
+		label.SetWordWrap(true)
+		setObjectName(label.QObject, "wizardCheck")
+		w.wizardDoctorChecks.AddWidget(label.QWidget)
+	}
 }
 
 func (w *mainWindow) buildSourceWizardPage() (*qt.QWizardPage, *qt.QRadioButton, *qt.QRadioButton, *[]string, *qt.QPushButton, *qt.QLabel) {

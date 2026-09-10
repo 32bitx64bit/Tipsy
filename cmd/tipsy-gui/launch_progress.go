@@ -113,6 +113,7 @@ func (w *mainWindow) showExternalProgress() {
 	p.dialog.SetWindowFlag2(qt.WindowCloseButtonHint, false)
 	p.title.SetText("Launching Roblox…")
 	p.detail.SetText("Checking launch authorization…")
+	p.note.SetText("This window closes when Roblox is ready.")
 	p.busy.Show()
 	p.note.Show()
 	p.actions.Hide()
@@ -252,6 +253,14 @@ type launchInitialization struct {
 	setupErr, settingsErr error
 }
 
+func loadWindowModels(service guimodel.Service) launchInitialization {
+	setup := guimodel.NewSetupModel(service)
+	settings := guimodel.NewSettingsModel(service)
+	setupErr := setup.Load(context.Background())
+	settingsErr := settings.Load(context.Background())
+	return launchInitialization{setup: setup, settings: settings, setupErr: setupErr, settingsErr: settingsErr}
+}
+
 func (w *mainWindow) startExternalInitialization(uri string) {
 	if w.launchInitializing || w.launchPreparing || w.launch.View().State != guimodel.LaunchIdle {
 		return
@@ -265,12 +274,40 @@ func (w *mainWindow) startExternalInitialization(uri string) {
 	w.launchInitialization = result
 	service := w.service
 	go func() {
-		setup := guimodel.NewSetupModel(service)
-		settings := guimodel.NewSettingsModel(service)
-		setupErr := setup.Load(context.Background())
-		settingsErr := settings.Load(context.Background())
-		result <- launchInitialization{setup, settings, setupErr, settingsErr}
+		result <- loadWindowModels(service)
 	}()
+}
+
+func (w *mainWindow) startSettingsInitialization() {
+	if w.launchInitializing || w.launchPreparing || w.launch.View().State != guimodel.LaunchIdle {
+		return
+	}
+	w.launchInitializing = true
+	w.startupSettings = true
+	w.showStartupProgress()
+	result := make(chan launchInitialization, 1)
+	w.launchInitialization = result
+	service := w.service
+	go func() {
+		result <- loadWindowModels(service)
+	}()
+}
+
+func (w *mainWindow) showStartupProgress() {
+	w.ensureLaunchProgress()
+	p := w.externalProgress
+	p.active = true
+	p.dialog.SetWindowFlag2(qt.WindowCloseButtonHint, false)
+	p.title.SetText("Starting Tipsy…")
+	p.detail.SetText("Checking the installed client…")
+	p.note.SetText("This window closes when Tipsy is ready.")
+	p.note.Show()
+	p.busy.Show()
+	p.actions.Hide()
+	p.authority.Hide()
+	p.dialog.SetWindowTitle("Tipsy — Checking the installed client")
+	placeWidgetOnDisplay(p.dialog.QWidget, configuredDisplay(w))
+	p.dialog.Show()
 }
 
 func (w *mainWindow) pollLaunchInitialization() {
@@ -281,6 +318,16 @@ func (w *mainWindow) pollLaunchInitialization() {
 		w.setup, w.settings = result.setup, result.settings
 		w.setupLoadErr, w.settingsErr = result.setupErr, result.settingsErr
 		w.finishShell()
+		if w.startupSettings {
+			w.startupSettings = false
+			w.externalProgress.active = false
+			w.externalProgress.dialog.Hide()
+			w.Show()
+			if w.FirstRun() {
+				w.ShowSetupWizard(true)
+			}
+			return
+		}
 		request := w.launchRequest
 		w.launchRequest = guimodel.LaunchRequest{}
 		if w.FirstRun() {

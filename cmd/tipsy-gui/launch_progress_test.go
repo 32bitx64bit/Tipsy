@@ -260,6 +260,52 @@ func TestExternalLaunchProgress(t *testing.T) {
 
 }
 
+func TestSettingsStartupVerifiesBeforeShell(t *testing.T) {
+	if os.Getenv("TIPSY_GUI_PROGRESS_X11") != "1" {
+		t.Setenv("QT_QPA_PLATFORM", "offscreen")
+	}
+	root := t.TempDir()
+	for _, dir := range []string{"CONFIG", "DATA", "CACHE", "STATE"} {
+		t.Setenv("XDG_"+dir+"_HOME", filepath.Join(root, dir))
+	}
+	t.Setenv("TIPSY_ICON_PATH", filepath.Join("..", "..", "tipsy.png"))
+	app := qt.NewQApplication([]string{"tipsy-settings-startup-test"})
+	defer app.Delete()
+	qt.QApplication_SetStyleWithStyle("Fusion")
+
+	service := newProgressService()
+	win := newWindowBase(service, brandIcon())
+	defer win.win.Delete()
+	win.startSettingsInitialization()
+	p := win.externalProgress
+	if p == nil || !p.dialog.IsVisible() || win.playButton != nil || win.win.IsVisible() {
+		t.Fatal("settings startup did not paint the verifying surface first")
+	}
+	if !strings.Contains(p.detail.Text(), "Checking") {
+		t.Fatalf("verifying copy = %q", p.detail.Text())
+	}
+	pulses := 0
+	timer := qt.NewQTimer2(win.win.QObject)
+	timer.OnTimeout(func() { pulses++ })
+	timer.Start(5)
+	waitGUI(t, func() bool { return pulses >= 3 && service.snapshots.Load() == 1 })
+	if win.playButton != nil {
+		t.Fatal("shell was built before verification completed")
+	}
+	close(service.snapshotGate)
+	waitGUI(t, func() bool {
+		return win.playButton != nil && win.win.IsVisible() && !p.dialog.IsVisible()
+	})
+	if win.FirstRun() {
+		t.Fatal("synthetic launch-ready client was treated as first run")
+	}
+	if win.preferenceFPS.Text() != "60 FPS" {
+		t.Fatalf("settings were not applied to the shell: %q", win.preferenceFPS.Text())
+	}
+	timer.Stop()
+	win.win.Close()
+}
+
 func assertProgressFailure(t *testing.T, win *mainWindow, sentinel string) {
 	t.Helper()
 	p := win.externalProgress

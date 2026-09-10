@@ -82,6 +82,15 @@ type mainWindow struct {
 	launchConsentRequested bool
 	launchInitializing     bool
 	launchInitialization   chan launchInitialization
+	startupSettings        bool
+
+	doctorPending bool
+	doctorResult  chan doctorOutcome
+
+	wizardDoctorPending bool
+	wizardDoctorResult  chan doctorOutcome
+	wizardDoctorStatus  *qt.QLabel
+	wizardDoctorChecks  *qt.QVBoxLayout
 }
 
 func newWindowBase(service guimodel.Service, icon *qt.QIcon) *mainWindow {
@@ -136,17 +145,6 @@ func (w *mainWindow) finishShell() {
 func (w *mainWindow) Show() {
 	placeWidgetOnDisplay(w.win.QWidget, configuredDisplay(w))
 	w.win.Show()
-}
-
-func (w *mainWindow) startInMode(mode, uri string) {
-	if (mode == guiModePlay || uri != "") && !w.FirstRun() {
-		w.beginLaunch(launchFromExternal, guimodel.LaunchRequest{URI: uri})
-		return
-	}
-	w.Show()
-	if w.FirstRun() {
-		w.ShowSetupWizard(true)
-	}
 }
 
 func (w *mainWindow) FirstRun() bool {
@@ -444,6 +442,7 @@ func (w *mainWindow) setLaunchAuthority(authority guimodel.LaunchAuthority) {
 }
 
 func (w *mainWindow) refreshLaunchState() {
+	w.pollDoctor()
 	if w.launchInitializing {
 		w.pollLaunchInitialization()
 		return

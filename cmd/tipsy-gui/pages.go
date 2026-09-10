@@ -642,16 +642,48 @@ func (w *mainWindow) buildDiagnosticsPage() *qt.QWidget {
 	return w.registerPage(page, scroll)
 }
 
+type doctorOutcome struct {
+	summary guimodel.DoctorSummary
+	err     error
+}
+
 func (w *mainWindow) runDoctor() {
-	if w.doctorSummary == nil {
+	if w.doctorSummary == nil || w.doctorPending {
 		return
 	}
-	report, err := w.service.Doctor(context.Background())
-	if err != nil {
+	w.doctorPending = true
+	w.doctorSummary.SetText("<b>Running checks…</b>")
+	w.doctorDetails.SetPlainText("Collecting local readiness details…")
+	w.status.ShowMessage2("Running system checks…", 5000)
+	result := make(chan doctorOutcome, 1)
+	w.doctorResult = result
+	service := w.service
+	go func() {
+		summary, err := service.Doctor(context.Background())
+		result <- doctorOutcome{summary: summary, err: err}
+	}()
+}
+
+func (w *mainWindow) pollDoctor() {
+	if !w.doctorPending || w.doctorResult == nil {
+		return
+	}
+	select {
+	case outcome := <-w.doctorResult:
+		w.doctorPending = false
+		w.doctorResult = nil
+		w.renderDoctor(outcome)
+	default:
+	}
+}
+
+func (w *mainWindow) renderDoctor(outcome doctorOutcome) {
+	if outcome.err != nil {
 		w.doctorSummary.SetText("<b>Checks could not be completed.</b>")
-		w.doctorDetails.SetPlainText(err.Error())
+		w.doctorDetails.SetPlainText(outcome.err.Error())
 		return
 	}
+	report := outcome.summary
 	var rows []string
 	var details []string
 	for _, check := range report.Checks {

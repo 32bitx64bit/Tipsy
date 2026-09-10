@@ -118,7 +118,7 @@ func testWizardSurface(t *testing.T, win *mainWindow, service *acceptanceService
 	}
 	captureAtSizes(t, wizard.QWidget, "wizard-welcome")
 	wizard.SetCurrentId(doctorID)
-	pumpEvents()
+	waitGUI(t, func() bool { return !win.wizardDoctorPending })
 	captureAtSizes(t, wizard.QWidget, "wizard-doctor")
 	wizard.SetCurrentId(sourceID)
 	pumpEvents()
@@ -243,9 +243,10 @@ func testMainSurface(t *testing.T, win *mainWindow, service *acceptanceService) 
 		}
 		captureMainPageAtSizes(t, win, page, strings.ToLower(name)+"-idle")
 	}
-	if !strings.Contains(win.doctorDetails.ToPlainText(), "X11 display") || !strings.Contains(win.doctorDetails.ToPlainText(), "intentionally long synthetic diagnostic") {
-		t.Fatal("Diagnostics did not render doctor details")
-	}
+	waitGUI(t, func() bool {
+		details := win.doctorDetails.ToPlainText()
+		return strings.Contains(details, "X11 display") && strings.Contains(details, "intentionally long synthetic diagnostic")
+	})
 	if win.installPageBadge.Text() != "LAUNCH READY" || !strings.Contains(win.installPageVer.Text(), "2.734.917") || !strings.Contains(win.installPageDetail.Text(), "Authenticated launch inputs") {
 		t.Fatalf("Installation page status did not refresh: badge=%q version=%q detail=%q", win.installPageBadge.Text(), win.installPageVer.Text(), win.installPageDetail.Text())
 	}

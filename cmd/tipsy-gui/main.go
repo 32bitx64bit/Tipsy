@@ -33,12 +33,11 @@ func main() {
 	qt.QGuiApplication_SetWindowIcon(icon)
 
 	service := newProductionService()
+	win := newWindowBase(service, icon)
 	if mode == guiModePlay || uri != "" {
-		win := newWindowBase(service, icon)
 		win.startExternalInitialization(uri)
 	} else {
-		win := newMainWindow(service, icon)
-		win.startInMode(mode, uri)
+		win.startSettingsInitialization()
 	}
 	qt.QApplication_Exec()
 }

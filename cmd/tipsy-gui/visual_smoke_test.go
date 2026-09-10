@@ -392,9 +392,11 @@ func TestPlayModeUsesProgressWhenInstalled(t *testing.T) {
 		launchReady:   make(chan struct{}),
 		launchDone:    make(chan struct{}),
 	}
-	win := newMainWindow(service, brandIcon())
-	win.startInMode(guiModePlay, "")
-	qt.QCoreApplication_ProcessEvents()
+	win := newWindowBase(service, brandIcon())
+	win.startExternalInitialization("")
+	waitGUI(t, func() bool {
+		return win.externalProgress != nil && win.externalProgress.dialog.IsVisible()
+	})
 
 	waitGUI(t, func() bool {
 		select {
