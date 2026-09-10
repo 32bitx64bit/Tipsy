@@ -60,6 +60,13 @@ type Window struct {
 	// linux+cgo). It lives on Window so escape analysis cannot allocate a
 	// 256-wide event array on every InputReady wake.
 	inputScratch any
+	// inputEvents is the reused Go drain target. Pump is the sole consumer
+	// for a window (the launch loop, or the single-window Open probe), so the
+	// backing array is overwritten only after notifyInput returns. Pump clears
+	// it afterwards so committed input text is not retained. Direct
+	// drainInputLocked callers must finish with the slice before draining
+	// again.
+	inputEvents []InputEvent
 }
 
 // InputKind classifies a captured window input event.

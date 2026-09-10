@@ -28,7 +28,6 @@ _Static_assert(sizeof(struct tipsy_input_ev) <= 48, "tipsy_input_ev must stay a 
 
 extern void GoX11_Notify(void);
 
-static int tipsy_x_error_code;
 static int tipsy_x_io_error;
 static int tipsy_x_inited;
 static XIM tipsy_xim;
@@ -197,6 +196,10 @@ static struct tipsy_pointer_capture tipsy_capture;
 // cannot re-grab the desktop pointer.
 static int tipsy_have_keyboard_focus;
 static Atom tipsy_atom_net_active_window;
+// Interned once in tipsy_x11_open. The event pump compares ClientMessage
+// atoms without a synchronous Xlib round trip while holding tipsy_event_mu.
+static Atom tipsy_atom_wm_protocols;
+static Atom tipsy_atom_wm_take_focus;
 
 static void tipsy_input_drop_oldest_locked(void) {
 	if (tipsy_input_ring[tipsy_input_tail].kind == TIPSY_INPUT_TEXT &&
@@ -960,8 +963,9 @@ static long tipsy_android_keycode(KeySym ks) {
 }
 
 static int tipsy_xerr(Display *dpy, XErrorEvent *ev) {
+	// Keep the handler installed so async X errors stay non-fatal and silent.
 	(void)dpy;
-	tipsy_x_error_code = ev->error_code;
+	(void)ev;
 	return 0;
 }
 
@@ -1185,7 +1189,6 @@ int tipsy_x11_open(const char *title, int width, int height,
 	uintptr_t *out_dpy, unsigned long *out_xid, unsigned long *out_delete,
 	int *out_randr_event_base) {
 	tipsy_x11_once();
-	tipsy_x_error_code = 0;
 	tipsy_x_io_error = 0;
 	tipsy_f11_down = 0;
 	tipsy_window_min_width = min_width > 0 ? min_width : 1;
@@ -1292,6 +1295,8 @@ int tipsy_x11_open(const char *title, int width, int height,
 
 	Atom wm_delete = XInternAtom(dpy, "WM_DELETE_WINDOW", False);
 	Atom wm_take_focus = XInternAtom(dpy, "WM_TAKE_FOCUS", False);
+	tipsy_atom_wm_protocols = XInternAtom(dpy, "WM_PROTOCOLS", False);
+	tipsy_atom_wm_take_focus = wm_take_focus;
 	Atom protocols[2] = {wm_delete, wm_take_focus};
 	XSetWMProtocols(dpy, win, protocols, 2);
 
@@ -1307,6 +1312,10 @@ int tipsy_x11_open(const char *title, int width, int height,
 
 	XMapWindow(dpy, win);
 	if (use_position) {
+		// NOTE: the bounded 500 ms XSync+sleep placement wait is intentionally
+		// left unchanged. XIfEvent has no timeout, and an event-assisted wait
+		// could not be validated against reparenting/placement WMs from this
+		// environment (no WM on Xvfb). Revisit with a WM matrix test.
 		XEvent mapped;
 		memset(&mapped, 0, sizeof(mapped));
 		for (int i = 0; i < 50; i++) {
@@ -1683,7 +1692,7 @@ int tipsy_x11_pump(uintptr_t dpy_ptr, unsigned long xid, unsigned long wm_delete
 			break;
 		case ClientMessage:
 			if (ev.xclient.window == win &&
-				ev.xclient.message_type == XInternAtom(dpy, "WM_PROTOCOLS", False) &&
+				ev.xclient.message_type == tipsy_atom_wm_protocols &&
 				(Atom)ev.xclient.data.l[0] == (Atom)wm_delete) {
 				tipsy_pointer_unlock(dpy, win, 1, 1);
 				// The blocking-start background pump may be the Xlib caller that
@@ -1692,7 +1701,7 @@ int tipsy_x11_pump(uintptr_t dpy_ptr, unsigned long xid, unsigned long wm_delete
 				tipsy_input_push(TIPSY_INPUT_CLOSE, 0, (long)win, 0, 0, 0);
 				*out_closed = 1;
 			} else if (ev.xclient.window == win &&
-				(Atom)ev.xclient.data.l[0] == XInternAtom(dpy, "WM_TAKE_FOCUS", False)) {
+				(Atom)ev.xclient.data.l[0] == tipsy_atom_wm_take_focus) {
 				// ICCCM: the WM offered focus; claim it. The resulting
 				// FocusIn is the real focus event.
 				XSetInputFocus(dpy, win, RevertToParent,

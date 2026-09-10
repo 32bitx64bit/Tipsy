@@ -298,10 +298,12 @@ func (w *Window) Pump() error {
 		_ = dismissLocked(w)
 		w.mu.Unlock()
 		notifyInput(evs)
+		clear(evs)
 		return ErrClosed
 	}
 	w.mu.Unlock()
 	notifyInput(evs)
+	clear(evs)
 	return nil
 }
 
@@ -314,7 +316,10 @@ func (w *Window) drainInputLocked() ([]InputEvent, bool) {
 	if n == 0 {
 		return nil, false
 	}
-	evs := make([]InputEvent, 0, n)
+	if cap(w.inputEvents) < n {
+		w.inputEvents = make([]InputEvent, n)
+	}
+	evs := w.inputEvents[:0]
 	closeRequested := false
 	for i := 0; i < n; i++ {
 		r := &s.evs[i]
