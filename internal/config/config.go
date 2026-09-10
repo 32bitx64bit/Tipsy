@@ -70,7 +70,8 @@ func Paths() Layout {
 }
 
 func xdgDir(env, homeFallback string) string {
-	if v := os.Getenv(env); v != "" {
+	// The XDG base directory specification requires ignoring relative paths.
+	if v := os.Getenv(env); filepath.IsAbs(v) {
 		return filepath.Join(v, "tipsy")
 	}
 	home, err := os.UserHomeDir()
@@ -105,7 +106,38 @@ func Load() (*Config, error) {
 	return &c, nil
 }
 
+// Update applies fn to the current config and saves the result while holding
+// the cross-process config lock. Callers that need a read-modify-write cycle
+// must use Update instead of a bare Load followed by Save.
+func Update(fn func(*Config) error) error {
+	if fn == nil {
+		return errors.New("config update function is nil")
+	}
+	release, err := acquireConfigLock()
+	if err != nil {
+		return err
+	}
+	defer release()
+	c, err := Load()
+	if err != nil {
+		return err
+	}
+	if err := fn(c); err != nil {
+		return err
+	}
+	return saveLocked(c)
+}
+
 func Save(c *Config) error {
+	release, err := acquireConfigLock()
+	if err != nil {
+		return err
+	}
+	defer release()
+	return saveLocked(c)
+}
+
+func saveLocked(c *Config) error {
 	if c == nil {
 		c = &Config{}
 	}

@@ -129,26 +129,6 @@ type FrameRate struct {
 	Limit int           `json:"limit,omitempty"`
 }
 
-// NeedsUnthrottledPresentation is the superseded FPS-coupled policy retained
-// only until the Runtime integration switches to Settings' VSync policy. New
-// callers must use Settings.NeedsUnthrottledPresentation so FPS and VSync stay
-// independent.
-func (f FrameRate) NeedsUnthrottledPresentation(refreshHz float64) bool {
-	switch f.Mode {
-	case FrameRateUnlimited:
-		return true
-	case FrameRateLimited:
-		if refreshHz <= 0 {
-			refreshHz = 60
-		}
-		// Accommodate nominal modes such as 59.94 and 143.98 Hz without
-		// treating matching integer limits as requests above refresh.
-		return float64(f.Limit) > refreshHz+1
-	default:
-		return false
-	}
-}
-
 type Settings struct {
 	Renderer  Renderer  `json:"renderer"`
 	FrameRate FrameRate `json:"frameRate"`

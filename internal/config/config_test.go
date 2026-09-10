@@ -5,8 +5,10 @@ package config
 
 import (
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
+	"sync"
 	"testing"
 )
 
@@ -93,6 +95,71 @@ func TestPathsFallsBackToHome(t *testing.T) {
 	}
 	if p.StateDir != filepath.Join(home, ".local", "state", "tipsy") {
 		t.Fatalf("StateDir = %s", p.StateDir)
+	}
+}
+
+func TestPathsIgnoresRelativeXDG(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CONFIG_HOME", "relative/cfg")
+	t.Setenv("XDG_DATA_HOME", "relative/data")
+	t.Setenv("XDG_CACHE_HOME", "relative/cache")
+	t.Setenv("XDG_STATE_HOME", "relative/state")
+
+	p := Paths()
+	if p.ConfigDir != filepath.Join(home, ".config", "tipsy") {
+		t.Fatalf("ConfigDir = %s", p.ConfigDir)
+	}
+	if p.DataDir != filepath.Join(home, ".local", "share", "tipsy") {
+		t.Fatalf("DataDir = %s", p.DataDir)
+	}
+	if p.CacheDir != filepath.Join(home, ".cache", "tipsy") {
+		t.Fatalf("CacheDir = %s", p.CacheDir)
+	}
+	if p.StateDir != filepath.Join(home, ".local", "state", "tipsy") {
+		t.Fatalf("StateDir = %s", p.StateDir)
+	}
+}
+
+func TestUpdateSerializesConcurrentWriters(t *testing.T) {
+	tmp := t.TempDir()
+	t.Setenv("XDG_CONFIG_HOME", tmp)
+
+	const writers = 4
+	const rounds = 25
+	start := make(chan struct{})
+	errCh := make(chan error, writers)
+	var wg sync.WaitGroup
+	for w := 0; w < writers; w++ {
+		wg.Add(1)
+		go func(w int) {
+			defer wg.Done()
+			<-start
+			for r := 0; r < rounds; r++ {
+				err := Update(func(c *Config) error {
+					c.LogCategories = append(c.LogCategories, fmt.Sprintf("writer-%d-round-%d", w, r))
+					return nil
+				})
+				if err != nil {
+					errCh <- err
+					return
+				}
+			}
+		}(w)
+	}
+	close(start)
+	wg.Wait()
+	close(errCh)
+	for err := range errCh {
+		t.Fatal(err)
+	}
+
+	c, err := Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(c.LogCategories) != writers*rounds {
+		t.Fatalf("lost updates: %d categories, want %d", len(c.LogCategories), writers*rounds)
 	}
 }
 
