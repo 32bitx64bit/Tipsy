@@ -41,8 +41,17 @@ done
 [ -S "$socket" ] || fail 'Xvfb did not create a display socket'
 
 mkdir -p bin
-go vet ./...
+# unsafeptr is disabled because the JNI bindings deliberately pack integers
+# into C pointer types (unsafe.Pointer(uintptr(x))); checkptr/UB coverage of
+# those conversions remains in the race passes below.
+go vet -unsafeptr=false ./...
 go test -count=1 -timeout 20m ./...
+# Race pass for the packages that own shared concurrency state.
+# internal/jni and internal/runtime are the deliberate integer-packed-pointer
+# packages: checkptr's instrumentation aborts on those conversions, so their
+# race pass disables only checkptr diagnostics (not the race detector).
+go test -race -count=1 -timeout 10m ./internal/android ./internal/config ./internal/loader ./internal/x11
+go test -race -gcflags=all=-d=checkptr=0 -count=1 -timeout 10m ./internal/jni ./internal/runtime
 go build -o bin/tipsy ./cmd/tipsy
 go build -o bin/tipsy-gui ./cmd/tipsy-gui
 test -x bin/tipsy || fail 'CLI binary was not built'

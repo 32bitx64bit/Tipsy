@@ -558,7 +558,7 @@ func TestWorkflowDependenciesAreImmutableAndLeastPrivilege(t *testing.T) {
 			t.Errorf("workflow action is not pinned to a full SHA: %s", match[0])
 		}
 	}
-	for _, forbidden := range []string{"ubuntu-latest", "continue-on-error: true", "permissions: write-all"} {
+	for _, forbidden := range []string{"ubuntu-latest", "continue-on-error: true", "permissions: write-all", `go-version: "`} {
 		if strings.Contains(text, forbidden) {
 			t.Errorf("workflow retains unsafe/mutable setting %q", forbidden)
 		}
@@ -566,7 +566,7 @@ func TestWorkflowDependenciesAreImmutableAndLeastPrivilege(t *testing.T) {
 	for _, required := range []string{
 		"permissions:\n  contents: read",
 		"persist-credentials: false",
-		`go-version: "1.27.1"`,
+		`go-version-file: go.mod`,
 		"scripts/ci-install-native.sh",
 		"scripts/ci-test-build.sh",
 		"ubuntu-22.04",
@@ -593,7 +593,7 @@ func TestWorkflowDependenciesAreImmutableAndLeastPrivilege(t *testing.T) {
 		t.Fatal(err)
 	}
 	testText := string(testBuild)
-	for _, required := range []string{"go vet ./...", "go test", "go build -o bin/tipsy ./cmd/tipsy", "go build -o bin/tipsy-gui ./cmd/tipsy-gui", "Xvfb", "/tmp/tipsy-ci-pkgconfig"} {
+	for _, required := range []string{"go vet -unsafeptr=false ./...", "go test", "-race", "go build -o bin/tipsy ./cmd/tipsy", "go build -o bin/tipsy-gui ./cmd/tipsy-gui", "Xvfb", "/tmp/tipsy-ci-pkgconfig"} {
 		if !strings.Contains(testText, required) {
 			t.Errorf("ci-test-build.sh is missing %q", required)
 		}
