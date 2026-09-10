@@ -442,16 +442,6 @@ void tipsy_egl_swap_thread_state(uintptr_t ptr, int *out_retired,
 	*out_failed = p->probes_failed;
 }
 
-int tipsy_egl_clear(float r, float g, float b, float a) {
-	glClearColor(r, g, b, a);
-	glClear(GL_COLOR_BUFFER_BIT);
-	GLenum err = glGetError();
-	if (err != GL_NO_ERROR) {
-		return (int)err;
-	}
-	return 0;
-}
-
 int tipsy_egl_close(uintptr_t dpy, uintptr_t surf, uintptr_t ctx) {
 	EGLDisplay edpy = (EGLDisplay)dpy;
 	if (edpy == NULL || edpy == EGL_NO_DISPLAY) {

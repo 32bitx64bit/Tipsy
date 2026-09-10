@@ -67,11 +67,3 @@ func (e *EGL) Close() error {
 	e.context = 0
 	return nil
 }
-
-func (e *EGL) clearRGBA(r, g, b, a float32) error {
-	_ = r
-	_ = g
-	_ = b
-	_ = a
-	return ErrUnavailable
-}

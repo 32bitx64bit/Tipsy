@@ -78,20 +78,18 @@ func BindEGL(x *x11.Window) (*EGL, error) {
 
 	refreshHz, supportedHz := platformDisplayRefreshRates(x.Display(), x.XID())
 	e := &EGL{
-		display:     uintptr(dpy),
-		surface:     uintptr(surf),
-		context:     uintptr(ctx),
-		x11Display:  x.Display(),
-		x11XID:      x.XID(),
-		refreshHz:   refreshHz,
-		supportedHz: supportedHz,
+		display:    uintptr(dpy),
+		surface:    uintptr(surf),
+		context:    uintptr(ctx),
+		x11Display: x.Display(),
+		x11XID:     x.XID(),
 	}
 	path := C.GoString(C.tipsy_egl_bind_path())
 	vendor := C.GoString(C.tipsy_egl_query(dpy, eglVendor))
 	version := C.GoString(C.tipsy_egl_query(dpy, eglVersion))
 	logging.Logger(logging.CatGraphics).Info("bound EGL on X11",
 		"path", path, "vendor", vendor, "version", version,
-		"refreshHz", e.refreshHz, "supportedRefreshRates", e.supportedHz)
+		"refreshHz", refreshHz, "supportedRefreshRates", supportedHz)
 	return e, nil
 }
 
@@ -243,22 +241,6 @@ func (e *EGL) Close() error {
 	e.display = 0
 	e.surface = 0
 	e.context = 0
-	return nil
-}
-
-func (e *EGL) clearRGBA(r, g, b, a float32) error {
-	if e == nil {
-		return ErrClosed
-	}
-	runtime.LockOSThread()
-	e.mu.Lock()
-	defer e.mu.Unlock()
-	if e.display == 0 {
-		return ErrClosed
-	}
-	if rc := C.tipsy_egl_clear(C.float(r), C.float(g), C.float(b), C.float(a)); rc != 0 {
-		return fmt.Errorf("graphics: glClear error 0x%x", int(rc))
-	}
 	return nil
 }
 

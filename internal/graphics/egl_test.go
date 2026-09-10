@@ -25,24 +25,10 @@ func TestBindEGLNilWindow(t *testing.T) {
 	}
 }
 
-func TestRefreshRateSnapshot(t *testing.T) {
-	e := &EGL{refreshHz: 164.96, supportedHz: []float32{59.95, 120, 164.96}}
-	if got := e.RefreshRateHz(); got != 164.96 {
-		t.Fatalf("RefreshRateHz=%v", got)
-	}
-	current, rates := e.RefreshRatesHz()
-	if current != 164.96 {
-		t.Fatalf("combined current refresh=%v", current)
-	}
-	if len(rates) != 3 || rates[0] != 59.95 || rates[2] != 164.96 {
-		t.Fatalf("SupportedRefreshRatesHz=%v", rates)
-	}
-	rates[0] = 1
-	if got := e.SupportedRefreshRatesHz()[0]; got != 59.95 {
-		t.Fatalf("SupportedRefreshRatesHz exposed internal slice: %v", got)
-	}
-	if (*EGL)(nil).RefreshRateHz() != 0 || (*EGL)(nil).SupportedRefreshRatesHz() != nil {
-		t.Fatal("nil EGL refresh snapshot is not empty")
+func TestWindowRefreshRatesNoWindow(t *testing.T) {
+	current, supported := WindowRefreshRates(0, 0)
+	if current != 0 || len(supported) != 0 {
+		t.Fatalf("WindowRefreshRates(0,0) = %v, %v; want zero rates", current, supported)
 	}
 }
 
@@ -70,9 +56,9 @@ func TestFirstFrame(t *testing.T) {
 	}
 	defer e.Close()
 
-	if err := e.clearRGBA(0.05, 0.05, 0.08, 1); err != nil {
-		t.Fatalf("clear: %v", err)
-	}
+	// Exercise the EGL-owning-thread Swap primitive. Production's sentinel
+	// path is StartSwapThread, which clears and presents its black frame
+	// inside C instead of exposing a glClear wrapper.
 	if err := e.Swap(); err != nil {
 		t.Fatalf("Swap: %v", err)
 	}

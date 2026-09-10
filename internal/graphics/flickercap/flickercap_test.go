@@ -4,6 +4,7 @@
 package flickercap_test
 
 import (
+	"errors"
 	"fmt"
 	"hash/fnv"
 	"image"
@@ -14,7 +15,61 @@ import (
 	"time"
 
 	"github.com/tipsy-linux/tipsy/internal/graphics/flickercap"
+	"github.com/tipsy-linux/tipsy/internal/x11"
 )
+
+// TestGridUnpacksPaintedVisual exercises tipsy_fcap_unpack against a real
+// X11 window: channel extraction must follow the visual's masks rather than
+// assuming 8-bit RGBX at fixed 16/8/0 shifts. White-in -> 255 RGB out.
+func TestGridUnpacksPaintedVisual(t *testing.T) {
+	if os.Getenv("DISPLAY") == "" {
+		t.Skip("DISPLAY unset")
+	}
+	w, err := x11.Open("flickercap mask test", 64, 64)
+	if err != nil {
+		if errors.Is(err, x11.ErrUnavailable) || errors.Is(err, x11.ErrNoDisplay) {
+			t.Skip(err)
+		}
+		t.Fatalf("x11.Open: %v", err)
+	}
+	defer w.Close()
+	// XMapWindow is asynchronous; Attach requires an already-viewable window.
+	var tgt *flickercap.Target
+	attachDeadline := time.Now().Add(2 * time.Second)
+	for tgt == nil && time.Now().Before(attachDeadline) {
+		tgt, err = flickercap.Attach(w.XID())
+		if err != nil {
+			_ = w.Pump()
+			time.Sleep(10 * time.Millisecond)
+		}
+	}
+	if tgt == nil {
+		t.Skipf("attach unusable: %v", err)
+	}
+	defer tgt.Close()
+	if err := tgt.PaintWhite(); err != nil {
+		t.Fatalf("paint: %v", err)
+	}
+	grid := make([]byte, 2*2*4)
+	var lastErr error
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if _, lastErr = tgt.Grid(2, 2, grid); lastErr == nil {
+			break
+		}
+		_ = w.Pump()
+		time.Sleep(10 * time.Millisecond)
+	}
+	if lastErr != nil {
+		t.Fatalf("grid: %v", lastErr)
+	}
+	for i := 0; i < 4; i++ {
+		r, g, b, a := grid[i*4], grid[i*4+1], grid[i*4+2], grid[i*4+3]
+		if r != 0xff || g != 0xff || b != 0xff || a != 0 {
+			t.Fatalf("pixel %d = %d,%d,%d,%d; want 255,255,255,0", i, r, g, b, a)
+		}
+	}
+}
 
 // TestLiveLoginFlickerCapture measures whether the live Roblox window's
 // presented content alternates between distinct frames (flicker). It is

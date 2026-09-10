@@ -19,54 +19,11 @@ var (
 
 // EGL is an ES2 context + window surface bound to a native X11 window.
 type EGL struct {
-	mu          sync.Mutex
-	display     uintptr   // EGLDisplay
-	surface     uintptr   // EGLSurface
-	context     uintptr   // EGLContext
-	x11Display  uintptr   // Xlib Display* (observation-only probes)
-	x11XID      uintptr   // X11 Window
-	refreshHz   float64   // last usable active XRandR CRTC refresh; 0 = unknown
-	supportedHz []float32 // last usable active XRandR output modes
-	swap        uintptr   // C tipsy_swap* background thread, or 0
-}
-
-// RefreshRateHz reports the XRandR refresh rate of the CRTC currently
-// containing the client window. Zero means the X server did not expose a
-// usable mode rate. It is an observation for presentation policy, not an FPS
-// measurement.
-func (e *EGL) RefreshRateHz() float64 {
-	current, _ := e.RefreshRatesHz()
-	return current
-}
-
-// SupportedRefreshRatesHz reports the positive, deduplicated XRandR mode
-// rates supported by the output currently containing the client window.
-// The returned slice is a copy. An empty result means the X server did not
-// expose a usable mode list.
-func (e *EGL) SupportedRefreshRatesHz() []float32 {
-	_, supported := e.RefreshRatesHz()
-	return supported
-}
-
-// RefreshRatesHz reports current and supported refresh rates from one XRandR
-// snapshot. Callers publishing both values should use this combined getter to
-// avoid repeating synchronous display queries. Retains the last usable values
-// after a transient query failure.
-func (e *EGL) RefreshRatesHz() (float64, []float32) {
-	if e == nil {
-		return 0, nil
-	}
-	e.mu.Lock()
-	defer e.mu.Unlock()
-	// Window managers may place or move the mapped window after EGL bind.
-	// Refresh from XRandR at each policy/JNI publication point so the result
-	// follows the CRTC currently containing the window, then retain the last
-	// usable snapshot as a fallback for a transient XRandR query failure.
-	if e.x11Display != 0 && e.x11XID != 0 {
-		if current, supported := platformDisplayRefreshRates(e.x11Display, e.x11XID); current > 0 {
-			e.refreshHz = current
-			e.supportedHz = append(e.supportedHz[:0], supported...)
-		}
-	}
-	return e.refreshHz, append([]float32(nil), e.supportedHz...)
+	mu         sync.Mutex
+	display    uintptr // EGLDisplay
+	surface    uintptr // EGLSurface
+	context    uintptr // EGLContext
+	x11Display uintptr // Xlib Display* (observation-only probes)
+	x11XID     uintptr // X11 Window
+	swap       uintptr // C tipsy_swap* background thread, or 0
 }

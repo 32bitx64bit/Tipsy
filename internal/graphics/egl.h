@@ -23,7 +23,6 @@ uintptr_t tipsy_egl_swap_thread_start(uintptr_t xdpy, unsigned long xid,
 int tipsy_egl_swap_thread_stop(uintptr_t ptr);
 void tipsy_egl_swap_thread_state(uintptr_t ptr, int *out_retired,
 	unsigned long *out_probes, unsigned long *out_failed);
-int tipsy_egl_clear(float r, float g, float b, float a);
 int tipsy_egl_close(uintptr_t dpy, uintptr_t surf, uintptr_t ctx);
 const char *tipsy_egl_query(uintptr_t dpy, int name);
 

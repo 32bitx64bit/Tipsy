@@ -81,6 +81,32 @@ int tipsy_fcap_find(uintptr_t *out_dpy, unsigned long *out_win, int *out_w, int 
 	return 0;
 }
 
+// Unpack one XImage pixel to RGBA8 from the visual's actual channel masks.
+// TrueColor masks are not required to be 8 bits at fixed 16/8/0 shifts (that
+// is only the common 24/32-bit layout), so derive the shift and width from
+// red_mask/green_mask/blue_mask and scale to 8 bits.
+static void tipsy_fcap_unpack(const XImage *img, unsigned long pixel,
+	unsigned char *out) {
+	const unsigned long masks[3] = {
+		img->red_mask, img->green_mask, img->blue_mask,
+	};
+	for (int c = 0; c < 3; c++) {
+		unsigned long mask = masks[c];
+		if (mask == 0) {
+			out[c] = 0;
+			continue;
+		}
+		int shift = 0;
+		while (((mask >> shift) & 1UL) == 0) {
+			shift++;
+		}
+		unsigned long max = mask >> shift;
+		unsigned long value = (pixel & mask) >> shift;
+		out[c] = (unsigned char)(((unsigned long long)value * 255ULL) / max);
+	}
+	out[3] = 0;
+}
+
 int tipsy_fcap_grid(uintptr_t dpy, unsigned long win, int w, int h,
 	int gw, int gh, unsigned char *out) {
 	Display *d = (Display *)dpy;
@@ -96,10 +122,7 @@ int tipsy_fcap_grid(uintptr_t dpy, unsigned long win, int w, int h,
 			int px = (w - 1) * gx / gden;
 			unsigned long p = XGetPixel(img, px, py);
 			unsigned char *o = out + ((size_t)gy * (size_t)gw + (size_t)gx) * 4;
-			o[0] = (unsigned char)((p & img->red_mask) >> 16);
-			o[1] = (unsigned char)((p & img->green_mask) >> 8);
-			o[2] = (unsigned char)(p & img->blue_mask);
-			o[3] = 0;
+			tipsy_fcap_unpack(img, p, o);
 		}
 	}
 	XDestroyImage(img);
@@ -122,10 +145,7 @@ int tipsy_fcap_full(uintptr_t dpy, unsigned long win, int w, int h, unsigned cha
 		for (int x = 0; x < w; x++) {
 			unsigned long p = XGetPixel(img, x, y);
 			unsigned char *o = buf + ((size_t)y * (size_t)w + (size_t)x) * 4;
-			o[0] = (unsigned char)((p & img->red_mask) >> 16);
-			o[1] = (unsigned char)((p & img->green_mask) >> 8);
-			o[2] = (unsigned char)(p & img->blue_mask);
-			o[3] = 0;
+			tipsy_fcap_unpack(img, p, o);
 		}
 	}
 	XDestroyImage(img);
