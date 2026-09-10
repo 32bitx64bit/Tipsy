@@ -57,6 +57,10 @@ type mainWindow struct {
 	settingsApply                                    *qt.QPushButton
 	settingsReset                                    *qt.QPushButton
 	settingsHint                                     *qt.QLabel
+	integrationStatus                                *qt.QLabel
+	integrationDetail                                *qt.QLabel
+	integrationAction                                *qt.QPushButton
+	integrationView                                  integrationView
 	doctorSummary                                    *qt.QLabel
 	doctorDetails                                    *qt.QPlainTextEdit
 	settingsProfile                                  *qt.QLabel
@@ -234,6 +238,11 @@ func (w *mainWindow) selectPage(index int) {
 	if index == 3 {
 		w.runDoctor()
 	}
+	if index == 2 && w.integrationStatus != nil {
+		// Another install may have adopted or released the launcher since
+		// this window opened; re-read the desktop before showing the row.
+		w.refreshIntegration()
+	}
 	if index < len(w.pageEntry) && w.pageEntry[index] != nil {
 		w.pageEntry[index].SetFocusWithReason(qt.OtherFocusReason)
 	}
@@ -397,7 +406,7 @@ var confirmDevelopmentLaunch = func(parent *qt.QWidget) bool {
 	dialog := qt.NewQMessageBox6(
 		qt.QMessageBox__Warning,
 		"Authorize development launch",
-		"This source build cannot be authenticated as an official Tipsy release. Continue in DevelopmentUnrestricted mode?\n\nThis records your explicit choice in Tipsy's owner-private configuration. The official Roblox APK and active generation will still be verified, but this Tipsy session must not be represented as OfficialVerified.",
+		"This local build cannot be authenticated as an official Tipsy release. Continue in DevelopmentUnrestricted mode?\n\nThis records your explicit choice in Tipsy's owner-private configuration. The official Roblox APK and active generation will still be verified, but this Tipsy session must not be represented as OfficialVerified.",
 		buttons,
 		parent,
 	)
@@ -414,7 +423,7 @@ func (w *mainWindow) setLaunchAuthority(authority guimodel.LaunchAuthority) {
 	}
 	switch {
 	case authority.DevelopmentConsentRequired:
-		w.playAuthority.SetText("Approval required — source builds cannot launch as OfficialVerified.")
+		w.playAuthority.SetText("Approval required — local builds cannot launch as OfficialVerified.")
 		setObjectName(w.playAuthority.QObject, "noticeWarning")
 	case authority.Mode == string(setupsvc.DevelopmentUnrestricted):
 		warning := authority.Warning

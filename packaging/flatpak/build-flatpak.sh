@@ -6,7 +6,11 @@
 #
 # Usage:
 #   packaging/flatpak/build-flatpak.sh --version 1.2.3 --output-dir dist
-#                                      [--tag v1.2.3]
+#                                      [--tag v1.2.3] [--mode developer|official]
+#
+# --mode official (GitHub Actions only) marks the bundle release-repository-signed
+# so the installed Flatpak runs OfficialVerified; the default developer build
+# stays development-unrestricted and asks for --development consent.
 #
 # Runtimes come from Flathub into the user installation (the remote is added
 # when missing). Uses the flatpak-builder binary when installed, otherwise the
@@ -18,12 +22,14 @@ fail() { printf 'build-flatpak: %s\n' "$*" >&2; exit 1; }
 version=
 output_dir=
 tag=
+mode=developer
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --version) [[ $# -ge 2 ]] || fail 'missing --version value'; version=$2; shift 2 ;;
     --output-dir) [[ $# -ge 2 ]] || fail 'missing --output-dir value'; output_dir=$2; shift 2 ;;
     --tag) [[ $# -ge 2 ]] || fail 'missing --tag value'; tag=$2; shift 2 ;;
-    -h|--help) sed -n '2,13p' "$0"; exit 0 ;;
+    --mode) [[ $# -ge 2 ]] || fail 'missing --mode value'; mode=$2; shift 2 ;;
+    -h|--help) sed -n '2,17p' "$0"; exit 0 ;;
     *) fail "unknown argument: $1" ;;
   esac
 done
@@ -32,6 +38,9 @@ done
 [[ -n "$output_dir" ]] || fail '--output-dir is required'
 [[ -n "$tag" ]] || tag="v$version"
 [[ "$tag" =~ ^[0-9A-Za-z][0-9A-Za-z._/+~-]*$ ]] || fail 'invalid tag'
+[[ "$mode" == developer || "$mode" == official ]] || fail 'mode must be developer or official'
+release_kind=development-unrestricted
+[[ "$mode" != official ]] || release_kind=release-repository-signed
 command -v flatpak >/dev/null 2>&1 || fail 'flatpak is missing'
 
 repo=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
@@ -66,10 +75,12 @@ trap cleanup EXIT HUP INT TERM
 
 manifest="$work/io.github.tipsy_linux.Tipsy.yaml"
 sed -e "s|^\(\s*\)tag: main$|\1tag: $tag|" -e "s|@VERSION@|$version|g" \
+  -e "s|@RELEASE_KIND@|$release_kind|g" \
   "$repo/packaging/flatpak/io.github.tipsy_linux.Tipsy.yaml" > "$manifest"
 grep -q "tag: $tag\$" "$manifest" || fail 'manifest tag rewrite failed'
 grep -q "Version=$version\"" "$manifest" || fail 'manifest version rewrite failed'
-! grep -q '@VERSION@' "$manifest" || fail 'manifest still has an unexpanded @VERSION@'
+grep -q "\"releaseKind\":\"$release_kind\"" "$manifest" || fail 'manifest release-kind rewrite failed'
+! grep -q '@VERSION@\|@RELEASE_KIND@' "$manifest" || fail 'manifest still has an unexpanded placeholder'
 
 app_id=io.github.tipsy_linux.Tipsy
 # --state-dir keeps flatpak-builder's cache out of the source checkout
@@ -86,5 +97,6 @@ files=$(ostree --repo="$work/repo" ls -R "app/$app_id/x86_64/master" /files 2>/d
 grep -q '/files/bin/tipsy$' <<<"$files" || fail 'bundle is missing bin/tipsy'
 grep -q '/files/bin/tipsy-gui$' <<<"$files" || fail 'bundle is missing bin/tipsy-gui'
 grep -q "/files/share/applications/$app_id.Play.desktop$" <<<"$files" || fail 'bundle is missing the Play desktop file'
+grep -q '/files/share/tipsy/build-info.json$' <<<"$files" || fail 'bundle is missing build-info.json (release identity)'
 
 printf 'Flatpak: %s\n' "$bundle"

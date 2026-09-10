@@ -10,6 +10,11 @@ usage: $0 --version VERSION [--output-dir DIRECTORY] [--mode developer|official|
 
 Builds a clean x86_64 AppDir and reproducible .tar.gz archive. The build uses
 the installed Qt 6 runtime and never downloads tools, APKs, or dependencies.
+
+--mode developer (the default) stamps the dev release channel: the AppImage
+integrates into menus as "Tipsy-Dev" and never touches the launcher or the
+roblox:// handler of an installed Tipsy (Flatpak/package/official AppImage).
+official and github-signed stamp the stable channel ("Tipsy").
 USAGE
 	exit 2
 }
@@ -178,7 +183,9 @@ install -d \
 	"$appdir/usr/share/metainfo" \
 	"$appdir/usr/share/tipsy"
 
-ldflags="-buildid= -s -w -X github.com/tipsy-linux/tipsy/internal/version.Version=$version"
+channel=stable
+[[ "$mode" != developer ]] || channel=dev
+ldflags="-buildid= -s -w -X github.com/tipsy-linux/tipsy/internal/version.Version=$version -X github.com/tipsy-linux/tipsy/internal/version.Channel=$channel"
 (cd "$repo" && go build -buildvcs=false -mod=readonly -trimpath -ldflags "$ldflags" -o "$appdir/usr/bin/tipsy" ./cmd/tipsy)
 (cd "$repo" && go build -buildvcs=false -mod=readonly -trimpath -ldflags "$ldflags" -o "$appdir/usr/bin/tipsy-gui" ./cmd/tipsy-gui)
 

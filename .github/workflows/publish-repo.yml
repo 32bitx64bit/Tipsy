@@ -203,10 +203,13 @@ jobs:
         run: |
           set -euo pipefail
           export GOAMD64=v2 CGO_ENABLED=1
+          # --mode official: only this workflow marks packages
+          # release-repository-signed (OfficialVerified once installed from the
+          # GPG-signed repository). Local builds stay development-unrestricted.
           bash packaging/deb/build-deb.sh \
-            --version '${{ needs.prepare.outputs.version }}' --output-dir dist
+            --version '${{ needs.prepare.outputs.version }}' --output-dir dist --mode official
           bash packaging/rpm/build-rpm.sh \
-            --version '${{ needs.prepare.outputs.version }}' --output-dir dist
+            --version '${{ needs.prepare.outputs.version }}' --output-dir dist --mode official
           ls -la dist/
 
       - name: Build the Flatpak bundle
@@ -230,7 +233,7 @@ jobs:
           # into the runner user's installation; the script adds the remote.
           bash packaging/flatpak/build-flatpak.sh \
             --version '${{ needs.prepare.outputs.version }}' \
-            --tag '${{ needs.prepare.outputs.tag }}' --output-dir dist
+            --tag '${{ needs.prepare.outputs.tag }}' --output-dir dist --mode official
           ls -la dist/Tipsy-*.flatpak
 
       - name: Write SHA256SUMS and stage publish set

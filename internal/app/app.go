@@ -56,6 +56,8 @@ func Run(ctx context.Context, args []string, stdin io.Reader, stdout, stderr io.
 		return cmdSetup(ctx, rest, stdout, stderr)
 	case "launch":
 		return cmdLaunch(ctx, rest, stdout, stderr)
+	case "desktop":
+		return cmdDesktop(ctx, rest, stdout, stderr)
 	case "repair":
 		fmt.Fprintf(stderr, "tipsy %s: %s\n", cmd, "not implemented; use tipsy setup to re-extract")
 		return 1

@@ -38,179 +38,21 @@ opens settings so first-run setup can complete otherwise.
 USAGE
 }
 
-quote_desktop_exec() {
-	printf '"%s"' "$(printf '%s' "$1" | sed 's/\\/\\\\/g; s/"/\\"/g')"
-}
-
-# Set by integrate_pin_entries before install_pin_entry runs.
-pin_icon=
-
-install_pin_entry() {
-	source_desktop=$1
-	destination=$2
-	exec_args=$3
-	quoted_image=$(quote_desktop_exec "$APPIMAGE")
-	in_action=
-	while IFS= read -r line || [ -n "$line" ]; do
-		case "$line" in
-			'[Desktop Entry]'*)
-				in_action=
-				printf '%s\n' "$line"
-				;;
-			'[Desktop Action Settings]'*)
-				in_action=settings
-				printf '%s\n' "$line"
-				;;
-			'['*)
-				in_action=
-				printf '%s\n' "$line"
-				;;
-			Exec=*)
-				args=$exec_args
-				if [ "$in_action" = settings ]; then
-					args='--settings %u'
-				fi
-				printf 'Exec=%s %s\n' "$quoted_image" "$args"
-				;;
-			Icon=*)
-				if [ -n "$pin_icon" ]; then
-					printf 'Icon=%s\n' "$pin_icon"
-				else
-					printf '%s\n' "$line"
-				fi
-				;;
-			NoDisplay=*)
-				;;
-			*)
-				printf '%s\n' "$line"
-				;;
-		esac
-	done <"$source_desktop" >"$destination"
-	chmod 0644 "$destination"
-}
-
-install_pin_icons() {
-	data_home=$1
-	src=$2
-	[ -f "$src" ] || return 1
-	for size in 256 512; do
-		dir="${data_home}/icons/hicolor/${size}x${size}/apps"
-		mkdir -p -- "$dir"
-		cp -- "$src" "$dir/io.github.tipsy_linux.Tipsy.png"
-		chmod 0644 "$dir/io.github.tipsy_linux.Tipsy.png"
-	done
-	printf '%s' "${data_home}/icons/hicolor/256x256/apps/io.github.tipsy_linux.Tipsy.png"
-}
-
-desktop_exec_is_appimage() {
-	quoted=$(quote_desktop_exec "$APPIMAGE")
-	while IFS= read -r line || [ -n "$line" ]; do
-		case "$line" in
-			Exec="$quoted"|Exec="$quoted"\ *|Exec=$APPIMAGE|Exec=$APPIMAGE\ *)
-				return 0
-				;;
-		esac
-	done <"$1"
-	return 1
-}
-
-# AppImage Manager stores a theme icon named like the desktop id.
-remove_manager_icons() {
-	data_home=$1
-	desktop=$2
-	icon=
-	while IFS= read -r line || [ -n "$line" ]; do
-		case "$line" in
-			Icon=*)
-				icon=${line#Icon=}
-				break
-				;;
-		esac
-	done <"$desktop"
-	case "$icon" in
-		appimage_tipsy_*)
-			;;
-		*)
-			return 0
-			;;
-	esac
-	cleaned=$(printf '%s' "$icon" | tr -cd 'A-Za-z0-9._-')
-	[ "$cleaned" = "$icon" ] || return 0
-	for icon_file in "$data_home"/icons/hicolor/*/apps/"$icon" "$data_home"/icons/hicolor/*/apps/"$icon".*; do
-		[ -f "$icon_file" ] || continue
-		case "$(basename -- "$icon_file")" in
-			io.github.tipsy_linux.Tipsy.png)
-				continue
-				;;
-		esac
-		rm -f -- "$icon_file"
-	done
-}
-
-# AppImage Manager writes a second Play row for the same $APPIMAGE, and can
-# leave an older appimage_tipsy_*.desktop after an update. Delete those
-# copies. Ours stays visible so GIO/Firefox protocol choosers can offer it.
-remove_foreign_launchers() {
-	apps_dir=$1
-	data_home=$2
-	for dest in "$apps_dir"/*.desktop; do
-		[ -f "$dest" ] || continue
-		base=$(basename -- "$dest")
-		case "$base" in
-			io.github.tipsy_linux.Tipsy.Play.desktop|io.github.tipsy_linux.Tipsy.Settings.desktop)
-				continue
-				;;
-		esac
-		remove=
-		if desktop_exec_is_appimage "$dest"; then
-			remove=1
-		fi
-		case "$base" in
-			appimage_tipsy_*.desktop)
-				remove=1
-				;;
-		esac
-		if [ -n "$remove" ]; then
-			remove_manager_icons "$data_home" "$dest"
-			rm -f -- "$dest"
-		fi
-	done
-}
-
+# Desktop integration is owned by `tipsy desktop` (internal/desktop): it
+# writes user-scope launcher entries for this AppImage under the identity of
+# the build's release channel (Tipsy, or Tipsy-Dev for developer builds) and
+# never shadows a Flatpak or distro package that already provides that
+# identity. `tipsy desktop status` explains the result; `tipsy desktop adopt`
+# without --if-unowned is the explicit takeover.
 integrate_pin_entries() {
 	[ -n "${APPIMAGE:-}" ] || return 0
 	case "$APPIMAGE" in
-		*["$(printf '\n\r')"]*)
-			return 0
-			;;
+		/*) ;;
+		*) return 0 ;;
 	esac
-	if [ -n "${XDG_DATA_HOME:-}" ]; then
-		data_home=$XDG_DATA_HOME
-	else
-		data_home="${HOME}/.local/share"
-	fi
-	apps_dir="${data_home}/applications"
-	mkdir -p -- "$apps_dir"
-	pin_icon=
-	if [ -f "$appdir/tipsy.png" ]; then
-		pin_icon=$(install_pin_icons "$data_home" "$appdir/tipsy.png")
-	fi
-	install_pin_entry \
-		"$appdir/usr/share/applications/io.github.tipsy_linux.Tipsy.Play.desktop" \
-		"$apps_dir/io.github.tipsy_linux.Tipsy.Play.desktop" \
-		"--play %u"
-	install_pin_entry \
-		"$appdir/usr/share/applications/io.github.tipsy_linux.Tipsy.Settings.desktop" \
-		"$apps_dir/io.github.tipsy_linux.Tipsy.Settings.desktop" \
-		"--settings %u"
-	remove_foreign_launchers "$apps_dir" "$data_home"
-	if command -v update-desktop-database >/dev/null 2>&1; then
-		update-desktop-database "$apps_dir" >/dev/null 2>&1 || true
-	fi
-	if command -v xdg-mime >/dev/null 2>&1; then
-		xdg-mime default io.github.tipsy_linux.Tipsy.Play.desktop x-scheme-handler/roblox-player >/dev/null 2>&1 || true
-		xdg-mime default io.github.tipsy_linux.Tipsy.Play.desktop x-scheme-handler/roblox >/dev/null 2>&1 || true
-	fi
+	[ -x "$appdir/usr/bin/tipsy" ] || return 0
+	"$appdir/usr/bin/tipsy" desktop adopt --if-unowned \
+		--appimage "$APPIMAGE" --icon "$appdir/tipsy.png" >/dev/null 2>&1 || true
 }
 
 runtime_is_ready() {

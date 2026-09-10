@@ -22,7 +22,8 @@ Commands:
   version             Print version
   logs                Show log directory and TIPSY_LOG usage
   setup               Verify and install the official x86-64 client
-  launch              Load the verified client (X11). --development explicitly authorizes source-build mode
+  launch              Load the verified client (X11). --development explicitly authorizes local-build mode
+  desktop             Launcher integration: status, adopt, release, render (Tipsy vs Tipsy-Dev identity)
   repair              Repair install (not yet implemented)
   help                Show this help
 
@@ -74,7 +75,7 @@ APKs, or .apkm/.xapk/.apks/.zip sets. Pass regular package files obtained
 through your own authorized account. Never commit Roblox packages.
 
   --development   Persist explicit DevelopmentUnrestricted consent for this
-                  source build. It never grants OfficialVerified status.
+                  local build. It never grants OfficialVerified status.
 `
 
 const launchHelp = `Usage: tipsy launch [--development] [--probe] [uri]

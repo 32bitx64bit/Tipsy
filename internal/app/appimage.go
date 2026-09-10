@@ -19,10 +19,6 @@ const (
 	maxBuildInfoBytes   = int64(16 << 10)
 )
 
-// errOfficialReleaseUnavailable means this process was not started by AppRun
-// from a non-development AppImage payload.
-var errOfficialReleaseUnavailable = errors.New("official AppImage identity is unavailable outside a GitHub AppImage")
-
 type payloadBuildInfo struct {
 	Format      string `json:"format"`
 	ReleaseKind string `json:"releaseKind"`
@@ -46,13 +42,6 @@ func identifyOfficialAppImage(ctx context.Context) error {
 		return fmt.Errorf("validate AppImage process: %w", err)
 	}
 	return officialReleaseKind(payloadReleaseKind())
-}
-
-func officialReleaseKind(kind string) error {
-	if kind == "" || kind == "development-unrestricted" {
-		return errOfficialReleaseUnavailable
-	}
-	return nil
 }
 
 func validateAppImageProcess() error {

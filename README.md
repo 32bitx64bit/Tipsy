@@ -146,6 +146,15 @@ Two desktop launchers after install:
 | **Tipsy - Play** | Starts the official client. Owns `roblox:` / `roblox-player:` website Play URIs. |
 | **Tipsy - Settings** | Setup wizard, renderer, FPS, VSync, display, and diagnostics. |
 
+Installed more than one way (say a Flatpak plus an AppImage)? One install owns
+the launcher and the `roblox:` links at a time. An AppImage only adds itself
+to the menu when nothing else provides Tipsy; **Settings → Desktop integration**
+shows which install your menu opens and offers a one-click switch, and
+`tipsy desktop status|adopt|release` does the same from a terminal. Builds from
+source (`--mode developer` AppImages, `CHANNEL=dev` installs) appear separately
+as **Tipsy-Dev - Play** / **Tipsy-Dev - Settings** and never take over the
+launcher or URI handler of your real Tipsy install.
+
 ---
 
 ## Requirements
@@ -265,7 +274,7 @@ That split is the whole design.
 | **Android / JNI** | Tipsy | Enough bionic, JNI, and GameActivity behavior for the official client to start, log in, and present. Missing APIs fail honestly. |
 | **Roblox** | Roblox | Login, Home, networking, experiences. Tipsy does not patch `libroblox.so` and does not ship it. |
 
-Official GitHub AppImages are treated as a verified Tipsy release. A **source build is not**. The first `tipsy launch` / GUI Play from a tree you compiled yourself asks for explicit `--development` consent (or the Settings confirmation dialog). That records DevelopmentUnrestricted in owner-private config. It never claims OfficialVerified, and it still verifies the Roblox package.
+Packages built by GitHub Actions — the AppImage, the Flatpak, and the `.deb`/`.rpm` from the signed repository — are treated as a verified Tipsy release. A **local build of any medium is not**: `build-appdir.sh`, `build-deb.sh`, `build-rpm.sh`, `build-flatpak.sh` and `install-desktop.sh` all default to a `development-unrestricted` marker, and only the publish workflow passes `--mode official`. The first `tipsy launch` / GUI Play from something you built yourself asks for explicit `--development` consent (or the Settings confirmation dialog). That records DevelopmentUnrestricted in owner-private config. It never claims OfficialVerified, and it still verifies the Roblox package.
 
 ---
 
@@ -324,7 +333,7 @@ flowchart TB
 
 **Call stack, in order, on a normal Play:**
 
-1. **Authority** — official AppImage, or explicit development consent for a source build.
+1. **Authority** — GitHub-built AppImage, Flatpak, or repository package, or explicit development consent for a local build.
 2. **Generation** — a previously verified extract; `tipsy setup` creates it.
 3. **X11** — map the window (optional start-fullscreen) before any guest code runs.
 4. **Graphics** — EGL-on-X11, or Vulkan Auto when the complete WSI path exists.
@@ -412,7 +421,7 @@ That also registers `roblox` / `roblox-player` URI handling on the Play desktop 
 
 ### 5. First launch from a source tree
 
-A GitHub AppImage can present as an official Tipsy release. A tree you just compiled cannot. Consent is explicit and sticky:
+A GitHub-built AppImage, Flatpak, or repository package can present as an official Tipsy release. Anything you built yourself cannot. Consent is explicit and sticky:
 
 ```sh
 # Settings / wizard (GUI will prompt once)

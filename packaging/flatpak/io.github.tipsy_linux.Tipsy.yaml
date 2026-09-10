@@ -18,6 +18,12 @@ finish-args:
   - --device=dri
   - --filesystem=xdg-data/tipsy:create
   - --filesystem=xdg-config/tipsy:create
+  # Desktop launcher ownership (Settings > Desktop integration, `tipsy desktop`):
+  # see whether a user-level entry from an AppImage shadows this Flatpak's
+  # exported launcher, and remove it on request. Read-only mimeapps.list shows
+  # which install handles roblox:// links. The Flatpak never writes handlers.
+  - --filesystem=xdg-data/applications:create
+  - --filesystem=xdg-config/mimeapps.list:ro
   - --talk-name=org.freedesktop.Notifications
   # No --socket=wayland: Tipsy is X11-first by design.
 modules:
@@ -45,10 +51,10 @@ modules:
         tag: main
     build-commands:
       - mkdir -p /app/bin
-      - go build -ldflags "-buildid= -s -w -X github.com/tipsy-linux/tipsy/internal/version.Version=@VERSION@"
-          -o /app/bin/tipsy ./cmd/tipsy
-      - go build -ldflags "-buildid= -s -w -X github.com/tipsy-linux/tipsy/internal/version.Version=@VERSION@"
-          -o /app/bin/tipsy-gui ./cmd/tipsy-gui
+      - go build -ldflags "-buildid= -s -w -X github.com/tipsy-linux/tipsy/internal/version.Version=@VERSION@
+          -X github.com/tipsy-linux/tipsy/internal/version.Channel=stable" -o /app/bin/tipsy ./cmd/tipsy
+      - go build -ldflags "-buildid= -s -w -X github.com/tipsy-linux/tipsy/internal/version.Version=@VERSION@
+          -X github.com/tipsy-linux/tipsy/internal/version.Channel=stable" -o /app/bin/tipsy-gui ./cmd/tipsy-gui
       # Flatpak only exports icons and desktop files named after the app id.
       - install -Dm0644 tipsy.png /app/share/icons/hicolor/512x512/apps/io.github.tipsy_linux.Tipsy.png
       - install -Dm0644 share/applications/io.github.tipsy_linux.Tipsy.Play.desktop
@@ -60,3 +66,9 @@ modules:
           /app/share/metainfo/io.github.tipsy_linux.Tipsy.metainfo.xml
       - install -Dm0644 LICENSE /app/share/licenses/tipsy/LICENSE
       - install -Dm0644 NOTICE /app/share/licenses/tipsy/NOTICE
+      # Release identity read by internal/app/official.go. build-flatpak.sh
+      # fills @RELEASE_KIND@: development-unrestricted by default, and
+      # release-repository-signed only for --mode official (GitHub Actions).
+      - mkdir -p /app/share/tipsy
+      - printf '%s\n' '{"architecture":"x86_64","format":"tipsy.build-info.v1","medium":"flatpak","name":"Tipsy","releaseKind":"@RELEASE_KIND@","source":{"commit":"'"$(git rev-parse HEAD 2>/dev/null || echo unknown)"'","tree":"clean"},"version":"@VERSION@"}'
+          > /app/share/tipsy/build-info.json

@@ -6,7 +6,11 @@
 # scripts/install-desktop.sh (DESTDIR staging) plus rpmbuild.
 #
 # Usage:
-#   packaging/rpm/build-rpm.sh --version 1.2.3 --output-dir dist
+#   packaging/rpm/build-rpm.sh --version 1.2.3 --output-dir dist [--mode developer|official]
+#
+# --mode official (GitHub Actions only) marks the package release-repository-signed
+# so a root-owned install from the GPG-signed repository runs OfficialVerified;
+# the default developer build stays development-unrestricted.
 #
 # Fixed Release 1 keeps the filename deterministic
 # (tipsy-<version>-1.x86_64.rpm). Fedora-style Requires on system Qt/X11/EGL.
@@ -16,10 +20,12 @@ fail() { printf 'build-rpm: %s\n' "$*" >&2; exit 1; }
 
 version=
 output_dir=
+mode=developer
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --version) [[ $# -ge 2 ]] || fail 'missing --version value'; version=$2; shift 2 ;;
     --output-dir) [[ $# -ge 2 ]] || fail 'missing --output-dir value'; output_dir=$2; shift 2 ;;
+    --mode) [[ $# -ge 2 ]] || fail 'missing --mode value'; mode=$2; shift 2 ;;
     -h|--help) sed -n '2,10p' "$0"; exit 0 ;;
     *) fail "unknown argument: $1" ;;
   esac
@@ -28,6 +34,9 @@ done
 [[ "$version" =~ ^[0-9A-Za-z][0-9A-Za-z._+~]*$ && "$version" != *-* ]] || \
   fail 'invalid version (RPM Version must not contain a hyphen; use the upstream tag without v)'
 [[ -n "$output_dir" ]] || fail '--output-dir is required'
+[[ "$mode" == developer || "$mode" == official ]] || fail 'mode must be developer or official'
+release_kind=development-unrestricted
+[[ "$mode" != official ]] || release_kind=release-repository-signed
 command -v rpmbuild >/dev/null 2>&1 || fail 'rpmbuild is missing'
 command -v go >/dev/null 2>&1 || fail 'go is missing'
 
@@ -48,7 +57,7 @@ trap cleanup EXIT HUP INT TERM
 mkdir -p "$work/rpmbuild"/{BUILD,RPMS,SOURCES,SPECS,SRPMS}
 stage="$work/stage"
 mkdir -p "$stage"
-DESTDIR="$stage" PREFIX=/usr VERSION="$version" "$repo/scripts/install-desktop.sh"
+DESTDIR="$stage" PREFIX=/usr VERSION="$version" CHANNEL=stable RELEASE_KIND="$release_kind" MEDIUM=rpm "$repo/scripts/install-desktop.sh"
 
 cat > "$work/rpmbuild/SPECS/tipsy.spec" <<EOF
 # The Go binaries are already stripped (-s -w): no debuginfo subpackage, or
@@ -87,6 +96,8 @@ fi
 /usr/share/applications/io.github.tipsy_linux.Tipsy.Settings.desktop
 /usr/share/icons/hicolor/512x512/apps/tipsy.png
 /usr/share/metainfo/io.github.tipsy_linux.Tipsy.metainfo.xml
+%dir /usr/share/tipsy
+/usr/share/tipsy/build-info.json
 %doc /usr/share/licenses/tipsy/LICENSE
 %doc /usr/share/licenses/tipsy/NOTICE
 
@@ -105,5 +116,6 @@ rpm -qpi "$output_dir/$rpm_name" >/dev/null || fail 'built RPM is unreadable'
 files=$(rpm -qpl "$output_dir/$rpm_name") || fail 'built RPM cannot be listed'
 grep -q '^/usr/bin/tipsy$' <<<"$files" || fail 'rpm is missing /usr/bin/tipsy'
 grep -q '^/usr/bin/tipsy-gui$' <<<"$files" || fail 'rpm is missing /usr/bin/tipsy-gui'
+grep -q '^/usr/share/tipsy/build-info.json$' <<<"$files" || fail 'rpm is missing build-info.json (release identity)'
 
 printf 'RPM: %s\n' "$output_dir/$rpm_name"

@@ -21,3 +21,18 @@ func TestDefaultDevVersion(t *testing.T) {
 		t.Fatalf("default String() = %q, want 0.0.0-dev (override via ldflags)", String())
 	}
 }
+
+func TestUnstampedBuildIsDevelopmentChannel(t *testing.T) {
+	if Channel != ChannelDevelopment || !Development() {
+		t.Fatalf("Channel = %q, Development() = %v; an unstamped build must be dev", Channel, Development())
+	}
+	t.Cleanup(func() { Channel = ChannelDevelopment })
+	Channel = ChannelStable
+	if Development() {
+		t.Fatal("Development() must be false once Channel is stamped stable")
+	}
+	Channel = "nightly"
+	if !Development() {
+		t.Fatal("any channel other than stable is a development build")
+	}
+}

@@ -46,9 +46,11 @@ func DefaultLimits() Limits {
 
 type TrustPolicy struct {
 	Mode AuthorizationMode
-	// ReleaseAuthenticated is set after AppRun identified a GitHub AppImage
-	// payload. It permits the compiled Roblox signer floor to authorize an
-	// official session. The running binary does not re-verify itself.
+	// ReleaseAuthenticated is set after the app identified a GitHub-built
+	// artifact (AppRun-launched AppImage, Flatpak, or repository package)
+	// through its build-info.json. It permits the compiled Roblox signer
+	// floor to authorize an official session. The running binary does not
+	// re-verify itself.
 	ReleaseAuthenticated     bool
 	PackageName              string
 	AllowedCertificateSHA256 []string
