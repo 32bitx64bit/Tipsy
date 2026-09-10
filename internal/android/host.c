@@ -23,6 +23,7 @@ static void *lib_libz;
 static void *lib_egl;
 static void *lib_gles;
 static pthread_once_t host_abi_once = PTHREAD_ONCE_INIT;
+static pthread_once_t host_egl_once = PTHREAD_ONCE_INIT;
 
 typedef void *EGLDisplay;
 typedef void *EGLConfig;
@@ -133,37 +134,33 @@ void *tipsy_host_dlsym(const char *name)
 	return NULL;
 }
 
-static void ensure_egl(void)
+/* One-time EGL/GLES host library resolution. pthread_once caches both success
+ * and failure, so a missing host EGL is not retried from every engine swap. */
+static _Atomic int egl_init_calls;
+
+static void open_egl_libraries(void)
 {
+	atomic_fetch_add_explicit(&egl_init_calls, 1, memory_order_relaxed);
+	lib_egl = open_lib("libEGL.so.1");
 	if (lib_egl == NULL) {
-		lib_egl = open_lib("libEGL.so.1");
-		if (lib_egl == NULL) {
-			lib_egl = open_lib("libEGL.so");
-		}
+		lib_egl = open_lib("libEGL.so");
 	}
+	lib_gles = open_lib("libGLESv2.so.2");
 	if (lib_gles == NULL) {
-		lib_gles = open_lib("libGLESv2.so.2");
-		if (lib_gles == NULL) {
-			lib_gles = open_lib("libGLESv2.so");
-		}
+		lib_gles = open_lib("libGLESv2.so");
 	}
 	if (lib_egl != NULL) {
-		if (host_eglCreateWindowSurface == NULL) {
-			host_eglCreateWindowSurface = (egl_create_window_surface_fn)dlsym(lib_egl, "eglCreateWindowSurface");
-		}
-		if (host_eglGetProcAddress == NULL) {
-			host_eglGetProcAddress = (egl_get_proc_address_fn)dlsym(lib_egl, "eglGetProcAddress");
-		}
-		if (host_eglSwapInterval == NULL) {
-			host_eglSwapInterval = (egl_swap_interval_fn)dlsym(lib_egl, "eglSwapInterval");
-		}
-		if (host_eglSwapBuffers == NULL) {
-			host_eglSwapBuffers = (egl_swap_buffers_fn)dlsym(lib_egl, "eglSwapBuffers");
-		}
-		if (host_eglGetError == NULL) {
-			host_eglGetError = (egl_get_error_fn)dlsym(lib_egl, "eglGetError");
-		}
+		host_eglCreateWindowSurface = (egl_create_window_surface_fn)dlsym(lib_egl, "eglCreateWindowSurface");
+		host_eglGetProcAddress = (egl_get_proc_address_fn)dlsym(lib_egl, "eglGetProcAddress");
+		host_eglSwapInterval = (egl_swap_interval_fn)dlsym(lib_egl, "eglSwapInterval");
+		host_eglSwapBuffers = (egl_swap_buffers_fn)dlsym(lib_egl, "eglSwapBuffers");
+		host_eglGetError = (egl_get_error_fn)dlsym(lib_egl, "eglGetError");
 	}
+}
+
+static void ensure_egl(void)
+{
+	pthread_once(&host_egl_once, open_egl_libraries);
 }
 
 static void tipsy_egl_record_successful_swap(uint64_t now_ns)
@@ -383,6 +380,11 @@ int tipsy_test_egl_proc_is_wrapped(const char *name)
 	return 0;
 }
 
+int tipsy_test_egl_init_calls(void)
+{
+	return atomic_load_explicit(&egl_init_calls, memory_order_relaxed);
+}
+
 void *tipsy_egl_dlsym(const char *name)
 {
 	void *p;
@@ -474,6 +476,8 @@ int tipsy_test_egl_swap_interval_policy(int vsync, int requested,
 	egl_get_error_fn saved_error;
 	EGLBoolean result;
 
+	/* Complete one-time host resolution before injecting the test doubles. */
+	ensure_egl();
 	t.policy_result = policy_result;
 	t.policy_error = policy_error;
 	t.client_result = client_result;

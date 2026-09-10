@@ -27,11 +27,21 @@ var (
 	registry   = map[string]*registeredMod{}
 	handleByH  = map[unsafe.Pointer]*registeredMod{}
 	globalMods []*registeredMod
-	dlErr      string
+
+	dlErrMu sync.Mutex
+	dlErr   string
 )
 
 func setDLError(msg string) {
+	dlErrMu.Lock()
 	dlErr = msg
+	dlErrMu.Unlock()
+}
+
+func getDLError() string {
+	dlErrMu.Lock()
+	defer dlErrMu.Unlock()
+	return dlErr
 }
 
 // Register adds a soname → lookup function used by libdl.so dlopen/dlsym.
@@ -43,6 +53,7 @@ func Register(soname string, lookup LookupFunc) {
 	soname = pathBase(soname)
 	regMu.Lock()
 	defer regMu.Unlock()
+	invalidateSymbolCache()
 	if existing, ok := registry[soname]; ok {
 		existing.lookup = lookup
 		return
@@ -79,6 +90,17 @@ func UnregisterImage(loadBias uintptr) {
 
 func dlIterateCount() int {
 	return int(C.tipsy_dl_iterate_count())
+}
+
+func testImageGeneration() uint64 {
+	return uint64(C.tipsy_image_generation())
+}
+
+func testImageCodeRange(addr uintptr) (start, end uintptr, moduleClass int) {
+	var cStart, cEnd C.uintptr_t
+	var gen C.uint64_t
+	moduleClass = int(C.tipsy_image_code_range(C.uintptr_t(addr), &cStart, &cEnd, &gen))
+	return uintptr(cStart), uintptr(cEnd), moduleClass
 }
 
 func pathBase(s string) string {

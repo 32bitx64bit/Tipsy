@@ -293,20 +293,37 @@ func GoAndroid_dlclose(handle unsafe.Pointer) C.int {
 	return 0
 }
 
-var dlerrorC *C.char
-
+// GoAndroid_dlerror returns a fresh C string owned by the caller, or NULL when
+// no error is pending. The C shim caches one pointer per OS thread and frees it
+// exactly once on the next call, so no Go-side cache can be raced.
+//
 //export GoAndroid_dlerror
 func GoAndroid_dlerror() *C.char {
-	regMu.Lock()
-	msg := dlErr
-	regMu.Unlock()
-	if dlerrorC != nil {
-		C.free(unsafe.Pointer(dlerrorC))
-		dlerrorC = nil
-	}
+	msg := getDLError()
 	if msg == "" {
 		return nil
 	}
-	dlerrorC = C.CString(msg)
-	return dlerrorC
+	return C.CString(msg)
+}
+
+// testDlErrorC reads the message through the C shim, whose per-thread buffer
+// stays owned by C.
+func testDlErrorC() string {
+	p := C.tipsy_dlerror()
+	if p == nil {
+		return ""
+	}
+	return C.GoString(p)
+}
+
+// testGoDlErrorAndFree exercises the direct Go export and frees the fresh
+// C string exactly once, as an embedding caller would.
+func testGoDlErrorAndFree() string {
+	p := GoAndroid_dlerror()
+	if p == nil {
+		return ""
+	}
+	s := C.GoString(p)
+	C.free(unsafe.Pointer(p))
+	return s
 }

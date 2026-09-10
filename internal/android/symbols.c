@@ -483,13 +483,3 @@ void *tipsy_android_lookup(const char *lib, const char *name)
 	}
 	return NULL;
 }
-
-void *tipsy_media_generic_err(void)
-{
-	return (void *)tipsy_media_stub_err;
-}
-
-void *tipsy_media_generic_null(void)
-{
-	return (void *)tipsy_media_stub_null;
-}

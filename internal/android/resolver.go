@@ -19,6 +19,7 @@ import (
 	"path"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 	"unsafe"
 
@@ -58,7 +59,31 @@ type provider struct {
 	apkPath   string
 	width     int32
 	height    int32
+
+	cache    map[lookupCacheKey]lookupCacheEntry
+	cacheGen uint64
 }
+
+type lookupCacheKey struct {
+	lib string
+	sym string
+}
+
+type lookupCacheEntry struct {
+	addr uintptr
+	err  error
+}
+
+// symbolCacheEpoch invalidates every provider cache when dynamic inputs change:
+// modules registered with Register, or the bionic sync diagnostics toggle that
+// switches libc imports between host symbols and wrappers.
+var symbolCacheEpoch atomic.Uint64
+
+func invalidateSymbolCache() {
+	symbolCacheEpoch.Add(1)
+}
+
+const maxProviderCacheEntries = 1 << 16
 
 var defaultProvider = &provider{width: 1920, height: 1080}
 
@@ -149,6 +174,10 @@ func testEGLProcIsWrapped(name string) bool {
 	cName := C.CString(name)
 	defer C.free(unsafe.Pointer(cName))
 	return C.tipsy_test_egl_proc_is_wrapped(cName) != 0
+}
+
+func testEGLInitCalls() int {
+	return int(C.tipsy_test_egl_init_calls())
 }
 
 func eglVSyncEnabled() bool {
@@ -308,6 +337,10 @@ func missingSymbol(name string) error {
 }
 
 // Lookup implements Resolver. lib is a DT_NEEDED soname or "".
+//
+// Results are cached per provider. A cgo round trip plus up to ten fallback
+// probes dominated relocation-time lookups; the cache is dropped whenever the
+// registry or diagnostics toggle changes what Lookup can return.
 func (p *provider) Lookup(lib, sym string) (uintptr, error) {
 	if p == nil {
 		p = defaultProvider
@@ -317,6 +350,33 @@ func (p *provider) Lookup(lib, sym string) (uintptr, error) {
 	}
 	lib = soname(lib)
 
+	gen := symbolCacheEpoch.Load()
+	key := lookupCacheKey{lib: lib, sym: sym}
+	p.mu.Lock()
+	if p.cacheGen != gen {
+		p.cache = make(map[lookupCacheKey]lookupCacheEntry, 64)
+		p.cacheGen = gen
+	}
+	if entry, ok := p.cache[key]; ok {
+		p.mu.Unlock()
+		return entry.addr, entry.err
+	}
+	p.mu.Unlock()
+
+	addr, err := p.lookupUncached(lib, sym)
+
+	p.mu.Lock()
+	if p.cacheGen == gen && len(p.cache) < maxProviderCacheEntries {
+		if p.cache == nil {
+			p.cache = make(map[lookupCacheKey]lookupCacheEntry, 64)
+		}
+		p.cache[key] = lookupCacheEntry{addr: addr, err: err}
+	}
+	p.mu.Unlock()
+	return addr, err
+}
+
+func (p *provider) lookupUncached(lib, sym string) (uintptr, error) {
 	switch lib {
 	case "libc.so", "libm.so", "libz.so":
 		return lookupLibc(lib, sym)

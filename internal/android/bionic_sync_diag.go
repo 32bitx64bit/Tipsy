@@ -105,6 +105,7 @@ func SetBionicSyncDiagnostics(enabled bool) {
 		v = 1
 	}
 	C.tipsy_bionic_sync_set_enabled(v)
+	invalidateSymbolCache()
 }
 
 func bionicSyncPath(raw C.TipsyBionicSyncPathStats) BionicSyncPathStats {

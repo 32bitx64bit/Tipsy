@@ -17,7 +17,6 @@ extern "C" {
 #define TIPSY_AMGR_MAGIC 0x5459414D47520001ull
 #define TIPSY_ACFG_MAGIC 0x5459414346470001ull
 #define TIPSY_ALOOPER_MAGIC 0x54594C4F4F500001ull
-#define TIPSY_DLHANDLE_MAGIC 0x5459444C484E0001ull
 
 #define ALOOPER_POLL_WAKE (-1)
 #define ALOOPER_POLL_CALLBACK (-2)
@@ -159,6 +158,7 @@ void tipsy_egl_reset_swap_stats(void);
 void tipsy_test_egl_record_swap(uint64_t now_ns);
 void tipsy_test_egl_note_successful_swap(void);
 int tipsy_test_egl_proc_is_wrapped(const char *name);
+int tipsy_test_egl_init_calls(void);
 int tipsy_test_egl_swap_interval_policy(int vsync, int requested,
 										int policy_result, int policy_error,
 										int client_result, int client_error,
@@ -310,9 +310,6 @@ void *tipsy_dlsym(void *handle, const char *symbol);
 int tipsy_dlclose(void *handle);
 char *tipsy_dlerror(void);
 void *tipsy_dlhandle_new(const char *soname);
-const char *tipsy_dlhandle_soname(void *handle);
-int tipsy_dlhandle_valid(void *handle);
-void tipsy_dlhandle_free(void *handle);
 void tipsy_register_image(uintptr_t load_bias, const char *name);
 void tipsy_unregister_image(uintptr_t load_bias);
 uint64_t tipsy_image_generation(void);

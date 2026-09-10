@@ -13,17 +13,21 @@
 #include <string.h>
 #include <pthread.h>
 #include <stdatomic.h>
+#include <sys/uio.h>
+#include <unistd.h>
 
 extern void *GoAndroid_dlopen(char *filename, int flags);
 extern void *GoAndroid_dlsym(void *handle, char *symbol);
 extern int GoAndroid_dlclose(void *handle);
 extern char *GoAndroid_dlerror(void);
 
-typedef struct DLHandle {
-	uint64_t magic;
-	char *soname;
-	int refs;
-} DLHandle;
+/* Opaque dlopen token. Identity lives in the Go registry, so this allocation
+ * only guarantees a unique non-NULL handle; nothing dereferences it in C. */
+void *tipsy_dlhandle_new(const char *soname)
+{
+	(void)soname;
+	return malloc(1);
+}
 
 void *tipsy_dlopen(const char *filename, int flags)
 {
@@ -40,9 +44,23 @@ int tipsy_dlclose(void *handle)
 	return GoAndroid_dlclose(handle);
 }
 
+/* dlerror is thread-local by contract. GoAndroid_dlerror always hands back a
+ * freshly allocated string; cache it per OS thread and free the previous one
+ * exactly once here. */
+static __thread char *tls_dlerror;
+
 char *tipsy_dlerror(void)
 {
-	return GoAndroid_dlerror();
+	char *msg = GoAndroid_dlerror();
+
+	if (tls_dlerror != NULL) {
+		free(tls_dlerror);
+		tls_dlerror = NULL;
+	}
+	if (msg != NULL) {
+		tls_dlerror = msg;
+	}
+	return tls_dlerror;
 }
 
 int tipsy_dladdr(const void *addr, Dl_info *info)
@@ -73,12 +91,31 @@ static int g_nimages;
 static pthread_mutex_t g_image_mu = PTHREAD_MUTEX_INITIALIZER;
 static _Atomic uint64_t g_image_generation = 1;
 
+/* Copy guest bytes without faulting: process_vm_readv reports EFAULT for an
+ * unmapped, PROT_NONE, or otherwise unreadable range instead of raising
+ * SIGSEGV, so a malformed e_phoff/e_phnum cannot crash the process. A short
+ * copy counts as failure. */
+static int tipsy_read_guest(const void *src, size_t len, void *dst)
+{
+	struct iovec local, remote;
+
+	if (len == 0) {
+		return 1;
+	}
+	local.iov_base = dst;
+	local.iov_len = len;
+	remote.iov_base = (void *)src;
+	remote.iov_len = len;
+	return process_vm_readv(getpid(), &local, 1, &remote, 1, 0) == (ssize_t)len;
+}
+
 void tipsy_register_image(uintptr_t load_bias, const char *name)
 {
 	const Elf64_Ehdr *eh = (const Elf64_Ehdr *)load_bias;
-	const Elf64_Phdr *ph;
+	Elf64_Phdr *phdr = NULL;
 	const char *base;
 	struct tipsy_image image = {0};
+	uint64_t phdr_bytes;
 	int i;
 	size_t p;
 
@@ -90,8 +127,23 @@ void tipsy_register_image(uintptr_t load_bias, const char *name)
 	 * guest memory, and must not mistake gaps/data for a caller module. */
 	if (memcmp(eh->e_ident, ELFMAG, SELFMAG) != 0 ||
 	    eh->e_ident[EI_CLASS] != ELFCLASS64 || eh->e_ident[EI_DATA] != ELFDATA2LSB ||
-	    eh->e_phentsize != sizeof(Elf64_Phdr) || eh->e_phoff > UINTPTR_MAX - load_bias) {
+	    eh->e_phentsize != sizeof(Elf64_Phdr)) {
 		return;
+	}
+	if (eh->e_phnum != 0) {
+		phdr_bytes = (uint64_t)eh->e_phnum * sizeof(Elf64_Phdr);
+		if (eh->e_phoff > UINTPTR_MAX - load_bias || phdr_bytes > SIZE_MAX) {
+			return;
+		}
+		phdr = malloc((size_t)phdr_bytes);
+		if (phdr == NULL ||
+		    !tipsy_read_guest((const void *)(load_bias + (uintptr_t)eh->e_phoff),
+				      (size_t)phdr_bytes, phdr)) {
+			/* Unreadable program headers would also fault later unwind
+			 * callbacks through dlpi_phdr, so reject the image. */
+			free(phdr);
+			return;
+		}
 	}
 	image.addr = load_bias;
 	if (name != NULL) {
@@ -104,20 +156,21 @@ void tipsy_register_image(uintptr_t load_bias, const char *name)
 	if (eh->e_phnum != 0) {
 		image.code = calloc(eh->e_phnum, sizeof(*image.code));
 	}
-	ph = (const Elf64_Phdr *)(load_bias + eh->e_phoff);
-	/* Diagnostic allocation failure must not prevent unwind registration. */
+	/* image.code is diagnostic only: an allocation failure still registers
+	 * the image for unwind. */
 	for (p = 0; image.code != NULL && p < eh->e_phnum; p++) {
 		uintptr_t start;
-		if (ph[p].p_type != PT_LOAD || !(ph[p].p_flags & PF_X) || ph[p].p_memsz == 0 ||
-		    ph[p].p_vaddr > UINTPTR_MAX - load_bias) {
+		if (phdr[p].p_type != PT_LOAD || !(phdr[p].p_flags & PF_X) || phdr[p].p_memsz == 0 ||
+		    phdr[p].p_vaddr > UINTPTR_MAX - load_bias) {
 			continue;
 		}
-		start = load_bias + ph[p].p_vaddr;
-		if (ph[p].p_memsz > UINTPTR_MAX - start) {
+		start = load_bias + phdr[p].p_vaddr;
+		if (phdr[p].p_memsz > UINTPTR_MAX - start) {
 			continue;
 		}
-		image.code[image.ncode++] = (struct tipsy_code_range){start, start + ph[p].p_memsz};
+		image.code[image.ncode++] = (struct tipsy_code_range){start, start + phdr[p].p_memsz};
 	}
+	free(phdr);
 	pthread_mutex_lock(&g_image_mu);
 	for (i = 0; i < g_nimages; i++) {
 		if (g_images[i].addr == load_bias) {
@@ -241,42 +294,3 @@ int tipsy_dl_iterate_count(void)
 	return n;
 }
 
-void *tipsy_dlhandle_new(const char *soname)
-{
-	DLHandle *h = calloc(1, sizeof(*h));
-	if (h == NULL) {
-		return NULL;
-	}
-	h->magic = TIPSY_DLHANDLE_MAGIC;
-	h->refs = 1;
-	if (soname != NULL) {
-		h->soname = strdup(soname);
-	}
-	return h;
-}
-
-const char *tipsy_dlhandle_soname(void *handle)
-{
-	DLHandle *h = (DLHandle *)handle;
-	if (h == NULL || h->magic != TIPSY_DLHANDLE_MAGIC) {
-		return NULL;
-	}
-	return h->soname;
-}
-
-int tipsy_dlhandle_valid(void *handle)
-{
-	DLHandle *h = (DLHandle *)handle;
-	return h != NULL && h->magic == TIPSY_DLHANDLE_MAGIC;
-}
-
-void tipsy_dlhandle_free(void *handle)
-{
-	DLHandle *h = (DLHandle *)handle;
-	if (h == NULL || h->magic != TIPSY_DLHANDLE_MAGIC) {
-		return;
-	}
-	free(h->soname);
-	h->magic = 0;
-	free(h);
-}

@@ -9,6 +9,7 @@ import (
 	"bytes"
 	"log/slog"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -482,4 +483,58 @@ func TestDlIteratePhdr(t *testing.T) {
 	if n < 1 {
 		t.Fatalf("dl_iterate_phdr visited %d objects, want host libc at least", n)
 	}
+}
+
+func TestProviderFreshCacheLookup(t *testing.T) {
+	p := &provider{}
+	for i := 0; i < 2; i++ {
+		addr, err := p.Lookup("libc.so", "memcpy")
+		if err != nil || addr == 0 {
+			t.Fatalf("fresh provider Lookup #%d = %#x, %v", i, addr, err)
+		}
+	}
+}
+
+func TestProviderCacheInvalidatedByRegister(t *testing.T) {
+	r := Provider()
+	if _, err := r.Lookup("libcacheprobe.so", "probe_sym"); err == nil {
+		t.Fatal("libcacheprobe.so unexpectedly resolvable before registration")
+	}
+	Register("libcacheprobe.so", func(sym string) (uintptr, error) {
+		if sym == "probe_sym" {
+			return 0xcafe, nil
+		}
+		return 0, errMissing
+	})
+	got, err := r.Lookup("libcacheprobe.so", "probe_sym")
+	if err != nil || got != 0xcafe {
+		t.Fatalf("Lookup after Register = %#x, %v; cached miss was not invalidated", got, err)
+	}
+}
+
+func TestProviderLookupConcurrent(t *testing.T) {
+	r := Provider()
+	var wg sync.WaitGroup
+	for w := 0; w < 8; w++ {
+		wg.Add(1)
+		go func(w int) {
+			defer wg.Done()
+			for i := 0; i < 200; i++ {
+				switch w % 4 {
+				case 0:
+					if p, err := r.Lookup("libc.so", "memcpy"); err != nil || p == 0 {
+						t.Errorf("concurrent Lookup memcpy = %#x, %v", p, err)
+						return
+					}
+				case 1:
+					_, _ = r.Lookup("libc.so", "no_such_symbol_cache_race")
+				case 2:
+					_, _ = r.Lookup("libEGL.so", "eglSwapBuffers")
+				default:
+					_, _ = r.Lookup("", "no_such_symbol_cache_race")
+				}
+			}
+		}(w)
+	}
+	wg.Wait()
 }

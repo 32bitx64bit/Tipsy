@@ -143,7 +143,3 @@ var libmSymbols = []string{
 	"llround", "llroundf", "lround", "lroundf", "remainderf", "remquof", "erff", "erfcf", "fmal", "finitef",
 	"nan", "nanf",
 }
-
-func init() {
-	_ = libmSymbols
-}
