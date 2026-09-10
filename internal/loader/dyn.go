@@ -187,13 +187,13 @@ func readDynEntries(ef *elf.File) ([]dynEnt, error) {
 	}
 	data := make([]byte, p.Filesz)
 	n, err := p.ReadAt(data, 0)
-	if err != nil && n == 0 {
+	if err != nil {
 		return nil, fmt.Errorf("loader: read PT_DYNAMIC: %w", err)
 	}
 	data = data[:n]
 	const ent = 16
-	if len(data)%ent != 0 && len(data) >= ent {
-		data = data[:len(data)-len(data)%ent]
+	if len(data)%ent != 0 {
+		return nil, fmt.Errorf("loader: PT_DYNAMIC size %d is not a multiple of %d", len(data), ent)
 	}
 	var out []dynEnt
 	for i := 0; i+ent <= len(data); i += ent {

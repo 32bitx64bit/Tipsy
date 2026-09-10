@@ -647,3 +647,8 @@ func buildSynthELF(opt synthOpts) []byte {
 	})
 	return buf
 }
+
+// peek64 is a test-only read alias used by the synthetic-module assertions.
+func (m *Module) peek64(vaddr uint64) (uint64, error) {
+	return m.read64(vaddr)
+}

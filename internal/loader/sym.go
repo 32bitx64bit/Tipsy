@@ -28,6 +28,11 @@ type dynSym struct {
 	version symbolVersion
 }
 
+type undefResult struct {
+	value uint64
+	err   error
+}
+
 func (s dynSym) bind() byte { return s.info >> 4 }
 func (s dynSym) typ() byte  { return s.info & 0xf }
 
@@ -40,10 +45,15 @@ func loadDynsym(ef *elf.File, d *dynInfo) ([]dynSym, []byte, error) {
 		return nil, nil, fmt.Errorf("loader: no DT_STRTAB")
 	}
 	strsz := d.strsz
-	if strsz == 0 {
-		strsz = 1 << 20
+	var strtab []byte
+	var err error
+	if strsz != 0 {
+		strtab, err = vaddrFileBytesExact(ef, d.strtab, strsz)
+	} else {
+		// No DT_STRSZ: names are still bounds-checked against the clamped
+		// file bytes below.
+		strtab, err = vaddrFileBytes(ef, d.strtab, 1<<20)
 	}
-	strtab, err := vaddrFileBytes(ef, d.strtab, strsz)
 	if err != nil {
 		return nil, nil, fmt.Errorf("loader: dynstr: %w", err)
 	}
@@ -51,10 +61,19 @@ func loadDynsym(ef *elf.File, d *dynInfo) ([]dynSym, []byte, error) {
 	if err != nil {
 		return nil, nil, err
 	}
-	if d.syment == 0 {
-		d.syment = 24
+	// ELF64 dynsym entries are exactly 24 bytes. Anything else (notably 0,
+	// which previously defaulted) makes the range arithmetic below ambiguous.
+	if d.syment != 24 {
+		return nil, nil, fmt.Errorf("loader: unsupported DT_SYMENT %d (ELF64 requires 24)", d.syment)
 	}
-	raw, err := vaddrFileBytes(ef, d.symtab, d.syment*uint64(nsym))
+	if nsym <= 0 || nsym > 1<<24 {
+		return nil, nil, fmt.Errorf("loader: implausible dynsym count %d", nsym)
+	}
+	size := d.syment * uint64(nsym)
+	if size/d.syment != uint64(nsym) {
+		return nil, nil, fmt.Errorf("loader: dynsym size overflow (%d x %d)", d.syment, nsym)
+	}
+	raw, err := vaddrFileBytesExact(ef, d.symtab, size)
 	if err != nil {
 		return nil, nil, fmt.Errorf("loader: dynsym: %w", err)
 	}
@@ -156,8 +175,32 @@ func gnuHashCount(ef *elf.File, vaddr uint64) (int, error) {
 	return int(maxIdx + 1), nil
 }
 
+// buildSymbolIndex records, per exported name, the dynsym indices that could
+// satisfy lookupDef, in ascending index order. Version hiding is checked at
+// lookup time because versions are attached after loadDynsym.
+func buildSymbolIndex(syms []dynSym) map[string][]int32 {
+	index := make(map[string][]int32)
+	for i := 1; i < len(syms); i++ {
+		s := syms[i]
+		if s.name == "" || !s.defined() || s.bind() == stbLocal {
+			continue
+		}
+		index[s.name] = append(index[s.name], int32(i))
+	}
+	return index
+}
+
 func (m *Module) lookupDef(name string) (dynSym, bool) {
 	if name == "" {
+		return dynSym{}, false
+	}
+	if m.symIndex != nil {
+		for _, i := range m.symIndex[name] {
+			s := m.syms[i]
+			if !s.version.hidden {
+				return s, true
+			}
+		}
 		return dynSym{}, false
 	}
 	for i, s := range m.syms {
@@ -191,7 +234,30 @@ func (m *Module) symbolValue(idx uint32) (uint64, error) {
 		a, err := m.symbolAddr(s)
 		return uint64(a), err
 	}
-	return m.resolveUndef(s)
+	return m.resolveUndefIndexed(idx, s)
+}
+
+// resolveUndefIndexed memoizes resolveUndef per undefined dynsym index, so a
+// symbol referenced by many relocations resolves once. Resolution is a pure
+// function of already-loaded modules; the lock is never held across resolver
+// callbacks to avoid re-entrant deadlock.
+func (m *Module) resolveUndefIndexed(idx uint32, s dynSym) (uint64, error) {
+	m.undefMu.Lock()
+	if r, ok := m.resolved[idx]; ok {
+		m.undefMu.Unlock()
+		return r.value, r.err
+	}
+	m.undefMu.Unlock()
+
+	value, err := m.resolveUndef(s)
+
+	m.undefMu.Lock()
+	if m.resolved == nil {
+		m.resolved = make(map[uint32]undefResult)
+	}
+	m.resolved[idx] = undefResult{value: value, err: err}
+	m.undefMu.Unlock()
+	return value, err
 }
 
 func (m *Module) resolveUndef(s dynSym) (uint64, error) {
@@ -221,11 +287,18 @@ func (m *Module) resolveUndef(s dynSym) (uint64, error) {
 }
 
 func (m *Module) lookupLoaded(name string) (uintptr, bool) {
+	// A dependency DAG can be re-entered through diamonds; each module only
+	// needs to be searched once per lookup.
+	visited := make(map[*Module]struct{})
 	var walk func(mod *Module, depth int) (uintptr, bool)
 	walk = func(mod *Module, depth int) (uintptr, bool) {
 		if mod == nil || depth > 64 {
 			return 0, false
 		}
+		if _, seen := visited[mod]; seen {
+			return 0, false
+		}
+		visited[mod] = struct{}{}
 		if s, ok := mod.lookupDef(name); ok {
 			a, err := mod.symbolAddr(s)
 			if err != nil {

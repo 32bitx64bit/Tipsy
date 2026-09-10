@@ -57,6 +57,9 @@ type Module struct {
 
 	dyn           *dynInfo
 	syms          []dynSym
+	symIndex      map[string][]int32
+	undefMu       sync.Mutex
+	resolved      map[uint32]undefResult
 	versions      *versionInfo
 	deps          []*Module
 	soname        string
@@ -249,6 +252,7 @@ func openFile(key, display string, f *os.File, authenticated bool, r Resolver, s
 		syms[i].version = versions.symbols[i]
 	}
 	m.syms = syms
+	m.symIndex = buildSymbolIndex(syms)
 	m.versions = versions
 
 	dir := filepath.Dir(display)
@@ -438,8 +442,4 @@ func (m *Module) Close() error {
 		}
 	}
 	return err
-}
-
-func (m *Module) peek64(vaddr uint64) (uint64, error) {
-	return m.read64(vaddr)
 }

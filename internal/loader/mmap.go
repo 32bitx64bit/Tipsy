@@ -255,6 +255,13 @@ func (m *Module) protectFinal() error {
 		if s.prot&syscall.PROT_WRITE != 0 && s.prot&syscall.PROT_EXEC != 0 {
 			return fmt.Errorf("loader: refusing writable executable final mapping in %s", m.Path)
 		}
+		if s.prot&syscall.PROT_EXEC != 0 {
+			// protectExecutableLoads() already moved executable segments to
+			// their final (non-writable) protection before relocation ran,
+			// and write64 rejects stores into execSpans, so no later write can
+			// land there. Re-mprotecting would repeat the same syscall.
+			continue
+		}
 		addr := m.bias + uintptr(s.vaddr)
 		sz := uintptr(s.memsz)
 		if err := rawMprotect(pageTrunc(addr), pageRound(addr+sz)-pageTrunc(addr), s.prot); err != nil {
@@ -315,6 +322,37 @@ func vaddrFileBytes(ef *elf.File, vaddr, size uint64) ([]byte, error) {
 		return buf, nil
 	}
 	return nil, fmt.Errorf("loader: vaddr 0x%x not in PT_LOAD filesz", vaddr)
+}
+
+// vaddrFileBytesExact is the strict variant: the whole range must lie inside
+// one PT_LOAD's file bytes. Short or cross-segment ranges are errors rather
+// than zero-filled buffers, so malformed tables cannot masquerade as data.
+func vaddrFileBytesExact(ef *elf.File, vaddr, size uint64) ([]byte, error) {
+	if size == 0 {
+		return []byte{}, nil
+	}
+	if vaddr > ^uint64(0)-size {
+		return nil, fmt.Errorf("loader: vaddr 0x%x size 0x%x overflows", vaddr, size)
+	}
+	for _, p := range ef.Progs {
+		if p.Type != elf.PT_LOAD || p.Filesz == 0 {
+			continue
+		}
+		if vaddr < p.Vaddr {
+			continue
+		}
+		end := p.Vaddr + p.Filesz
+		if end < p.Vaddr || vaddr+size > end {
+			continue
+		}
+		buf := make([]byte, size)
+		sr := io.NewSectionReader(p.ReaderAt, int64(vaddr-p.Vaddr), int64(size))
+		if _, err := io.ReadFull(sr, buf); err != nil {
+			return nil, err
+		}
+		return buf, nil
+	}
+	return nil, fmt.Errorf("loader: vaddr 0x%x size 0x%x not fully in PT_LOAD filesz", vaddr, size)
 }
 
 type vaddrSpan struct {
