@@ -9,6 +9,16 @@ package android
 #cgo LDFLAGS: -lX11 -lX11-xcb -lxcb -ldl -pthread
 #include "android_bridge.h"
 #include <stdlib.h>
+
+uint32_t tipsy_vk_present_call_durations(uint64_t after, uint64_t *out_ns,
+	uint32_t capacity, uint64_t *out_cursor, uint64_t *out_overwritten);
+void tipsy_test_vk_note_present_result_duration(int32_t result, uint64_t now_ns, uint64_t duration_ns);
+int tipsy_test_vk_observe_device_create(const char **names, uint32_t n);
+void tipsy_test_vk_note_pacing_query(const char *name);
+void tipsy_test_vk_pacing_query_counts(uint64_t *out);
+int tipsy_test_vk_pacing_query_logged(void);
+void *tipsy_test_vk_host_loader_symbol(const char *name);
+void *tipsy_test_vk_resolve_create_swapchain(void);
 */
 import "C"
 
@@ -16,6 +26,9 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"os"
+	"sort"
+	"strings"
 	"sync"
 	"time"
 	"unsafe"
@@ -113,16 +126,23 @@ func resetVulkanPresentStats() {
 	resetPresentRateWindow()
 }
 
-// presentStatsLoggerEnabled is true when graphics Info will emit, which is
-// the same gate as launch.go's 2s present-stats ticker.
+// presentStatsLoggerEnabled reports whether the present-stats consumer will
+// actually run. launch.go's logPresentStats is called only under TIPSY_DIAG=1
+// and the record is dropped unless the graphics Info logger emits, so both
+// gates must hold before either backend pays per-present bookkeeping. EGL
+// (resolver.go SetEGLVSync) and Vulkan (BindVulkanWSI) share this gate.
 func presentStatsLoggerEnabled() bool {
+	if os.Getenv("TIPSY_DIAG") != "1" {
+		return false
+	}
 	return logging.Logger(logging.CatGraphics).Enabled(context.Background(), slog.LevelInfo)
 }
 
 // SetVulkanPresentStats enables or disables vkQueuePresentKHR success
 // counters. Both EGL and Vulkan default off: a successful present is a host
 // call plus one relaxed enable load. BindVulkanWSI and SetEGLVSync turn the
-// matching backend on only when the graphics Info logger will emit.
+// matching backend on only when the real TIPSY_DIAG=1 present-stats consumer
+// and the graphics Info logger are both active.
 func SetVulkanPresentStats(enabled bool) {
 	v := C.int(0)
 	if enabled {
@@ -138,8 +158,9 @@ func VulkanPresentStatsEnabled() bool {
 }
 
 // SetEGLPresentStats enables or disables eglSwapBuffers clock+counter
-// bookkeeping. Default off; SetEGLVSync enables it when the 2s Info logger
-// will emit. When off, swap is a host call plus one relaxed enable load.
+// bookkeeping. Default off; SetEGLVSync enables it only when the real
+// TIPSY_DIAG=1 present-stats consumer and the graphics Info logger are both
+// active. When off, swap is a host call plus one relaxed enable load.
 func SetEGLPresentStats(enabled bool) {
 	v := C.int(0)
 	if enabled {
@@ -247,6 +268,105 @@ func VulkanPresentTimingSnapshot(after uint64) VulkanPresentTimingBatch {
 		}
 	}
 	return batch
+}
+
+// VulkanPresentCallDurationStatistics summarizes retained host-call duration
+// samples. P50NS/P99NS are nearest-rank over the samples returned by one
+// snapshot call; MaxNS is their maximum. Nothing is recorded unless the
+// TIPSY_PRESENT_TIMING epoch is enabled.
+type VulkanPresentCallDurationStatistics struct {
+	Count       uint64
+	Overwritten uint64
+	P50NS       uint64
+	P99NS       uint64
+	MaxNS       uint64
+}
+
+// VulkanPresentCallDurations copies retained vkQueuePresentKHR host-call
+// duration samples newer than the supplied cursor and returns nearest-rank
+// p50/p99/max plus the next cursor. Samples exist only while the
+// TIPSY_PRESENT_TIMING epoch is enabled; the default path never clocks,
+// locks, or writes here. Overwritten counts samples lost before the oldest
+// retained one.
+func VulkanPresentCallDurations(after uint64) (VulkanPresentCallDurationStatistics, uint64) {
+	var raw [VulkanPresentTimingCapacity]C.uint64_t
+	var cursor, overwritten C.uint64_t
+	n := int(C.tipsy_vk_present_call_durations(C.uint64_t(after), &raw[0],
+		C.uint32_t(len(raw)), &cursor, &overwritten))
+	stats := VulkanPresentCallDurationStatistics{Overwritten: uint64(overwritten)}
+	next := uint64(cursor)
+	if n == 0 {
+		return stats, next
+	}
+	samples := make([]uint64, n)
+	for i := range samples {
+		samples[i] = uint64(raw[i])
+	}
+	sort.Slice(samples, func(i, j int) bool { return samples[i] < samples[j] })
+	stats.Count = uint64(n)
+	stats.P50NS = durationPercentile(samples, 50)
+	stats.P99NS = durationPercentile(samples, 99)
+	stats.MaxNS = samples[n-1]
+	return stats, next
+}
+
+// durationPercentile is the nearest-rank percentile over an ascending slice.
+func durationPercentile(sorted []uint64, p int) uint64 {
+	if len(sorted) == 0 {
+		return 0
+	}
+	index := (p*len(sorted)+99)/100 - 1
+	if index < 0 {
+		index = 0
+	}
+	return sorted[index]
+}
+
+// GoAndroid_LogVulkanDevice is the one-time E1 observation bridge. names/n
+// describe the client's enabled device extensions at the first
+// vkCreateDevice; host booleans come from one read-only host device extension
+// enumeration. content-free: only API names and booleans.
+//
+//export GoAndroid_LogVulkanDevice
+func GoAndroid_LogVulkanDevice(names **C.char, n C.uint32_t, hostPresentWait, hostPresentWait2, hostPresentID, hostPresentID2, hostPresentTiming, hostSupportProbed C.int) {
+	extensions := ""
+	truncated := false
+	if names != nil && n > 0 {
+		count := int(n)
+		if count > 256 {
+			count = 256
+			truncated = true
+		}
+		ext := make([]string, 0, count)
+		for _, p := range unsafe.Slice(names, count) {
+			if p != nil {
+				ext = append(ext, C.GoString(p))
+			}
+		}
+		extensions = strings.Join(ext, ",")
+	}
+	logging.Logger(logging.CatGraphics).Info("Android Vulkan device created",
+		"extensions", extensions,
+		"extensions_truncated", truncated,
+		"host_present_wait", hostPresentWait != 0,
+		"host_present_wait2", hostPresentWait2 != 0,
+		"host_present_id", hostPresentID != 0,
+		"host_present_id2", hostPresentID2 != 0,
+		"host_present_timing", hostPresentTiming != 0,
+		"host_support_probed", hostSupportProbed != 0)
+}
+
+// GoAndroid_LogVulkanPacingQueries is the one-time E1 counter report, emitted
+// the first time any vkGetDeviceProcAddr query for a pacing entry point is
+// observed. Counts are content-free.
+//
+//export GoAndroid_LogVulkanPacingQueries
+func GoAndroid_LogVulkanPacingQueries(waitForPresent, waitForPresent2, setPresentTimingQueueSize, getPastPresentationTiming C.uint64_t) {
+	logging.Logger(logging.CatGraphics).Info("Android Vulkan pacing proc queries",
+		"vkWaitForPresentKHR", uint64(waitForPresent),
+		"vkWaitForPresent2KHR", uint64(waitForPresent2),
+		"vkSetSwapchainPresentTimingQueueSizeEXT", uint64(setPresentTimingQueueSize),
+		"vkGetPastPresentationTimingEXT", uint64(getPastPresentationTiming))
 }
 
 func testVulkanProcIsWrapped(name string) bool {
@@ -383,6 +503,54 @@ func vulkanWSIBound() bool {
 
 func testVulkanNotePresentResult(result int32, nowNS uint64) {
 	C.tipsy_test_vk_note_present_result(C.int32_t(result), C.uint64_t(nowNS))
+}
+
+func testVulkanNotePresentResultDuration(result int32, nowNS, durationNS uint64) {
+	C.tipsy_test_vk_note_present_result_duration(C.int32_t(result), C.uint64_t(nowNS), C.uint64_t(durationNS))
+}
+
+func testVulkanObserveDeviceCreate(extensions []string) bool {
+	if len(extensions) == 0 {
+		return C.tipsy_test_vk_observe_device_create(nil, 0) != 0
+	}
+	cNames := make([]*C.char, len(extensions))
+	ptrs := make([]*C.char, len(extensions))
+	for i, name := range extensions {
+		cNames[i] = C.CString(name)
+		ptrs[i] = cNames[i]
+	}
+	defer func() {
+		for _, p := range cNames {
+			C.free(unsafe.Pointer(p))
+		}
+	}()
+	return C.tipsy_test_vk_observe_device_create((**C.char)(unsafe.Pointer(&ptrs[0])), C.uint32_t(len(ptrs))) != 0
+}
+
+func testVulkanNotePacingQuery(name string) {
+	cName := C.CString(name)
+	defer C.free(unsafe.Pointer(cName))
+	C.tipsy_test_vk_note_pacing_query(cName)
+}
+
+func testVulkanPacingQueryCounts() [4]uint64 {
+	var counts [4]C.uint64_t
+	C.tipsy_test_vk_pacing_query_counts(&counts[0])
+	return [4]uint64{uint64(counts[0]), uint64(counts[1]), uint64(counts[2]), uint64(counts[3])}
+}
+
+func testVulkanPacingQueryLogged() bool {
+	return C.tipsy_test_vk_pacing_query_logged() != 0
+}
+
+func testVulkanHostLoaderSymbol(name string) uintptr {
+	cName := C.CString(name)
+	defer C.free(unsafe.Pointer(cName))
+	return uintptr(C.tipsy_test_vk_host_loader_symbol(cName))
+}
+
+func testVulkanResolveCreateSwapchain() uintptr {
+	return uintptr(C.tipsy_test_vk_resolve_create_swapchain())
 }
 
 func testEGLNoteSuccessfulSwap() {

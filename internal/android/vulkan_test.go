@@ -15,6 +15,7 @@ func TestVulkanLoaderLookupsUseCompatibilityWrappers(t *testing.T) {
 	for _, name := range []string{
 		"vkGetInstanceProcAddr",
 		"vkCreateInstance",
+		"vkCreateDevice",
 		"vkCreateAndroidSurfaceKHR",
 		"vkEnumerateInstanceExtensionProperties",
 		"vkGetPhysicalDeviceSurfacePresentModesKHR",
@@ -36,7 +37,7 @@ func TestVulkanLoaderLookupsUseCompatibilityWrappers(t *testing.T) {
 }
 
 func TestVulkanDrawFamilyGIPAIsHostPassthrough(t *testing.T) {
-	for _, name := range []string{"vkCreateDevice", "vkDestroyInstance", "vkEnumeratePhysicalDevices"} {
+	for _, name := range []string{"vkDestroyInstance", "vkEnumeratePhysicalDevices"} {
 		if !testVulkanProcIsHostPassthrough(name) {
 			if _, err := Provider().Lookup("libvulkan.so", name); err != nil {
 				t.Skipf("host Vulkan loader has no %s; passthrough cannot be proven", name)
@@ -185,15 +186,76 @@ func TestVulkanWSIBindRequiresDisplayAndWindow(t *testing.T) {
 	}
 }
 
-func TestVulkanPresentStatsFollowGraphicsInfoLogger(t *testing.T) {
+func TestVulkanPresentStatsFollowTIPSYDIAGConsumer(t *testing.T) {
 	t.Cleanup(func() {
 		SetVulkanPresentStats(false)
 		resetVulkanPresentStats()
 	})
-	SetVulkanPresentStats(!presentStatsLoggerEnabled())
+
+	t.Setenv("TIPSY_DIAG", "")
+	if presentStatsLoggerEnabled() {
+		t.Fatal("present stats gate enabled without TIPSY_DIAG=1")
+	}
 	SetVulkanPresentStats(presentStatsLoggerEnabled())
-	if got, want := VulkanPresentStatsEnabled(), presentStatsLoggerEnabled(); got != want {
-		t.Fatalf("Vulkan present stats enabled=%v, want logger Info gate %v", got, want)
+	if VulkanPresentStatsEnabled() {
+		t.Fatal("present stats enabled with no running consumer")
+	}
+
+	t.Setenv("TIPSY_DIAG", "1")
+	if !presentStatsLoggerEnabled() {
+		t.Skip("graphics Info logger disabled by TIPSY_LOG; TIPSY_DIAG=1 case not observable")
+	}
+	SetVulkanPresentStats(presentStatsLoggerEnabled())
+	if !VulkanPresentStatsEnabled() {
+		t.Fatal("present stats disabled with TIPSY_DIAG=1 and the graphics Info logger active")
+	}
+}
+
+func TestVulkanCreateDeviceIsWrappedReadOnly(t *testing.T) {
+	if !testVulkanProcIsWrapped("vkCreateDevice") {
+		t.Fatal("vkCreateDevice GIPA is not the Tipsy observation wrapper")
+	}
+}
+
+func TestVulkanDeviceCapabilityObservationIsOneTime(t *testing.T) {
+	first := testVulkanObserveDeviceCreate([]string{"VK_KHR_swapchain", "VK_KHR_present_wait"})
+	if !first {
+		t.Fatal("first device-capability observation did not log")
+	}
+	if testVulkanObserveDeviceCreate(nil) {
+		t.Fatal("device-capability observation logged more than once")
+	}
+}
+
+func TestVulkanPacingProcQueryCounts(t *testing.T) {
+	before := testVulkanPacingQueryCounts()
+	testVulkanNotePacingQuery("vkWaitForPresentKHR")
+	testVulkanNotePacingQuery("vkWaitForPresentKHR")
+	testVulkanNotePacingQuery("vkGetPastPresentationTimingEXT")
+	testVulkanNotePacingQuery("vkQueuePresentKHR")
+	after := testVulkanPacingQueryCounts()
+	if after[0] != before[0]+2 || after[3] != before[3]+1 {
+		t.Fatalf("pacing counts before=%v after=%v", before, after)
+	}
+	if after[1] != before[1] || after[2] != before[2] {
+		t.Fatalf("unqueried pacing names moved: before=%v after=%v", before, after)
+	}
+	if !testVulkanPacingQueryLogged() {
+		t.Fatal("pacing query observation never logged")
+	}
+}
+
+func TestVulkanSwapchainResolverPrefersLoaderTrampoline(t *testing.T) {
+	want := testVulkanHostLoaderSymbol("vkCreateSwapchainKHR")
+	if want == 0 {
+		t.Skip("host Vulkan loader not present; loader-preferred resolver cannot be proven")
+	}
+	got := testVulkanResolveCreateSwapchain()
+	if got != want {
+		t.Fatalf("swapchain resolver = %#x want loader %#x", got, want)
+	}
+	if again := testVulkanResolveCreateSwapchain(); again != want {
+		t.Fatalf("swapchain resolver not stable: %#x want %#x", again, want)
 	}
 }
 
@@ -300,6 +362,54 @@ func TestVulkanPresentTimingReportsOverwrittenSamples(t *testing.T) {
 	}
 	if next := VulkanPresentTimingSnapshot(batch.Cursor); len(next.Samples) != 0 || next.Overwritten != 0 {
 		t.Fatalf("overwritten samples repeated on consumed cursor: %+v", next)
+	}
+}
+
+func drainVulkanPresentCallDurations() uint64 {
+	_, cursor := VulkanPresentCallDurations(0)
+	return cursor
+}
+
+func TestVulkanPresentCallDurationsOnlyInTimingEpoch(t *testing.T) {
+	SetVulkanPresentTiming(false)
+	SetVulkanPresentTiming(true)
+	t.Cleanup(func() { SetVulkanPresentTiming(false) })
+	base := drainVulkanPresentCallDurations()
+
+	testVulkanNotePresentResultDuration(0, 1_000_000_000, 100)
+	testVulkanNotePresentResultDuration(0, 1_001_000_000, 300)
+	testVulkanNotePresentResultDuration(0, 1_002_000_000, 200)
+	testVulkanNotePresentResultDuration(-3, 1_003_000_000, 9_999) // failures are not samples
+	stats, next := VulkanPresentCallDurations(base)
+	if stats.Count != 3 || stats.P50NS != 200 || stats.P99NS != 300 || stats.MaxNS != 300 ||
+		stats.Overwritten != 0 {
+		t.Fatalf("duration stats = %+v next=%d", stats, next)
+	}
+	if next != base+3 {
+		t.Fatalf("duration cursor = %d want %d", next, base+3)
+	}
+	SetVulkanPresentTiming(false)
+	testVulkanNotePresentResultDuration(0, 1_004_000_000, 9_999)
+	if again, _ := VulkanPresentCallDurations(next); again.Count != 0 {
+		t.Fatalf("disabled timing epoch recorded durations: %+v", again)
+	}
+}
+
+func TestVulkanPresentCallDurationsOverwriteAccounting(t *testing.T) {
+	SetVulkanPresentTiming(false)
+	SetVulkanPresentTiming(true)
+	t.Cleanup(func() { SetVulkanPresentTiming(false) })
+	base := drainVulkanPresentCallDurations()
+	const excess = 5
+	for i := 0; i < VulkanPresentTimingCapacity+excess; i++ {
+		testVulkanNotePresentResultDuration(0, 1_000+uint64(i), uint64(i)+1)
+	}
+	stats, _ := VulkanPresentCallDurations(base)
+	if stats.Overwritten != excess || stats.Count != VulkanPresentTimingCapacity {
+		t.Fatalf("duration overwrite accounting: %+v", stats)
+	}
+	if stats.MaxNS != uint64(VulkanPresentTimingCapacity+excess) {
+		t.Fatalf("max retained duration = %d, want %d", stats.MaxNS, VulkanPresentTimingCapacity+excess)
 	}
 }
 

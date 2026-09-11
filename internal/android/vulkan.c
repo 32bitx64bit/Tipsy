@@ -24,6 +24,12 @@
 extern void GoAndroid_LogMissing(char *name);
 extern void GoAndroid_LogVulkanPresentMode(int vsync, int requested, int effective,
 	int primaryOK, int primaryError, int fallbackOK, int fallbackError);
+extern void GoAndroid_LogVulkanDevice(char **names, uint32_t n, int host_present_wait,
+	int host_present_wait2, int host_present_id, int host_present_id2,
+	int host_present_timing, int host_support_probed);
+extern void GoAndroid_LogVulkanPacingQueries(uint64_t wait_for_present,
+	uint64_t wait_for_present2, uint64_t set_present_timing_queue_size,
+	uint64_t get_past_presentation_timing);
 
 typedef void *TipsyVkInstance;
 typedef void *TipsyVkPhysicalDevice;
@@ -121,10 +127,29 @@ typedef struct {
 _Static_assert(sizeof(TipsyVkSwapchainCreateInfoKHR) == 104, "VkSwapchainCreateInfoKHR x86-64 ABI");
 _Static_assert(offsetof(TipsyVkSwapchainCreateInfoKHR, presentMode) == 88, "presentMode x86-64 offset");
 
+typedef struct {
+	uint32_t sType;
+	const void *pNext;
+	uint32_t flags;
+	uint32_t queueCreateInfoCount;
+	const void *pQueueCreateInfos;
+	uint32_t enabledLayerCount;
+	const char *const *ppEnabledLayerNames;
+	uint32_t enabledExtensionCount;
+	const char *const *ppEnabledExtensionNames;
+	const void *pEnabledFeatures;
+} TipsyVkDeviceCreateInfo;
+
+_Static_assert(sizeof(TipsyVkDeviceCreateInfo) == 72, "VkDeviceCreateInfo x86-64 ABI");
+_Static_assert(offsetof(TipsyVkDeviceCreateInfo, ppEnabledExtensionNames) == 56,
+	"ppEnabledExtensionNames x86-64 offset");
+
 typedef void *(*tipsy_vkGIPA_fn)(TipsyVkInstance, const char *);
 typedef void *(*tipsy_vkGDPA_fn)(TipsyVkDevice, const char *);
 typedef TipsyVkResult (*tipsy_vkCreateInstance_fn)(const TipsyVkInstanceCreateInfo *, const void *, TipsyVkInstance *);
+typedef TipsyVkResult (*tipsy_vkCreateDevice_fn)(TipsyVkPhysicalDevice, const TipsyVkDeviceCreateInfo *, const void *, TipsyVkDevice *);
 typedef TipsyVkResult (*tipsy_vkEnumerateInstanceExtensionProperties_fn)(const char *, uint32_t *, TipsyVkExtensionProperties *);
+typedef TipsyVkResult (*tipsy_vkEnumerateDeviceExtensionProperties_fn)(TipsyVkPhysicalDevice, const char *, uint32_t *, TipsyVkExtensionProperties *);
 typedef TipsyVkResult (*tipsy_vkCreateXcbSurface_fn)(TipsyVkInstance, const TipsyVkXcbSurfaceCreateInfoKHR *, const void *, TipsyVkSurfaceKHR *);
 typedef TipsyVkResult (*tipsy_vkCreateXlibSurface_fn)(TipsyVkInstance, const TipsyVkXlibSurfaceCreateInfoKHR *, const void *, TipsyVkSurfaceKHR *);
 typedef TipsyVkResult (*tipsy_vkGetPresentModes_fn)(TipsyVkPhysicalDevice, TipsyVkSurfaceKHR, uint32_t *, uint32_t *);
@@ -136,13 +161,42 @@ static void *lib_vulkan;
 static tipsy_vkGIPA_fn host_vkGetInstanceProcAddr;
 static tipsy_vkGDPA_fn host_vkGetDeviceProcAddr;
 static tipsy_vkCreateInstance_fn host_vkCreateInstance;
+static tipsy_vkCreateDevice_fn host_vkCreateDevice;
 static tipsy_vkEnumerateInstanceExtensionProperties_fn host_vkEnumerateInstanceExtensionProperties;
+static tipsy_vkEnumerateDeviceExtensionProperties_fn host_vkEnumerateDeviceExtensionProperties;
 static tipsy_vkGetPresentModes_fn host_vkGetPhysicalDeviceSurfacePresentModesKHR;
 static tipsy_vkQueuePresent_fn host_vkQueuePresentKHR;
 static tipsy_vkCreateSwapchain_fn host_vkCreateSwapchainKHR;
 static tipsy_vkCreateSwapchain_fn test_vkCreateSwapchainKHR;
 static int host_has_xcb;
 static int host_has_xlib;
+
+/*
+ * E1: one-time, read-only client device-capability observation. No policy,
+ * no per-call logging, no result change. The client extension list is read
+ * from the first vkCreateDevice call and forwarded once to Go; host support
+ * comes from a single device-extension enumeration on that physical device.
+ * vkGetDeviceProcAddr pacing-name queries are counted (relaxed) and reported
+ * once, the first time any count becomes non-zero.
+ */
+#define TIPSY_VK_HOST_PACING_EXTENSIONS 5
+static const char *const vk_pacing_extension_names[TIPSY_VK_HOST_PACING_EXTENSIONS] = {
+	"VK_KHR_present_wait",
+	"VK_KHR_present_wait2",
+	"VK_KHR_present_id",
+	"VK_KHR_present_id2",
+	"VK_EXT_present_timing",
+};
+#define TIPSY_VK_PACING_QUERY_NAMES 4
+static const char *const vk_pacing_query_names[TIPSY_VK_PACING_QUERY_NAMES] = {
+	"vkWaitForPresentKHR",
+	"vkWaitForPresent2KHR",
+	"vkSetSwapchainPresentTimingQueueSizeEXT",
+	"vkGetPastPresentationTimingEXT",
+};
+static _Atomic int vk_create_device_logged;
+static _Atomic int vk_pacing_query_logged;
+static _Atomic uint64_t vk_pacing_query_counts[TIPSY_VK_PACING_QUERY_NAMES];
 
 static Display *wsi_dpy;
 static unsigned long wsi_xid;
@@ -164,10 +218,16 @@ static _Atomic uint64_t vk_present_timing_epoch;
 static pthread_mutex_t vk_present_timing_mu = PTHREAD_MUTEX_INITIALIZER;
 static uint64_t vk_present_timing_sequence;
 static uint64_t vk_present_timing_ns[TIPSY_VK_PRESENT_TIMING_CAPACITY];
+/* Opt-in host-call duration histogram (E2b), recorded only inside the same
+ * TIPSY_PRESENT_TIMING epoch and kept in its own bounded ring so the default
+ * path performs no clock, lock, or write. */
+static uint64_t vk_present_call_duration_sequence;
+static uint64_t vk_present_call_duration_ns[TIPSY_VK_PRESENT_TIMING_CAPACITY];
 
 static void *tipsy_vkGetInstanceProcAddr(TipsyVkInstance instance, const char *name);
 static void *tipsy_vkGetDeviceProcAddr(TipsyVkDevice device, const char *name);
 static TipsyVkResult tipsy_vkCreateInstance(const TipsyVkInstanceCreateInfo *pCreateInfo, const void *pAllocator, TipsyVkInstance *pInstance);
+static TipsyVkResult tipsy_vkCreateDevice(TipsyVkPhysicalDevice physicalDevice, const TipsyVkDeviceCreateInfo *pCreateInfo, const void *pAllocator, TipsyVkDevice *pDevice);
 static TipsyVkResult tipsy_vkEnumerateInstanceExtensionProperties(const char *pLayerName, uint32_t *pPropertyCount, TipsyVkExtensionProperties *pProperties);
 static TipsyVkResult tipsy_vkCreateAndroidSurfaceKHR(TipsyVkInstance instance, const TipsyVkAndroidSurfaceCreateInfoKHR *pCreateInfo, const void *pAllocator, TipsyVkSurfaceKHR *pSurface);
 static TipsyVkResult tipsy_vkGetPhysicalDeviceSurfacePresentModesKHR(TipsyVkPhysicalDevice physicalDevice, TipsyVkSurfaceKHR surface, uint32_t *pPresentModeCount, uint32_t *pPresentModes);
@@ -198,6 +258,15 @@ static int android_exclusive_proc(const char *name)
 		strstr(name, "Gralloc") != NULL;
 }
 
+static uint64_t tipsy_vk_monotonic_ns(void)
+{
+	struct timespec ts;
+	if (clock_gettime(CLOCK_MONOTONIC, &ts) != 0) {
+		return 0;
+	}
+	return (uint64_t)ts.tv_sec * 1000000000ull + (uint64_t)ts.tv_nsec;
+}
+
 static void tipsy_vk_record_present(uint64_t now_ns)
 {
 	if (now_ns != 0) {
@@ -209,7 +278,7 @@ static void tipsy_vk_record_present(uint64_t now_ns)
 	atomic_fetch_add_explicit(&vk_successful_presents, 1, memory_order_relaxed);
 }
 
-static void tipsy_vk_record_present_timing(uint64_t test_ns)
+static void tipsy_vk_record_present_timing(uint64_t test_ns, uint64_t duration_ns)
 {
 	uint64_t epoch = atomic_load_explicit(&vk_present_timing_epoch, memory_order_relaxed);
 	if ((epoch & 1) == 0) {
@@ -217,24 +286,118 @@ static void tipsy_vk_record_present_timing(uint64_t test_ns)
 	}
 	uint64_t now_ns = test_ns;
 	if (now_ns == 0) {
-		struct timespec ts;
 		// Capture before the snapshot mutex so a delayed diagnostic reader
 		// does not turn its lock hold into an apparent presentation gap.
 		// Host glibc uses the vDSO monotonic clock on the supported Linux host.
-		if (clock_gettime(CLOCK_MONOTONIC, &ts) != 0) {
+		now_ns = tipsy_vk_monotonic_ns();
+		if (now_ns == 0) {
 			return;
 		}
-		now_ns = (uint64_t)ts.tv_sec * 1000000000ull + (uint64_t)ts.tv_nsec;
 	}
 	pthread_mutex_lock(&vk_present_timing_mu);
 	if (atomic_load_explicit(&vk_present_timing_epoch, memory_order_relaxed) == epoch) {
 		uint64_t sequence = ++vk_present_timing_sequence;
 		vk_present_timing_ns[(sequence - 1) % TIPSY_VK_PRESENT_TIMING_CAPACITY] = now_ns;
+		if (duration_ns != 0) {
+			uint64_t duration_sequence = ++vk_present_call_duration_sequence;
+			vk_present_call_duration_ns[(duration_sequence - 1) % TIPSY_VK_PRESENT_TIMING_CAPACITY] = duration_ns;
+		}
 	}
 	pthread_mutex_unlock(&vk_present_timing_mu);
 }
 
-static void tipsy_vk_note_present_result(TipsyVkResult result, uint64_t test_ns)
+static int vk_host_supports_extension(const char *name, const TipsyVkExtensionProperties *props, uint32_t n)
+{
+	uint32_t i;
+	for (i = 0; i < n; i++) {
+		if (strcmp(props[i].extensionName, name) == 0) {
+			return 1;
+		}
+	}
+	return 0;
+}
+
+static int tipsy_vk_observe_device_create(TipsyVkPhysicalDevice physical_device, const TipsyVkDeviceCreateInfo *pCreateInfo)
+{
+	int expected = 0;
+	uint32_t i;
+	int support[TIPSY_VK_HOST_PACING_EXTENSIONS];
+	int probed = 0;
+	const char *const *names = NULL;
+	uint32_t name_count = 0;
+
+	for (i = 0; i < TIPSY_VK_HOST_PACING_EXTENSIONS; i++) {
+		support[i] = 0;
+	}
+	if (!atomic_compare_exchange_strong_explicit(&vk_create_device_logged, &expected, 1,
+		memory_order_acq_rel, memory_order_acquire)) {
+		return 0;
+	}
+	if (pCreateInfo != NULL) {
+		name_count = pCreateInfo->enabledExtensionCount;
+		names = pCreateInfo->ppEnabledExtensionNames;
+		if (names == NULL) {
+			name_count = 0;
+		}
+	}
+	// One read-only enumeration on the physical device that is about to be
+	// used. Allocation happens once per process and never on the present path.
+	if (host_vkEnumerateDeviceExtensionProperties != NULL && physical_device != NULL) {
+		uint32_t total = 0;
+		if (host_vkEnumerateDeviceExtensionProperties(physical_device, NULL, &total, NULL) ==
+				TIPSY_VK_SUCCESS && total > 0) {
+			TipsyVkExtensionProperties *props =
+				(TipsyVkExtensionProperties *)calloc(total, sizeof(*props));
+			if (props != NULL) {
+				uint32_t got = total;
+				TipsyVkResult result =
+					host_vkEnumerateDeviceExtensionProperties(physical_device, NULL, &got, props);
+				if (result == TIPSY_VK_SUCCESS || result == TIPSY_VK_INCOMPLETE) {
+					probed = 1;
+					for (i = 0; i < TIPSY_VK_HOST_PACING_EXTENSIONS; i++) {
+						support[i] = vk_host_supports_extension(vk_pacing_extension_names[i],
+							props, got);
+					}
+				}
+				free(props);
+			}
+		}
+	}
+	GoAndroid_LogVulkanDevice((char **)names, name_count, support[0], support[1],
+		support[2], support[3], support[4], probed);
+	return 1;
+}
+
+static void tipsy_vk_note_pacing_query(const char *name)
+{
+	uint32_t i;
+	int index = -1;
+	int expected = 0;
+
+	if (name == NULL) {
+		return;
+	}
+	for (i = 0; i < TIPSY_VK_PACING_QUERY_NAMES; i++) {
+		if (strcmp(name, vk_pacing_query_names[i]) == 0) {
+			index = (int)i;
+			break;
+		}
+	}
+	if (index < 0) {
+		return;
+	}
+	atomic_fetch_add_explicit(&vk_pacing_query_counts[index], 1, memory_order_relaxed);
+	if (atomic_compare_exchange_strong_explicit(&vk_pacing_query_logged, &expected, 1,
+		memory_order_acq_rel, memory_order_acquire)) {
+		uint64_t counts[TIPSY_VK_PACING_QUERY_NAMES];
+		for (i = 0; i < TIPSY_VK_PACING_QUERY_NAMES; i++) {
+			counts[i] = atomic_load_explicit(&vk_pacing_query_counts[i], memory_order_relaxed);
+		}
+		GoAndroid_LogVulkanPacingQueries(counts[0], counts[1], counts[2], counts[3]);
+	}
+}
+
+static void tipsy_vk_note_present_result_at(TipsyVkResult result, uint64_t test_ns, uint64_t duration_ns)
 {
 	// Preserve the existing counter's exact result filtering independently
 	// of the new diagnostic. A failed call never becomes a timing sample.
@@ -243,8 +406,13 @@ static void tipsy_vk_note_present_result(TipsyVkResult result, uint64_t test_ns)
 		tipsy_vk_record_present(0);
 	}
 	if (result == TIPSY_VK_SUCCESS) {
-		tipsy_vk_record_present_timing(test_ns);
+		tipsy_vk_record_present_timing(test_ns, duration_ns);
 	}
+}
+
+static void tipsy_vk_note_present_result(TipsyVkResult result, uint64_t test_ns)
+{
+	tipsy_vk_note_present_result_at(result, test_ns, 0);
 }
 
 uint64_t tipsy_vk_set_present_timing(int enabled)
@@ -287,6 +455,39 @@ uint32_t tipsy_vk_present_timing_snapshot(uint64_t after, uint64_t *out_ns,
 	}
 	for (uint64_t i = 0; i < count; i++) {
 		out_ns[i] = vk_present_timing_ns[(first + i - 1) % TIPSY_VK_PRESENT_TIMING_CAPACITY];
+	}
+	*out_cursor = first + count - 1;
+	pthread_mutex_unlock(&vk_present_timing_mu);
+	return (uint32_t)count;
+}
+
+uint32_t tipsy_vk_present_call_durations(uint64_t after, uint64_t *out_ns,
+	uint32_t capacity, uint64_t *out_cursor, uint64_t *out_overwritten)
+{
+	*out_cursor = after;
+	*out_overwritten = 0;
+	if (out_ns == NULL || capacity == 0) {
+		return 0;
+	}
+	pthread_mutex_lock(&vk_present_timing_mu);
+	uint64_t end = vk_present_call_duration_sequence;
+	if (after >= end) {
+		pthread_mutex_unlock(&vk_present_timing_mu);
+		return 0;
+	}
+	uint64_t first = after + 1;
+	uint64_t oldest = end >= TIPSY_VK_PRESENT_TIMING_CAPACITY ?
+		end - TIPSY_VK_PRESENT_TIMING_CAPACITY + 1 : 1;
+	if (first < oldest) {
+		*out_overwritten = oldest - first;
+		first = oldest;
+	}
+	uint64_t count = end - first + 1;
+	if (count > capacity) {
+		count = capacity;
+	}
+	for (uint64_t i = 0; i < count; i++) {
+		out_ns[i] = vk_present_call_duration_ns[(first + i - 1) % TIPSY_VK_PRESENT_TIMING_CAPACITY];
 	}
 	*out_cursor = first + count - 1;
 	pthread_mutex_unlock(&vk_present_timing_mu);
@@ -356,6 +557,9 @@ static void vk_init_once(void)
 	if (host_vkCreateInstance == NULL) {
 		host_vkCreateInstance = (tipsy_vkCreateInstance_fn)dlsym(lib_vulkan, "vkCreateInstance");
 	}
+	host_vkCreateDevice = (tipsy_vkCreateDevice_fn)dlsym(lib_vulkan, "vkCreateDevice");
+	host_vkEnumerateDeviceExtensionProperties =
+		(tipsy_vkEnumerateDeviceExtensionProperties_fn)dlsym(lib_vulkan, "vkEnumerateDeviceExtensionProperties");
 	host_vkEnumerateInstanceExtensionProperties =
 		(tipsy_vkEnumerateInstanceExtensionProperties_fn)host_vkGetInstanceProcAddr(NULL, "vkEnumerateInstanceExtensionProperties");
 	if (host_vkEnumerateInstanceExtensionProperties == NULL) {
@@ -613,6 +817,24 @@ static TipsyVkResult tipsy_vkCreateInstance(const TipsyVkInstanceCreateInfo *pCr
 	return result;
 }
 
+static TipsyVkResult tipsy_vkCreateDevice(TipsyVkPhysicalDevice physicalDevice,
+	const TipsyVkDeviceCreateInfo *pCreateInfo, const void *pAllocator, TipsyVkDevice *pDevice)
+{
+	ensure_vulkan();
+	if (host_vkCreateDevice == NULL) {
+		host_vkCreateDevice = (tipsy_vkCreateDevice_fn)dlsym(lib_vulkan, "vkCreateDevice");
+	}
+	if (host_vkCreateDevice == NULL) {
+		GoAndroid_LogMissing("vkCreateDevice");
+		return TIPSY_VK_ERROR_INITIALIZATION_FAILED;
+	}
+	// Read-only observation before the host call so the client's request is
+	// reported even when device creation itself fails. The host result is
+	// returned unchanged.
+	tipsy_vk_observe_device_create(physicalDevice, pCreateInfo);
+	return host_vkCreateDevice(physicalDevice, pCreateInfo, pAllocator, pDevice);
+}
+
 static TipsyVkResult tipsy_vkCreateAndroidSurfaceKHR(TipsyVkInstance instance,
 	const TipsyVkAndroidSurfaceCreateInfoKHR *pCreateInfo, const void *pAllocator, TipsyVkSurfaceKHR *pSurface)
 {
@@ -684,11 +906,14 @@ static tipsy_vkCreateSwapchain_fn resolve_create_swapchain(TipsyVkDevice device)
 	if (host_vkCreateSwapchainKHR != NULL) {
 		return host_vkCreateSwapchainKHR;
 	}
-	if (host_vkGetDeviceProcAddr != NULL && device != NULL) {
-		host_vkCreateSwapchainKHR = (tipsy_vkCreateSwapchain_fn)host_vkGetDeviceProcAddr(device, "vkCreateSwapchainKHR");
-	}
-	if (host_vkCreateSwapchainKHR == NULL && lib_vulkan != NULL) {
+	// Prefer the loader trampoline, exactly like the present path: it is not
+	// bound to a VkDevice and cannot be poisoned by a device from another ICD.
+	if (lib_vulkan != NULL) {
 		host_vkCreateSwapchainKHR = (tipsy_vkCreateSwapchain_fn)dlsym(lib_vulkan, "vkCreateSwapchainKHR");
+	}
+	if (host_vkCreateSwapchainKHR == NULL && host_vkGetDeviceProcAddr != NULL && device != NULL) {
+		// Non-cached fallback: the pointer is device-dispatch specific.
+		return (tipsy_vkCreateSwapchain_fn)host_vkGetDeviceProcAddr(device, "vkCreateSwapchainKHR");
 	}
 	return host_vkCreateSwapchainKHR;
 }
@@ -808,6 +1033,10 @@ static TipsyVkResult tipsy_vkGetPhysicalDeviceSurfacePresentModesKHR(TipsyVkPhys
 static TipsyVkResult tipsy_vkQueuePresentKHR(TipsyVkQueue queue, const void *pPresentInfo)
 {
 	TipsyVkResult result;
+	uint64_t epoch;
+	uint64_t start_ns = 0;
+	uint64_t end_ns = 0;
+	uint64_t duration_ns = 0;
 
 	ensure_vulkan();
 	if (host_vkQueuePresentKHR == NULL && host_vkGetDeviceProcAddr != NULL && queue != NULL) {
@@ -818,8 +1047,21 @@ static TipsyVkResult tipsy_vkQueuePresentKHR(TipsyVkQueue queue, const void *pPr
 		GoAndroid_LogMissing("vkQueuePresentKHR");
 		return TIPSY_VK_ERROR_INITIALIZATION_FAILED;
 	}
+	// One relaxed epoch load and a predictable branch on the default path;
+	// the clock, lock, and histogram writes exist only inside the opt-in
+	// TIPSY_PRESENT_TIMING epoch.
+	epoch = atomic_load_explicit(&vk_present_timing_epoch, memory_order_relaxed);
+	if ((epoch & 1) != 0) {
+		start_ns = tipsy_vk_monotonic_ns();
+	}
 	result = host_vkQueuePresentKHR(queue, pPresentInfo);
-	tipsy_vk_note_present_result(result, 0);
+	if (start_ns != 0) {
+		end_ns = tipsy_vk_monotonic_ns();
+		if (end_ns > start_ns) {
+			duration_ns = end_ns - start_ns;
+		}
+	}
+	tipsy_vk_note_present_result_at(result, end_ns, duration_ns);
 	return result;
 }
 
@@ -854,6 +1096,9 @@ static void *tipsy_vkGetInstanceProcAddr(TipsyVkInstance instance, const char *n
 	if (strcmp(name, "vkCreateInstance") == 0) {
 		return (void *)tipsy_vkCreateInstance;
 	}
+	if (strcmp(name, "vkCreateDevice") == 0) {
+		return (void *)tipsy_vkCreateDevice;
+	}
 	if (strcmp(name, "vkCreateAndroidSurfaceKHR") == 0) {
 		return (void *)tipsy_vkCreateAndroidSurfaceKHR;
 	}
@@ -887,6 +1132,9 @@ static void *tipsy_vkGetDeviceProcAddr(TipsyVkDevice device, const char *name)
 	if (name == NULL) {
 		return NULL;
 	}
+	// E1 observation: count (never alter) client queries for the pacing
+	// entry points; report the counts once, on the first non-zero count.
+	tipsy_vk_note_pacing_query(name);
 	if (strcmp(name, "vkGetDeviceProcAddr") == 0) {
 		return (void *)tipsy_vkGetDeviceProcAddr;
 	}
@@ -922,6 +1170,9 @@ void *tipsy_vk_dlsym(const char *name)
 	}
 	if (strcmp(name, "vkCreateInstance") == 0) {
 		return (void *)tipsy_vkCreateInstance;
+	}
+	if (strcmp(name, "vkCreateDevice") == 0) {
+		return (void *)tipsy_vkCreateDevice;
 	}
 	if (strcmp(name, "vkCreateAndroidSurfaceKHR") == 0) {
 		return (void *)tipsy_vkCreateAndroidSurfaceKHR;
@@ -1023,6 +1274,62 @@ void tipsy_test_vk_note_present_result(int32_t result, uint64_t now_ns)
 	tipsy_vk_note_present_result(result, now_ns);
 }
 
+void tipsy_test_vk_note_present_result_duration(int32_t result, uint64_t now_ns, uint64_t duration_ns)
+{
+	tipsy_vk_note_present_result_at(result, now_ns, duration_ns);
+}
+
+int tipsy_test_vk_observe_device_create(char **names, uint32_t n)
+{
+	TipsyVkDeviceCreateInfo info;
+	memset(&info, 0, sizeof(info));
+	info.enabledExtensionCount = n;
+	info.ppEnabledExtensionNames = (const char *const *)names;
+	return tipsy_vk_observe_device_create(NULL, &info);
+}
+
+void tipsy_test_vk_note_pacing_query(const char *name)
+{
+	tipsy_vk_note_pacing_query(name);
+}
+
+void tipsy_test_vk_pacing_query_counts(uint64_t *out)
+{
+	uint32_t i;
+	if (out == NULL) {
+		return;
+	}
+	for (i = 0; i < TIPSY_VK_PACING_QUERY_NAMES; i++) {
+		out[i] = atomic_load_explicit(&vk_pacing_query_counts[i], memory_order_relaxed);
+	}
+}
+
+int tipsy_test_vk_pacing_query_logged(void)
+{
+	return atomic_load_explicit(&vk_pacing_query_logged, memory_order_relaxed);
+}
+
+void *tipsy_test_vk_host_loader_symbol(const char *name)
+{
+	ensure_vulkan();
+	if (name == NULL || lib_vulkan == NULL) {
+		return NULL;
+	}
+	return dlsym(lib_vulkan, name);
+}
+
+void *tipsy_test_vk_resolve_create_swapchain(void)
+{
+	ensure_vulkan();
+	host_vkCreateSwapchainKHR = NULL;
+	if (lib_vulkan == NULL || dlsym(lib_vulkan, "vkCreateSwapchainKHR") == NULL) {
+		return NULL;
+	}
+	// A non-NULL bogus device proves the loader path is taken before any
+	// device-dispatch lookup could dereference it.
+	return (void *)resolve_create_swapchain((TipsyVkDevice)1);
+}
+
 int tipsy_test_vk_proc_is_wrapped(const char *name)
 {
 	void *got;
@@ -1033,6 +1340,9 @@ int tipsy_test_vk_proc_is_wrapped(const char *name)
 	got = tipsy_vkGetInstanceProcAddr(NULL, name);
 	if (strcmp(name, "vkCreateInstance") == 0) {
 		return got == (void *)tipsy_vkCreateInstance;
+	}
+	if (strcmp(name, "vkCreateDevice") == 0) {
+		return got == (void *)tipsy_vkCreateDevice;
 	}
 	if (strcmp(name, "vkCreateAndroidSurfaceKHR") == 0) {
 		return got == (void *)tipsy_vkCreateAndroidSurfaceKHR;
