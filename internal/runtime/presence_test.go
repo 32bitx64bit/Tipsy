@@ -12,6 +12,8 @@ import (
 	"testing"
 	"time"
 
+	"golang.org/x/sys/unix"
+
 	"github.com/tipsy-linux/tipsy/internal/android"
 	"github.com/tipsy-linux/tipsy/internal/clientsettings"
 	"github.com/tipsy-linux/tipsy/internal/jni"
@@ -49,7 +51,21 @@ func TestDiscordPresenceDoesNotStartPlayerLogPoller(t *testing.T) {
 	if err := os.WriteFile(path, []byte("Info [FLog::DataModelBindings] onGameLoaded: placeId:111.\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	before := watchPlayerLogsStarts.Load()
+
+	// The retired 250 ms file follower read the newest _Player_*.log after it
+	// grew, which raises IN_ACCESS on the file. Watching IN_ACCESS therefore
+	// turns "the poller is gone" into a behavioral assertion instead of a
+	// symbol check; the JNI and liblog place sources never read this file.
+	// Only IN_ACCESS is masked: the test's own append is IN_OPEN/IN_MODIFY.
+	fd, err := unix.InotifyInit1(unix.IN_CLOEXEC | unix.IN_NONBLOCK)
+	if err != nil {
+		t.Skipf("inotify unavailable: %v", err)
+	}
+	defer unix.Close(fd)
+	if watch, err := unix.InotifyAddWatch(fd, path, unix.IN_ACCESS); err != nil || watch < 0 {
+		t.Fatalf("inotify watch: watch=%d err=%v", watch, err)
+	}
+
 	hub := startDiscordPresence(context.Background(), load, 1818, dir)
 	if hub == nil {
 		t.Fatal("presence hub was nil")
@@ -66,9 +82,18 @@ func TestDiscordPresenceDoesNotStartPlayerLogPoller(t *testing.T) {
 	if err := f.Close(); err != nil {
 		t.Fatal(err)
 	}
-	time.Sleep(playerLogPoll + 80*time.Millisecond)
-	if got := watchPlayerLogsStarts.Load(); got != before {
-		t.Fatalf("watchPlayerLogs started (%d → %d); JNI onGameLoaded is the place source", before, got)
+
+	deadline := time.Now().Add(time.Second)
+	buf := make([]byte, 4096)
+	for time.Now().Before(deadline) {
+		n, err := unix.Read(fd, buf)
+		if n > 0 {
+			t.Fatalf("player log was read while presence was active; the JNI onGameLoaded callback is the place source")
+		}
+		if err != nil && err != unix.EAGAIN && err != unix.EINTR {
+			t.Fatalf("inotify read: %v", err)
+		}
+		time.Sleep(10 * time.Millisecond)
 	}
 }
 
