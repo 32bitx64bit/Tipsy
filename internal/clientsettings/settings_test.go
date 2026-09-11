@@ -581,17 +581,88 @@ func TestMalformedFilesRecoveredWithoutPayloadLeak(t *testing.T) {
 		t.Fatal(err)
 	}
 	wanted := Settings{Renderer: RendererAuto, FrameRate: FrameRate{Mode: FrameRateLimited, Limit: 60}}
-	_, err = s.Apply(context.Background(), wanted)
-	if err == nil || strings.Contains(err.Error(), secret) {
-		t.Fatalf("malformed XML err=%v", err)
+	result, err := s.Apply(context.Background(), wanted)
+	if err != nil {
+		if strings.Contains(err.Error(), secret) {
+			t.Fatalf("error leaked malformed payload: %v", err)
+		}
+		t.Fatalf("malformed XML blocked apply: %v", err)
 	}
-	kept, _ := os.ReadFile(s.XMLPath)
-	if !bytes.Equal(kept, badXML) {
-		t.Fatal("malformed XML was modified")
+	if strings.Contains(result.FrameRateNote, secret) {
+		t.Fatal("frame-rate note leaked malformed payload")
+	}
+	if result.FrameRateApplied {
+		t.Fatal("malformed XML reported a frame-rate override as applied")
+	}
+	if _, statErr := os.Stat(s.XMLPath); !errors.Is(statErr, os.ErrNotExist) {
+		t.Fatalf("unparseable XML was not removed for engine recreation: %v", statErr)
 	}
 	xmlBackup := s.XMLPath + ".invalid-20260904T120000.000000000Z"
 	if copied, err := os.ReadFile(xmlBackup); err != nil || !bytes.Equal(copied, badXML) {
 		t.Fatalf("XML backup err=%v copied=%q", err, copied)
+	}
+}
+
+// TestTruncatedXMLDoesNotBlockLaunch pins the unclean-shutdown contract: a
+// zero-byte settings document must not abort a launch. The bytes are
+// preserved under a new name and the engine recreates its defaults.
+func TestTruncatedXMLDoesNotBlockLaunch(t *testing.T) {
+	s := testService(t)
+	if err := os.MkdirAll(filepath.Dir(s.Path), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	doc := persistedSettings{Settings: Settings{
+		Renderer:  RendererAuto,
+		FrameRate: FrameRate{Mode: FrameRateLimited, Limit: 60},
+	}}
+	if err := s.writeDocument(doc); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Dir(s.XMLPath), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(s.XMLPath, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.ReconcileWhileClientLocked(context.Background()); err != nil {
+		t.Fatalf("truncated XML blocked launch: %v", err)
+	}
+	if _, err := os.Stat(s.XMLPath); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("truncated XML still present: %v", err)
+	}
+	if _, err := os.Stat(s.XMLPath + ".invalid-20260904T120000.000000000Z"); err != nil {
+		t.Fatalf("truncated XML was not preserved: %v", err)
+	}
+}
+
+// TestMissingFramerateFieldDoesNotBlockLaunch pins that a parseable document
+// without the expected field is left untouched: only the override is
+// deferred, never the launch.
+func TestMissingFramerateFieldDoesNotBlockLaunch(t *testing.T) {
+	s := testService(t)
+	if err := os.MkdirAll(filepath.Dir(s.Path), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	doc := persistedSettings{Settings: Settings{
+		Renderer:  RendererAuto,
+		FrameRate: FrameRate{Mode: FrameRateLimited, Limit: 60},
+	}}
+	if err := s.writeDocument(doc); err != nil {
+		t.Fatal(err)
+	}
+	valid := []byte(`<?xml version="1.0"?><roblox version="4"><Item class="UserGameSettings"><Properties><string name="Other">x</string></Properties></Item></roblox>`)
+	if err := os.MkdirAll(filepath.Dir(s.XMLPath), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(s.XMLPath, valid, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.ReconcileWhileClientLocked(context.Background()); err != nil {
+		t.Fatalf("missing frame-rate field blocked launch: %v", err)
+	}
+	kept, err := os.ReadFile(s.XMLPath)
+	if err != nil || !bytes.Equal(kept, valid) {
+		t.Fatalf("parseable XML was modified: err=%v", err)
 	}
 }
 

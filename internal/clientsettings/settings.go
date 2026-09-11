@@ -332,36 +332,54 @@ func (s *Service) applyLocked(ctx context.Context, wanted Settings) (ApplyResult
 	newXML := oldXML
 	xmlChanged := false
 	note := ""
+	frameRateApplied := xmlExists
 	if xmlExists {
 		_, current, err := updateFramerateCap(oldXML, "")
 		if err != nil {
+			// Roblox's settings document is user data, never a launch gate. An
+			// unclean shutdown can truncate it to zero bytes or cut it
+			// mid-tag; preserve the bytes, then drop a document the XML
+			// decoder could not parse at all so the engine recreates defaults.
+			// Either way the saved frame-rate choice is applied on a later
+			// launch instead of aborting this one.
 			s.backupMalformedXML(oldXML)
-			return ApplyResult{}, fmt.Errorf("Roblox settings XML is malformed; the original was preserved: %w", err)
-		}
-		switch wanted.FrameRate.Mode {
-		case FrameRateAuto:
-			if oldDoc.FPSOwned && current == oldDoc.FPSApplied {
-				newXML, _, err = updateFramerateCap(oldXML, oldDoc.FPSOriginal)
+			var parseErr xmlParseError
+			if errors.As(err, &parseErr) {
+				if rmErr := os.Remove(xmlPath); rmErr != nil && !errors.Is(rmErr, os.ErrNotExist) {
+					return ApplyResult{}, fmt.Errorf("remove malformed Roblox settings XML: %w", rmErr)
+				}
+				xmlExists = false
+				note = "Roblox settings XML was malformed and has been preserved; the client will recreate it on launch and the frame-rate choice applies on a later launch."
+			} else {
+				note = "Roblox settings XML cannot take a frame-rate override yet; the choice is saved and will be applied on a later launch."
+			}
+			frameRateApplied = false
+		} else {
+			switch wanted.FrameRate.Mode {
+			case FrameRateAuto:
+				if oldDoc.FPSOwned && current == oldDoc.FPSApplied {
+					newXML, _, err = updateFramerateCap(oldXML, oldDoc.FPSOriginal)
+					if err != nil {
+						return ApplyResult{}, err
+					}
+					xmlChanged = !bytes.Equal(oldXML, newXML)
+				}
+				newDoc.FPSOwned = false
+				newDoc.FPSOriginal = ""
+				newDoc.FPSApplied = ""
+			case FrameRateLimited, FrameRateUnlimited:
+				value := fpsValue(wanted.FrameRate)
+				if !oldDoc.FPSOwned {
+					newDoc.FPSOriginal = current
+				}
+				newDoc.FPSOwned = true
+				newDoc.FPSApplied = value
+				newXML, _, err = updateFramerateCap(oldXML, value)
 				if err != nil {
 					return ApplyResult{}, err
 				}
 				xmlChanged = !bytes.Equal(oldXML, newXML)
 			}
-			newDoc.FPSOwned = false
-			newDoc.FPSOriginal = ""
-			newDoc.FPSApplied = ""
-		case FrameRateLimited, FrameRateUnlimited:
-			value := fpsValue(wanted.FrameRate)
-			if !oldDoc.FPSOwned {
-				newDoc.FPSOriginal = current
-			}
-			newDoc.FPSOwned = true
-			newDoc.FPSApplied = value
-			newXML, _, err = updateFramerateCap(oldXML, value)
-			if err != nil {
-				return ApplyResult{}, err
-			}
-			xmlChanged = !bytes.Equal(oldXML, newXML)
 		}
 	} else if wanted.FrameRate.Mode != FrameRateAuto {
 		note = "Roblox has not created GlobalBasicSettings_13.xml yet; the choice is saved and will be applied on a later launch."
@@ -398,7 +416,7 @@ func (s *Service) applyLocked(ctx context.Context, wanted Settings) (ApplyResult
 	return ApplyResult{
 		Settings:         wanted,
 		RestartRequired:  graphicsChanged || xmlChanged,
-		FrameRateApplied: xmlExists,
+		FrameRateApplied: frameRateApplied,
 		FrameRateNote:    applyNote,
 	}, nil
 }
@@ -733,7 +751,19 @@ func readRegularFile(path string, limit int64) ([]byte, error) {
 	return data, nil
 }
 
+// xmlParseError marks bytes the XML decoder could not parse at all: an empty
+// or whitespace-only file left by an unclean shutdown, or a document cut
+// mid-tag. It is distinct from a parseable document whose frame-rate field is
+// absent or invalid, which must be left in place.
+type xmlParseError struct{ err error }
+
+func (e xmlParseError) Error() string { return e.err.Error() }
+func (e xmlParseError) Unwrap() error { return e.err }
+
 func updateFramerateCap(data []byte, replacement string) ([]byte, string, error) {
+	if len(bytes.TrimSpace(data)) == 0 {
+		return nil, "", xmlParseError{io.ErrUnexpectedEOF}
+	}
 	dec := xml.NewDecoder(bytes.NewReader(data))
 	type scope struct{ name, class string }
 	var stack []scope
@@ -745,7 +775,7 @@ func updateFramerateCap(data []byte, replacement string) ([]byte, string, error)
 			break
 		}
 		if err != nil {
-			return nil, "", err
+			return nil, "", xmlParseError{err}
 		}
 		switch t := tok.(type) {
 		case xml.StartElement:
