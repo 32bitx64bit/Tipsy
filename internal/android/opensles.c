@@ -7,6 +7,9 @@
  * Pulse server). Microphone capture is opened only after RECORDING is asked
  * for and a capture buffer has actually been supplied.
  */
+#ifndef _GNU_SOURCE
+#define _GNU_SOURCE
+#endif
 #include "android_bridge.h"
 
 #include <pulse/error.h>
@@ -448,6 +451,7 @@ static void retry_pause(void)
 static void *stream_worker(void *arg)
 {
 	tipsy_sl_object *o = arg;
+	(void)pthread_setname_np(pthread_self(), "tip.opensles");
 	pthread_mutex_lock(&o->mu);
 	for (;;) {
 		while (!o->destroying && (!state_active(o) || o->head == NULL)) {
@@ -1182,4 +1186,49 @@ int tipsy_audio_test_host_playback(uint32_t rate, uint32_t channels, uint32_t by
 {
 	fake_disable();
 	return test_stream(0, rate, channels, bytes, written, callbacks);
+}
+
+/* H6 probe: spawn one real C worker through the same code the client uses and
+ * read back the name it set on itself. The object is shut down exactly like
+ * object_destroy before the thread is joined. */
+int tipsy_test_audio_worker_thread_name(char *out, size_t cap)
+{
+	if (out == NULL || cap == 0)
+		return -1;
+	out[0] = '\0';
+	fake_disable();
+	tipsy_sl_object *o = object_new(OBJ_PLAYER);
+	if (o == NULL)
+		return -1;
+	if (pthread_create(&o->thread, NULL, stream_worker, o) != 0) {
+		pthread_cond_destroy(&o->cond);
+		pthread_mutex_destroy(&o->mu);
+		free(o);
+		return -1;
+	}
+	o->thread_started = 1;
+	char name[64];
+	int ok = 0;
+	for (int i = 0; i < 200; i++) {
+		name[0] = '\0';
+		if (pthread_getname_np(o->thread, name, sizeof(name)) == 0 &&
+		    strcmp(name, "tip.opensles") == 0) {
+			ok = 1;
+			break;
+		}
+		struct timespec ts = {.tv_sec = 0, .tv_nsec = 1000000L};
+		nanosleep(&ts, NULL);
+	}
+	if (ok)
+		snprintf(out, cap, "%s", name);
+	pthread_mutex_lock(&o->mu);
+	o->destroying = 1;
+	o->queue_generation++;
+	pthread_cond_broadcast(&o->cond);
+	pthread_mutex_unlock(&o->mu);
+	pthread_join(o->thread, NULL);
+	pthread_cond_destroy(&o->cond);
+	pthread_mutex_destroy(&o->mu);
+	free(o);
+	return ok ? 0 : -1;
 }
