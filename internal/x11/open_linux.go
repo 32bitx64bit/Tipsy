@@ -243,18 +243,14 @@ func setCursorVisibleLocked(w *Window, visible bool) {
 	}
 }
 
-func setPointerLockLocked(w *Window, locked, center bool) (bool, error) {
+func setPointerLockLocked(w *Window, locked bool, anchor pointerAnchor) (bool, error) {
 	value := C.int(0)
 	if locked {
 		value = 1
 	}
-	centerFlag := C.int(0)
-	if center {
-		centerFlag = 1
-	}
 	var anchorX, anchorY, status C.int
 	rc := int(C.tipsy_x11_set_pointer_lock(C.uintptr_t(w.display), C.ulong(w.xid),
-		value, centerFlag, &anchorX, &anchorY, &status))
+		value, C.int(anchor), &anchorX, &anchorY, &status))
 	switch rc {
 	case 1:
 		w.pointerCaptured = true
@@ -262,7 +258,7 @@ func setPointerLockLocked(w *Window, locked, center bool) (bool, error) {
 		w.pointerAnchorY = int(anchorY)
 		logging.Logger(logging.CatX11).Info("X11 pointer lock acquired",
 			"xid", w.xid, "anchorX", w.pointerAnchorX, "anchorY", w.pointerAnchorY,
-			"center", center)
+			"center", anchor != anchorCursor, "sticky", anchor == anchorCenterSticky)
 		return true, nil
 	case 2:
 		w.pointerCaptured = false

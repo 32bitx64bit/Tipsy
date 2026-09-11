@@ -187,17 +187,37 @@ func clearActiveWindow(w *Window) {
 // pre-lock coordinate. Acquisition is refused while the window is unfocused
 // so Alt-Tab cannot leave a background grab in place.
 func SetPointerLock(locked bool) (bool, error) {
-	return setPointerLock(locked, true)
+	return setPointerLock(locked, anchorCenterSticky)
 }
 
 // SetPointerLockAtCursor is the held-RMB camera-look grab. It confines the
 // pointer at its current client position instead of warping to the window
 // center, so releasing RMB leaves the desktop cursor where the user clicked.
 func SetPointerLockAtCursor(locked bool) (bool, error) {
-	return setPointerLock(locked, false)
+	return setPointerLock(locked, anchorCursor)
 }
 
-func setPointerLock(locked, center bool) (bool, error) {
+// SetPointerLockAtCenter is the desktop zoom-lock grab: it warps to and
+// confines at the window center like SetPointerLock, so release leaves the
+// desktop pointer at the center where the engine cursor reappears, but it is
+// not sticky — focus loss drops it and only the caller decides whether the
+// next motion re-acquires.
+func SetPointerLockAtCenter(locked bool) (bool, error) {
+	return setPointerLock(locked, anchorCenter)
+}
+
+// pointerAnchor selects where a grab confines the pointer and whether the
+// native side re-applies it by itself when focus returns. The values are the
+// wire encoding of tipsy_x11_set_pointer_lock's center argument.
+type pointerAnchor int
+
+const (
+	anchorCursor       pointerAnchor = 0 // live cursor, no sticky recapture
+	anchorCenterSticky pointerAnchor = 1 // window center, sticky tab-back
+	anchorCenter       pointerAnchor = 2 // window center, no sticky recapture
+)
+
+func setPointerLock(locked bool, anchor pointerAnchor) (bool, error) {
 	activeWindow.Lock()
 	w := activeWindow.w
 	activeWindow.Unlock()
@@ -209,7 +229,7 @@ func setPointerLock(locked, center bool) (bool, error) {
 	if w.closed || w.display == 0 || w.xid == 0 {
 		return false, ErrClosed
 	}
-	return setPointerLockLocked(w, locked, center)
+	return setPointerLockLocked(w, locked, anchor)
 }
 
 // SetCursorVisible swaps the sole client window's cursor between the

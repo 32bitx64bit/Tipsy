@@ -727,12 +727,26 @@ func SnapRobloxDirectPointerFallbackToCenter() (x, y float32, ok bool) {
 	if !directInputTarget.fallbackCaptured {
 		return 0, 0, false
 	}
-	x = float32(directInputTarget.clampW / 2)
-	y = float32(directInputTarget.clampH / 2)
+	x, y = pointerViewportCenter()
 	directInputTarget.fallbackX, directInputTarget.fallbackY = x, y
 	directInputTarget.havePointer = true
 	directInputTarget.lastX, directInputTarget.lastY = x, y
 	return x, y, true
+}
+
+// pointerViewportCenter returns the live viewport center in logical surface
+// coordinates. Caller holds mu (either mode).
+func pointerViewportCenter() (float32, float32) {
+	return float32(directInputTarget.clampW / 2), float32(directInputTarget.clampH / 2)
+}
+
+// PointerViewportCenter returns the live viewport center, the logical origin
+// the zoom-lock grab seeds. The surface tracks the X11 window, so it is also
+// the host pointer's anchor after SetPointerLockAtCenter.
+func PointerViewportCenter() (x, y float32) {
+	directInputTarget.mu.RLock()
+	defer directInputTarget.mu.RUnlock()
+	return pointerViewportCenter()
 }
 
 // robloxDirectLastPosition returns the ordinary direct dispatcher's last

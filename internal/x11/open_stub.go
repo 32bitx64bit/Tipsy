@@ -49,10 +49,10 @@ func setCursorVisibleLocked(w *Window, visible bool) {
 	}
 }
 
-func setPointerLockLocked(w *Window, locked, center bool) (bool, error) {
+func setPointerLockLocked(w *Window, locked bool, anchor pointerAnchor) (bool, error) {
 	_ = w
 	_ = locked
-	_ = center
+	_ = anchor
 	return false, ErrUnavailable
 }
 

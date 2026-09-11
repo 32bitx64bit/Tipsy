@@ -140,10 +140,19 @@ func requireProbe(t *testing.T) {
 
 func requirePointerGrabAvailable(t *testing.T, w *Window) {
 	t.Helper()
-	if err := x11probe.GrabPointer(w.XID()); err != nil {
-		t.Skipf("desktop has an active pointer grab: %v", err)
+	// A freshly opened window may not be viewable for the first few
+	// milliseconds, which XGrabPointer reports exactly like a competing
+	// grab. Retry briefly before concluding the desktop holds one.
+	var err error
+	for attempt := 0; attempt < 40; attempt++ {
+		if err = x11probe.GrabPointer(w.XID()); err == nil {
+			x11probe.UngrabPointer()
+			return
+		}
+		drainPump(w, t)
+		time.Sleep(25 * time.Millisecond)
 	}
-	x11probe.UngrabPointer()
+	t.Skipf("desktop has an active pointer grab: %v", err)
 }
 
 func TestFocusEventsDelivered(t *testing.T) {
@@ -1121,6 +1130,98 @@ func TestPointerLockReacquiresCenteredOnFocusIn(t *testing.T) {
 	waitPointerPosition(t, w, centerX, centerY)
 	if changed, err := SetPointerLock(false); err != nil || !changed {
 		t.Fatalf("SetPointerLock(false) = changed %t, err %v", changed, err)
+	}
+}
+
+func TestPointerLockAtCenterConfinesAtCenterWithoutStickyTabBack(t *testing.T) {
+	const winW, winH = 320, 180
+	centerX, centerY := winW/2, winH/2
+	w := openInputWindowSize(t, winW, winH)
+	c := collectInput(t)
+	requireProbe(t)
+	requirePointerGrabAvailable(t, w)
+	c.clearAndSettle(t, w)
+
+	// Start away from the center: the zoom lock must warp there, unlike the
+	// held-RMB cursor anchor.
+	if err := x11probe.WarpPointer(w.XID(), 20, 30); err != nil {
+		t.Fatalf("pre-lock warp: %v", err)
+	}
+	waitPointerPosition(t, w, 20, 30)
+	c.clear()
+	changed, err := SetPointerLockAtCenter(true)
+	if err != nil || !changed {
+		t.Fatalf("SetPointerLockAtCenter(true) = changed %t, err %v", changed, err)
+	}
+	ev := c.next(t, w)
+	if ev.Kind != InputPointerCapture || !ev.Captured || ev.X != float32(centerX) || ev.Y != float32(centerY) {
+		t.Fatalf("capture event = %+v, want acquired at center (%d,%d)", ev, centerX, centerY)
+	}
+	if captured, x, y := w.PointerCapture(); !captured || x != centerX || y != centerY {
+		t.Fatalf("PointerCapture = %t (%d,%d), want true (%d,%d)", captured, x, y, centerX, centerY)
+	}
+	waitPointerPosition(t, w, centerX, centerY)
+
+	if err := x11probe.WarpPointer(w.XID(), centerX+30, centerY-10); err != nil {
+		t.Fatalf("captured motion: %v", err)
+	}
+	ev = c.next(t, w)
+	if ev.Kind != InputPointer || ev.PointerAction != PointerMove || !ev.Relative ||
+		ev.X != float32(centerX) || ev.Y != float32(centerY) || ev.DeltaX != 30 || ev.DeltaY != -10 {
+		t.Fatalf("captured motion = %+v, want center-anchored relative (30,-10)", ev)
+	}
+	waitPointerPosition(t, w, centerX, centerY)
+
+	// Focus loss drops the grab; focus return must NOT re-grab by itself
+	// (that is the engine LockCenter sticky contract, not the zoom lock's).
+	if err := x11probe.Focus(w.XID(), false); err != nil {
+		t.Fatal(err)
+	}
+	ev = c.next(t, w)
+	if ev.Kind != InputPointerCapture || ev.Captured {
+		t.Fatalf("focus-loss first event = %+v, want capture release", ev)
+	}
+	ev = c.next(t, w)
+	if ev.Kind != InputFocus || ev.FocusGained {
+		t.Fatalf("focus-loss focus event = %+v", ev)
+	}
+	if captured, _, _ := w.PointerCapture(); captured {
+		t.Fatal("pointer remained captured after FocusOut")
+	}
+	if err := x11probe.Focus(w.XID(), true); err != nil {
+		t.Fatal(err)
+	}
+	ev = c.next(t, w)
+	if ev.Kind != InputFocus || !ev.FocusGained {
+		t.Fatalf("focus-return first event = %+v, want plain focus gain (no sticky recapture)", ev)
+	}
+	if captured, _, _ := w.PointerCapture(); captured {
+		t.Fatal("non-sticky center grab re-acquired itself on FocusIn")
+	}
+	waitPointerPosition(t, w, centerX, centerY)
+
+	// A fresh acquire and an explicit release both leave the pointer at the
+	// center, where the engine cursor reappears after zoom-out.
+	c.clear()
+	if changed, err := SetPointerLockAtCenter(true); err != nil || !changed {
+		t.Fatalf("re-acquire SetPointerLockAtCenter(true) = changed %t, err %v", changed, err)
+	}
+	_ = c.next(t, w)
+	if changed, err := SetPointerLockAtCenter(false); err != nil || !changed {
+		t.Fatalf("SetPointerLockAtCenter(false) = changed %t, err %v", changed, err)
+	}
+	ev = c.next(t, w)
+	if ev.Kind != InputPointerCapture || ev.Captured || ev.CaptureFailed {
+		t.Fatalf("capture release = %+v", ev)
+	}
+	waitPointerPosition(t, w, centerX, centerY)
+	if err := x11probe.WarpPointer(w.XID(), centerX+5, centerY+7); err != nil {
+		t.Fatalf("post-release motion: %v", err)
+	}
+	ev = c.next(t, w)
+	if ev.Kind != InputPointer || ev.PointerAction != PointerMove || ev.Relative ||
+		ev.X != float32(centerX+5) || ev.Y != float32(centerY+7) {
+		t.Fatalf("post-release motion = %+v, want absolute motion from the center", ev)
 	}
 }
 

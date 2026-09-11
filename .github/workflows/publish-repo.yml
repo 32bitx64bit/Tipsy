@@ -272,11 +272,49 @@ jobs:
           set -euo pipefail
           tag='${{ needs.prepare.outputs.tag }}'
           version='${{ needs.prepare.outputs.version }}'
+          notes_file=$(mktemp)
+          # Auto-generated changelog from the commit range since the previous
+          # tag (same source as the Tipsy release notes). Best-effort only.
+          prev_tag=$(git describe --tags --match 'v*' --abbrev=0 HEAD^ -- 2>/dev/null || true)
+          changelog_body=""
+          if [[ -n "$prev_tag" ]]; then
+            changelog_body=$(git log --no-decorate --pretty=format:'- %s (%h)' "${prev_tag}..HEAD" -- 2>/dev/null | head -n 100 || true)
+          else
+            changelog_body=$(git log --no-decorate --pretty=format:'- %s (%h)' HEAD -- 2>/dev/null | head -n 100 || true)
+          fi
+          [[ -n "$changelog_body" ]] || changelog_body='- No changes recorded.'
+          if [[ -n "$prev_tag" ]]; then
+            compare_line="**Full Changelog**: https://github.com/$SOURCE_REPO/compare/${prev_tag}...${tag}"
+          else
+            compare_line=""
+          fi
+          printf '%s\n' \
+            "Tipsy $version (Linux repositories)" \
+            '' \
+            '## Install (recommended)' \
+            '' \
+            '```sh' \
+            'curl -fsSL https://32bitx64bit.github.io/Tipsy-repo/install.sh | sudo bash' \
+            '```' \
+            '' \
+            'Manual install (APT / DNF / pacman / Flatpak / AppImage): https://github.com/32bitx64bit/Tipsy-repo/blob/main/docs/INSTALL.md' \
+            '' \
+            "## What's Changed" \
+            '' \
+            "$changelog_body" \
+            '' \
+            "$compare_line" \
+            > "$notes_file"
           if ! gh release view "$tag" --repo "$DISTRO_REPO" >/dev/null 2>&1; then
             gh release create "$tag" --repo "$DISTRO_REPO" \
               --title "Tipsy $version (Linux repositories)" \
-              --notes "Official Linux distribution artifacts for Tipsy $version. Install via APT, DNF, pacman, Flatpak, or AppImage; see the repository README."
+              --notes-file "$notes_file"
+          else
+            gh release edit "$tag" --repo "$DISTRO_REPO" \
+              --title "Tipsy $version (Linux repositories)" \
+              --notes-file "$notes_file"
           fi
+          rm -f -- "$notes_file"
           # --clobber is intentional: reruns replace same-named rebuilt assets.
           gh release upload "$tag" publish/* --clobber --repo "$DISTRO_REPO"
 

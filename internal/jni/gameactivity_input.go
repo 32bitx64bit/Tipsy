@@ -719,6 +719,12 @@ var pointerLockSticky atomic.Bool
 var pointerLockSetter = x11.SetPointerLock
 var pointerLockAtCursorSetter = x11.SetPointerLockAtCursor
 
+// pointerLockAtCenterSetter is the desktop zoom-lock grab: window-center
+// anchor like the engine LockCenter grab, but not sticky, so release and
+// focus loss both leave the pointer at the center where the engine cursor
+// reappears and only the zoom-lock state decides about re-acquiring.
+var pointerLockAtCenterSetter = x11.SetPointerLockAtCenter
+
 // pointerCursorSetter is a test seam for the host cursor boundary.
 // Production never replaces it.
 var pointerCursorSetter = x11.SetCursorVisible
@@ -755,6 +761,14 @@ var persistentPointerCapture atomic.Bool
 // not teleport. That first motion disarms. Motion between detents integrates
 // exact dx/dy from wherever the pair is; nothing is ever pinned. A one- or
 // two-notch third-person zoom never arms, so ordinary zooming is untouched.
+//
+// Under the default zoom capture policy the host grab follows the same
+// edges: the arming detent takes the centered non-sticky grab
+// (acquirePersistentCapture) and the disarming motion frees it with the
+// pointer left at the center (releasePersistentCaptureAtCenter), so a
+// zoomed-out pointer is free to leave the window. Under
+// TIPSY_MOUSE_CAPTURE=always the grab is held for the whole experience and
+// only the logical re-seeding applies.
 const (
 	zoomLockArmDetents = 3
 	zoomLockRunWindow  = 2 * time.Second
@@ -786,13 +800,16 @@ func zoomLockArmed() bool {
 }
 
 // zoomLockNoteMotion disarms after the zoom-out detents that ended a lock:
-// the engine cursor is visible again and now tracks from the center.
-func zoomLockNoteMotion() {
+// the engine cursor is visible again and now tracks from the center. It
+// reports true on the motion sample that completed the disarm.
+func zoomLockNoteMotion() bool {
 	zoomLock.mu.Lock()
-	if zoomLock.unlocking {
-		zoomLock.armed, zoomLock.unlocking, zoomLock.run = false, false, 0
+	defer zoomLock.mu.Unlock()
+	if !zoomLock.unlocking {
+		return false
 	}
-	zoomLock.mu.Unlock()
+	zoomLock.armed, zoomLock.unlocking, zoomLock.run = false, false, 0
+	return true
 }
 
 // zoomLockDetent records one wheel detent and reports whether the logical
@@ -823,12 +840,20 @@ func zoomLockDetent(zoomIn bool, now time.Time) (center, announce bool) {
 }
 
 // zoomLockWheel applies the dead-center heuristic to one wheel detent taken
-// under persistent capture. When it re-seeds the logical pair it returns the
-// center and ok=true; the detent must then be delivered at that point. An
-// unarmed zoom-out whose logical cursor already drifted off-view also
-// re-seeds: nothing visible can jump, and reappearing at the center beats
-// reappearing at a clamped edge.
-func zoomLockWheel(scrollY float32) (x, y float32, ok bool) {
+// in a joined experience under the desktop capture policy: from a free
+// pointer, under the persistent grab, or during the held-RMB fallback. When
+// it re-seeds the logical pair it returns the center and ok=true; the detent
+// must then be delivered at that point. An unarmed zoom-out whose logical
+// cursor already drifted off-view also re-seeds: nothing visible can jump,
+// and reappearing at the center beats reappearing at a clamped edge.
+//
+// In the default zoom policy the arming detent is also where the pointer
+// gets confined: the centered grab is taken here, on the detent itself, so
+// the pointer is already held at the center when the game locks the mouse a
+// frame later. A refused grab (unfocused window) leaves the lock armed and
+// the next absolute motion retries. x, y is the pointer position carried by
+// the wheel event, the origin an always-policy acquire would anchor at.
+func zoomLockWheel(x, y, scrollY float32) (cx, cy float32, ok bool) {
 	if scrollY == 0 {
 		return 0, 0, false
 	}
@@ -841,14 +866,78 @@ func zoomLockWheel(scrollY float32) (x, y float32, ok bool) {
 	if !center {
 		return 0, 0, false
 	}
-	x, y, ok = SnapRobloxDirectPointerFallbackToCenter()
+	if announce && !persistentPointerCapture.Load() && !rmbPointerFallback.Load() &&
+		!pointerLockSticky.Load() {
+		if !acquirePersistentCapture(x, y) {
+			return 0, 0, false
+		}
+	}
+	cx, cy, ok = SnapRobloxDirectPointerFallbackToCenter()
 	if !ok {
 		return 0, 0, false
 	}
 	if announce {
 		DispatchRobloxDirectPointerFallbackDelta(0, 0)
 	}
-	return x, y, true
+	return cx, cy, true
+}
+
+// persistentAcquireWanted reports whether an absolute motion sample in a
+// joined experience should take the persistent grab: always under the
+// always policy, only while the zoom lock is armed under the default zoom
+// policy (re-acquire after a focus flap or an Alt re-arm).
+func persistentAcquireWanted() bool {
+	if !persistentEngageAllowed() {
+		return false
+	}
+	return pointerCaptureAlways() || zoomLockArmed()
+}
+
+// acquirePersistentCapture takes the persistent host grab and seeds the
+// logical integrator. The always policy anchors at the pointer position x, y
+// (the held-RMB style grab); the zoom policy anchors at the window center
+// and seeds the logical pair at the viewport center so the host pointer, the
+// logical cursor and the origin the engine freezes agree. Publish happens
+// only after the logical origin is ready; see the held-RMB acquisition
+// ordering. A refused grab changes nothing and reports false.
+func acquirePersistentCapture(x, y float32) bool {
+	if pointerCaptureAlways() {
+		changed, err := pointerLockAtCursorSetter(true)
+		if err != nil || !changed {
+			return false
+		}
+		BeginRobloxDirectPointerFallback(x, y)
+	} else {
+		changed, err := pointerLockAtCenterSetter(true)
+		if err != nil || !changed {
+			return false
+		}
+		BeginRobloxDirectPointerFallback(PointerViewportCenter())
+	}
+	persistentPointerCapture.Store(true)
+	pointerCursorSetter(false)
+	logging.Logger(logging.CatJNI).Info("[jni] persistent pointer capture acquired",
+		"policy", pointerCapturePolicyName())
+	return true
+}
+
+// releasePersistentCaptureAtCenter frees the zoom-lock grab once its unlock
+// completed. The X11 unlock leaves the host pointer at the grab anchor (the
+// window center) and the ordinary dispatcher keeps the logical center as its
+// last origin, so the first absolute sample afterwards is continuous with
+// the engine cursor that reappeared there.
+func releasePersistentCaptureAtCenter() {
+	persistentPointerCapture.Store(false)
+	ClearRobloxDirectPointerFallbackKeepLast()
+	_, _ = pointerLockAtCenterSetter(false)
+	logging.Logger(logging.CatJNI).Info("[jni] zoom lock released; pointer free")
+}
+
+func pointerCapturePolicyName() string {
+	if pointerCaptureAlways() {
+		return "always"
+	}
+	return "zoom"
 }
 
 // pointerCaptureReleased is the operator's LeftAlt toggle. One physical
@@ -892,9 +981,16 @@ func loadPointerCaptureAltSnapshot() (released, sticky bool) {
 // Unset or any value other than an explicit false spelling enables the
 // desktop persistent capture; 0/false/off/no (case-insensitive) restores the
 // unmodified Android listener behavior.
+//
+// TIPSY_MOUSE_CAPTURE=always keeps the previous policy: the pointer is
+// confined for the whole experience from its first motion. The default,
+// zoom, confines only while the wheel-driven dead-center lock is armed
+// (see zoomLock), so a zoomed-out third-person pointer is free and may leave
+// the window exactly like the desktop client.
 var pointerCapturePolicy struct {
 	sync.Once
 	enabled bool
+	always  bool
 }
 
 func pointerCapturePolicyEnabled() bool {
@@ -902,11 +998,19 @@ func pointerCapturePolicyEnabled() bool {
 		switch strings.ToLower(strings.TrimSpace(os.Getenv("TIPSY_MOUSE_CAPTURE"))) {
 		case "0", "false", "off", "no":
 			pointerCapturePolicy.enabled = false
+		case "always":
+			pointerCapturePolicy.enabled = true
+			pointerCapturePolicy.always = true
 		default:
 			pointerCapturePolicy.enabled = true
 		}
 	})
 	return pointerCapturePolicy.enabled
+}
+
+// pointerCaptureAlways reports the whole-experience confinement policy.
+func pointerCaptureAlways() bool {
+	return pointerCapturePolicyEnabled() && pointerCapturePolicy.always
 }
 
 // ResetPointerCapturePolicy makes the next policy lookup re-read
@@ -915,6 +1019,17 @@ func pointerCapturePolicyEnabled() bool {
 func ResetPointerCapturePolicy() {
 	pointerCapturePolicy.Once = sync.Once{}
 	pointerCapturePolicy.enabled = true
+	pointerCapturePolicy.always = false
+	resetPointerCaptureState()
+}
+
+// SetPointerCapturePolicyForTest pins the policy without the environment.
+// Test seam only.
+func SetPointerCapturePolicyForTest(enabled, always bool) {
+	pointerCapturePolicy.Once = sync.Once{}
+	pointerCapturePolicy.Do(func() {})
+	pointerCapturePolicy.enabled = enabled
+	pointerCapturePolicy.always = always
 	resetPointerCaptureState()
 }
 
@@ -1326,7 +1441,14 @@ func handleX11InputEvent(ev x11.InputEvent) {
 						resetZoomLock()
 						return
 					}
-					zoomLockNoteMotion()
+					if zoomLockNoteMotion() && !pointerCaptureAlways() {
+						// The unlock completed: under the zoom policy the pointer
+						// goes free again, sitting at the center where the engine
+						// cursor reappeared. This relative sample is the
+						// transition and is consumed like the acquire sample.
+						releasePersistentCaptureAtCenter()
+						return
+					}
 					DispatchRobloxDirectPointerFallbackDelta(ev.DeltaX, ev.DeltaY)
 					return
 				}
@@ -1341,18 +1463,13 @@ func handleX11InputEvent(ev x11.InputEvent) {
 					return
 				}
 				// Absolute move with no centered lock: acquire the persistent
-				// anchored grab in a joined experience. The transition sample is
-				// consumed exactly like the official capture request.
-				if persistentEngageAllowed() && !rmbPointerFallback.Load() &&
+				// grab in a joined experience when the policy wants it (always,
+				// or zoom lock armed after a focus flap / Alt re-arm). The
+				// transition sample is consumed exactly like the official
+				// capture request.
+				if persistentAcquireWanted() && !rmbPointerFallback.Load() &&
 					!persistentPointerCapture.Load() && !pointerLockSticky.Load() {
-					changed, err := pointerLockAtCursorSetter(true)
-					if err == nil && changed {
-						BeginRobloxDirectPointerFallback(ev.X, ev.Y)
-						// Publish only after the logical origin is ready; see
-						// the held-RMB acquisition ordering below.
-						persistentPointerCapture.Store(true)
-						pointerCursorSetter(false)
-						logging.Logger(logging.CatJNI).Info("[jni] persistent pointer capture acquired")
+					if acquirePersistentCapture(ev.X, ev.Y) {
 						return
 					}
 					// Grab rejected: fall through to absolute delivery. Begin
@@ -1509,14 +1626,14 @@ func handleX11InputEvent(ev x11.InputEvent) {
 			if fx, fy, ok := RobloxDirectFallbackPosition(); ok {
 				wx, wy = fx, fy
 			}
-			if persistentPointerCapture.Load() && !pointerCaptureReleased.Load() {
-				if cx, cy, ok := zoomLockWheel(ev.ScrollY); ok {
-					wx, wy = cx, cy
-				}
-			}
 		} else if pointerLockSticky.Load() {
 			if lx, ly, ok := robloxDirectLastPosition(); ok {
 				wx, wy = lx, ly
+			}
+		}
+		if !pointerLockSticky.Load() && persistentEngageAllowed() {
+			if cx, cy, ok := zoomLockWheel(ev.X, ev.Y, ev.ScrollY); ok {
+				wx, wy = cx, cy
 			}
 		}
 		DispatchRobloxDirectScroll(wx, wy, ev.ScrollX, ev.ScrollY)

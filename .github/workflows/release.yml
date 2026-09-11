@@ -416,6 +416,7 @@ jobs:
           readonly evidence='${{ steps.candidate.outputs.evidence }}'
           readonly output=$(dirname -- "$appimage")
           readonly version='${{ steps.preflight.outputs.version }}'
+          readonly release_tag='${{ steps.preflight.outputs.tag }}'
           readonly sigstore_bundle='${{ steps.signature.outputs.bundle }}'
           readonly github_bundle='${{ steps.attest.outputs.bundle-path }}'
           readonly verification="$output/Tipsy-${version}-x86_64.VERIFY.txt"
@@ -432,6 +433,31 @@ jobs:
           tar --sort=name --owner=0 --group=0 --numeric-owner -C "$output" -czf "$evidence_archive" "$(basename "$evidence")"
           sha256sum "$appimage" > "${appimage}.sha256"
           sha256sum "$appimage" "${appimage}.sha256" "$sigstore_bundle" "$evidence_archive" > "$checksums"
+
+          # Auto-generated changelog from the commit range since the previous
+          # tag. Git history is the source of truth here: this repository
+          # commits directly to main, so GitHub's PR-based generated notes come
+          # back empty (only a compare link). Best-effort only; a missing
+          # previous tag still publishes with the recent history.
+          prev_tag=""
+          if [[ "$GITHUB_EVENT_NAME" == push ]]; then
+            prev_tag=$(git describe --tags --match 'v*' --abbrev=0 HEAD^ -- 2>/dev/null || true)
+          else
+            prev_tag=$(git describe --tags --match 'v*' --abbrev=0 HEAD -- 2>/dev/null || true)
+          fi
+          changelog_body=""
+          if [[ -n "$prev_tag" ]]; then
+            changelog_body=$(git log --no-decorate --pretty=format:'- %s (%h)' "${prev_tag}..HEAD" -- 2>/dev/null | head -n 100 || true)
+          else
+            changelog_body=$(git log --no-decorate --pretty=format:'- %s (%h)' HEAD -- 2>/dev/null | head -n 100 || true)
+          fi
+          [[ -n "$changelog_body" ]] || changelog_body='- No changes recorded.'
+          if [[ -n "$prev_tag" ]]; then
+            compare_line="**Full Changelog**: https://github.com/$GITHUB_REPOSITORY/compare/${prev_tag}...${release_tag}"
+          else
+            compare_line=""
+          fi
+
           printf '%s\n' \
             'Tipsy GitHub-signed release verification' \
             '' \
@@ -451,10 +477,27 @@ jobs:
           printf '%s\n' \
             "Tipsy ${version}" \
             '' \
+            '## Install (recommended)' \
+            '' \
+            '```sh' \
+            'curl -fsSL https://32bitx64bit.github.io/Tipsy-repo/install.sh | sudo bash' \
+            '```' \
+            '' \
+            'Manual install (APT / DNF / pacman / Flatpak / AppImage): https://github.com/32bitx64bit/Tipsy-repo/blob/main/docs/INSTALL.md' \
+            '' \
+            "## What's Changed" \
+            '' \
+            "$changelog_body" \
+            '' \
+            "$compare_line" \
+            '' \
+            '## Verify' \
+            '' \
             'This AppImage was built by an unprivileged GitHub Actions job, keylessly signed with GitHub Actions OIDC and Sigstore, and issued a GitHub build-provenance attestation.' \
             'No private signing key, signing secret, or release credential is embedded in the artifact or repository.' \
             '' \
             'Download the AppImage, its SHA-256 file, its Sigstore bundle, and VERIFY.txt. The evidence archive contains the GitHub provenance bundle and deterministic build evidence.' \
+            'See VERIFY.txt for the exact verification commands.' \
             > "$notes"
           for item in "$appimage" "${appimage}.sha256" "$sigstore_bundle" "$evidence_archive" "$checksums" "$verification" "$notes"; do
             [[ -f "$item" && ! -L "$item" && -s "$item" ]]
