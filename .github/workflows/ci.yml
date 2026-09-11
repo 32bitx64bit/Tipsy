@@ -91,15 +91,15 @@ jobs:
           - name: Fedora 43
             image: fedora:43
     steps:
-      - name: Install git for checkout
+      - name: Install base tooling (git, file)
         run: |
           set -euo pipefail
           if command -v apt-get >/dev/null 2>&1; then
             export DEBIAN_FRONTEND=noninteractive
             apt-get update
-            apt-get install -y --no-install-recommends ca-certificates curl git
+            apt-get install -y --no-install-recommends ca-certificates curl git file
           else
-            dnf install -y --setopt=install_weak_deps=False ca-certificates curl git
+            dnf install -y --setopt=install_weak_deps=False ca-certificates curl git file
           fi
 
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
