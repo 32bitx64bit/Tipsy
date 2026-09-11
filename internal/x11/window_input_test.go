@@ -1203,3 +1203,32 @@ func TestPointerLockGrabFailureKeepsButtonEdges(t *testing.T) {
 		t.Fatalf("up after failed grab = %+v", ev)
 	}
 }
+
+// TestSetCursorVisibleSwapsHiddenPolicy pins the desktop capture cursor
+// toggle: Open hides the host cursor, SetCursorVisible(true) restores the
+// inherited cursor while the operator release is active, and hiding again
+// redefines transparency. No pointer grab is involved.
+func TestSetCursorVisibleSwapsHiddenPolicy(t *testing.T) {
+	w := openInputWindow(t)
+	if !w.CursorHidden() {
+		t.Fatal("fresh window cursor is visible, want hidden")
+	}
+	SetCursorVisible(true)
+	if w.CursorHidden() {
+		t.Fatal("cursor still hidden after SetCursorVisible(true)")
+	}
+	// Idempotent while visible.
+	SetCursorVisible(true)
+	if w.CursorHidden() {
+		t.Fatal("cursor hidden after second SetCursorVisible(true)")
+	}
+	SetCursorVisible(false)
+	if !w.CursorHidden() {
+		t.Fatal("cursor visible after SetCursorVisible(false)")
+	}
+	// Idempotent while hidden.
+	SetCursorVisible(false)
+	if !w.CursorHidden() {
+		t.Fatal("cursor visible after second SetCursorVisible(false)")
+	}
+}

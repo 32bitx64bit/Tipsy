@@ -134,6 +134,7 @@ func decodePointerRingAction(rawA int32) (action int32, relative bool) {
 type InputEvent struct {
 	Kind           InputKind
 	FocusGained    bool    // InputFocus
+	FocusAltHeld   bool    // InputFocus loss with physical LeftAlt down (Alt-Tab evidence)
 	KeyPressed     bool    // InputKey
 	KeyCode        int32   // Android keycode; 0 = unmapped (dropped)
 	ScanCode       int32   // raw X11 keycode (InputKey), 0 otherwise
@@ -209,6 +210,27 @@ func setPointerLock(locked, center bool) (bool, error) {
 		return false, ErrClosed
 	}
 	return setPointerLockLocked(w, locked, center)
+}
+
+// SetCursorVisible swaps the sole client window's cursor between the
+// inherited host cursor (visible) and the transparent Roblox cursor
+// (hidden). The official Android client always hides the OS cursor over the
+// game surface; the desktop persistent-capture toggle shows it only while
+// the operator has explicitly released capture via LeftAlt. Visibility is
+// window-scoped: leaving the window restores the host cursor either way.
+func SetCursorVisible(visible bool) {
+	activeWindow.Lock()
+	w := activeWindow.w
+	activeWindow.Unlock()
+	if w == nil {
+		return
+	}
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if w.closed || w.display == 0 || w.xid == 0 {
+		return
+	}
+	setCursorVisibleLocked(w, visible)
 }
 
 // OnInput subscribes fn to captured input events of every open window.

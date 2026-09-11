@@ -74,6 +74,7 @@ func ResetPointerInputPath() {
 	pointerPath.Once = sync.Once{}
 	pointerPath.value = PointerPathDirect
 	rmbPointerFallback.Store(false)
+	resetPointerCaptureState()
 	ClearRobloxDirectPointerFallback()
 }
 
@@ -162,6 +163,113 @@ var directInputTarget struct {
 	fallbackCaptured bool
 	fallbackX        float32
 	fallbackY        float32
+	// clampW/clampH pin captured points (button edges, wheel detents) to the
+	// live surface so a minutes-long desktop grab cannot land clicks or zoom
+	// off-view. Motion pairs are never pinned: a pair that stops changing can
+	// read as no motion to the engine, so outward travel stays unbounded and
+	// only travel back toward the surface re-enters from the edge (no dead
+	// zone). Updated from the resize sink; never reset by target re-wires
+	// because the viewport outlives them.
+	clampW int32
+	clampH int32
+	// rmbAnchor is the LockCurrentPosition point of a secondary press taken
+	// under persistent capture. The old held-RMB fallback grabbed at the click
+	// and released the button at that same anchor, so the engine cursor came
+	// back to where the operator clicked; the persistent stream reproduces
+	// that by re-seeding the integrator to this point on release.
+	rmbAnchorSet bool
+	rmbAnchorX   float32
+	rmbAnchorY   float32
+}
+
+func init() {
+	// Match the VM's constructor display default and the initial X11 client
+	// geometry. The first surface resize publishes the real bounds.
+	directInputTarget.clampW = 1280
+	directInputTarget.clampH = 720
+}
+
+// SetPointerClampViewport publishes the live surface bounds for captured
+// points (button edges, wheel detents). The resize sink calls it alongside
+// SetDisplaySize so the clamp always agrees with the DisplayMetrics the
+// engine sees. Non-positive sizes are ignored defensively; production never
+// sends them.
+func SetPointerClampViewport(w, h int) {
+	if w <= 0 || h <= 0 {
+		return
+	}
+	directInputTarget.mu.Lock()
+	directInputTarget.clampW = int32(w)
+	directInputTarget.clampH = int32(h)
+	directInputTarget.mu.Unlock()
+}
+
+// ResetPointerClampViewportForTest restores the default clamp bounds. Test
+// seam; production bounds only move forward from surface resizes.
+func ResetPointerClampViewportForTest() {
+	directInputTarget.mu.Lock()
+	directInputTarget.clampW = 1280
+	directInputTarget.clampH = 720
+	directInputTarget.mu.Unlock()
+}
+
+// PointerClampViewport reports the live captured-logical bounds. The resize
+// sink test pins fan-out through it.
+func PointerClampViewport() (w, h int) {
+	directInputTarget.mu.RLock()
+	defer directInputTarget.mu.RUnlock()
+	return int(directInputTarget.clampW), int(directInputTarget.clampH)
+}
+
+// clampPointerLogical pins a captured point to the live surface. Caller must
+// hold directInputTarget.mu (either mode; it only reads the bounds). Absolute
+// X11 coordinates span [0,W-1]x[0,H-1]; the pinned point matches that domain
+// so a click or wheel detent always lands where the engine can see it. Never
+// call on motion pairs: a pair that stops changing can read as no motion to
+// the engine and the camera stops at the edge.
+func clampPointerLogical(x, y float32) (float32, float32) {
+	maxX := float32(directInputTarget.clampW - 1)
+	maxY := float32(directInputTarget.clampH - 1)
+	if maxX < 0 || maxY < 0 {
+		return x, y
+	}
+	if x < 0 {
+		x = 0
+	} else if x > maxX {
+		x = maxX
+	}
+	if y < 0 {
+		y = 0
+	} else if y > maxY {
+		y = maxY
+	}
+	return x, y
+}
+
+// advancePointerLogical moves a captured motion pair by an exact delta.
+// Caller must hold directInputTarget.mu. Outward travel past the live surface
+// stays unbounded so every sample keeps changing position; travel back toward
+// the surface first snaps the pair to the crossed edge so the engine cursor
+// reappears the moment the operator reverses instead of after replaying the
+// whole overshoot. The delta itself is never altered.
+func advancePointerLogical(x, y, dx, dy float32) (float32, float32) {
+	maxX := float32(directInputTarget.clampW - 1)
+	maxY := float32(directInputTarget.clampH - 1)
+	if maxX >= 0 {
+		if x > maxX && dx < 0 {
+			x = maxX
+		} else if x < 0 && dx > 0 {
+			x = 0
+		}
+	}
+	if maxY >= 0 {
+		if y > maxY && dy < 0 {
+			y = maxY
+		} else if y < 0 && dy > 0 {
+			y = 0
+		}
+	}
+	return x + dx, y + dy
 }
 
 // SetRobloxDirectInputTarget wires the direct mouse methods used by the
@@ -182,6 +290,7 @@ func SetRobloxDirectInputTarget(env, class, buttonFn, moveFn, wheelFn, lockFn ui
 	directInputTarget.fallbackCaptured = false
 	directInputTarget.fallbackX = 0
 	directInputTarget.fallbackY = 0
+	directInputTarget.rmbAnchorSet = false
 	ready := env != 0 && class != 0 && buttonFn != 0 && moveFn != 0 && wheelFn != 0 && lockFn != 0
 	directInputTarget.mu.Unlock()
 
@@ -211,7 +320,15 @@ func ClearRobloxDirectInputTarget() {
 	directInputTarget.fallbackCaptured = false
 	directInputTarget.fallbackX = 0
 	directInputTarget.fallbackY = 0
+	directInputTarget.rmbAnchorSet = false
 	directInputTarget.mu.Unlock()
+	// Delivery is dead without a target; drop any anchored stream so a
+	// re-wired target never inherits a stale grab. The Alt toggle (operator
+	// state) and the sticky centered request survive; the next motion after
+	// re-wire re-acquires honestly.
+	rmbPointerFallback.Store(false)
+	persistentPointerCapture.Store(false)
+	altToggleConsumed.Store(false)
 }
 
 // The direct keyboard target is a separate APK identity from the mouse
@@ -323,6 +440,11 @@ func DispatchRobloxDirectScroll(x, y, deltaX, deltaY float32) bool {
 	}
 	directInputTarget.mu.RLock()
 	env, class, fn := directInputTarget.env, directInputTarget.class, directInputTarget.wheelFn
+	// A wheel detent is a point, not motion: pin the captured logical to the
+	// live surface so zoom always hit-tests on-view, even after the unbounded
+	// motion pair has drifted far off-viewport. Absolute wheel (already
+	// on-view) is unaffected.
+	x, y = clampPointerLogical(x, y)
 	directInputTarget.mu.RUnlock()
 	if env == 0 || class == 0 || fn == 0 {
 		dropDirectEvent("scroll: no direct wheel target wired")
@@ -453,6 +575,9 @@ func DispatchRobloxDirectPointerDelta(x, y, dx, dy float32) bool {
 		dropDirectEvent("pointer: captured logical coordinate overflow")
 		return false
 	}
+	// Deliberately unbounded, matching the official captured listener's
+	// accumulated pair: the cursor is hidden while centered, and a pair that
+	// stops changing can read as no motion. Points clamp at their own sites.
 	directInputTarget.havePointer = true
 	directInputTarget.lastX = x
 	directInputTarget.lastY = y
@@ -473,8 +598,12 @@ func DispatchRobloxDirectPointerDelta(x, y, dx, dy float32) bool {
 // The APK's cached pair is a logical pointer coordinate, not a View bounds
 // check: its captured listener accumulates the density-normalized axes without
 // clamping them back to the captured View. Tipsy presents density 1.0, and X11
-// supplies finite integer-pixel deltas, so retain that unbounded logical pair
-// rather than inventing an edge clamp or wrap that would reverse camera travel.
+// supplies finite integer-pixel deltas. Motion is never pinned: a pair that
+// stops changing can read as no motion to the engine (the reason this
+// integrator exists). Outward travel stays unbounded; travel back re-enters
+// from the crossed edge so a visible cursor has no dead zone. Buttons and
+// wheel are points, not motion, and clamp to the live surface at their own
+// dispatch sites so clicks and zoom always land on-view.
 func BeginRobloxDirectPointerFallback(x, y float32) {
 	directInputTarget.mu.Lock()
 	directInputTarget.fallbackCaptured = true
@@ -498,6 +627,7 @@ func ClearRobloxDirectPointerFallback() {
 	directInputTarget.fallbackCaptured = false
 	directInputTarget.fallbackX = 0
 	directInputTarget.fallbackY = 0
+	directInputTarget.rmbAnchorSet = false
 	directInputTarget.havePointer = false
 	directInputTarget.lastX = 0
 	directInputTarget.lastY = 0
@@ -527,8 +657,9 @@ func DispatchRobloxDirectPointerFallbackDelta(dx, dy float32) bool {
 		dropDirectEvent("pointer: non-finite captured fallback delta")
 		return false
 	}
-	x := directInputTarget.fallbackX + dx
-	y := directInputTarget.fallbackY + dy
+	x := directInputTarget.fallbackX
+	y := directInputTarget.fallbackY
+	x, y = advancePointerLogical(x, y, dx, dy)
 	if math.IsInf(float64(x), 0) || math.IsInf(float64(y), 0) {
 		directInputTarget.mu.Unlock()
 		dropDirectEvent("pointer: captured fallback logical coordinate overflow")
@@ -544,6 +675,167 @@ func DispatchRobloxDirectPointerFallbackDelta(dx, dy float32) bool {
 		C.float(x), C.float(y), C.float(dx), C.float(dy))
 	atomic.AddUint64(&directInputStats.MoveDelivered, 1)
 	return true
+}
+
+// robloxDirectMoveTargetLive reports whether the direct mouse-move native is
+// wired. Persistent desktop capture engages only after this is true, so no
+// host grab is acquired before the engine listener exists (startup/Home).
+func robloxDirectMoveTargetLive() bool {
+	directInputTarget.mu.RLock()
+	defer directInputTarget.mu.RUnlock()
+	return directInputTarget.env != 0 && directInputTarget.class != 0 && directInputTarget.moveFn != 0
+}
+
+// RobloxDirectFallbackPosition returns the evolving captured logical cursor
+// position. Captured button and wheel events must use it — not X11's fixed
+// grab anchor — so the engine's software cursor and the delivered click or
+// scroll agree. ok is false when no fallback/persistent capture holds the
+// integrator.
+func RobloxDirectFallbackPosition() (x, y float32, ok bool) {
+	directInputTarget.mu.RLock()
+	defer directInputTarget.mu.RUnlock()
+	if !directInputTarget.fallbackCaptured {
+		return 0, 0, false
+	}
+	return directInputTarget.fallbackX, directInputTarget.fallbackY, true
+}
+
+// RobloxDirectFallbackOffView reports whether the captured logical pair has
+// drifted outside the live viewport, i.e. the engine's software cursor (when
+// shown) is currently invisible. ok is false when no fallback/persistent
+// capture holds the integrator.
+func RobloxDirectFallbackOffView() (off, ok bool) {
+	directInputTarget.mu.RLock()
+	defer directInputTarget.mu.RUnlock()
+	if !directInputTarget.fallbackCaptured {
+		return false, false
+	}
+	cx, cy := clampPointerLogical(directInputTarget.fallbackX, directInputTarget.fallbackY)
+	return cx != directInputTarget.fallbackX || cy != directInputTarget.fallbackY, true
+}
+
+// SnapRobloxDirectPointerFallbackToCenter re-seeds the captured logical pair
+// to the live viewport center and reports that point. The wheel-driven
+// dead-center heuristic (zoomLock in gameactivity_input.go) uses it so a
+// first-person lock begins and ends with the engine cursor at the center:
+// motion between detents still integrates exact dx/dy from there, the pair is
+// never pinned. ok is false when no fallback/persistent capture holds the
+// integrator.
+func SnapRobloxDirectPointerFallbackToCenter() (x, y float32, ok bool) {
+	directInputTarget.mu.Lock()
+	defer directInputTarget.mu.Unlock()
+	if !directInputTarget.fallbackCaptured {
+		return 0, 0, false
+	}
+	x = float32(directInputTarget.clampW / 2)
+	y = float32(directInputTarget.clampH / 2)
+	directInputTarget.fallbackX, directInputTarget.fallbackY = x, y
+	directInputTarget.havePointer = true
+	directInputTarget.lastX, directInputTarget.lastY = x, y
+	return x, y, true
+}
+
+// robloxDirectLastPosition returns the ordinary direct dispatcher's last
+// delivered origin. The centered LockCenter path accumulates from it; a
+// wheel detent while centered reports it so zoom UI follows the look cursor.
+func robloxDirectLastPosition() (x, y float32, ok bool) {
+	directInputTarget.mu.RLock()
+	defer directInputTarget.mu.RUnlock()
+	if !directInputTarget.havePointer {
+		return 0, 0, false
+	}
+	return directInputTarget.lastX, directInputTarget.lastY, true
+}
+
+// BeginRobloxDirectCapturedSecondary marks a secondary-button press taken
+// under persistent capture. It pins the logical cursor on-view, re-seeds the
+// integrator there so the drag starts from the delivered press point, and
+// remembers that point as the LockCurrentPosition anchor. ok is false when no
+// persistent/fallback stream holds the integrator.
+func BeginRobloxDirectCapturedSecondary() (x, y float32, ok bool) {
+	directInputTarget.mu.Lock()
+	defer directInputTarget.mu.Unlock()
+	if !directInputTarget.fallbackCaptured {
+		return 0, 0, false
+	}
+	x, y = clampPointerLogical(directInputTarget.fallbackX, directInputTarget.fallbackY)
+	directInputTarget.fallbackX, directInputTarget.fallbackY = x, y
+	directInputTarget.havePointer = true
+	directInputTarget.lastX, directInputTarget.lastY = x, y
+	directInputTarget.rmbAnchorSet = true
+	directInputTarget.rmbAnchorX, directInputTarget.rmbAnchorY = x, y
+	return x, y, true
+}
+
+// EndRobloxDirectCapturedSecondary restores the integrator to the remembered
+// secondary-press anchor so the matching release lands there and later motion
+// continues from it: the engine cursor comes back to the click point, exactly
+// as the held-RMB fallback's release at the grab anchor did. ok is false when
+// no press is remembered (the press predates the stream, or a focus/convert
+// reset dropped it); the caller then releases at the live logical cursor.
+func EndRobloxDirectCapturedSecondary() (x, y float32, ok bool) {
+	directInputTarget.mu.Lock()
+	defer directInputTarget.mu.Unlock()
+	if !directInputTarget.rmbAnchorSet || !directInputTarget.fallbackCaptured {
+		directInputTarget.rmbAnchorSet = false
+		return 0, 0, false
+	}
+	x, y = directInputTarget.rmbAnchorX, directInputTarget.rmbAnchorY
+	directInputTarget.rmbAnchorSet = false
+	directInputTarget.fallbackX, directInputTarget.fallbackY = x, y
+	directInputTarget.havePointer = true
+	directInputTarget.lastX, directInputTarget.lastY = x, y
+	return x, y, true
+}
+
+// DispatchRobloxDirectButtonCaptured delivers a button edge at the captured
+// logical cursor instead of a physical X11 coordinate. The host pointer is
+// confined at the grab anchor while captured, so the physical coordinate is
+// the anchor — not where the engine's software cursor is. The integrator is
+// otherwise untouched: a click does not move the logical cursor.
+func DispatchRobloxDirectButtonCaptured(action int32, x11Button int32) bool {
+	directInputTarget.mu.Lock()
+	env, class := directInputTarget.env, directInputTarget.class
+	buttonFn := directInputTarget.buttonFn
+	if env == 0 || class == 0 || buttonFn == 0 || !directInputTarget.fallbackCaptured {
+		directInputTarget.mu.Unlock()
+		dropDirectEvent("pointer: no captured button target wired")
+		return false
+	}
+	button, ok := directButtonIndex(x11Button)
+	if !ok {
+		directInputTarget.mu.Unlock()
+		dropDirectEvent("pointer: unsupported X11 button")
+		return false
+	}
+	x, y := directInputTarget.fallbackX, directInputTarget.fallbackY
+	// A click is a point, not motion: pin to the live surface so it always
+	// hit-tests on-view, even after the unbounded motion pair has drifted
+	// far off-viewport. The stored integrator is untouched.
+	x, y = clampPointerLogical(x, y)
+	directInputTarget.mu.Unlock()
+	pressed := C.uchar(0)
+	if action == motionActionDown {
+		pressed = 1
+	}
+	C.tipsy_direct_mouse_button(unsafe.Pointer(buttonFn), C.uintptr_t(env), C.uintptr_t(class),
+		C.float(x), C.float(y), pressed, C.int(button))
+	atomic.AddUint64(&directInputStats.ButtonDelivered, 1)
+	return true
+}
+
+// ClearRobloxDirectPointerFallbackKeepLast drops the fallback-captured flag
+// while preserving the ordinary dispatcher's last origin. The anchored to
+// centered LockCenter conversion uses it so the first centered deltas
+// continue from the established logical cursor instead of restarting at the
+// window-center anchor.
+func ClearRobloxDirectPointerFallbackKeepLast() {
+	directInputTarget.mu.Lock()
+	directInputTarget.fallbackCaptured = false
+	directInputTarget.fallbackX = 0
+	directInputTarget.fallbackY = 0
+	directInputTarget.rmbAnchorSet = false
+	directInputTarget.mu.Unlock()
 }
 
 const (

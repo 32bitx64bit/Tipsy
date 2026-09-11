@@ -1252,6 +1252,36 @@ func TestSurfaceResizePipeDeliversCommandBytes(t *testing.T) {
 	}
 }
 
+// TestSurfaceResizePublishesPointerClampViewport runs the production sink and
+// pins that a surface delta republishes the captured-logical clamp alongside
+// DisplayMetrics, so a long-held grab parks at the live edge after resizes.
+func TestSurfaceResizePublishesPointerClampViewport(t *testing.T) {
+	var pipeFDs [2]int
+	if err := syscall.Pipe2(pipeFDs[:], syscall.O_CLOEXEC|syscall.O_NONBLOCK); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = syscall.Close(pipeFDs[0]); _ = syscall.Close(pipeFDs[1]) })
+	t.Cleanup(func() { jni.SetPointerClampViewport(1280, 720) })
+
+	vm, err := jni.NewVM()
+	if err != nil {
+		t.Fatal(err)
+	}
+	aw := android.NewWindow(1280, 720, nil)
+	s := &surfaceResize{
+		sink:   &engineResizeSink{commands: pipeCommandWriter{fd: pipeFDs[1]}, vm: vm, aw: aw},
+		seeded: true, width: 1280, height: 720,
+	}
+	s.observe(800, 600)
+	if w, h := jni.PointerClampViewport(); w != 800 || h != 600 {
+		t.Fatalf("clamp viewport = %dx%d, want 800x600", w, h)
+	}
+	s.observe(2560, 1440)
+	if w, h := jni.PointerClampViewport(); w != 2560 || h != 1440 {
+		t.Fatalf("clamp viewport = %dx%d, want 2560x1440", w, h)
+	}
+}
+
 func TestPostAndroidAppCmdUsesOwnedWriter(t *testing.T) {
 	var pipeFDs [2]int
 	if err := syscall.Pipe2(pipeFDs[:], syscall.O_CLOEXEC|syscall.O_NONBLOCK); err != nil {

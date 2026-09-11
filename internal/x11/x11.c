@@ -326,6 +326,18 @@ static void tipsy_release_keys(void) {
 	tipsy_f11_down = 0;
 }
 
+// Physical LeftAlt (Android 57) held state, read before synthesized
+// focus-loss releases. The Go capture toggle uses it as event evidence that
+// an Alt press belonged to an Alt-Tab chord rather than a standalone toggle.
+static int tipsy_left_alt_held(void) {
+	for (int code = 0; code < 256; ++code) {
+		if (tipsy_keys[code].down == 1 && tipsy_keys[code].android_code == 57) {
+			return 1;
+		}
+	}
+	return 0;
+}
+
 static int tipsy_clamp_coord(int value, int extent) {
 	if (extent <= 1) return 0;
 	if (value < 0) return 0;
@@ -702,12 +714,13 @@ static void tipsy_apply_host_focus(Display *dpy, Window win, int gained) {
 		return;
 	}
 	tipsy_have_keyboard_focus = 0;
+	int alt_held = tipsy_left_alt_held();
 	tipsy_release_keys();
 	tipsy_pointer_unlock(dpy, win, 1, 1);
 	if (tipsy_xic != NULL) {
 		XUnsetICFocus(tipsy_xic);
 	}
-	tipsy_input_push(TIPSY_INPUT_FOCUS, 0, 0, 0, 0, 0);
+	tipsy_input_push(TIPSY_INPUT_FOCUS, 0, alt_held, 0, 0, 0);
 }
 
 // Apply the state read from the APK-proven native getter. Return 1 for
@@ -1447,8 +1460,10 @@ int tipsy_x11_pump(uintptr_t dpy_ptr, unsigned long xid, unsigned long wm_delete
 				ev.xfocus.detail != NotifyPointer &&
 				ev.xfocus.detail != NotifyPointerRoot &&
 				ev.xfocus.detail != NotifyInferior) {
+				int alt_held = 0;
 				if (ev.type == FocusOut) {
 					tipsy_have_keyboard_focus = 0;
+					alt_held = tipsy_left_alt_held();
 					tipsy_release_keys();
 					tipsy_pointer_unlock(dpy, win, 1, 1);
 					if (tipsy_xic != NULL) {
@@ -1466,7 +1481,7 @@ int tipsy_x11_pump(uintptr_t dpy_ptr, unsigned long xid, unsigned long wm_delete
 					}
 				}
 				tipsy_input_push(TIPSY_INPUT_FOCUS,
-					ev.type == FocusIn ? 1 : 0, 0, 0, 0, 0);
+					ev.type == FocusIn ? 1 : 0, alt_held, 0, 0, 0);
 			}
 			break;
 		case PropertyNotify:

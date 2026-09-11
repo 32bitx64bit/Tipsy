@@ -719,6 +719,252 @@ var pointerLockSticky atomic.Bool
 var pointerLockSetter = x11.SetPointerLock
 var pointerLockAtCursorSetter = x11.SetPointerLockAtCursor
 
+// pointerCursorSetter is a test seam for the host cursor boundary.
+// Production never replaces it.
+var pointerCursorSetter = x11.SetCursorVisible
+
+// leftAltKeyCode is Android KEYCODE_ALT_LEFT, the desktop persistent-capture
+// toggle. RightAlt (AltGr) is never consumed so layout input keeps working.
+const leftAltKeyCode = 57
+
+// persistentPointerCapture is the desktop-style in-experience grab. The
+// official Android listener captures only under the engine LockCenter getter,
+// but several first-person experiences (notably Project 12 [BODY CAM!]) never
+// set that state, leaving an uncaptured pointer that stops camera travel at
+// the screen edge. While in an experience this anchored grab confines the
+// pointer and integrates the same unbounded logical cursor as the held-RMB
+// fallback, so look keeps working; buttons and wheel are points and clamp to
+// the live surface at dispatch so clicks and zoom always land on-view. The
+// engine getter stays the stays the
+// sole LockCenter authority: a getter-true transition converts this grab to
+// the centered sticky grab in place. Mutually exclusive with
+// rmbPointerFallback; at most one anchored mode holds the X11 grab.
+var persistentPointerCapture atomic.Bool
+
+// zoomLock is the wheel-driven "dead center" heuristic for persistent
+// capture. The engine exports no first-person or cursor-visibility signal
+// (Project 12 never reports LockCenter yet hides its cursor and locks the
+// look), so the only observable edge of such a lock is the wheel that causes
+// it. A deliberate run of zoom-in detents (zoomLockArmDetents within
+// zoomLockRunWindow of each other) arms the lock: that detent and every
+// further zoom-in detent re-seed the logical cursor to the viewport center
+// and precede the wheel with a zero-delta move, so the origin the engine
+// freezes when the game locks the mouse is the center. The zoom-out detents
+// that leave first person re-seed to the center again, so the reappearing
+// engine cursor and our integrator agree and the first motion afterwards does
+// not teleport. That first motion disarms. Motion between detents integrates
+// exact dx/dy from wherever the pair is; nothing is ever pinned. A one- or
+// two-notch third-person zoom never arms, so ordinary zooming is untouched.
+const (
+	zoomLockArmDetents = 3
+	zoomLockRunWindow  = 2 * time.Second
+)
+
+var zoomLock struct {
+	mu         sync.Mutex
+	run        int
+	lastDetent time.Time
+	armed      bool
+	unlocking  bool
+}
+
+// zoomLockNow is the heuristic's clock; tests substitute it.
+var zoomLockNow = time.Now
+
+func resetZoomLock() {
+	zoomLock.mu.Lock()
+	zoomLock.run, zoomLock.armed, zoomLock.unlocking = 0, false, false
+	zoomLock.lastDetent = time.Time{}
+	zoomLock.mu.Unlock()
+}
+
+// zoomLockArmed reports the heuristic state for tests and diagnostics.
+func zoomLockArmed() bool {
+	zoomLock.mu.Lock()
+	defer zoomLock.mu.Unlock()
+	return zoomLock.armed
+}
+
+// zoomLockNoteMotion disarms after the zoom-out detents that ended a lock:
+// the engine cursor is visible again and now tracks from the center.
+func zoomLockNoteMotion() {
+	zoomLock.mu.Lock()
+	if zoomLock.unlocking {
+		zoomLock.armed, zoomLock.unlocking, zoomLock.run = false, false, 0
+	}
+	zoomLock.mu.Unlock()
+}
+
+// zoomLockDetent records one wheel detent and reports whether the logical
+// cursor must be re-seeded to the center for it (center) and whether a
+// zero-delta move must precede the wheel (announce; zoom-in only, because a
+// zoom-out detent may still be delivered to a locked engine).
+func zoomLockDetent(zoomIn bool, now time.Time) (center, announce bool) {
+	zoomLock.mu.Lock()
+	defer zoomLock.mu.Unlock()
+	if !zoomLock.lastDetent.IsZero() && now.Sub(zoomLock.lastDetent) > zoomLockRunWindow {
+		zoomLock.run = 0
+	}
+	zoomLock.lastDetent = now
+	if zoomIn {
+		zoomLock.run++
+		zoomLock.unlocking = false
+		if zoomLock.run >= zoomLockArmDetents {
+			zoomLock.armed = true
+		}
+		return zoomLock.armed, zoomLock.armed
+	}
+	zoomLock.run = 0
+	if zoomLock.armed {
+		zoomLock.unlocking = true
+		return true, false
+	}
+	return false, false
+}
+
+// zoomLockWheel applies the dead-center heuristic to one wheel detent taken
+// under persistent capture. When it re-seeds the logical pair it returns the
+// center and ok=true; the detent must then be delivered at that point. An
+// unarmed zoom-out whose logical cursor already drifted off-view also
+// re-seeds: nothing visible can jump, and reappearing at the center beats
+// reappearing at a clamped edge.
+func zoomLockWheel(scrollY float32) (x, y float32, ok bool) {
+	if scrollY == 0 {
+		return 0, 0, false
+	}
+	center, announce := zoomLockDetent(scrollY > 0, zoomLockNow())
+	if !center && scrollY < 0 {
+		if off, has := RobloxDirectFallbackOffView(); has && off {
+			center = true
+		}
+	}
+	if !center {
+		return 0, 0, false
+	}
+	x, y, ok = SnapRobloxDirectPointerFallbackToCenter()
+	if !ok {
+		return 0, 0, false
+	}
+	if announce {
+		DispatchRobloxDirectPointerFallbackDelta(0, 0)
+	}
+	return x, y, true
+}
+
+// pointerCaptureReleased is the operator's LeftAlt toggle. One physical
+// LeftAlt press shows the host cursor and frees every grab; the next press
+// hides the cursor and lets the next motion re-acquire. It survives focus
+// changes by design; only an explicit press changes it, except for the
+// Alt-Tab chord neutralize on focus loss (see pointerCaptureAltSnapshot).
+var pointerCaptureReleased atomic.Bool
+
+// altToggleConsumed tracks a LeftAlt physical gesture whose down edge was
+// swallowed as a capture toggle. Repeats and the release of that same gesture
+// are swallowed too; edges of a gesture that started before the feature
+// became active (or after it deactivated) still route normally so Alt can
+// never stick down or up in the engine across experience transitions.
+var altToggleConsumed atomic.Bool
+
+// pointerCaptureAltSnapshot is the pre-press {released, sticky} state saved
+// on every consumed LeftAlt down. If X11 focus loss reports LeftAlt held,
+// that press belonged to an Alt-Tab chord and the snapshot is restored so
+// Alt-Tab stays capture-neutral instead of becoming a lasting toggle.
+var pointerCaptureAltSnapshot struct {
+	mu       sync.Mutex
+	released bool
+	sticky   bool
+}
+
+func savePointerCaptureAltSnapshot(released, sticky bool) {
+	pointerCaptureAltSnapshot.mu.Lock()
+	pointerCaptureAltSnapshot.released = released
+	pointerCaptureAltSnapshot.sticky = sticky
+	pointerCaptureAltSnapshot.mu.Unlock()
+}
+
+func loadPointerCaptureAltSnapshot() (released, sticky bool) {
+	pointerCaptureAltSnapshot.mu.Lock()
+	defer pointerCaptureAltSnapshot.mu.Unlock()
+	return pointerCaptureAltSnapshot.released, pointerCaptureAltSnapshot.sticky
+}
+
+// pointerCapturePolicy is the TIPSY_MOUSE_CAPTURE default-on switch.
+// Unset or any value other than an explicit false spelling enables the
+// desktop persistent capture; 0/false/off/no (case-insensitive) restores the
+// unmodified Android listener behavior.
+var pointerCapturePolicy struct {
+	sync.Once
+	enabled bool
+}
+
+func pointerCapturePolicyEnabled() bool {
+	pointerCapturePolicy.Do(func() {
+		switch strings.ToLower(strings.TrimSpace(os.Getenv("TIPSY_MOUSE_CAPTURE"))) {
+		case "0", "false", "off", "no":
+			pointerCapturePolicy.enabled = false
+		default:
+			pointerCapturePolicy.enabled = true
+		}
+	})
+	return pointerCapturePolicy.enabled
+}
+
+// ResetPointerCapturePolicy makes the next policy lookup re-read
+// TIPSY_MOUSE_CAPTURE and clears all capture toggle state. Test seam;
+// production never changes policy within a process.
+func ResetPointerCapturePolicy() {
+	pointerCapturePolicy.Once = sync.Once{}
+	pointerCapturePolicy.enabled = true
+	resetPointerCaptureState()
+}
+
+// resetPointerCaptureState clears the live capture flags and the Alt-Tab
+// snapshot without touching the environment policy. Input-path and target
+// resets call it so a reconfigured stream never inherits a stale grab.
+func resetPointerCaptureState() {
+	persistentPointerCapture.Store(false)
+	pointerCaptureReleased.Store(false)
+	altToggleConsumed.Store(false)
+	savePointerCaptureAltSnapshot(false, false)
+	resetZoomLock()
+}
+
+// pointerCaptureAvailable reports whether the desktop persistent capture
+// feature can engage on this stream: policy enabled, desktop mouse identity
+// (never touch), the direct pointer path selected, and the direct mouse-move
+// native wired. It does not consider experience presence or the Alt toggle.
+func pointerCaptureAvailable() bool {
+	if !pointerCapturePolicyEnabled() || pointerDeviceIsTouch() {
+		return false
+	}
+	if pointerDeliveryPath() == PointerPathGameActivity {
+		return false
+	}
+	return robloxDirectMoveTargetLive()
+}
+
+// inExperience reports whether the engine's latest onGameLoaded announcement
+// named a joined experience (non-zero place id) rather than Home (0) or no
+// announcement yet. Persistent capture engages only in an experience so Home
+// and Login keep absolute UI navigation.
+func inExperience() bool {
+	_, placeID := NativeHelperGameLoaded()
+	return placeID != 0
+}
+
+// persistentEngageAllowed reports whether a free absolute motion may acquire
+// the persistent anchored grab right now.
+func persistentEngageAllowed() bool {
+	return pointerCaptureAvailable() && inExperience() && !pointerCaptureReleased.Load()
+}
+
+// persistentAltActive reports whether LeftAlt edges are capture toggles
+// rather than engine keys: the feature is available and the client is in an
+// experience. On Home the Alt key always routes normally.
+func persistentAltActive() bool {
+	return pointerCaptureAvailable() && inExperience()
+}
+
 func pointerButtonState(x11Button int32, down bool) int32 {
 	pointerButtons.mu.Lock()
 	defer pointerButtons.mu.Unlock()
@@ -854,12 +1100,44 @@ func handleX11InputEvent(ev x11.InputEvent) {
 			// Host focus loss already ungrabs in X11. Do not send an explicit
 			// unlock here: that would clear the sticky first-person grab so
 			// returning to the window could not recapture without a click.
-			rmbPointerFallback.Store(false)
-			ClearRobloxDirectPointerFallback()
+			if ev.FocusAltHeld {
+				// Alt-Tab chord evidence: the Alt press belonged to the window-
+				// manager chord, not a standalone capture toggle. Restore the
+				// pre-press snapshot so Alt-Tab stays capture-neutral.
+				released, sticky := loadPointerCaptureAltSnapshot()
+				pointerCaptureReleased.Store(released)
+				pointerLockSticky.Store(sticky)
+				rmbPointerFallback.Store(false)
+				persistentPointerCapture.Store(false)
+				altToggleConsumed.Store(false)
+				ClearRobloxDirectPointerFallback()
+				// Reapply the restored cursor now: the window keeps its cursor
+				// setting while unfocused, and focus gain reaffirms it below.
+				if released {
+					pointerCursorSetter(true)
+				} else {
+					pointerCursorSetter(false)
+				}
+			} else {
+				// Ordinary focus loss preserves the operator Alt toggle and the
+				// sticky centered request; only transient anchored streams drop.
+				rmbPointerFallback.Store(false)
+				persistentPointerCapture.Store(false)
+				altToggleConsumed.Store(false)
+				ClearRobloxDirectPointerFallback()
+			}
+		} else if pointerCaptureReleased.Load() {
+			// Intentional operator release: stay free and keep the host cursor
+			// visible even if a sticky centered request is pending. Toggling
+			// back re-arms capture on the next motion.
+			pointerCursorSetter(true)
 		} else if pointerLockSticky.Load() {
 			rmbPointerFallback.Store(false)
+			persistentPointerCapture.Store(false)
+			pointerCursorSetter(false)
 			_, _ = pointerLockSetter(true)
 		} else {
+			pointerCursorSetter(false)
 			locked, available := RobloxMainWindowMouseLocked()
 			if available && locked {
 				pointerLockSticky.Store(true)
@@ -868,6 +1146,56 @@ func handleX11InputEvent(ev x11.InputEvent) {
 		}
 		DispatchGameActivityFocus(ev.FocusGained)
 	case x11.InputKey:
+		// LeftAlt is the desktop persistent-capture toggle while the feature
+		// is live in a joined experience. The press toggles every host grab
+		// and the host cursor; repeats and the release of that same physical
+		// gesture are swallowed so Alt never sticks in the engine. On Home,
+		// or with the feature opted out, Alt routes like any other key.
+		if ev.KeyCode == leftAltKeyCode {
+			if persistentAltActive() {
+				if ev.KeyPressed && ev.RepeatCount == 0 {
+					// Drop any stale pre-activation route, snapshot for a
+					// possible Alt-Tab chord, then toggle.
+					takeX11KeyOwner(ev.ScanCode)
+					savePointerCaptureAltSnapshot(pointerCaptureReleased.Load(), pointerLockSticky.Load())
+					if pointerCaptureReleased.Load() {
+						pointerCaptureReleased.Store(false)
+						pointerCursorSetter(false)
+						logging.Logger(logging.CatJNI).Info("[jni] pointer capture re-armed by Alt toggle")
+					} else {
+						pointerCaptureReleased.Store(true)
+						pointerLockSticky.Store(false)
+						rmbPointerFallback.Store(false)
+						persistentPointerCapture.Store(false)
+						ClearRobloxDirectPointerFallback()
+						_, _ = pointerLockSetter(false)
+						pointerCursorSetter(true)
+						logging.Logger(logging.CatJNI).Info("[jni] pointer capture released by Alt toggle")
+					}
+					altToggleConsumed.Store(true)
+					return
+				}
+				if altToggleConsumed.Load() {
+					if !ev.KeyPressed {
+						altToggleConsumed.Store(false)
+					}
+					takeX11KeyOwner(ev.ScanCode)
+					return
+				}
+				// Repeat/up of a gesture that started before activation (Alt
+				// held across the Home→experience join): fall through to the
+				// normal owner routing so the engine's down gets its up.
+			} else if altToggleConsumed.Load() {
+				// Gesture started active, feature deactivated mid-hold (left
+				// the experience while Alt was down): swallow the unmatched
+				// release instead of forwarding a down the engine never saw.
+				if !ev.KeyPressed {
+					altToggleConsumed.Store(false)
+				}
+				takeX11KeyOwner(ev.ScanCode)
+				return
+			}
+		}
 		// Repeat downs and the final up stay on the listener selected by the
 		// initial physical down. A non-repeat down always starts/replaces a
 		// gesture, recovering honestly if an earlier release was lost.
@@ -926,10 +1254,36 @@ func handleX11InputEvent(ev x11.InputEvent) {
 				// listener. The C ring uses a=3 for that path; decoding it as
 				// PointerDown would drop every camera delta as an unsupported
 				// button while the host grab still held the cursor.
+				//
+				// Leaving-experience safety: a persistent grab held across the
+				// experience→Home transition releases here. A relative sample
+				// from the dying grab is consumed (its anchor coordinates are
+				// not a real position); an absolute move falls through to the
+				// normal getter/absolute handling below.
+				if persistentPointerCapture.Load() && !inExperience() {
+					persistentPointerCapture.Store(false)
+					rmbPointerFallback.Store(false)
+					ClearRobloxDirectPointerFallback()
+					pointerLockSticky.Store(false)
+					_, _ = pointerLockSetter(false)
+					if ev.Relative {
+						return
+					}
+				}
 				locked, available := RobloxMainWindowMouseLocked()
-				if available && locked {
+				if available && locked && !pointerCaptureReleased.Load() {
+					// Getter-true converts any anchored mode (held-RMB or
+					// persistent) to the centered sticky grab. The persistent
+					// origin is preserved so centered deltas continue from the
+					// established logical cursor.
+					converting := false
+					if persistentPointerCapture.Swap(false) {
+						ClearRobloxDirectPointerFallbackKeepLast()
+						converting = true
+					}
 					if rmbPointerFallback.Swap(false) {
 						ClearRobloxDirectPointerFallback()
+						converting = true
 					}
 					if !ev.Relative {
 						// This is the official generic-listener order: observe the
@@ -937,12 +1291,25 @@ func handleX11InputEvent(ev x11.InputEvent) {
 						// then deliver later captured relative-axis events.
 						pointerLockSticky.Store(true)
 						_, _ = pointerLockSetter(true)
+						pointerCursorSetter(false)
 						return
+					}
+					if converting {
+						pointerLockSticky.Store(true)
+						_, _ = pointerLockSetter(true)
+						pointerCursorSetter(false)
 					}
 					DispatchRobloxDirectPointerDelta(ev.X, ev.Y, ev.DeltaX, ev.DeltaY)
 					return
 				}
 				if ev.Relative && rmbPointerFallback.Load() {
+					if pointerCaptureReleased.Load() {
+						// Alt-toggled mid-gesture: the toggle already ungrabs;
+						// this sample is stale.
+						rmbPointerFallback.Store(false)
+						ClearRobloxDirectPointerFallback()
+						return
+					}
 					// The native getter was measured false after this held RMB
 					// began, but the host fallback has an acquired grab. Relative
 					// X11 movement is therefore real camera motion, not a stale
@@ -952,26 +1319,83 @@ func handleX11InputEvent(ev x11.InputEvent) {
 					DispatchRobloxDirectPointerFallbackDelta(ev.DeltaX, ev.DeltaY)
 					return
 				}
+				if ev.Relative && persistentPointerCapture.Load() {
+					if pointerCaptureReleased.Load() || !inExperience() {
+						persistentPointerCapture.Store(false)
+						ClearRobloxDirectPointerFallback()
+						resetZoomLock()
+						return
+					}
+					zoomLockNoteMotion()
+					DispatchRobloxDirectPointerFallbackDelta(ev.DeltaX, ev.DeltaY)
+					return
+				}
 				if ev.Relative {
 					// The APK's captured-pointer listener checks the getter before
 					// dispatch and releases/consumes the event when it turns false.
 					rmbPointerFallback.Store(false)
+					persistentPointerCapture.Store(false)
 					ClearRobloxDirectPointerFallback()
 					pointerLockSticky.Store(false)
 					_, _ = pointerLockSetter(false)
 					return
 				}
+				// Absolute move with no centered lock: acquire the persistent
+				// anchored grab in a joined experience. The transition sample is
+				// consumed exactly like the official capture request.
+				if persistentEngageAllowed() && !rmbPointerFallback.Load() &&
+					!persistentPointerCapture.Load() && !pointerLockSticky.Load() {
+					changed, err := pointerLockAtCursorSetter(true)
+					if err == nil && changed {
+						BeginRobloxDirectPointerFallback(ev.X, ev.Y)
+						// Publish only after the logical origin is ready; see
+						// the held-RMB acquisition ordering below.
+						persistentPointerCapture.Store(true)
+						pointerCursorSetter(false)
+						logging.Logger(logging.CatJNI).Info("[jni] persistent pointer capture acquired")
+						return
+					}
+					// Grab rejected: fall through to absolute delivery. Begin
+					// was never called, so no integrator state exists to clear;
+					// a full clear here would wipe the ordinary dispatcher's
+					// last origin and break move continuity.
+				}
 				DispatchRobloxDirectPointer(ev.PointerAction, ev.X, ev.Y, ev.Button)
 			case ev.PointerAction == x11.PointerDown && ev.Button == 3:
+				// While persistent-captured, RMB keeps the old held-RMB contract
+				// in logical space (LockCurrentPosition): the press pins the
+				// logical cursor on-view and anchors it, the drag integrates
+				// from that point, and the release restores it so the engine
+				// cursor comes back to where the operator clicked. No second
+				// grab; the stream is retained.
+				if persistentPointerCapture.Load() {
+					if _, _, ok := BeginRobloxDirectCapturedSecondary(); ok {
+						DispatchRobloxDirectButtonCaptured(ev.PointerAction, ev.Button)
+					} else {
+						DispatchRobloxDirectPointer(ev.PointerAction, ev.X, ev.Y, ev.Button)
+					}
+					locked, available := RobloxMainWindowMouseLocked()
+					if available && locked && !pointerCaptureReleased.Load() {
+						if persistentPointerCapture.Swap(false) {
+							ClearRobloxDirectPointerFallbackKeepLast()
+						}
+						rmbPointerFallback.Store(false)
+						pointerLockSticky.Store(true)
+						_, _ = pointerLockSetter(true)
+						pointerCursorSetter(false)
+					}
+					break
+				}
 				DispatchRobloxDirectPointer(ev.PointerAction, ev.X, ev.Y, ev.Button)
 				locked, available := RobloxMainWindowMouseLocked()
 				logging.Logger(logging.CatJNI).Info("[jni] pointer lock after secondary down",
 					"available", available, "locked", locked)
-				if available && locked {
+				if available && locked && !pointerCaptureReleased.Load() {
 					rmbPointerFallback.Store(false)
 					pointerLockSticky.Store(true)
 					_, _ = pointerLockSetter(true)
-				} else if available {
+					pointerCursorSetter(false)
+				} else if available && !locked && !pointerCaptureReleased.Load() {
 					// The observed in-experience client leaves the exact lock getter
 					// false for ordinary RMB camera look. Deliver the edge first,
 					// then use one held-RMB host capture anchored at the click so
@@ -987,16 +1411,49 @@ func handleX11InputEvent(ev x11.InputEvent) {
 						// also makes a concurrent drain unable to see an active fallback
 						// with no logical accumulator.
 						rmbPointerFallback.Store(true)
+						pointerCursorSetter(false)
 						logging.Logger(logging.CatJNI).Info("[jni] held-RMB pointer-lock fallback acquired")
 					}
 				}
 			case ev.PointerAction == x11.PointerUp && ev.Button == 3:
+				// While persistent-captured, the release lands at the press
+				// anchor and re-seeds the integrator there (the old fallback's
+				// release-at-grab-anchor, in logical space); the stream
+				// continues. Only a getter-true edge converts it to centered.
+				if persistentPointerCapture.Load() {
+					if _, _, ok := EndRobloxDirectCapturedSecondary(); ok {
+						DispatchRobloxDirectButtonCaptured(ev.PointerAction, ev.Button)
+					} else if _, _, ok := RobloxDirectFallbackPosition(); ok {
+						DispatchRobloxDirectButtonCaptured(ev.PointerAction, ev.Button)
+					} else {
+						DispatchRobloxDirectPointer(ev.PointerAction, ev.X, ev.Y, ev.Button)
+					}
+					locked, available := RobloxMainWindowMouseLocked()
+					if available && locked && !pointerCaptureReleased.Load() {
+						if persistentPointerCapture.Swap(false) {
+							ClearRobloxDirectPointerFallbackKeepLast()
+						}
+						pointerLockSticky.Store(true)
+						_, _ = pointerLockSetter(true)
+						pointerCursorSetter(false)
+					}
+					break
+				}
 				// Discard the virtual captured origin before seeding the ordinary
 				// direct dispatcher from this real anchored release. This makes the
 				// next two physical post-release motions start from actual X11
 				// coordinates, not an accumulated camera-look coordinate.
 				ClearRobloxDirectPointerFallback()
 				DispatchRobloxDirectPointer(ev.PointerAction, ev.X, ev.Y, ev.Button)
+				if pointerCaptureReleased.Load() {
+					// Alt-toggled mid-hold: the toggle already ungrabs; stay
+					// free and keep the host cursor visible.
+					rmbPointerFallback.Store(false)
+					pointerLockSticky.Store(false)
+					_, _ = pointerLockSetter(false)
+					pointerCursorSetter(true)
+					break
+				}
 				// Re-read after delivering the edge, matching the engine-owned
 				// handshake. Ordinary RMB camera look turns false and releases at
 				// the anchor; first-person/shift-lock remains captured.
@@ -1005,8 +1462,32 @@ func handleX11InputEvent(ev x11.InputEvent) {
 				if !available || !locked {
 					pointerLockSticky.Store(false)
 					_, _ = pointerLockSetter(false)
+				} else {
+					pointerCursorSetter(false)
 				}
 			default:
+				// Captured primary (and other) button edges land at the logical
+				// cursor so in-experience UI clicks agree with the software
+				// cursor. A getter-true edge converts to centered immediately
+				// instead of waiting for the next motion.
+				if persistentPointerCapture.Load() &&
+					(ev.PointerAction == x11.PointerDown || ev.PointerAction == x11.PointerUp) {
+					if _, _, ok := RobloxDirectFallbackPosition(); ok {
+						DispatchRobloxDirectButtonCaptured(ev.PointerAction, ev.Button)
+					} else {
+						DispatchRobloxDirectPointer(ev.PointerAction, ev.X, ev.Y, ev.Button)
+					}
+					locked, available := RobloxMainWindowMouseLocked()
+					if available && locked && !pointerCaptureReleased.Load() {
+						if persistentPointerCapture.Swap(false) {
+							ClearRobloxDirectPointerFallbackKeepLast()
+						}
+						pointerLockSticky.Store(true)
+						_, _ = pointerLockSetter(true)
+						pointerCursorSetter(false)
+					}
+					break
+				}
 				DispatchRobloxDirectPointer(ev.PointerAction, ev.X, ev.Y, ev.Button)
 			}
 		}
@@ -1015,8 +1496,67 @@ func handleX11InputEvent(ev x11.InputEvent) {
 		// direct NativeInputInterface wheel native. GameActivity's replaced
 		// touch listener has no faithful wheel equivalent.
 		path := pointerDeliveryPath()
-		if path == PointerPathDirect || path == PointerPathBoth {
-			DispatchRobloxDirectScroll(ev.X, ev.Y, ev.ScrollX, ev.ScrollY)
+		if path != PointerPathDirect && path != PointerPathBoth {
+			break
+		}
+		// Captured wheel detents report the logical cursor, not X11's fixed
+		// grab anchor, so zoomed-out UI hover/scroll agrees with the software
+		// cursor. Centered LockCenter detents report the look origin. Under
+		// persistent capture the dead-center heuristic may re-seed the logical
+		// cursor first (see zoomLock); the detent is then delivered there.
+		wx, wy := ev.X, ev.Y
+		if persistentPointerCapture.Load() || rmbPointerFallback.Load() {
+			if fx, fy, ok := RobloxDirectFallbackPosition(); ok {
+				wx, wy = fx, fy
+			}
+			if persistentPointerCapture.Load() && !pointerCaptureReleased.Load() {
+				if cx, cy, ok := zoomLockWheel(ev.ScrollY); ok {
+					wx, wy = cx, cy
+				}
+			}
+		} else if pointerLockSticky.Load() {
+			if lx, ly, ok := robloxDirectLastPosition(); ok {
+				wx, wy = lx, ly
+			}
+		}
+		DispatchRobloxDirectScroll(wx, wy, ev.ScrollX, ev.ScrollY)
+		// Exactly one engine-getter probe per delivered wheel event. A detent
+		// that completes a first-person zoom converts to the centered sticky
+		// grab on that same detent instead of waiting for the next motion;
+		// a zoom-out detent that clears the getter releases the centered grab
+		// on the detent itself. Getter-false from an anchored stream preserves
+		// that stream: persistent capture is the deliberate desktop fallback
+		// and must stay confined even when the engine never reports LockCenter.
+		if pointerCaptureReleased.Load() {
+			break
+		}
+		locked, available := RobloxMainWindowMouseLocked()
+		if !available {
+			break
+		}
+		if locked {
+			if pointerLockSticky.Load() {
+				break
+			}
+			if persistentPointerCapture.Swap(false) {
+				ClearRobloxDirectPointerFallbackKeepLast()
+				// The engine owns centering from here (LockCenter reported).
+				resetZoomLock()
+			}
+			if rmbPointerFallback.Swap(false) {
+				ClearRobloxDirectPointerFallback()
+			}
+			pointerLockSticky.Store(true)
+			_, _ = pointerLockSetter(true)
+			pointerCursorSetter(false)
+			logging.Logger(logging.CatJNI).Info("[jni] pointer lock armed after scroll")
+		} else if pointerLockSticky.Load() {
+			pointerLockSticky.Store(false)
+			rmbPointerFallback.Store(false)
+			persistentPointerCapture.Store(false)
+			ClearRobloxDirectPointerFallback()
+			_, _ = pointerLockSetter(false)
+			logging.Logger(logging.CatJNI).Info("[jni] pointer lock released after scroll")
 		}
 	}
 }

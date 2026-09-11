@@ -7,6 +7,7 @@ package jni
 
 import (
 	"testing"
+	"time"
 
 	"github.com/tipsy-linux/tipsy/internal/x11"
 )
@@ -15,7 +16,13 @@ func selectPointerPath(t *testing.T, value string) {
 	t.Helper()
 	t.Setenv("TIPSY_INPUT_PATH", value)
 	ResetPointerInputPath()
+	// Input-bridge tests default to the Home lifecycle state: an
+	// onGameLoaded dispatched by an earlier test in this package must not
+	// leak an in-experience signal here. Experience tests set their place
+	// explicitly after this call; the cleanup restores Home for the next.
+	ResetGameLoadedForTest()
 	t.Cleanup(ResetPointerInputPath)
+	t.Cleanup(ResetGameLoadedForTest)
 }
 
 func selectKeyboardPath(t *testing.T, value string) {
@@ -28,6 +35,7 @@ func selectKeyboardPath(t *testing.T, value string) {
 func wireRecordingDirectTarget(t *testing.T, env, class uintptr) {
 	t.Helper()
 	testDirectRecReset()
+	ResetPointerClampViewportForTest()
 	if !SetRobloxDirectInputTarget(env, class, testDirectRecordButtonFn(), testDirectRecordMoveFn(), testDirectRecordWheelFn(), testDirectRecordMouseLockedFn()) {
 		t.Fatal("recording direct target did not wire")
 	}
@@ -47,16 +55,44 @@ func stubPointerLock(t *testing.T, fn func(bool) (bool, error)) {
 	t.Helper()
 	old := pointerLockSetter
 	oldCursor := pointerLockAtCursorSetter
+	oldVisible := pointerCursorSetter
 	pointerLockSetter = fn
 	pointerLockAtCursorSetter = fn
+	pointerCursorSetter = func(bool) {}
 	rmbPointerFallback.Store(false)
 	pointerLockSticky.Store(false)
+	resetPointerCaptureState()
 	t.Cleanup(func() {
 		pointerLockSetter = old
 		pointerLockAtCursorSetter = oldCursor
+		pointerCursorSetter = oldVisible
 		rmbPointerFallback.Store(false)
 		pointerLockSticky.Store(false)
+		resetPointerCaptureState()
 	})
+}
+
+// selectMouseCapture sets TIPSY_MOUSE_CAPTURE for one test. Empty selects
+// the production default (enabled).
+func selectMouseCapture(t *testing.T, value string) {
+	t.Helper()
+	t.Setenv("TIPSY_MOUSE_CAPTURE", value)
+	ResetPointerCapturePolicy()
+	t.Cleanup(ResetPointerCapturePolicy)
+}
+
+// enterExperienceForTest records an engine onGameLoaded announcement for a
+// joined experience (non-zero place id). selectPointerPath resets to Home;
+// this is the explicit opt-in for persistent-capture tests.
+func enterExperienceForTest(t *testing.T, vm *VM, placeID int64) {
+	t.Helper()
+	if placeID == 0 {
+		t.Fatal("experience tests need a non-zero place id")
+	}
+	if _, handled := vm.dispatch(jnull(), nativeHelperClass, "gameActivity_onGameLoaded", "(J)V", packJlong(placeID)); !handled {
+		t.Fatal("gameActivity_onGameLoaded not handled")
+	}
+	t.Cleanup(ResetGameLoadedForTest)
 }
 
 // TestDirectMouseButtonABI pins the exact public-static-native JNI ABI proven
@@ -900,5 +936,1117 @@ func TestKeyRepeatPreservesTextEditor(t *testing.T) {
 	}
 	if RobloxDirectInputStats().KeyDelivered != before {
 		t.Fatal("editor navigation escaped to gameplay listener")
+	}
+}
+
+// --- Desktop persistent pointer capture ---
+//
+// The engine getter never reports LockCenter for Project 12 [BODY CAM!], so
+// the official Android listener would leave the pointer free and stop camera
+// travel at the screen edge. The desktop policy captures while in a joined
+// experience and frees on a LeftAlt toggle. Every test below pins the
+// no-regression boundary against the held-RMB and LockCenter paths above.
+
+type captureCalls struct {
+	center  []bool
+	cursor  []bool
+	visible []bool
+}
+
+// stubCaptureSeams replaces the host grab and cursor boundaries with
+// recorders that always report success. Centered and cursor-anchored grabs
+// stay distinguishable, unlike stubPointerLock's shared stub.
+func stubCaptureSeams(t *testing.T) *captureCalls {
+	t.Helper()
+	calls := &captureCalls{}
+	oldCenter := pointerLockSetter
+	oldCursor := pointerLockAtCursorSetter
+	oldVisible := pointerCursorSetter
+	pointerLockSetter = func(locked bool) (bool, error) {
+		calls.center = append(calls.center, locked)
+		return true, nil
+	}
+	pointerLockAtCursorSetter = func(locked bool) (bool, error) {
+		calls.cursor = append(calls.cursor, locked)
+		return true, nil
+	}
+	pointerCursorSetter = func(visible bool) {
+		calls.visible = append(calls.visible, visible)
+	}
+	rmbPointerFallback.Store(false)
+	pointerLockSticky.Store(false)
+	resetPointerCaptureState()
+	t.Cleanup(func() {
+		pointerLockSetter = oldCenter
+		pointerLockAtCursorSetter = oldCursor
+		pointerCursorSetter = oldVisible
+		rmbPointerFallback.Store(false)
+		pointerLockSticky.Store(false)
+		resetPointerCaptureState()
+	})
+	return calls
+}
+
+func newCaptureVM(t *testing.T) *VM {
+	t.Helper()
+	vm, err := NewVM()
+	if err != nil {
+		t.Fatal(err)
+	}
+	return vm
+}
+
+func TestPersistentCaptureAcquiresAndIntegratesMotion(t *testing.T) {
+	selectPointerPath(t, "direct")
+	wireRecordingDirectTarget(t, 0x1234, 0x5678)
+	calls := stubCaptureSeams(t)
+	vm := newCaptureVM(t)
+	enterExperienceForTest(t, vm, 79966250354565)
+	testDirectRecSetMouseLocked(false)
+	before := RobloxDirectInputStats()
+
+	// The first absolute motion is consumed as the capture transition.
+	handleX11InputEvent(x11.InputEvent{Kind: x11.InputPointer, PointerAction: x11.PointerMove, X: 100, Y: 200})
+	if len(calls.cursor) != 1 || !calls.cursor[0] {
+		t.Fatalf("anchored acquire calls=%v, want [true]", calls.cursor)
+	}
+	if len(calls.center) != 0 {
+		t.Fatalf("centered calls=%v, want none for persistent acquire", calls.center)
+	}
+	if !persistentPointerCapture.Load() {
+		t.Fatal("persistent capture flag not set after transition move")
+	}
+	if got := RobloxDirectInputStats().MoveDelivered - before.MoveDelivered; got != 0 {
+		t.Fatalf("transition move deliveries=%d, want 0 (consumed)", got)
+	}
+	if len(calls.visible) != 1 || calls.visible[0] {
+		t.Fatalf("cursor visible calls=%v, want [false] (hidden)", calls.visible)
+	}
+
+	// Captured samples integrate the unbounded logical pair.
+	handleX11InputEvent(x11.InputEvent{Kind: x11.InputPointer, PointerAction: x11.PointerMove, Relative: true, X: 100, Y: 200, DeltaX: 11, DeltaY: -7})
+	if x, y := testDirectRecMoveFloat(0), testDirectRecMoveFloat(1); x != 111 || y != 193 {
+		t.Fatalf("persistent logical=(%v,%v), want (111,193)", x, y)
+	}
+	if dx, dy := testDirectRecMoveFloat(2), testDirectRecMoveFloat(3); dx != 11 || dy != -7 {
+		t.Fatalf("persistent delta=(%v,%v), want (11,-7)", dx, dy)
+	}
+	handleX11InputEvent(x11.InputEvent{Kind: x11.InputPointer, PointerAction: x11.PointerMove, Relative: true, X: 100, Y: 200, DeltaX: -5, DeltaY: 4})
+	if x, y := testDirectRecMoveFloat(0), testDirectRecMoveFloat(1); x != 106 || y != 197 {
+		t.Fatalf("reversed persistent logical=(%v,%v), want (106,197)", x, y)
+	}
+	if got := RobloxDirectInputStats().MoveDelivered - before.MoveDelivered; got != 2 {
+		t.Fatalf("captured move deliveries=%d, want 2", got)
+	}
+}
+
+func TestPersistentCaptureEnvironmentOptOutKeepsAbsoluteMotion(t *testing.T) {
+	for _, value := range []string{"0", "false", "off", "no", "FALSE", " Off "} {
+		t.Run(value, func(t *testing.T) {
+			selectPointerPath(t, "direct")
+			selectMouseCapture(t, value)
+			wireRecordingDirectTarget(t, 0x1234, 0x5678)
+			calls := stubCaptureSeams(t)
+			vm := newCaptureVM(t)
+			enterExperienceForTest(t, vm, 155615604)
+			testDirectRecSetMouseLocked(false)
+			before := RobloxDirectInputStats()
+
+			handleX11InputEvent(x11.InputEvent{Kind: x11.InputPointer, PointerAction: x11.PointerMove, X: 100, Y: 200})
+			handleX11InputEvent(x11.InputEvent{Kind: x11.InputPointer, PointerAction: x11.PointerMove, X: 104, Y: 197})
+			if dx, dy := testDirectRecMoveFloat(2), testDirectRecMoveFloat(3); dx != 4 || dy != -3 {
+				t.Fatalf("opt-out move delta=(%v,%v), want (4,-3)", dx, dy)
+			}
+			if got := RobloxDirectInputStats().MoveDelivered - before.MoveDelivered; got != 2 {
+				t.Fatalf("opt-out deliveries=%d, want 2", got)
+			}
+			if len(calls.cursor)+len(calls.center) != 0 {
+				t.Fatalf("opt-out grab calls center=%v cursor=%v, want none", calls.center, calls.cursor)
+			}
+			if persistentPointerCapture.Load() {
+				t.Fatal("opt-out engaged persistent capture")
+			}
+		})
+	}
+}
+
+func TestPersistentCaptureHomeKeepsAbsoluteAndAltPassThrough(t *testing.T) {
+	selectPointerPath(t, "direct")
+	selectKeyboardPath(t, "direct")
+	wireRecordingDirectTarget(t, 0x1234, 0x5678)
+	wireRecordingDirectKeyTarget(t, 0x1234, 0x88)
+	calls := stubCaptureSeams(t)
+	// No enterExperience: Home lifecycle state.
+	testDirectRecSetMouseLocked(false)
+	moveBefore := RobloxDirectInputStats().MoveDelivered
+	keyBefore := RobloxDirectInputStats().KeyDelivered
+
+	handleX11InputEvent(x11.InputEvent{Kind: x11.InputPointer, PointerAction: x11.PointerMove, X: 100, Y: 200})
+	handleX11InputEvent(x11.InputEvent{Kind: x11.InputPointer, PointerAction: x11.PointerMove, X: 104, Y: 197})
+	if dx, dy := testDirectRecMoveFloat(2), testDirectRecMoveFloat(3); dx != 4 || dy != -3 {
+		t.Fatalf("Home move delta=(%v,%v), want (4,-3)", dx, dy)
+	}
+	if got := RobloxDirectInputStats().MoveDelivered - moveBefore; got != 2 {
+		t.Fatalf("Home move deliveries=%d, want 2", got)
+	}
+	if len(calls.cursor)+len(calls.center) != 0 {
+		t.Fatalf("Home grab calls center=%v cursor=%v, want none", calls.center, calls.cursor)
+	}
+
+	// LeftAlt (X11 keycode 64 → evdev 56, Android 57) routes to the engine.
+	handleX11InputEvent(x11.InputEvent{Kind: x11.InputKey, KeyPressed: true, KeyCode: 57, ScanCode: 64})
+	handleX11InputEvent(x11.InputEvent{Kind: x11.InputKey, KeyPressed: false, KeyCode: 57, ScanCode: 64})
+	if got := RobloxDirectInputStats().KeyDelivered - keyBefore; got != 2 {
+		t.Fatalf("Home Alt key deliveries=%d, want 2 (pass-through)", got)
+	}
+	if pointerCaptureReleased.Load() {
+		t.Fatal("Home Alt press toggled capture release")
+	}
+}
+
+func TestPersistentCaptureToggleReleasesAndRecaptures(t *testing.T) {
+	selectPointerPath(t, "direct")
+	selectKeyboardPath(t, "direct")
+	wireRecordingDirectTarget(t, 0x1234, 0x5678)
+	wireRecordingDirectKeyTarget(t, 0x1234, 0x88)
+	calls := stubCaptureSeams(t)
+	vm := newCaptureVM(t)
+	enterExperienceForTest(t, vm, 79966250354565)
+	testDirectRecSetMouseLocked(false)
+
+	handleX11InputEvent(x11.InputEvent{Kind: x11.InputPointer, PointerAction: x11.PointerMove, X: 100, Y: 200})
+	if !persistentPointerCapture.Load() {
+		t.Fatal("persistent capture did not acquire")
+	}
+	keyBefore := RobloxDirectInputStats().KeyDelivered
+
+	// Toggle off: ungrab, visible cursor, Alt edges swallowed.
+	altDown := x11.InputEvent{Kind: x11.InputKey, KeyPressed: true, KeyCode: 57, ScanCode: 64}
+	altRepeat := x11.InputEvent{Kind: x11.InputKey, KeyPressed: true, KeyCode: 57, ScanCode: 64, RepeatCount: 1}
+	altUp := x11.InputEvent{Kind: x11.InputKey, KeyPressed: false, KeyCode: 57, ScanCode: 64}
+	handleX11InputEvent(altDown)
+	if !pointerCaptureReleased.Load() {
+		t.Fatal("Alt press did not release capture")
+	}
+	if persistentPointerCapture.Load() {
+		t.Fatal("persistent flag survived Alt release")
+	}
+	if len(calls.center) != 1 || calls.center[0] {
+		t.Fatalf("release grab calls center=%v, want [false]", calls.center)
+	}
+	if n := len(calls.visible); n != 2 || calls.visible[n-1] != true {
+		t.Fatalf("cursor calls=%v, want last true (visible)", calls.visible)
+	}
+	handleX11InputEvent(altRepeat)
+	handleX11InputEvent(altUp)
+	if got := RobloxDirectInputStats().KeyDelivered - keyBefore; got != 0 {
+		t.Fatalf("Alt toggle key deliveries=%d, want 0 (consumed)", got)
+	}
+
+	// Free absolute motion while released.
+	moveBefore := RobloxDirectInputStats().MoveDelivered
+	handleX11InputEvent(x11.InputEvent{Kind: x11.InputPointer, PointerAction: x11.PointerMove, X: 50, Y: 60})
+	if got := RobloxDirectInputStats().MoveDelivered - moveBefore; got != 1 {
+		t.Fatalf("released move deliveries=%d, want 1 (absolute)", got)
+	}
+	if x, y := testDirectRecMoveFloat(0), testDirectRecMoveFloat(1); x != 50 || y != 60 {
+		t.Fatalf("released absolute=(%v,%v), want (50,60)", x, y)
+	}
+
+	// Toggle back on: hidden cursor, next motion re-acquires.
+	handleX11InputEvent(altDown)
+	if pointerCaptureReleased.Load() {
+		t.Fatal("second Alt press did not re-arm capture")
+	}
+	if n := len(calls.visible); calls.visible[n-1] != false {
+		t.Fatalf("cursor calls=%v, want last false (hidden)", calls.visible)
+	}
+	handleX11InputEvent(altUp)
+	cursorAcquires := len(calls.cursor)
+	handleX11InputEvent(x11.InputEvent{Kind: x11.InputPointer, PointerAction: x11.PointerMove, X: 60, Y: 70})
+	if len(calls.cursor) != cursorAcquires+1 || !calls.cursor[cursorAcquires] {
+		t.Fatalf("re-acquire cursor calls=%v, want one more [true]", calls.cursor)
+	}
+	if !persistentPointerCapture.Load() {
+		t.Fatal("persistent capture did not re-acquire after toggle-on")
+	}
+}
+
+func TestPointerCaptureToggleReleasesStickyEngineLock(t *testing.T) {
+	selectPointerPath(t, "direct")
+	wireRecordingDirectTarget(t, 0x1234, 0x5678)
+	calls := stubCaptureSeams(t)
+	vm := newCaptureVM(t)
+	enterExperienceForTest(t, vm, 155615604)
+	testDirectRecSetMouseLocked(true)
+
+	// Getter-true transition move acquires centered sticky.
+	handleX11InputEvent(x11.InputEvent{Kind: x11.InputPointer, PointerAction: x11.PointerMove, X: 640, Y: 360})
+	if !pointerLockSticky.Load() {
+		t.Fatal("getter-true move did not set sticky")
+	}
+	if len(calls.center) != 1 || !calls.center[0] {
+		t.Fatalf("centered acquire calls=%v, want [true]", calls.center)
+	}
+
+	// Alt toggle releases everything and gates the getter-true branch.
+	handleX11InputEvent(x11.InputEvent{Kind: x11.InputKey, KeyPressed: true, KeyCode: 57, ScanCode: 64})
+	if !pointerCaptureReleased.Load() || pointerLockSticky.Load() {
+		t.Fatal("Alt toggle did not release sticky centered lock")
+	}
+	handleX11InputEvent(x11.InputEvent{Kind: x11.InputKey, KeyPressed: false, KeyCode: 57, ScanCode: 64})
+	centerCalls := len(calls.center)
+	moveBefore := RobloxDirectInputStats().MoveDelivered
+	handleX11InputEvent(x11.InputEvent{Kind: x11.InputPointer, PointerAction: x11.PointerMove, X: 100, Y: 100})
+	if len(calls.center) != centerCalls {
+		t.Fatalf("released getter-true move grabbed center=%v, want gated", calls.center)
+	}
+	if got := RobloxDirectInputStats().MoveDelivered - moveBefore; got != 1 {
+		t.Fatalf("released move deliveries=%d, want 1 absolute", got)
+	}
+
+	// Toggle back: the next getter-true move re-acquires centered.
+	handleX11InputEvent(x11.InputEvent{Kind: x11.InputKey, KeyPressed: true, KeyCode: 57, ScanCode: 64})
+	handleX11InputEvent(x11.InputEvent{Kind: x11.InputKey, KeyPressed: false, KeyCode: 57, ScanCode: 64})
+	handleX11InputEvent(x11.InputEvent{Kind: x11.InputPointer, PointerAction: x11.PointerMove, X: 200, Y: 200})
+	if !pointerLockSticky.Load() {
+		t.Fatal("re-armed getter-true move did not restore sticky")
+	}
+	if len(calls.center) != centerCalls+1 || !calls.center[centerCalls] {
+		t.Fatalf("re-acquire center calls=%v, want one more [true]", calls.center)
+	}
+}
+
+func TestPersistentCaptureFocusLossClearsWithoutUnlock(t *testing.T) {
+	selectPointerPath(t, "direct")
+	wireRecordingDirectTarget(t, 0x1234, 0x5678)
+	calls := stubCaptureSeams(t)
+	vm := newCaptureVM(t)
+	enterExperienceForTest(t, vm, 79966250354565)
+	testDirectRecSetMouseLocked(false)
+
+	handleX11InputEvent(x11.InputEvent{Kind: x11.InputPointer, PointerAction: x11.PointerMove, X: 100, Y: 200})
+	if !persistentPointerCapture.Load() {
+		t.Fatal("persistent capture did not acquire")
+	}
+	// Focus loss drops the transient stream without an explicit unlock (X11
+	// already ungrabs) and preserves the released toggle (false here).
+	handleX11InputEvent(x11.InputEvent{Kind: x11.InputFocus, FocusGained: false})
+	if persistentPointerCapture.Load() {
+		t.Fatal("focus loss did not clear persistent capture")
+	}
+	if len(calls.center)+len(calls.cursor) != 1 {
+		t.Fatalf("focus-loss grab calls center=%v cursor=%v, want only the acquire", calls.center, calls.cursor)
+	}
+	// Focus gain reapplies the hidden cursor but waits for motion to
+	// re-acquire (no click needed, no grab yet).
+	handleX11InputEvent(x11.InputEvent{Kind: x11.InputFocus, FocusGained: true})
+	if len(calls.center)+len(calls.cursor) != 1 {
+		t.Fatalf("focus-gain grab calls center=%v cursor=%v, want no recapture yet", calls.center, calls.cursor)
+	}
+	if n := len(calls.visible); n != 2 || calls.visible[n-1] != false {
+		t.Fatalf("cursor calls=%v, want [false false] (hidden reapplied)", calls.visible)
+	}
+	handleX11InputEvent(x11.InputEvent{Kind: x11.InputPointer, PointerAction: x11.PointerMove, X: 120, Y: 210})
+	if !persistentPointerCapture.Load() {
+		t.Fatal("post-focus motion did not re-acquire persistent capture")
+	}
+}
+
+func TestPersistentCaptureRMBRestoresClickPointAndStaysCaptured(t *testing.T) {
+	selectPointerPath(t, "direct")
+	wireRecordingDirectTarget(t, 0x1234, 0x5678)
+	calls := stubCaptureSeams(t)
+	vm := newCaptureVM(t)
+	enterExperienceForTest(t, vm, 79966250354565)
+	testDirectRecSetMouseLocked(false)
+
+	handleX11InputEvent(x11.InputEvent{Kind: x11.InputPointer, PointerAction: x11.PointerMove, X: 100, Y: 200})
+	handleX11InputEvent(x11.InputEvent{Kind: x11.InputPointer, PointerAction: x11.PointerMove, Relative: true, X: 100, Y: 200, DeltaX: 11, DeltaY: -7})
+	grabsBefore := len(calls.cursor) + len(calls.center)
+
+	// RMB down lands at the logical cursor (111,193); no second grab.
+	handleX11InputEvent(x11.InputEvent{Kind: x11.InputPointer, PointerAction: x11.PointerDown, Button: 3, X: 100, Y: 200})
+	if x, y := testDirectRecButtonFloat(0), testDirectRecButtonFloat(1); x != 111 || y != 193 {
+		t.Fatalf("captured RMB down=(%v,%v), want logical (111,193)", x, y)
+	}
+	if !testDirectRecButtonPressed() || testDirectRecButtonIndex() != 1 {
+		t.Fatal("captured RMB down lost pressed/index")
+	}
+	// Held relative motion integrates from the press point with exact deltas.
+	handleX11InputEvent(x11.InputEvent{Kind: x11.InputPointer, PointerAction: x11.PointerMove, Relative: true, X: 100, Y: 200, DeltaX: -5, DeltaY: 4})
+	if x, y := testDirectRecMoveFloat(0), testDirectRecMoveFloat(1); x != 106 || y != 197 {
+		t.Fatalf("held RMB logical=(%v,%v), want (106,197)", x, y)
+	}
+	if dx, dy := testDirectRecMoveFloat(2), testDirectRecMoveFloat(3); dx != -5 || dy != 4 {
+		t.Fatalf("held RMB delta=(%v,%v), want (-5,4)", dx, dy)
+	}
+	// The release lands at the press anchor (LockCurrentPosition), exactly
+	// like the old held-RMB fallback released at its grab anchor.
+	handleX11InputEvent(x11.InputEvent{Kind: x11.InputPointer, PointerAction: x11.PointerUp, Button: 3, X: 100, Y: 200})
+	if x, y := testDirectRecButtonFloat(0), testDirectRecButtonFloat(1); x != 111 || y != 193 {
+		t.Fatalf("captured RMB up=(%v,%v), want press anchor (111,193)", x, y)
+	}
+	if testDirectRecButtonPressed() {
+		t.Fatal("captured RMB up still pressed")
+	}
+	// Post-release motion continues from the anchor: the engine cursor is
+	// back where the operator clicked.
+	handleX11InputEvent(x11.InputEvent{Kind: x11.InputPointer, PointerAction: x11.PointerMove, Relative: true, X: 100, Y: 200, DeltaX: 2, DeltaY: 3})
+	if x, y := testDirectRecMoveFloat(0), testDirectRecMoveFloat(1); x != 113 || y != 196 {
+		t.Fatalf("post-release logical=(%v,%v), want (113,196) from the anchor", x, y)
+	}
+	if !persistentPointerCapture.Load() {
+		t.Fatal("persistent stream did not survive RMB")
+	}
+	if rmbPointerFallback.Load() {
+		t.Fatal("RMB fallback flag set inside persistent stream")
+	}
+	if got := len(calls.cursor) + len(calls.center); got != grabsBefore {
+		t.Fatalf("grab calls grew to %d, want %d (RMB is an ordinary button while captured)", got, grabsBefore)
+	}
+}
+
+func TestPersistentCaptureRMBOffViewPinsPressAndRestoresIt(t *testing.T) {
+	selectPointerPath(t, "direct")
+	wireRecordingDirectTarget(t, 0x1234, 0x5678)
+	stubCaptureSeams(t)
+	vm := newCaptureVM(t)
+	enterExperienceForTest(t, vm, 79966250354565)
+	testDirectRecSetMouseLocked(false)
+
+	// A long first-person look drifts the logical cursor off-view.
+	handleX11InputEvent(x11.InputEvent{Kind: x11.InputPointer, PointerAction: x11.PointerMove, X: 1270, Y: 710})
+	handleX11InputEvent(x11.InputEvent{Kind: x11.InputPointer, PointerAction: x11.PointerMove, Relative: true, X: 1270, Y: 710, DeltaX: 50, DeltaY: 50})
+	if x, y := testDirectRecMoveFloat(0), testDirectRecMoveFloat(1); x != 1320 || y != 760 {
+		t.Fatalf("drifted logical=(%v,%v), want unbounded (1320,760)", x, y)
+	}
+	// The press pins on-view and re-seeds the drag from that point.
+	handleX11InputEvent(x11.InputEvent{Kind: x11.InputPointer, PointerAction: x11.PointerDown, Button: 3, X: 1270, Y: 710})
+	if x, y := testDirectRecButtonFloat(0), testDirectRecButtonFloat(1); x != 1279 || y != 719 {
+		t.Fatalf("off-view RMB down=(%v,%v), want pinned (1279,719)", x, y)
+	}
+	handleX11InputEvent(x11.InputEvent{Kind: x11.InputPointer, PointerAction: x11.PointerMove, Relative: true, X: 1270, Y: 710, DeltaX: -100, DeltaY: -100})
+	if x, y := testDirectRecMoveFloat(0), testDirectRecMoveFloat(1); x != 1179 || y != 619 {
+		t.Fatalf("held RMB logical=(%v,%v), want (1179,619) from the pinned press", x, y)
+	}
+	handleX11InputEvent(x11.InputEvent{Kind: x11.InputPointer, PointerAction: x11.PointerUp, Button: 3, X: 1270, Y: 710})
+	if x, y := testDirectRecButtonFloat(0), testDirectRecButtonFloat(1); x != 1279 || y != 719 {
+		t.Fatalf("off-view RMB up=(%v,%v), want press anchor (1279,719)", x, y)
+	}
+	if fx, fy, ok := RobloxDirectFallbackPosition(); !ok || fx != 1279 || fy != 719 {
+		t.Fatalf("post-release integrator=(%v,%v,%v), want (1279,719,true)", fx, fy, ok)
+	}
+}
+
+func TestCapturedFallbackReentersViewportWithoutDeadZone(t *testing.T) {
+	selectPointerPath(t, "direct")
+	wireRecordingDirectTarget(t, 0x1234, 0x5678)
+	t.Cleanup(ResetPointerClampViewportForTest)
+
+	// Outward travel is unbounded: every sample keeps changing position.
+	BeginRobloxDirectPointerFallback(1270, 710)
+	if !DispatchRobloxDirectPointerFallbackDelta(50, 50) {
+		t.Fatal("outward delta did not dispatch")
+	}
+	if x, y := testDirectRecMoveFloat(0), testDirectRecMoveFloat(1); x != 1320 || y != 760 {
+		t.Fatalf("outward logical=(%v,%v), want (1320,760)", x, y)
+	}
+	if !DispatchRobloxDirectPointerFallbackDelta(500, 0) {
+		t.Fatal("further outward delta did not dispatch")
+	}
+	if x, y := testDirectRecMoveFloat(0), testDirectRecMoveFloat(1); x != 1820 || y != 760 {
+		t.Fatalf("further outward logical=(%v,%v), want (1820,760)", x, y)
+	}
+	// Reversing re-enters from the crossed edge at once; the delta is exact.
+	if !DispatchRobloxDirectPointerFallbackDelta(-10, -10) {
+		t.Fatal("inward delta did not dispatch")
+	}
+	if x, y := testDirectRecMoveFloat(0), testDirectRecMoveFloat(1); x != 1269 || y != 709 {
+		t.Fatalf("re-entered logical=(%v,%v), want (1269,709)", x, y)
+	}
+	if dx, dy := testDirectRecMoveFloat(2), testDirectRecMoveFloat(3); dx != -10 || dy != -10 {
+		t.Fatalf("re-entry delta=(%v,%v), want (-10,-10) exact", dx, dy)
+	}
+	// Same contract past the origin.
+	if !DispatchRobloxDirectPointerFallbackDelta(-2000, -2000) {
+		t.Fatal("negative outward delta did not dispatch")
+	}
+	if x, y := testDirectRecMoveFloat(0), testDirectRecMoveFloat(1); x != -731 || y != -1291 {
+		t.Fatalf("negative outward logical=(%v,%v), want (-731,-1291)", x, y)
+	}
+	if !DispatchRobloxDirectPointerFallbackDelta(5, 6) {
+		t.Fatal("return delta did not dispatch")
+	}
+	if x, y := testDirectRecMoveFloat(0), testDirectRecMoveFloat(1); x != 5 || y != 6 {
+		t.Fatalf("returned logical=(%v,%v), want (5,6)", x, y)
+	}
+	// Inside the surface the pair is untouched.
+	if !DispatchRobloxDirectPointerFallbackDelta(100, 100) {
+		t.Fatal("interior delta did not dispatch")
+	}
+	if x, y := testDirectRecMoveFloat(0), testDirectRecMoveFloat(1); x != 105 || y != 106 {
+		t.Fatalf("interior logical=(%v,%v), want (105,106)", x, y)
+	}
+}
+
+func TestScrollGetterTrueConvertsPersistentCaptureOnce(t *testing.T) {
+	selectPointerPath(t, "direct")
+	wireRecordingDirectTarget(t, 0x1234, 0x5678)
+	calls := stubCaptureSeams(t)
+	vm := newCaptureVM(t)
+	enterExperienceForTest(t, vm, 155615604)
+	testDirectRecSetMouseLocked(false)
+
+	handleX11InputEvent(x11.InputEvent{Kind: x11.InputPointer, PointerAction: x11.PointerMove, X: 100, Y: 200})
+	handleX11InputEvent(x11.InputEvent{Kind: x11.InputPointer, PointerAction: x11.PointerMove, Relative: true, X: 100, Y: 200, DeltaX: 11, DeltaY: -7})
+
+	testDirectRecSetMouseLocked(true)
+	queriesBefore := RobloxDirectInputStats().LockQueries
+	handleX11InputEvent(x11.InputEvent{Kind: x11.InputScroll, X: 100, Y: 200, ScrollY: 1})
+	if got := RobloxDirectInputStats().LockQueries - queriesBefore; got != 1 {
+		t.Fatalf("scroll getter queries=%d, want exactly 1", got)
+	}
+	if x, y, d := testDirectRecWheelFloat(0), testDirectRecWheelFloat(1), testDirectRecWheelFloat(2); x != 111 || y != 193 || d != 1 {
+		t.Fatalf("captured wheel=(%v,%v,%v), want (111,193,1)", x, y, d)
+	}
+	if persistentPointerCapture.Load() || !pointerLockSticky.Load() {
+		t.Fatal("scroll did not convert persistent to centered sticky")
+	}
+	if len(calls.center) != 1 || !calls.center[0] {
+		t.Fatalf("conversion center calls=%v, want [true]", calls.center)
+	}
+}
+
+func TestGetterFalseScrollUsesLogicalPositionAndKeepsPersistentCapture(t *testing.T) {
+	selectPointerPath(t, "direct")
+	wireRecordingDirectTarget(t, 0x1234, 0x5678)
+	calls := stubCaptureSeams(t)
+	vm := newCaptureVM(t)
+	enterExperienceForTest(t, vm, 79966250354565)
+	testDirectRecSetMouseLocked(false)
+
+	handleX11InputEvent(x11.InputEvent{Kind: x11.InputPointer, PointerAction: x11.PointerMove, X: 100, Y: 200})
+	handleX11InputEvent(x11.InputEvent{Kind: x11.InputPointer, PointerAction: x11.PointerMove, Relative: true, X: 100, Y: 200, DeltaX: 11, DeltaY: -7})
+	grabsBefore := len(calls.cursor) + len(calls.center)
+	visibleBefore := len(calls.visible)
+	queriesBefore := RobloxDirectInputStats().LockQueries
+	wheelsBefore := RobloxDirectInputStats().WheelDelivered
+
+	// Any number of getter-false detents preserve the anchored stream.
+	for i := 0; i < 3; i++ {
+		handleX11InputEvent(x11.InputEvent{Kind: x11.InputScroll, X: 100, Y: 200, ScrollY: -1})
+	}
+	if got := RobloxDirectInputStats().WheelDelivered - wheelsBefore; got != 3 {
+		t.Fatalf("wheel deliveries=%d, want 3 (UI scroll preserved)", got)
+	}
+	if got := RobloxDirectInputStats().LockQueries - queriesBefore; got != 3 {
+		t.Fatalf("scroll getter queries=%d, want exactly 3 (one per detent)", got)
+	}
+	if x, y := testDirectRecWheelFloat(0), testDirectRecWheelFloat(1); x != 111 || y != 193 {
+		t.Fatalf("captured wheel=(%v,%v), want logical (111,193)", x, y)
+	}
+	if !persistentPointerCapture.Load() {
+		t.Fatal("getter-false scroll suspended persistent capture")
+	}
+	if got := len(calls.cursor) + len(calls.center); got != grabsBefore {
+		t.Fatalf("grab calls grew to %d, want %d (stream preserved)", got, grabsBefore)
+	}
+	if len(calls.visible) != visibleBefore {
+		t.Fatalf("cursor calls=%v, want no change (stays hidden)", calls.visible)
+	}
+}
+
+func TestWheelSequencePreservesFallbackThenConvertsAndReappliesCursorPolicy(t *testing.T) {
+	selectPointerPath(t, "direct")
+	wireRecordingDirectTarget(t, 0x1234, 0x5678)
+	calls := stubCaptureSeams(t)
+	vm := newCaptureVM(t)
+	enterExperienceForTest(t, vm, 155615604)
+	testDirectRecSetMouseLocked(false)
+
+	handleX11InputEvent(x11.InputEvent{Kind: x11.InputPointer, PointerAction: x11.PointerMove, X: 100, Y: 200})
+	handleX11InputEvent(x11.InputEvent{Kind: x11.InputScroll, X: 100, Y: 200, ScrollY: -1})
+	if !persistentPointerCapture.Load() {
+		t.Fatal("first getter-false scroll did not preserve persistent capture")
+	}
+	testDirectRecSetMouseLocked(true)
+	handleX11InputEvent(x11.InputEvent{Kind: x11.InputScroll, X: 100, Y: 200, ScrollY: -1})
+	if persistentPointerCapture.Load() || !pointerLockSticky.Load() {
+		t.Fatal("getter-true scroll did not convert to centered sticky")
+	}
+	if len(calls.center) != 1 || !calls.center[0] {
+		t.Fatalf("conversion center calls=%v, want [true]", calls.center)
+	}
+	for _, v := range calls.visible {
+		if v {
+			t.Fatalf("cursor calls=%v, want always hidden (no release in this sequence)", calls.visible)
+		}
+	}
+	// Zoom back out: getter-false from centered releases on the detent.
+	testDirectRecSetMouseLocked(false)
+	handleX11InputEvent(x11.InputEvent{Kind: x11.InputScroll, X: 640, Y: 360, ScrollY: 1})
+	if pointerLockSticky.Load() {
+		t.Fatal("zoom-out scroll did not release centered sticky")
+	}
+	if len(calls.center) != 2 || calls.center[1] {
+		t.Fatalf("release center calls=%v, want [true false]", calls.center)
+	}
+	for _, v := range calls.visible {
+		if v {
+			t.Fatalf("cursor calls=%v, want always hidden after zoom-out release", calls.visible)
+		}
+	}
+	// The next motion restores the anchored fallback, proving the release
+	// left a re-acquirable stream rather than a stuck state.
+	handleX11InputEvent(x11.InputEvent{Kind: x11.InputPointer, PointerAction: x11.PointerMove, X: 300, Y: 300})
+	if !persistentPointerCapture.Load() {
+		t.Fatal("post-zoom-out motion did not restore persistent capture")
+	}
+}
+
+func TestAltTabRestoresActivePointerPolicy(t *testing.T) {
+	selectPointerPath(t, "direct")
+	wireRecordingDirectTarget(t, 0x1234, 0x5678)
+	calls := stubCaptureSeams(t)
+	vm := newCaptureVM(t)
+	enterExperienceForTest(t, vm, 79966250354565)
+	testDirectRecSetMouseLocked(false)
+
+	handleX11InputEvent(x11.InputEvent{Kind: x11.InputPointer, PointerAction: x11.PointerMove, X: 100, Y: 200})
+	if !persistentPointerCapture.Load() {
+		t.Fatal("persistent capture did not acquire")
+	}
+	// Alt-Tab chord: Alt press toggles off, the WM takes focus while Alt is
+	// still held (X11 synthesizes the Alt release first, then focus loss
+	// carrying the Alt-held evidence).
+	handleX11InputEvent(x11.InputEvent{Kind: x11.InputKey, KeyPressed: true, KeyCode: 57, ScanCode: 64})
+	if !pointerCaptureReleased.Load() {
+		t.Fatal("Alt press did not toggle release before Alt-Tab")
+	}
+	handleX11InputEvent(x11.InputEvent{Kind: x11.InputKey, KeyPressed: false, KeyCode: 57, ScanCode: 64})
+	handleX11InputEvent(x11.InputEvent{Kind: x11.InputFocus, FocusGained: false, FocusAltHeld: true})
+	if pointerCaptureReleased.Load() {
+		t.Fatal("Alt-Tab focus loss did not neutralize the chord toggle")
+	}
+	if n := len(calls.visible); calls.visible[n-1] != false {
+		t.Fatalf("cursor calls=%v, want last false (hidden restored)", calls.visible)
+	}
+	// Focus return: no recapture yet (waits for motion), cursor hidden.
+	grabsBefore := len(calls.cursor) + len(calls.center)
+	handleX11InputEvent(x11.InputEvent{Kind: x11.InputFocus, FocusGained: true})
+	if got := len(calls.cursor) + len(calls.center); got != grabsBefore {
+		t.Fatalf("focus-gain grab calls grew to %d, want %d (motion re-acquires)", got, grabsBefore)
+	}
+	handleX11InputEvent(x11.InputEvent{Kind: x11.InputPointer, PointerAction: x11.PointerMove, X: 120, Y: 210})
+	if !persistentPointerCapture.Load() {
+		t.Fatal("post-Alt-Tab motion did not re-acquire persistent capture")
+	}
+}
+
+func TestAltTabRestoresStickyCenteredPolicy(t *testing.T) {
+	selectPointerPath(t, "direct")
+	wireRecordingDirectTarget(t, 0x1234, 0x5678)
+	calls := stubCaptureSeams(t)
+	vm := newCaptureVM(t)
+	enterExperienceForTest(t, vm, 155615604)
+	testDirectRecSetMouseLocked(true)
+
+	handleX11InputEvent(x11.InputEvent{Kind: x11.InputPointer, PointerAction: x11.PointerMove, X: 640, Y: 360})
+	if !pointerLockSticky.Load() {
+		t.Fatal("centered sticky did not acquire")
+	}
+	handleX11InputEvent(x11.InputEvent{Kind: x11.InputKey, KeyPressed: true, KeyCode: 57, ScanCode: 64})
+	handleX11InputEvent(x11.InputEvent{Kind: x11.InputKey, KeyPressed: false, KeyCode: 57, ScanCode: 64})
+	// Neutralize; the sticky request must survive the chord.
+	handleX11InputEvent(x11.InputEvent{Kind: x11.InputFocus, FocusGained: false, FocusAltHeld: true})
+	if pointerCaptureReleased.Load() || !pointerLockSticky.Load() {
+		t.Fatalf("Alt-Tab restore released=%t sticky=%t, want false,true",
+			pointerCaptureReleased.Load(), pointerLockSticky.Load())
+	}
+	// Focus return recaptures centered without waiting for a click. The
+	// getter often drops across focus loss; sticky must still recapture.
+	centerBefore := len(calls.center)
+	testDirectRecSetMouseLocked(false)
+	handleX11InputEvent(x11.InputEvent{Kind: x11.InputFocus, FocusGained: true})
+	if len(calls.center) != centerBefore+1 || !calls.center[centerBefore] {
+		t.Fatalf("focus-gain center calls=%v, want recapture [true]", calls.center)
+	}
+}
+
+func TestHeldRMBWorksFromUnlockedUIStream(t *testing.T) {
+	// Home: no persistent interference. Getter-false RMB acquires the
+	// cursor-anchored fallback, hides the cursor, integrates, and releases
+	// once at the physical anchor.
+	selectPointerPath(t, "direct")
+	wireRecordingDirectTarget(t, 0x1234, 0x5678)
+	calls := stubCaptureSeams(t)
+	testDirectRecSetMouseLocked(false)
+
+	handleX11InputEvent(x11.InputEvent{Kind: x11.InputPointer, PointerAction: x11.PointerDown, Button: 3, X: 20, Y: 22})
+	if len(calls.cursor) != 1 || !calls.cursor[0] {
+		t.Fatalf("RMB acquire cursor calls=%v, want [true]", calls.cursor)
+	}
+	if len(calls.center) != 0 {
+		t.Fatalf("RMB acquire center calls=%v, want none (anchored, not centered)", calls.center)
+	}
+	if !rmbPointerFallback.Load() || persistentPointerCapture.Load() {
+		t.Fatal("RMB fallback state wrong from unlocked stream")
+	}
+	handleX11InputEvent(x11.InputEvent{Kind: x11.InputPointer, PointerAction: x11.PointerMove, Relative: true, X: 20, Y: 22, DeltaX: 11, DeltaY: -7})
+	if x, y := testDirectRecMoveFloat(0), testDirectRecMoveFloat(1); x != 31 || y != 15 {
+		t.Fatalf("RMB logical=(%v,%v), want (31,15)", x, y)
+	}
+	handleX11InputEvent(x11.InputEvent{Kind: x11.InputPointer, PointerAction: x11.PointerUp, Button: 3, X: 20, Y: 22})
+	if len(calls.center) != 1 || calls.center[0] {
+		t.Fatalf("RMB release center calls=%v, want [false]", calls.center)
+	}
+	if rmbPointerFallback.Load() {
+		t.Fatal("RMB fallback survived release")
+	}
+	// Post-release motion is absolute from the physical anchor (Home: no
+	// persistent steal).
+	handleX11InputEvent(x11.InputEvent{Kind: x11.InputPointer, PointerAction: x11.PointerMove, X: 15, Y: 18})
+	if x, y := testDirectRecMoveFloat(0), testDirectRecMoveFloat(1); x != 15 || y != 18 {
+		t.Fatalf("post-release absolute=(%v,%v), want (15,18)", x, y)
+	}
+	for _, v := range calls.visible {
+		if v {
+			t.Fatalf("cursor calls=%v, want always hidden on this stream", calls.visible)
+		}
+	}
+}
+
+func TestHeldRMBConvertsToCenteredWhenGetterTurnsTrue(t *testing.T) {
+	selectPointerPath(t, "direct")
+	wireRecordingDirectTarget(t, 0x1234, 0x5678)
+	calls := stubCaptureSeams(t)
+	testDirectRecSetMouseLocked(false)
+
+	handleX11InputEvent(x11.InputEvent{Kind: x11.InputPointer, PointerAction: x11.PointerDown, Button: 3, X: 20, Y: 22})
+	if !rmbPointerFallback.Load() {
+		t.Fatal("RMB fallback did not acquire")
+	}
+	// Getter flips true mid-hold (shift-lock pressed while aiming): the
+	// next captured sample converts in place to centered sticky.
+	testDirectRecSetMouseLocked(true)
+	handleX11InputEvent(x11.InputEvent{Kind: x11.InputPointer, PointerAction: x11.PointerMove, Relative: true, X: 20, Y: 22, DeltaX: 11, DeltaY: -7})
+	if rmbPointerFallback.Load() || !pointerLockSticky.Load() {
+		t.Fatal("getter-true sample did not convert RMB fallback to centered sticky")
+	}
+	if len(calls.center) != 1 || !calls.center[0] {
+		t.Fatalf("conversion center calls=%v, want [true]", calls.center)
+	}
+	// Release with the getter still true stays centered (no ungrab).
+	centerBefore := len(calls.center)
+	handleX11InputEvent(x11.InputEvent{Kind: x11.InputPointer, PointerAction: x11.PointerUp, Button: 3, X: 20, Y: 22})
+	if len(calls.center) != centerBefore {
+		t.Fatalf("center calls grew to %v, want no release while getter-true", calls.center)
+	}
+	if !pointerLockSticky.Load() {
+		t.Fatal("sticky cleared while getter-true")
+	}
+}
+
+func TestLeavingExperienceReleasesPersistentCapture(t *testing.T) {
+	selectPointerPath(t, "direct")
+	wireRecordingDirectTarget(t, 0x1234, 0x5678)
+	calls := stubCaptureSeams(t)
+	vm := newCaptureVM(t)
+	enterExperienceForTest(t, vm, 79966250354565)
+	testDirectRecSetMouseLocked(false)
+
+	handleX11InputEvent(x11.InputEvent{Kind: x11.InputPointer, PointerAction: x11.PointerMove, X: 100, Y: 200})
+	if !persistentPointerCapture.Load() {
+		t.Fatal("persistent capture did not acquire")
+	}
+	// Leave to Home: the engine announces place 0.
+	if _, handled := vm.dispatch(jnull(), nativeHelperClass, "gameActivity_onGameLoaded", "(J)V", packJlong(0)); !handled {
+		t.Fatal("leave onGameLoaded not handled")
+	}
+	// A relative sample from the dying grab is consumed, not delivered.
+	moveBefore := RobloxDirectInputStats().MoveDelivered
+	handleX11InputEvent(x11.InputEvent{Kind: x11.InputPointer, PointerAction: x11.PointerMove, Relative: true, X: 100, Y: 200, DeltaX: 5, DeltaY: 5})
+	if got := RobloxDirectInputStats().MoveDelivered - moveBefore; got != 0 {
+		t.Fatalf("dying-grab deliveries=%d, want 0 (consumed)", got)
+	}
+	if persistentPointerCapture.Load() {
+		t.Fatal("persistent flag survived leaving the experience")
+	}
+	if len(calls.center) != 1 || calls.center[0] {
+		t.Fatalf("leave release center calls=%v, want [false]", calls.center)
+	}
+	// Absolute motion is free Home navigation again.
+	handleX11InputEvent(x11.InputEvent{Kind: x11.InputPointer, PointerAction: x11.PointerMove, X: 50, Y: 60})
+	if got := RobloxDirectInputStats().MoveDelivered - moveBefore; got != 1 {
+		t.Fatalf("Home move deliveries=%d, want 1", got)
+	}
+	if x, y := testDirectRecMoveFloat(0), testDirectRecMoveFloat(1); x != 50 || y != 60 {
+		t.Fatalf("Home absolute=(%v,%v), want (50,60)", x, y)
+	}
+}
+
+func TestPersistentCaptureGrabFailureFallsBackToAbsolute(t *testing.T) {
+	selectPointerPath(t, "direct")
+	wireRecordingDirectTarget(t, 0x1234, 0x5678)
+	// Acquisition always rejected (another client holds the pointer).
+	oldCursor := pointerLockAtCursorSetter
+	oldCenter := pointerLockSetter
+	oldVisible := pointerCursorSetter
+	pointerLockAtCursorSetter = func(bool) (bool, error) { return false, x11.ErrPointerGrab }
+	pointerLockSetter = func(bool) (bool, error) { return false, nil }
+	pointerCursorSetter = func(bool) {}
+	resetPointerCaptureState()
+	t.Cleanup(func() {
+		pointerLockAtCursorSetter, pointerLockSetter, pointerCursorSetter = oldCursor, oldCenter, oldVisible
+		resetPointerCaptureState()
+	})
+	vm := newCaptureVM(t)
+	enterExperienceForTest(t, vm, 79966250354565)
+	testDirectRecSetMouseLocked(false)
+
+	// Rejected acquisition must not consume moves nor break continuity.
+	handleX11InputEvent(x11.InputEvent{Kind: x11.InputPointer, PointerAction: x11.PointerMove, X: 100, Y: 200})
+	handleX11InputEvent(x11.InputEvent{Kind: x11.InputPointer, PointerAction: x11.PointerMove, X: 104, Y: 197})
+	if dx, dy := testDirectRecMoveFloat(2), testDirectRecMoveFloat(3); dx != 4 || dy != -3 {
+		t.Fatalf("rejected-grab move delta=(%v,%v), want (4,-3)", dx, dy)
+	}
+	if persistentPointerCapture.Load() {
+		t.Fatal("rejected grab set persistent capture")
+	}
+}
+
+func TestCapturedPointsPinWhileMotionStaysUnbounded(t *testing.T) {
+	selectPointerPath(t, "direct")
+	wireRecordingDirectTarget(t, 0x1234, 0x5678)
+	t.Cleanup(ResetPointerClampViewportForTest)
+
+	// The engine differentiates positions, so captured motion must stay
+	// unbounded (pinning reads as no motion and the camera stops). Points
+	// carry no continuity and pin to the live surface instead.
+	BeginRobloxDirectPointerFallback(1270, 710)
+	if !DispatchRobloxDirectPointerFallbackDelta(50, 50) {
+		t.Fatal("fallback delta did not dispatch")
+	}
+	if x, y := testDirectRecMoveFloat(0), testDirectRecMoveFloat(1); x != 1320 || y != 760 {
+		t.Fatalf("motion logical=(%v,%v), want unbounded (1320,760)", x, y)
+	}
+	if !DispatchRobloxDirectButtonCaptured(motionActionDown, 1) {
+		t.Fatal("captured button did not dispatch")
+	}
+	if x, y := testDirectRecButtonFloat(0), testDirectRecButtonFloat(1); x != 1279 || y != 719 {
+		t.Fatalf("button point=(%v,%v), want pinned (1279,719)", x, y)
+	}
+	fx, fy, ok := RobloxDirectFallbackPosition()
+	if !ok || fx != 1320 || fy != 760 {
+		t.Fatalf("fallback position=(%v,%v,%v), want (1320,760,true) untouched by the click", fx, fy, ok)
+	}
+	if !DispatchRobloxDirectScroll(5000, -5000, 0, 1) {
+		t.Fatal("wheel did not dispatch")
+	}
+	if x, y, d := testDirectRecWheelFloat(0), testDirectRecWheelFloat(1), testDirectRecWheelFloat(2); x != 1279 || y != 0 || d != 1 {
+		t.Fatalf("wheel point=(%v,%v,%v), want (1279,0,1)", x, y, d)
+	}
+}
+
+func TestCapturedPointsFollowViewportResize(t *testing.T) {
+	selectPointerPath(t, "direct")
+	wireRecordingDirectTarget(t, 0x1234, 0x5678)
+	t.Cleanup(ResetPointerClampViewportForTest)
+
+	SetPointerClampViewport(800, 600)
+	BeginRobloxDirectPointerFallback(790, 590)
+	if !DispatchRobloxDirectPointerFallbackDelta(50, 50) {
+		t.Fatal("fallback delta did not dispatch")
+	}
+	if x, y := testDirectRecMoveFloat(0), testDirectRecMoveFloat(1); x != 840 || y != 640 {
+		t.Fatalf("motion logical=(%v,%v), want unbounded (840,640)", x, y)
+	}
+	fx, fy, _ := RobloxDirectFallbackPosition()
+	if !DispatchRobloxDirectScroll(fx, fy, 0, 1) {
+		t.Fatal("wheel did not dispatch")
+	}
+	if x, y := testDirectRecWheelFloat(0), testDirectRecWheelFloat(1); x != 799 || y != 599 {
+		t.Fatalf("resized wheel point=(%v,%v), want (799,599)", x, y)
+	}
+	// Fullscreen growth unpins: the same logical point is on-view again.
+	SetPointerClampViewport(2560, 1440)
+	if !DispatchRobloxDirectScroll(fx, fy, 0, 1) {
+		t.Fatal("grown wheel did not dispatch")
+	}
+	if x, y := testDirectRecWheelFloat(0), testDirectRecWheelFloat(1); x != 840 || y != 640 {
+		t.Fatalf("grown wheel point=(%v,%v), want (840,640) preserved", x, y)
+	}
+}
+
+func TestPointerClampViewportIgnoresNonPositive(t *testing.T) {
+	selectPointerPath(t, "direct")
+	wireRecordingDirectTarget(t, 0x1234, 0x5678)
+	t.Cleanup(ResetPointerClampViewportForTest)
+
+	SetPointerClampViewport(0, -5)
+	if !DispatchRobloxDirectScroll(5000, 5000, 0, 1) {
+		t.Fatal("wheel did not dispatch")
+	}
+	if x, y := testDirectRecWheelFloat(0), testDirectRecWheelFloat(1); x != 1279 || y != 719 {
+		t.Fatalf("default wheel point=(%v,%v), want (1279,719)", x, y)
+	}
+}
+
+// fakeZoomClock pins the zoom-lock heuristic's clock for a test.
+func fakeZoomClock(t *testing.T) *time.Time {
+	t.Helper()
+	now := time.Unix(1_700_000_000, 0)
+	old := zoomLockNow
+	zoomLockNow = func() time.Time { return now }
+	t.Cleanup(func() { zoomLockNow = old })
+	return &now
+}
+
+func zoomDetent(dir float32) {
+	handleX11InputEvent(x11.InputEvent{Kind: x11.InputScroll, X: 100, Y: 200, ScrollY: dir})
+}
+
+func lookRelative(dx, dy float32) {
+	handleX11InputEvent(x11.InputEvent{Kind: x11.InputPointer, PointerAction: x11.PointerMove, Relative: true, X: 100, Y: 200, DeltaX: dx, DeltaY: dy})
+}
+
+func TestZoomLockArmsOnDeliberateZoomInAndCentersTheUnlock(t *testing.T) {
+	selectPointerPath(t, "direct")
+	wireRecordingDirectTarget(t, 0x1234, 0x5678)
+	calls := stubCaptureSeams(t)
+	vm := newCaptureVM(t)
+	enterExperienceForTest(t, vm, 79966250354565)
+	testDirectRecSetMouseLocked(false)
+	fakeZoomClock(t)
+
+	handleX11InputEvent(x11.InputEvent{Kind: x11.InputPointer, PointerAction: x11.PointerMove, X: 100, Y: 200})
+	lookRelative(11, -7) // logical (111,193)
+	grabsBefore := len(calls.cursor) + len(calls.center)
+
+	// Two zoom-in notches are casual third-person zoom: delivered at the
+	// logical cursor, no extra move, not armed.
+	movesBefore := RobloxDirectInputStats().MoveDelivered
+	zoomDetent(1)
+	zoomDetent(1)
+	if x, y, d := testDirectRecWheelFloat(0), testDirectRecWheelFloat(1), testDirectRecWheelFloat(2); x != 111 || y != 193 || d != 1 {
+		t.Fatalf("casual zoom-in wheel=(%v,%v,%v), want (111,193,1)", x, y, d)
+	}
+	if zoomLockArmed() {
+		t.Fatal("two zoom-in detents armed the dead-center lock")
+	}
+	if got := RobloxDirectInputStats().MoveDelivered - movesBefore; got != 0 {
+		t.Fatalf("casual zoom-in produced %d moves, want 0", got)
+	}
+
+	// The third notch arms: a zero-delta move re-seeds the engine origin to
+	// the center, then the detent is delivered there.
+	zoomDetent(1)
+	if !zoomLockArmed() {
+		t.Fatal("third zoom-in detent did not arm")
+	}
+	if got := RobloxDirectInputStats().MoveDelivered - movesBefore; got != 1 {
+		t.Fatalf("arming produced %d moves, want exactly 1 zero-delta move", got)
+	}
+	if x, y, dx, dy := testDirectRecMoveFloat(0), testDirectRecMoveFloat(1), testDirectRecMoveFloat(2), testDirectRecMoveFloat(3); x != 640 || y != 360 || dx != 0 || dy != 0 {
+		t.Fatalf("arming move=(%v,%v,%v,%v), want (640,360,0,0)", x, y, dx, dy)
+	}
+	if x, y, d := testDirectRecWheelFloat(0), testDirectRecWheelFloat(1), testDirectRecWheelFloat(2); x != 640 || y != 360 || d != 1 {
+		t.Fatalf("arming wheel=(%v,%v,%v), want (640,360,1)", x, y, d)
+	}
+
+	// Motion between detents still integrates exact dx/dy from the center;
+	// nothing is pinned and the lock stays armed.
+	lookRelative(5, -3)
+	if x, y, dx, dy := testDirectRecMoveFloat(0), testDirectRecMoveFloat(1), testDirectRecMoveFloat(2), testDirectRecMoveFloat(3); x != 645 || y != 357 || dx != 5 || dy != -3 {
+		t.Fatalf("armed motion=(%v,%v,%v,%v), want (645,357,5,-3)", x, y, dx, dy)
+	}
+	if !zoomLockArmed() {
+		t.Fatal("motion between zoom-in detents disarmed")
+	}
+	// Every further zoom-in notch re-centers again (the notch that actually
+	// enters first person is unobservable, so all of them carry the origin).
+	zoomDetent(1)
+	if x, y := testDirectRecWheelFloat(0), testDirectRecWheelFloat(1); x != 640 || y != 360 {
+		t.Fatalf("armed zoom-in wheel=(%v,%v), want (640,360)", x, y)
+	}
+
+	// First-person look: unbounded travel, far off-view.
+	for i := 0; i < 3; i++ {
+		lookRelative(300, 0)
+	}
+	if fx, fy, _ := RobloxDirectFallbackPosition(); fx != 1540 || fy != 360 {
+		t.Fatalf("look logical=(%v,%v), want unbounded (1540,360)", fx, fy)
+	}
+
+	// Zoom-out while armed: the detent that unlocks is delivered at the
+	// center and the integrator returns there, but no move is sent (the
+	// engine may still be locked for this detent).
+	movesBefore = RobloxDirectInputStats().MoveDelivered
+	zoomDetent(-1)
+	if x, y, d := testDirectRecWheelFloat(0), testDirectRecWheelFloat(1), testDirectRecWheelFloat(2); x != 640 || y != 360 || d != -1 {
+		t.Fatalf("unlock wheel=(%v,%v,%v), want (640,360,-1)", x, y, d)
+	}
+	if got := RobloxDirectInputStats().MoveDelivered - movesBefore; got != 0 {
+		t.Fatalf("unlock detent produced %d moves, want 0", got)
+	}
+	if !zoomLockArmed() {
+		t.Fatal("unlock detent disarmed before the first motion")
+	}
+	// A second zoom-out notch (games whose first notch stays in first
+	// person) re-centers again.
+	zoomDetent(-1)
+	if x, y := testDirectRecWheelFloat(0), testDirectRecWheelFloat(1); x != 640 || y != 360 {
+		t.Fatalf("second unlock wheel=(%v,%v), want (640,360)", x, y)
+	}
+
+	// The first motion after unlocking continues from the center with the
+	// exact delta — the reappearing engine cursor does not teleport — and
+	// disarms.
+	lookRelative(2, 3)
+	if x, y, dx, dy := testDirectRecMoveFloat(0), testDirectRecMoveFloat(1), testDirectRecMoveFloat(2), testDirectRecMoveFloat(3); x != 642 || y != 363 || dx != 2 || dy != 3 {
+		t.Fatalf("post-unlock motion=(%v,%v,%v,%v), want (642,363,2,3)", x, y, dx, dy)
+	}
+	if zoomLockArmed() {
+		t.Fatal("post-unlock motion did not disarm")
+	}
+	// Ordinary third-person zoom afterwards follows the cursor again.
+	zoomDetent(-1)
+	if x, y := testDirectRecWheelFloat(0), testDirectRecWheelFloat(1); x != 642 || y != 363 {
+		t.Fatalf("disarmed wheel=(%v,%v), want logical (642,363)", x, y)
+	}
+	if !persistentPointerCapture.Load() {
+		t.Fatal("persistent stream did not survive the zoom lock")
+	}
+	if got := len(calls.cursor) + len(calls.center); got != grabsBefore {
+		t.Fatalf("grab calls grew to %d, want %d (zoom lock is logical only)", got, grabsBefore)
+	}
+}
+
+func TestZoomLockRunNeedsDeliberateDetentsWithinWindow(t *testing.T) {
+	selectPointerPath(t, "direct")
+	wireRecordingDirectTarget(t, 0x1234, 0x5678)
+	stubCaptureSeams(t)
+	vm := newCaptureVM(t)
+	enterExperienceForTest(t, vm, 79966250354565)
+	testDirectRecSetMouseLocked(false)
+	now := fakeZoomClock(t)
+
+	handleX11InputEvent(x11.InputEvent{Kind: x11.InputPointer, PointerAction: x11.PointerMove, X: 100, Y: 200})
+	lookRelative(11, -7)
+
+	// Two notches, a pause longer than the window, one more notch: the run
+	// restarted, so a slow drift of adjustments never arms.
+	zoomDetent(1)
+	zoomDetent(1)
+	*now = now.Add(zoomLockRunWindow + time.Second)
+	zoomDetent(1)
+	if zoomLockArmed() {
+		t.Fatal("stale detents counted toward arming")
+	}
+	if x, y := testDirectRecWheelFloat(0), testDirectRecWheelFloat(1); x != 111 || y != 193 {
+		t.Fatalf("unarmed wheel=(%v,%v), want logical (111,193)", x, y)
+	}
+	// A zoom-out resets the run: in+in+out+in+in is not a deliberate spin.
+	zoomDetent(1)
+	zoomDetent(-1)
+	zoomDetent(1)
+	zoomDetent(1)
+	if zoomLockArmed() {
+		t.Fatal("zoom-out did not reset the zoom-in run")
+	}
+	// An unarmed on-view zoom-out never moves the cursor.
+	if x, y := testDirectRecWheelFloat(0), testDirectRecWheelFloat(1); x != 111 || y != 193 {
+		t.Fatalf("third-person wheel=(%v,%v), want logical (111,193)", x, y)
+	}
+	if fx, fy, _ := RobloxDirectFallbackPosition(); fx != 111 || fy != 193 {
+		t.Fatalf("third-person integrator=(%v,%v), want untouched (111,193)", fx, fy)
+	}
+}
+
+func TestZoomLockUnarmedZoomOutOffViewReappearsAtCenter(t *testing.T) {
+	selectPointerPath(t, "direct")
+	wireRecordingDirectTarget(t, 0x1234, 0x5678)
+	stubCaptureSeams(t)
+	vm := newCaptureVM(t)
+	enterExperienceForTest(t, vm, 79966250354565)
+	testDirectRecSetMouseLocked(false)
+	fakeZoomClock(t)
+
+	handleX11InputEvent(x11.InputEvent{Kind: x11.InputPointer, PointerAction: x11.PointerMove, X: 100, Y: 200})
+	lookRelative(1220, 567) // logical (1320,767): off-view
+	movesBefore := RobloxDirectInputStats().MoveDelivered
+
+	// Unarmed zoom-in off-view: the point pins to the edge, the integrator
+	// is untouched (motion back inward re-enters at that edge).
+	zoomDetent(1)
+	if x, y := testDirectRecWheelFloat(0), testDirectRecWheelFloat(1); x != 1279 || y != 719 {
+		t.Fatalf("off-view zoom-in wheel=(%v,%v), want pinned (1279,719)", x, y)
+	}
+	if fx, fy, _ := RobloxDirectFallbackPosition(); fx != 1320 || fy != 767 {
+		t.Fatalf("integrator=(%v,%v), want untouched (1320,767)", fx, fy)
+	}
+	// Unarmed zoom-out off-view: nothing visible can jump, so the cursor
+	// reappears at the center instead of a clamped edge, silently (no move).
+	zoomDetent(-1)
+	if x, y := testDirectRecWheelFloat(0), testDirectRecWheelFloat(1); x != 640 || y != 360 {
+		t.Fatalf("off-view zoom-out wheel=(%v,%v), want center (640,360)", x, y)
+	}
+	if got := RobloxDirectInputStats().MoveDelivered - movesBefore; got != 0 {
+		t.Fatalf("off-view zoom-out produced %d moves, want 0", got)
+	}
+	if zoomLockArmed() {
+		t.Fatal("off-view recenter armed the lock")
+	}
+	lookRelative(-4, 6)
+	if x, y, dx, dy := testDirectRecMoveFloat(0), testDirectRecMoveFloat(1), testDirectRecMoveFloat(2), testDirectRecMoveFloat(3); x != 636 || y != 366 || dx != -4 || dy != 6 {
+		t.Fatalf("post-recenter motion=(%v,%v,%v,%v), want (636,366,-4,6)", x, y, dx, dy)
+	}
+}
+
+func TestZoomLockClearsWhenCaptureDrops(t *testing.T) {
+	selectPointerPath(t, "direct")
+	wireRecordingDirectTarget(t, 0x1234, 0x5678)
+	stubCaptureSeams(t)
+	vm := newCaptureVM(t)
+	enterExperienceForTest(t, vm, 79966250354565)
+	testDirectRecSetMouseLocked(false)
+	fakeZoomClock(t)
+
+	handleX11InputEvent(x11.InputEvent{Kind: x11.InputPointer, PointerAction: x11.PointerMove, X: 100, Y: 200})
+	lookRelative(11, -7)
+	for i := 0; i < zoomLockArmDetents; i++ {
+		zoomDetent(1)
+	}
+	if !zoomLockArmed() {
+		t.Fatal("deliberate spin did not arm")
+	}
+	// Operator Alt release: the next relative sample drops the stream and the
+	// heuristic with it; a later stream starts unarmed.
+	pointerCaptureReleased.Store(true)
+	lookRelative(1, 1)
+	if persistentPointerCapture.Load() {
+		t.Fatal("released stream stayed persistent")
+	}
+	if zoomLockArmed() {
+		t.Fatal("dropped stream left the zoom lock armed")
+	}
+	// Getter-true conversion hands centering to the engine: unarmed too.
+	pointerCaptureReleased.Store(false)
+	handleX11InputEvent(x11.InputEvent{Kind: x11.InputPointer, PointerAction: x11.PointerMove, X: 100, Y: 200})
+	lookRelative(11, -7)
+	for i := 0; i < zoomLockArmDetents; i++ {
+		zoomDetent(1)
+	}
+	if !zoomLockArmed() || !persistentPointerCapture.Load() {
+		t.Fatal("second stream did not re-arm under persistent capture")
+	}
+	testDirectRecSetMouseLocked(true)
+	zoomDetent(1)
+	if persistentPointerCapture.Load() || !pointerLockSticky.Load() {
+		t.Fatal("getter-true detent did not convert to centered sticky")
+	}
+	if zoomLockArmed() {
+		t.Fatal("centered sticky conversion left the zoom lock armed")
 	}
 }

@@ -112,6 +112,10 @@ func (s *engineResizeSink) setDisplaySize(width, height int) {
 	// the transient editor's clipping metadata in lockstep with that same
 	// surface resize; NativeTextBoxInfo bounds themselves are not rescaled.
 	jni.SetRbxTextOverlayViewport(width, height, 1)
+	// Captured points (button edges, wheel detents) pin to these same bounds
+	// so a long-held desktop grab always lands clicks and zoom on-view.
+	// Captured motion stays unbounded: the engine differentiates positions.
+	jni.SetPointerClampViewport(width, height)
 }
 
 func (s *engineResizeSink) postAppCmd(cmd byte) { postAndroidAppCmd(s.commands, cmd) }

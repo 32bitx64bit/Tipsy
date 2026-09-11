@@ -172,6 +172,18 @@ func NativeHelperGameLoaded() (count uint64, placeID int64) {
 	return gameLoadedCount, gameLoadedLastPlaceID
 }
 
+// ResetGameLoadedForTest clears the recorded onGameLoaded announcements to
+// the pre-launch state (count 0, Home place 0). Test seam: production
+// announcements are engine statements and are never cleared. Input tests
+// call it so an onGameLoaded dispatched by an earlier test cannot leak an
+// in-experience signal into a later Home-state test.
+func ResetGameLoadedForTest() {
+	gameLoadedMu.Lock()
+	gameLoadedCount = 0
+	gameLoadedLastPlaceID = 0
+	gameLoadedMu.Unlock()
+}
+
 // testPackObjectArg packs one jobject argument slot for tests (test files
 // cannot import "C" in this package).
 func testPackObjectArg(id int64) *C.jvalue {

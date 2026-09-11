@@ -11,7 +11,8 @@ extern "C" {
 #endif
 
 /* Input event capture. kinds: 0 focus, 1 key, 2 pointer, 3 resize, 4 text.
- * focus: a = 1 gained / 0 lost.
+ * focus: a = 1 gained / 0 lost. On loss, b = 1 when physical LeftAlt was
+ *        down before synthesized key releases (Alt-Tab chord evidence).
  * key:   a = 1 pressed / 0 released, b = Android physical keycode (0 only
  *        for an unmapped KeySym), c = raw X11 core keycode. KeyPress and
  *        KeyRelease are retained for the direct Roblox physical-key route;

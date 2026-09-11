@@ -223,6 +223,26 @@ func dismissLocked(w *Window) error {
 	return nil
 }
 
+// setCursorVisibleLocked swaps the transparent Roblox cursor for the
+// inherited host cursor and back. Showing undefines and frees the owned
+// transparent cursor; hiding defines a fresh one. Both are window-scoped.
+func setCursorVisibleLocked(w *Window, visible bool) {
+	if visible {
+		if w.cursor != 0 {
+			C.tipsy_x11_restore_cursor(C.uintptr_t(w.display), C.ulong(w.xid), C.ulong(w.cursor))
+			w.cursor = 0
+			logging.Logger(logging.CatX11).Info("X11 cursor shown", "xid", w.xid)
+		}
+		return
+	}
+	if w.cursor == 0 {
+		w.cursor = uintptr(C.tipsy_x11_hide_cursor(C.uintptr_t(w.display), C.ulong(w.xid)))
+		if w.cursor == 0 {
+			logging.Logger(logging.CatX11).Info("X11 cursor hide unavailable")
+		}
+	}
+}
+
 func setPointerLockLocked(w *Window, locked, center bool) (bool, error) {
 	value := C.int(0)
 	if locked {
@@ -327,7 +347,7 @@ func (w *Window) drainInputLocked() ([]InputEvent, bool) {
 		case C.TIPSY_INPUT_FOCUS:
 			gained := r.a != 0
 			w.focused = gained
-			evs = append(evs, InputEvent{Kind: InputFocus, FocusGained: gained})
+			evs = append(evs, InputEvent{Kind: InputFocus, FocusGained: gained, FocusAltHeld: r.b != 0})
 			logging.Logger(logging.CatX11).Info("window focus", "gained", gained)
 		case C.TIPSY_INPUT_KEY:
 			if r.b == 0 {
