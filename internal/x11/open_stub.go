@@ -64,6 +64,11 @@ func (w *Window) InputReady() <-chan struct{} {
 	return nil
 }
 
+// RefreshReady is never selectable on builds without native X11.
+func (w *Window) RefreshReady() <-chan struct{} {
+	return nil
+}
+
 // StopBackgroundPump is a no-op on builds without native X11.
 func (w *Window) StopBackgroundPump() error {
 	if w == nil {

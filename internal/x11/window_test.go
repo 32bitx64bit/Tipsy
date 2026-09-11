@@ -656,6 +656,7 @@ func TestRefreshVersionInvalidation(t *testing.T) {
 				if before == 0 {
 					t.Fatal("open window has no refresh version")
 				}
+				drainRefreshWake()
 				if err := change.fn(); err != nil {
 					t.Fatalf("%s: %v", change.name, err)
 				}
@@ -676,6 +677,13 @@ func TestRefreshVersionInvalidation(t *testing.T) {
 						t.Fatalf("%s did not invalidate refresh", change.name)
 					default:
 					}
+				}
+				// The same reader edge must wake the launch loop's coalesced
+				// refresh channel, not only move the version counter.
+				select {
+				case <-w.RefreshReady():
+				default:
+					t.Fatalf("%s changed the refresh version without a RefreshReady wake", change.name)
 				}
 			}
 			if err := w.Close(); err != nil {

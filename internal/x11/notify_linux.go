@@ -16,10 +16,25 @@ import "C"
 // has consumed the token.
 var inputWake = make(chan struct{}, 1)
 
+// refreshWake is the coalesced Go-side signal that the window's refresh
+// generation moved (client move/resize, map/reparent, or RandR change).
+// Capacity 1: extra C notifies drop until the launch loop consumes the token
+// and reads RefreshVersion. The version store precedes every notify, so a
+// dropped token can only hide a generation the pending token will read.
+var refreshWake = make(chan struct{}, 1)
+
 //export GoX11_Notify
 func GoX11_Notify() {
 	select {
 	case inputWake <- struct{}{}:
+	default:
+	}
+}
+
+//export GoX11_RefreshNotify
+func GoX11_RefreshNotify() {
+	select {
+	case refreshWake <- struct{}{}:
 	default:
 	}
 }
@@ -32,4 +47,14 @@ func (w *Window) InputReady() <-chan struct{} {
 		return nil
 	}
 	return inputWake
+}
+
+// RefreshReady is the coalesced wake for display-refresh changes. The launch
+// loop reads RefreshVersion after receiving the token. Extra wakes are
+// dropped while a token is already pending.
+func (w *Window) RefreshReady() <-chan struct{} {
+	if w == nil {
+		return nil
+	}
+	return refreshWake
 }

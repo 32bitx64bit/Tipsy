@@ -27,6 +27,7 @@
 _Static_assert(sizeof(struct tipsy_input_ev) <= 48, "tipsy_input_ev must stay a small pointer slot");
 
 extern void GoX11_Notify(void);
+extern void GoX11_RefreshNotify(void);
 
 static int tipsy_x_io_error;
 static int tipsy_x_inited;
@@ -96,6 +97,15 @@ static void tipsy_wake_go(void) {
 
 void tipsy_x11_wake_ack(void) {
 	atomic_store(&tipsy_go_wake_pending, 0);
+}
+
+// A client move/resize, map/reparent, or RandR change moves the display
+// generation. Bump it and wake the launch loop's coalesced refresh channel so
+// display-refresh republication is event-driven; the Go side drops extra
+// tokens while one is already pending, so a drag storm cannot queue work.
+static void tipsy_bump_refresh_version(void) {
+	atomic_fetch_add_explicit(&tipsy_refresh_version, 1, memory_order_relaxed);
+	GoX11_RefreshNotify();
 }
 
 void tipsy_nudge_pump(void) {
@@ -1228,6 +1238,8 @@ int tipsy_x11_open(const char *title, int width, int height,
 	// EWMH active-window changes are the XWayland path where compositor
 	// focus moves on but X11 FocusOut never arrives for a grabbed pointer.
 	XSelectInput(dpy, root, PropertyChangeMask);
+	// Seed the generation before the window exists. The runtime reads its
+	// baseline from this value after Open, so no consumer wake is needed here.
 	atomic_fetch_add_explicit(&tipsy_refresh_version, 1, memory_order_relaxed);
 
 	XSetWindowAttributes swa;
@@ -1407,7 +1419,7 @@ int tipsy_x11_pump(uintptr_t dpy_ptr, unsigned long xid, unsigned long wm_delete
 			if (ev.type == randr_event_base + RRScreenChangeNotify) {
 				XRRUpdateConfiguration(&ev);
 			}
-			atomic_fetch_add_explicit(&tipsy_refresh_version, 1, memory_order_relaxed);
+			tipsy_bump_refresh_version();
 			tipsy_wake_go();
 			continue;
 		}
@@ -1659,7 +1671,7 @@ int tipsy_x11_pump(uintptr_t dpy_ptr, unsigned long xid, unsigned long wm_delete
 					XFlush(dpy);
 					break;
 				}
-				atomic_fetch_add_explicit(&tipsy_refresh_version, 1, memory_order_relaxed);
+				tipsy_bump_refresh_version();
 				if (tipsy_capture.active) {
 					int ax = 0, ay = 0;
 					if (tipsy_capture.center) {
@@ -1718,7 +1730,7 @@ int tipsy_x11_pump(uintptr_t dpy_ptr, unsigned long xid, unsigned long wm_delete
 		case MapNotify:
 		case ReparentNotify:
 			if (ev.xany.window == win) {
-				atomic_fetch_add_explicit(&tipsy_refresh_version, 1, memory_order_relaxed);
+				tipsy_bump_refresh_version();
 				tipsy_wake_go();
 			}
 			break;
@@ -1793,6 +1805,7 @@ static int tipsy_wait_x11(Display *dpy, int wake_fd) {
 }
 
 static void *tipsy_pump_main(void *arg) {
+	(void)pthread_setname_np(pthread_self(), "tip.x11pump");
 	struct tipsy_pump *p = (struct tipsy_pump *)arg;
 	while (p->run && !p->closed) {
 		int st = tipsy_wait_x11((Display *)p->dpy, p->wake_r);
