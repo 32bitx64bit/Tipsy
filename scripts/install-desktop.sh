@@ -16,6 +16,11 @@
 #                 official); a local build of any medium stays development and
 #                 the app asks for --development consent before launching.
 #   MEDIUM        package (default), deb, rpm, or pacman — recorded in build-info.json.
+#   TIPSY_BINARIES_DIR
+#                 directory holding prebuilt tipsy and tipsy-gui (as produced by
+#                 scripts/build-tipsy-binaries.sh). When set, those binaries are
+#                 reused and Go is not needed; the publish workflow uses this so
+#                 the .deb, .rpm, and pacman assemblies share one compile.
 #
 # Launcher entries are rendered by the freshly built `tipsy desktop render`
 # so every medium shares one source (share/applications must match stable).
@@ -58,12 +63,29 @@ case "$tipsy_medium" in
 		;;
 esac
 
-for tipsy_tool in go install mktemp; do
+tipsy_binaries_dir=${TIPSY_BINARIES_DIR:-}
+if [ -n "$tipsy_binaries_dir" ]; then
+	if ! tipsy_binaries_dir=$(CDPATH= cd -- "$tipsy_binaries_dir" 2>/dev/null && pwd); then
+		printf '%s\n' "TIPSY_BINARIES_DIR does not exist: ${TIPSY_BINARIES_DIR}" >&2
+		exit 1
+	fi
+	for tipsy_binary_name in tipsy tipsy-gui; do
+		if [ ! -x "${tipsy_binaries_dir}/${tipsy_binary_name}" ]; then
+			printf '%s\n' "TIPSY_BINARIES_DIR is missing an executable ${tipsy_binary_name}" >&2
+			exit 1
+		fi
+	done
+fi
+for tipsy_tool in install mktemp; do
 	if ! command -v "$tipsy_tool" >/dev/null 2>&1; then
 		printf '%s\n' "Missing required command: ${tipsy_tool}" >&2
 		exit 1
 	fi
 done
+if [ -z "$tipsy_binaries_dir" ] && ! command -v go >/dev/null 2>&1; then
+	printf '%s\n' 'Missing required command: go (or set TIPSY_BINARIES_DIR to prebuilt binaries)' >&2
+	exit 1
+fi
 
 if command -v desktop-file-validate >/dev/null 2>&1; then
 	desktop-file-validate "${tipsy_repo}/share/applications/io.github.tipsy_linux.Tipsy.Play.desktop"
@@ -82,10 +104,15 @@ cleanup() {
 trap cleanup EXIT HUP INT TERM
 
 cd "${tipsy_repo}"
-export GOAMD64=v2
-tipsy_ldflags="-buildid= -s -w -X github.com/tipsy-linux/tipsy/internal/version.Version=${tipsy_version} -X github.com/tipsy-linux/tipsy/internal/version.Channel=${tipsy_channel}"
-go build -buildvcs=false -mod=readonly -trimpath -ldflags "$tipsy_ldflags" -o "${tipsy_work}/tipsy" ./cmd/tipsy
-go build -buildvcs=false -mod=readonly -trimpath -ldflags "$tipsy_ldflags" -o "${tipsy_work}/tipsy-gui" ./cmd/tipsy-gui
+if [ -n "$tipsy_binaries_dir" ]; then
+	tipsy_binary="${tipsy_binaries_dir}/tipsy"
+	tipsy_gui_binary="${tipsy_binaries_dir}/tipsy-gui"
+else
+	"${tipsy_repo}/scripts/build-tipsy-binaries.sh" \
+		--version "$tipsy_version" --channel "$tipsy_channel" --output-dir "$tipsy_work"
+	tipsy_binary="${tipsy_work}/tipsy"
+	tipsy_gui_binary="${tipsy_work}/tipsy-gui"
+fi
 
 mkdir -p \
 	"${tipsy_target}/bin" \
@@ -115,10 +142,10 @@ if command -v python3 >/dev/null 2>&1; then
 	python3 -c 'import json,sys; json.load(open(sys.argv[1]))' "$tipsy_build_info"
 fi
 
-install -m 0755 "${tipsy_work}/tipsy" "${tipsy_target}/bin/tipsy"
-install -m 0755 "${tipsy_work}/tipsy-gui" "${tipsy_target}/bin/tipsy-gui"
+install -m 0755 "${tipsy_binary}" "${tipsy_target}/bin/tipsy"
+install -m 0755 "${tipsy_gui_binary}" "${tipsy_target}/bin/tipsy-gui"
 install -m 0644 tipsy.png "${tipsy_target}/share/icons/hicolor/512x512/apps/tipsy.png"
-"${tipsy_work}/tipsy" desktop render --channel "$tipsy_channel" --out "${tipsy_work}/applications" >/dev/null
+"${tipsy_binary}" desktop render --channel "$tipsy_channel" --out "${tipsy_work}/applications" >/dev/null
 for tipsy_entry in "${tipsy_work}"/applications/*.desktop; do
 	install -m 0644 "$tipsy_entry" "${tipsy_target}/share/applications/$(basename -- "$tipsy_entry")"
 done

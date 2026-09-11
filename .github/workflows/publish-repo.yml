@@ -199,11 +199,22 @@ jobs:
             --pattern 'Tipsy-*-x86_64.AppImage'
           ls dist/Tipsy-*-x86_64.AppImage
 
-      - name: Build .deb, .rpm, and pacman packages
+      - name: Build the tipsy binaries once
         shell: bash
         run: |
           set -euo pipefail
           export GOAMD64=v2 CGO_ENABLED=1
+          scripts/build-tipsy-binaries.sh \
+            --version '${{ needs.prepare.outputs.version }}' --channel stable \
+            --output-dir build-bin
+          find build-bin -maxdepth 1 -type f -printf '%f %s bytes\n'
+
+      - name: Assemble .deb, .rpm, and pacman packages from those binaries
+        shell: bash
+        env:
+          TIPSY_BINARIES_DIR: ${{ github.workspace }}/build-bin
+        run: |
+          set -euo pipefail
           # --mode official: only this workflow marks packages
           # release-repository-signed (OfficialVerified once installed from the
           # GPG-signed repository). Local builds stay development-unrestricted.
