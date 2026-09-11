@@ -2,6 +2,10 @@
  * SPDX-License-Identifier: GPL-3.0-or-later
  */
 
+#ifndef _GNU_SOURCE
+#define _GNU_SOURCE
+#endif
+
 #include "egl.h"
 
 #define USE_X11 1
@@ -19,6 +23,11 @@
 #ifndef EGL_PLATFORM_X11_KHR
 #define EGL_PLATFORM_X11_KHR 0x31D5
 #endif
+
+// Exported from notify_linux.go. Called at most once, from the swap pthread,
+// after a client presenter retires the sentinel. The handle is a cgo.Handle
+// owned by the EGL instance and stays valid until pthread_join.
+extern void GoEGLHandoff(uintptr_t handle);
 
 static const char *tipsy_egl_path;
 
@@ -304,6 +313,7 @@ struct tipsy_swap {
 	uintptr_t dpy;
 	uintptr_t surf;
 	uintptr_t ctx;
+	uintptr_t go_handle; // cgo.Handle resolved by GoEGLHandoff on retirement
 	volatile int run;
 	volatile int fail;
 	volatile int retired; // 1 = client presenter detected; Tipsy stopped presenting
@@ -367,6 +377,9 @@ static int tipsy_swap_probe_foreign_frame(struct tipsy_swap *p) {
 
 static void *tipsy_swap_main(void *arg) {
 	struct tipsy_swap *p = (struct tipsy_swap *)arg;
+	// H6: name the sentinel thread so external samplers can attribute it
+	// instead of leaving it in "unnamed residual".
+	(void)pthread_setname_np(pthread_self(), "tip.eglswap");
 	if (!eglMakeCurrent((EGLDisplay)p->dpy, (EGLSurface)p->surf, (EGLSurface)p->surf, (EGLContext)p->ctx)) {
 		p->fail = eglGetError();
 		return NULL;
@@ -393,11 +406,19 @@ static void *tipsy_swap_main(void *arg) {
 		usleep(125000);
 	}
 	eglMakeCurrent((EGLDisplay)p->dpy, EGL_NO_SURFACE, EGL_NO_SURFACE, EGL_NO_CONTEXT);
+	// One event-driven Go wake, and only when a client presenter retired the
+	// sentinel: the 125 ms probes, run=0 stops, and start/swap failures never
+	// call back. Go resolves go_handle to a capacity-1 channel, so this
+	// pthread never blocks on Go. StopSwapThread frees p and deletes the
+	// handle only after pthread_join, so no callback can race teardown.
+	if (p->retired) {
+		GoEGLHandoff(p->go_handle);
+	}
 	return NULL;
 }
 
 uintptr_t tipsy_egl_swap_thread_start(uintptr_t xdpy, unsigned long xid,
-	uintptr_t dpy, uintptr_t surf, uintptr_t ctx) {
+	uintptr_t dpy, uintptr_t surf, uintptr_t ctx, uintptr_t go_handle) {
 	struct tipsy_swap *p = (struct tipsy_swap *)calloc(1, sizeof(*p));
 	if (p == NULL) {
 		return 0;
@@ -407,6 +428,7 @@ uintptr_t tipsy_egl_swap_thread_start(uintptr_t xdpy, unsigned long xid,
 	p->dpy = dpy;
 	p->surf = surf;
 	p->ctx = ctx;
+	p->go_handle = go_handle;
 	p->run = 1;
 	if (pthread_create(&p->thr, NULL, tipsy_swap_main, p) != 0) {
 		free(p);

@@ -26,4 +26,12 @@ type EGL struct {
 	x11Display uintptr // Xlib Display* (observation-only probes)
 	x11XID     uintptr // X11 Window
 	swap       uintptr // C tipsy_swap* background thread, or 0
+	// Handoff wake plumbing (linux+cgo; see bind_linux.go, notify_linux.go).
+	// swapWake is the capacity-1 coalesced channel the C thread resolves via
+	// swapHandle; swapStop is closed after the C thread is joined; swapDone is
+	// closed by the watcher goroutine when it returns.
+	swapWake   chan struct{}
+	swapStop   chan struct{}
+	swapDone   chan struct{}
+	swapHandle uintptr // cgo.Handle for swapWake, or 0
 }

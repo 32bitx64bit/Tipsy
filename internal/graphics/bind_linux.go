@@ -16,8 +16,8 @@ import (
 	"fmt"
 	"math"
 	"runtime"
+	"runtime/cgo"
 	"sort"
-	"time"
 
 	"github.com/tipsy-linux/tipsy/internal/logging"
 	"github.com/tipsy-linux/tipsy/internal/x11"
@@ -148,32 +148,56 @@ func (e *EGL) StartSwapThread() error {
 	if e.swap != 0 {
 		return nil
 	}
+	// The capacity-1 channel is registered before the C thread exists so a
+	// retirement that races the first probe cannot be lost. The C thread
+	// resolves this handle exactly once, on retirement.
+	wake := make(chan struct{}, 1)
+	handle := cgo.NewHandle(wake)
 	p := C.tipsy_egl_swap_thread_start(C.uintptr_t(e.x11Display), C.ulong(e.x11XID),
-		C.uintptr_t(e.display), C.uintptr_t(e.surface), C.uintptr_t(e.context))
+		C.uintptr_t(e.display), C.uintptr_t(e.surface), C.uintptr_t(e.context),
+		C.uintptr_t(handle))
 	if p == 0 {
+		handle.Delete()
 		return fmt.Errorf("graphics: swap thread")
 	}
 	e.swap = uintptr(p)
-	go e.watchSwapHandoff()
+	e.swapWake = wake
+	e.swapHandle = uintptr(handle)
+	e.swapStop = make(chan struct{})
+	e.swapDone = make(chan struct{})
+	go e.watchSwapHandoff(e.swapWake, e.swapStop, e.swapDone)
 	return nil
 }
 
-// watchSwapHandoff logs the single presenter handoff when the C thread
-// detects a client-presented frame. It exits once the thread is stopped or
-// the handoff is observed.
-func (e *EGL) watchSwapHandoff() {
+// swapHandoffLogMessage is emitted exactly once per EGL instance when the C
+// sentinel swap thread retires on a client-presented frame.
+const swapHandoffLogMessage = "client presenter detected on window; Tipsy swap thread retired"
+
+// watchSwapHandoff turns the C sentinel thread's single retirement event into
+// the one handoff log. It parks on the C wake (or the stop signal) with no
+// timer and no polling; wake is the capacity-1 coalesced channel resolved by
+// GoEGLHandoff, and stop is closed by stopSwapThreadLocked after the C thread
+// is joined. It exits once the thread is stopped, the handoff is observed, or
+// the wake is no longer owned by this start (a restarted thread's watcher owns
+// e.swapWake).
+func (e *EGL) watchSwapHandoff(wake <-chan struct{}, stop <-chan struct{}, done chan struct{}) {
+	defer close(done)
 	for {
-		time.Sleep(250 * time.Millisecond)
-		e.mu.Lock()
-		if e.swap == 0 {
+		select {
+		case <-wake:
+			e.mu.Lock()
+			if e.swap == 0 || e.swapWake != wake {
+				e.mu.Unlock()
+				return
+			}
+			retired, probes, failed := e.swapHandoffStatsLocked()
 			e.mu.Unlock()
-			return
-		}
-		retired, probes, failed := e.swapHandoffStatsLocked()
-		e.mu.Unlock()
-		if retired {
-			logging.Logger(logging.CatGraphics).Info("client presenter detected on window; Tipsy swap thread retired",
-				"probes", probes, "probeFailures", failed)
+			if retired {
+				logging.Logger(logging.CatGraphics).Info(swapHandoffLogMessage,
+					"probes", probes, "probeFailures", failed)
+				return
+			}
+		case <-stop:
 			return
 		}
 	}
@@ -218,6 +242,18 @@ func (e *EGL) stopSwapThreadLocked() error {
 	}
 	fail := C.tipsy_egl_swap_thread_stop(C.uintptr_t(e.swap))
 	e.swap = 0
+	// pthread_join above means the C thread can no longer call GoEGLHandoff,
+	// so the handle is safe to delete. Clearing swapWake makes the watcher's
+	// ownership check fail even if a token raced the stop.
+	if e.swapHandle != 0 {
+		cgo.Handle(e.swapHandle).Delete()
+		e.swapHandle = 0
+	}
+	if e.swapStop != nil {
+		close(e.swapStop)
+		e.swapStop = nil
+	}
+	e.swapWake = nil
 	if fail != 0 && fail != eglSuccess {
 		return fmt.Errorf("graphics: swap thread: %s", eglErrorName(int(fail)))
 	}

@@ -19,7 +19,7 @@ int tipsy_egl_make_current(uintptr_t dpy, uintptr_t surf, uintptr_t ctx);
 int tipsy_egl_swap(uintptr_t dpy, uintptr_t surf);
 int tipsy_egl_release_current(uintptr_t dpy);
 uintptr_t tipsy_egl_swap_thread_start(uintptr_t xdpy, unsigned long xid,
-	uintptr_t dpy, uintptr_t surf, uintptr_t ctx);
+	uintptr_t dpy, uintptr_t surf, uintptr_t ctx, uintptr_t go_handle);
 int tipsy_egl_swap_thread_stop(uintptr_t ptr);
 void tipsy_egl_swap_thread_state(uintptr_t ptr, int *out_retired,
 	unsigned long *out_probes, unsigned long *out_failed);

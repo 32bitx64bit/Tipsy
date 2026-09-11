@@ -4,12 +4,18 @@
 package graphics
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"os"
 	"os/exec"
+	"path/filepath"
+	"runtime"
 	"strconv"
+	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -104,8 +110,11 @@ func TestSwapThread(t *testing.T) {
 
 // TestSwapThreadRetiresOnSecondPresenter verifies the single-presenter
 // handoff: when another EGL client presents non-black frames on the same
-// window, the Tipsy swap thread must detect it and never present again.
+// window, the Tipsy swap thread must detect it and never present again. It
+// also pins the event-driven watcher contract: exactly one handoff log, and
+// the watcher goroutine exits after logging.
 func TestSwapThreadRetiresOnSecondPresenter(t *testing.T) {
+	captured := captureGraphicsLogs(t)
 	ensureDisplay(t)
 	w, err := x11.Open("Tipsy handoff test", 64, 64)
 	if err != nil {
@@ -129,6 +138,7 @@ func TestSwapThreadRetiresOnSecondPresenter(t *testing.T) {
 	if err := victim.StartSwapThread(); err != nil {
 		t.Fatalf("victim StartSwapThread: %v", err)
 	}
+	done := watcherDone(t, victim)
 
 	// Second presenter through its own X connection: painting white content
 	// on the same window is exactly what the probe must observe, the way the
@@ -147,11 +157,187 @@ func TestSwapThreadRetiresOnSecondPresenter(t *testing.T) {
 			t.Fatalf("client paint: %v", err)
 		}
 		if victim.SwapHandedOff() {
+			// The C thread wakes Go after it releases the context. Wait for
+			// the watcher to log and return instead of racing it with stop.
+			select {
+			case <-done:
+			case <-time.After(2 * time.Second):
+				t.Fatal("watcher did not exit after handoff")
+			}
+			if n := captured.count(swapHandoffLogMessage); n != 1 {
+				t.Fatalf("handoff log count = %d; want exactly 1", n)
+			}
+			if err := victim.StopSwapThread(); err != nil {
+				t.Fatalf("StopSwapThread: %v", err)
+			}
+			if n := captured.count(swapHandoffLogMessage); n != 1 {
+				t.Fatalf("handoff log count after stop = %d; want exactly 1", n)
+			}
 			return
 		}
 		time.Sleep(100 * time.Millisecond)
 	}
 	t.Fatal("swap thread did not retire within 8s of a second presenter")
+}
+
+// TestSwapThreadWatcherExitsOnStop covers the no-handoff lifetime: a lone
+// sentinel never wakes the watcher, so it must exit promptly when the thread
+// is stopped (no standing poll, no handoff log).
+func TestSwapThreadWatcherExitsOnStop(t *testing.T) {
+	captured := captureGraphicsLogs(t)
+	ensureDisplay(t)
+	w, err := x11.Open("Tipsy watcher stop", 64, 64)
+	if err != nil {
+		if errors.Is(err, x11.ErrUnavailable) || errors.Is(err, x11.ErrNoDisplay) {
+			t.Skip(err)
+		}
+		t.Fatalf("x11.Open: %v", err)
+	}
+	defer w.Close()
+	e, err := BindEGL(w)
+	if err != nil {
+		if errors.Is(err, ErrUnavailable) {
+			t.Skip(err)
+		}
+		t.Skipf("EGL not usable on this display: %v", err)
+	}
+	defer e.Close()
+	if err := e.ReleaseCurrent(); err != nil {
+		t.Fatalf("ReleaseCurrent: %v", err)
+	}
+	if err := e.StartSwapThread(); err != nil {
+		t.Fatalf("StartSwapThread: %v", err)
+	}
+	done := watcherDone(t, e)
+	// H6: the sentinel pthread must be externally attributable by name.
+	if runtime.GOOS == "linux" && !waitThreadName(t, "tip.eglswap") {
+		t.Fatal("EGL swap thread is not named tip.eglswap")
+	}
+	if err := e.StopSwapThread(); err != nil {
+		t.Fatalf("StopSwapThread: %v", err)
+	}
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("watcher did not exit promptly after StopSwapThread")
+	}
+	if n := captured.count(swapHandoffLogMessage); n != 0 {
+		t.Fatalf("lone sentinel logged handoff %d times; want 0", n)
+	}
+	if e.SwapHandedOff() {
+		t.Fatal("SwapHandedOff = true without a second presenter")
+	}
+}
+
+// TestWatchSwapHandoffStopWinsWithoutLog pins the stop-first semantics on a
+// watcher whose wake ownership was already cleared: no log, prompt exit.
+func TestWatchSwapHandoffStopWinsWithoutLog(t *testing.T) {
+	captured := captureGraphicsLogs(t)
+	e := &EGL{}
+	wake := make(chan struct{}, 1)
+	stop := make(chan struct{})
+	done := make(chan struct{})
+	go e.watchSwapHandoff(wake, stop, done)
+	close(stop)
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("watcher did not exit promptly after stop")
+	}
+	if n := captured.count(swapHandoffLogMessage); n != 0 {
+		t.Fatalf("handoff logged %d times with no active swap thread; want 0", n)
+	}
+}
+
+// TestWatchSwapHandoffIgnoresSpuriousWake pins that a wake with no owned
+// swap state exits without logging instead of polling or panicking.
+func TestWatchSwapHandoffIgnoresSpuriousWake(t *testing.T) {
+	captured := captureGraphicsLogs(t)
+	e := &EGL{}
+	wake := make(chan struct{}, 1)
+	stop := make(chan struct{})
+	done := make(chan struct{})
+	go e.watchSwapHandoff(wake, stop, done)
+	wake <- struct{}{}
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("watcher did not exit on an unowned wake")
+	}
+	close(stop)
+	if n := captured.count(swapHandoffLogMessage); n != 0 {
+		t.Fatalf("handoff logged %d times without retirement; want 0", n)
+	}
+}
+
+func watcherDone(t *testing.T, e *EGL) chan struct{} {
+	t.Helper()
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if e.swapDone == nil {
+		t.Fatal("StartSwapThread started no watcher")
+	}
+	return e.swapDone
+}
+
+// waitThreadName polls /proc until a thread of this process carries name.
+func waitThreadName(t *testing.T, name string) bool {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		entries, err := os.ReadDir("/proc/self/task")
+		if err == nil {
+			for _, entry := range entries {
+				comm, err := os.ReadFile(filepath.Join("/proc/self/task", entry.Name(), "comm"))
+				if err == nil && strings.TrimSpace(string(comm)) == name {
+					return true
+				}
+			}
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	return false
+}
+
+// graphicsLogCapture collects slog messages while a test replaces the default
+// logger. logging.Logger re-resolves the current slog.Default, so records from
+// the handoff path reach this handler.
+type graphicsLogCapture struct {
+	mu      sync.Mutex
+	records []string
+}
+
+func (c *graphicsLogCapture) Enabled(context.Context, slog.Level) bool { return true }
+
+func (c *graphicsLogCapture) Handle(_ context.Context, r slog.Record) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.records = append(c.records, r.Message)
+	return nil
+}
+
+func (c *graphicsLogCapture) WithAttrs([]slog.Attr) slog.Handler { return c }
+func (c *graphicsLogCapture) WithGroup(string) slog.Handler      { return c }
+
+func (c *graphicsLogCapture) count(message string) int {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	n := 0
+	for _, got := range c.records {
+		if got == message {
+			n++
+		}
+	}
+	return n
+}
+
+func captureGraphicsLogs(t *testing.T) *graphicsLogCapture {
+	t.Helper()
+	c := &graphicsLogCapture{}
+	prev := slog.Default()
+	slog.SetDefault(slog.New(c))
+	t.Cleanup(func() { slog.SetDefault(prev) })
+	return c
 }
 
 func ensureDisplay(t *testing.T, extraArgs ...string) {
