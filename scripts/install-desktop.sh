@@ -15,7 +15,7 @@
 #                 passes the official kind (packaging/*/build-*.sh --mode
 #                 official); a local build of any medium stays development and
 #                 the app asks for --development consent before launching.
-#   MEDIUM        package (default), deb, or rpm — recorded in build-info.json.
+#   MEDIUM        package (default), deb, rpm, or pacman — recorded in build-info.json.
 #
 # Launcher entries are rendered by the freshly built `tipsy desktop render`
 # so every medium shares one source (share/applications must match stable).
@@ -51,9 +51,9 @@ case "$tipsy_release_kind" in
 		;;
 esac
 case "$tipsy_medium" in
-	package|deb|rpm) ;;
+	package|deb|rpm|pacman) ;;
 	*)
-		printf '%s\n' "Invalid MEDIUM: ${tipsy_medium} (package, deb, or rpm)" >&2
+		printf '%s\n' "Invalid MEDIUM: ${tipsy_medium} (package, deb, rpm, or pacman)" >&2
 		exit 2
 		;;
 esac

@@ -26,9 +26,9 @@ const (
 	releaseKindCandidateUnsigned = "release-candidate-unsigned"
 	// build-appdir.sh --mode github-signed: cosign keyless AppImage.
 	releaseKindCandidateKeyless = "release-candidate-keyless"
-	// build-deb/rpm/flatpak.sh --mode official: built for the GPG-signed
-	// APT/RPM/OSTree repository; apt, dnf and flatpak verify that signature
-	// when the package is installed.
+	// build-deb/rpm/pacman/flatpak.sh --mode official: built for the
+	// GPG-signed APT/RPM/pacman/OSTree repository; apt, dnf, pacman and
+	// flatpak verify that signature when the package is installed.
 	releaseKindRepositorySigned = "release-repository-signed"
 )
 
