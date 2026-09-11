@@ -94,6 +94,7 @@ func Launch(ctx context.Context, opt LaunchOptions) error {
 	}
 	presentTiming := vulkanPresentTimingRequested(os.Getenv)
 	presentTimingCursor := android.SetVulkanPresentTiming(presentTiming)
+	var presentDurationCursor uint64
 	if presentTiming {
 		logging.Logger(logging.CatGraphics).Info("Vulkan present timing enabled", "capacity", android.VulkanPresentTimingCapacity)
 		defer func() {
@@ -382,13 +383,12 @@ func Launch(ctx context.Context, opt LaunchOptions) error {
 	})
 	defer cancelResizeInput()
 
-	stats := time.NewTicker(2 * time.Second)
-	defer stats.Stop()
 	// Everything needed by the in-process client loop is live: X11 and the
 	// exclusive EGL or Vulkan presenter plus its pump were established above,
 	// GameActivity startup succeeded, input targets are wired, and the launch
-	// loop waits on the X11 input wake plus a 2s refresh-rate ticker. Immediate
-	// failures and --probe return before this boundary.
+	// loop waits on the X11 input wake, the X11 refresh-change wake, and the
+	// focused-text/resize event sources. Immediate failures and --probe return
+	// before this boundary.
 	started.signal()
 	shutdownClient := func(reason string) {
 		_ = win.Dismiss()
@@ -404,21 +404,23 @@ func Launch(ctx context.Context, opt LaunchOptions) error {
 			logging.Logger(logging.CatFilesystem).Info("official cookie storage synchronized")
 		}
 	}
-	for {
-		select {
-		case <-ctx.Done():
-			shutdownClient("context-cancelled")
-			return ctx.Err()
-		case <-stats.C:
-			if err := refreshPublication.update(win.RefreshVersion(), presenter.refreshRates, func(current float32, supported []float32) error {
-				return publishDisplayRefreshRates(mod, vm.Env(), current, supported)
-			}); err != nil {
-				logging.Logger(logging.CatGraphics).Error("republish Android display refresh rates", "err", err)
-			}
+	// Display-refresh republication is event-driven. The X11 reader wakes this
+	// loop through RefreshReady when the window's refresh generation moves
+	// (move, resize, map/reparent, or RandR change), and refreshFallbackPeriod
+	// bounds how long a lost wake can delay republication. The retired 2s
+	// ticker woke an otherwise idle client twice per second to re-check a
+	// version that only changes on those events. Opt-in diagnostics keep their
+	// exact historical 2s logging cadence.
+	var logDiagnostics func()
+	if presentTiming || stutterDiag || os.Getenv("TIPSY_DIAG") == "1" {
+		logDiagnostics = func() {
 			if presentTiming {
 				batch := android.VulkanPresentTimingSnapshot(presentTimingCursor)
 				logVulkanPresentTiming(batch)
 				presentTimingCursor = batch.Cursor
+				durations, next := android.VulkanPresentCallDurations(presentDurationCursor)
+				logVulkanPresentCallDurations(durations)
+				presentDurationCursor = next
 			}
 			if stutterDiag {
 				logStutterDiagnostics(android.StutterWaitSnapshot(true), jni.StutterSnapshot(true), android.BionicSyncSnapshot(true))
@@ -440,12 +442,94 @@ func Launch(ctx context.Context, opt LaunchOptions) error {
 					"textInfoApplied", textInfo.Applied, "textInfoMissing", textInfo.MissingTarget,
 					"textInfoNull", textInfo.NullResult, "textInfoStale", textInfo.StaleSession)
 			}
-		case now := <-textOverlayWake.C():
-			refreshFocusedText(now)
-		case <-resizeSettleC:
-			flushSurfaceResize()
-		case <-win.InputReady():
-			if err := win.Pump(); err != nil {
+		}
+	}
+	return runLaunchLoop(launchLoopSources{
+		ctx:                ctx,
+		inputReady:         win.InputReady(),
+		refreshReady:       win.RefreshReady(),
+		textOverlayWake:    textOverlayWake.C,
+		resizeSettle:       func() <-chan time.Time { return resizeSettleC },
+		pump:               win.Pump,
+		refreshFocusedText: refreshFocusedText,
+		flushResize:        flushSurfaceResize,
+		publishRefresh: func() {
+			if err := refreshPublication.update(win.RefreshVersion(), presenter.refreshRates, func(current float32, supported []float32) error {
+				return publishDisplayRefreshRates(mod, vm.Env(), current, supported)
+			}); err != nil {
+				logging.Logger(logging.CatGraphics).Error("republish Android display refresh rates", "err", err)
+			}
+		},
+		diagnostics: logDiagnostics,
+	}, shutdownClient, refreshFallbackPeriod, launchDiagnosticPeriod)
+}
+
+const (
+	// refreshFallbackPeriod bounds how long a missed X11 refresh wake can
+	// delay display-rate republication. The RefreshReady wake is the primary
+	// path (it follows a move/resize/RandR change by the reader's notify), and
+	// this fallback is deliberately long so an idle client does not wake to
+	// re-check an unchanged generation. 30s cuts the retired 2s wake rate by
+	// 15x while keeping the worst-case staleness of a lost wake bounded.
+	refreshFallbackPeriod = 30 * time.Second
+	// launchDiagnosticPeriod preserves the historical 2s cadence of the
+	// opt-in present-timing, shared-wait, and TIPSY_DIAG log lines.
+	launchDiagnosticPeriod = 2 * time.Second
+)
+
+// launchLoopSources is the live client loop's event and callback surface.
+// Production values come from the mapped X11 window, the focused-text overlay,
+// the resize debouncer, the display-refresh publication, and the requested
+// diagnostics; tests substitute fakes and short periods so the wake policy can
+// be pinned without launching Roblox.
+type launchLoopSources struct {
+	ctx                context.Context
+	inputReady         <-chan struct{}
+	refreshReady       <-chan struct{}
+	textOverlayWake    func() <-chan time.Time
+	resizeSettle       func() <-chan time.Time
+	pump               func() error
+	refreshFocusedText func(time.Time)
+	flushResize        func()
+	publishRefresh     func()
+	diagnostics        func()
+}
+
+// runLaunchLoop is the live client event loop. It republishes Android display
+// refresh rates when the X11 refresh generation moves or after the long
+// fallback period, logs diagnostics at the requested cadence when enabled, and
+// runs the focused-text, resize-settle, and input paths with the existing
+// shutdown semantics.
+func runLaunchLoop(src launchLoopSources, shutdownClient func(reason string), refreshFallback, diagnosticsPeriod time.Duration) error {
+	var refreshFallbackC <-chan time.Time
+	if refreshFallback > 0 {
+		fallback := time.NewTicker(refreshFallback)
+		defer fallback.Stop()
+		refreshFallbackC = fallback.C
+	}
+	var diagnosticsC <-chan time.Time
+	if src.diagnostics != nil && diagnosticsPeriod > 0 {
+		diagnostics := time.NewTicker(diagnosticsPeriod)
+		defer diagnostics.Stop()
+		diagnosticsC = diagnostics.C
+	}
+	for {
+		select {
+		case <-src.ctx.Done():
+			shutdownClient("context-cancelled")
+			return src.ctx.Err()
+		case <-diagnosticsC:
+			src.diagnostics()
+		case <-src.refreshReady:
+			src.publishRefresh()
+		case <-refreshFallbackC:
+			src.publishRefresh()
+		case now := <-src.textOverlayWake():
+			src.refreshFocusedText(now)
+		case <-src.resizeSettle():
+			src.flushResize()
+		case <-src.inputReady:
+			if err := src.pump(); err != nil {
 				if err == x11.ErrClosed {
 					// Pump has already unmapped the window, bounding visible close
 					// response independently from native teardown. Stop producers,
@@ -464,7 +548,7 @@ func Launch(ctx context.Context, opt LaunchOptions) error {
 			// XIM commits and editor-navigation keys mutate the focused snapshot
 			// while Pump notifies subscribers. Paint that version in the same
 			// launch-loop turn rather than waiting for the bounded poll fallback.
-			refreshFocusedText(time.Now())
+			src.refreshFocusedText(time.Now())
 		}
 	}
 }

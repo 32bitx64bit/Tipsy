@@ -40,6 +40,18 @@ func logVulkanPresentTiming(batch android.VulkanPresentTimingBatch) {
 		"monotonicNS", timestamps)
 }
 
+// logVulkanPresentCallDurations reports the opt-in E2b host-call histogram.
+// The caller runs it only inside the existing present-timing diagnostics
+// block, so the default path neither reads nor logs anything.
+func logVulkanPresentCallDurations(stats android.VulkanPresentCallDurationStatistics) {
+	if stats.Count == 0 && stats.Overwritten == 0 {
+		return
+	}
+	logging.Logger(logging.CatGraphics).Info("Vulkan present call durations",
+		"count", stats.Count, "overwritten", stats.Overwritten,
+		"p50NS", stats.P50NS, "p99NS", stats.P99NS, "maxNS", stats.MaxNS)
+}
+
 func logStutterDiagnostics(wait android.StutterWaitStats, calls jni.JNIStutterStats, bionic android.BionicSyncStats) {
 	workerMutex := bionic.Path(android.BionicSyncThreadRBXWorker, android.BionicSyncModuleRoblox, android.BionicSyncMutexLock)
 	workerTryMutex := bionic.Path(android.BionicSyncThreadRBXWorker, android.BionicSyncModuleRoblox, android.BionicSyncMutexTryLock)

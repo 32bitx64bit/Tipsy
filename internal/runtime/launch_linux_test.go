@@ -14,6 +14,8 @@ import (
 	"path/filepath"
 	"reflect"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"syscall"
 	"testing"
 	"time"
@@ -62,6 +64,15 @@ func TestInputDispatchInterval(t *testing.T) {
 	select {
 	case <-ch:
 		t.Fatal("InputReady must start empty")
+	default:
+	}
+	refreshCh := (&x11.Window{}).RefreshReady()
+	if refreshCh == nil {
+		t.Fatal("launch loop needs a selectable X11 RefreshReady channel")
+	}
+	select {
+	case <-refreshCh:
+		t.Fatal("RefreshReady must start empty")
 	default:
 	}
 }
@@ -1362,4 +1373,264 @@ func TestVulkanPresentTimingRequiresExactOptIn(t *testing.T) {
 	if vulkanPresentTimingRequested(nil) {
 		t.Fatal("nil environment enabled timing")
 	}
+}
+
+type launchLoopCounters struct {
+	publishes   atomic.Int32
+	diagnostics atomic.Int32
+	pumps       atomic.Int32
+	refreshes   atomic.Int32
+}
+
+// newTestLaunchLoopSources builds a loop with no event sources and no-ops for
+// every callback. Tests override only the fields their wake policy needs.
+func newTestLaunchLoopSources(ctx context.Context) launchLoopSources {
+	return launchLoopSources{
+		ctx:                ctx,
+		textOverlayWake:    func() <-chan time.Time { return nil },
+		resizeSettle:       func() <-chan time.Time { return nil },
+		pump:               func() error { return nil },
+		refreshFocusedText: func(time.Time) {},
+		flushResize:        func() {},
+		publishRefresh:     func() {},
+	}
+}
+
+func waitForLoopCounter(t *testing.T, counter *atomic.Int32, want int32, what string) {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if counter.Load() >= want {
+			return
+		}
+		time.Sleep(2 * time.Millisecond)
+	}
+	t.Fatalf("%s = %d, want at least %d", what, counter.Load(), want)
+}
+
+func TestLaunchLoopCadenceConstants(t *testing.T) {
+	if launchDiagnosticPeriod != 2*time.Second {
+		t.Fatalf("diagnostic period = %v, want the historical 2s cadence", launchDiagnosticPeriod)
+	}
+	if refreshFallbackPeriod < 30*time.Second || refreshFallbackPeriod > time.Minute {
+		t.Fatalf("refresh fallback = %v, want within [30s, 60s]", refreshFallbackPeriod)
+	}
+}
+
+// TestLaunchLoopRefreshWakeIsEventDriven pins H2: with diagnostics off there is
+// no standing 2s republish wake. One refresh generation change wakes exactly
+// one republish, an unchanged generation does not re-query, and a second
+// change republishes again.
+func TestLaunchLoopRefreshWakeIsEventDriven(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	var counters launchLoopCounters
+	refreshReady := make(chan struct{}, 1)
+	publication := displayRefreshPublication{version: 1, current: 60, supported: []float32{60}}
+	var mu sync.Mutex
+	version := uint64(1)
+	currentRate, supportedRates := float32(165), []float32{60, 165}
+	queries, published, lastVersion := 0, 0, uint64(0)
+	src := newTestLaunchLoopSources(ctx)
+	src.refreshReady = refreshReady
+	src.publishRefresh = func() {
+		mu.Lock()
+		currentVersion := version
+		mu.Unlock()
+		if err := publication.update(currentVersion, func() (float32, []float32) {
+			mu.Lock()
+			defer mu.Unlock()
+			queries++
+			lastVersion = currentVersion
+			return currentRate, supportedRates
+		}, func(float32, []float32) error {
+			mu.Lock()
+			published++
+			mu.Unlock()
+			counters.publishes.Add(1)
+			return nil
+		}); err != nil {
+			t.Errorf("publication update: %v", err)
+		}
+	}
+	shutdowns := make(chan string, 4)
+	done := make(chan error, 1)
+	go func() {
+		done <- runLaunchLoop(src, func(reason string) { shutdowns <- reason }, time.Hour, launchDiagnosticPeriod)
+	}()
+
+	// A nil diagnostics callback disables the 2s diagnostic ticker even when
+	// the production period is passed, so an idle loop must stay asleep.
+	time.Sleep(2200 * time.Millisecond)
+	mu.Lock()
+	gotQueries, gotPublished := queries, published
+	mu.Unlock()
+	if got := counters.publishes.Load(); got != 0 || gotQueries != 0 || gotPublished != 0 {
+		t.Fatalf("idle loop woke without a refresh change: republishes=%d queries=%d published=%d", got, gotQueries, gotPublished)
+	}
+
+	// One generation change wakes exactly one republish.
+	mu.Lock()
+	version = 2
+	mu.Unlock()
+	refreshReady <- struct{}{}
+	waitForLoopCounter(t, &counters.publishes, 1, "republishes after a refresh wake")
+	time.Sleep(50 * time.Millisecond)
+	mu.Lock()
+	gotQueries, gotPublished, gotVersion := queries, published, lastVersion
+	mu.Unlock()
+	if got := counters.publishes.Load(); got != 1 || gotQueries != 1 || gotPublished != 1 || gotVersion != 2 {
+		t.Fatalf("refresh change: republishes=%d queries=%d published=%d version=%d, want 1/1/1/2",
+			got, gotQueries, gotPublished, gotVersion)
+	}
+
+	// An unchanged generation must not re-query the X server or republish.
+	refreshReady <- struct{}{}
+	time.Sleep(50 * time.Millisecond)
+	mu.Lock()
+	gotQueries, gotPublished = queries, published
+	mu.Unlock()
+	if got := counters.publishes.Load(); got != 1 || gotQueries != 1 || gotPublished != 1 {
+		t.Fatalf("unchanged generation: republishes=%d queries=%d published=%d, want 1/1/1", got, gotQueries, gotPublished)
+	}
+
+	// A second change republishes again.
+	mu.Lock()
+	version = 3
+	currentRate, supportedRates = 144, []float32{60, 144}
+	mu.Unlock()
+	refreshReady <- struct{}{}
+	waitForLoopCounter(t, &counters.publishes, 2, "republishes after a second refresh wake")
+	mu.Lock()
+	gotQueries, gotPublished = queries, published
+	mu.Unlock()
+	if gotQueries != 2 || gotPublished != 2 {
+		t.Fatalf("second change queries=%d published=%d, want 2/2", gotQueries, gotPublished)
+	}
+
+	cancel()
+	select {
+	case err := <-done:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("loop exit = %v, want context.Canceled", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("launch loop did not stop on context cancellation")
+	}
+	if reason := <-shutdowns; reason != "context-cancelled" {
+		t.Fatalf("shutdown reason = %q, want context-cancelled", reason)
+	}
+}
+
+// TestLaunchLoopDiagnosticsKeepOptInCadence pins that an enabled diagnostic
+// callback still runs on its own ticker (the production period is pinned at 2s
+// above) while refresh republication stays event-driven.
+func TestLaunchLoopDiagnosticsKeepOptInCadence(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	var counters launchLoopCounters
+	src := newTestLaunchLoopSources(ctx)
+	src.publishRefresh = func() { counters.publishes.Add(1) }
+	src.diagnostics = func() { counters.diagnostics.Add(1) }
+	done := make(chan error, 1)
+	go func() {
+		done <- runLaunchLoop(src, func(string) {}, time.Hour, 20*time.Millisecond)
+	}()
+	waitForLoopCounter(t, &counters.diagnostics, 3, "diagnostic ticks")
+	if got := counters.publishes.Load(); got != 0 {
+		t.Fatalf("diagnostic ticks republished %d times; refresh must stay event-driven", got)
+	}
+	cancel()
+	select {
+	case err := <-done:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("loop exit = %v, want context.Canceled", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("launch loop did not stop on context cancellation")
+	}
+}
+
+// TestLaunchLoopShutdownPaths pins the existing close/error semantics and that
+// nil input/refresh channels are selectable (they simply never fire).
+func TestLaunchLoopShutdownPaths(t *testing.T) {
+	t.Run("context-cancelled", func(t *testing.T) {
+		ctx, cancel := context.WithCancel(context.Background())
+		cancel()
+		src := newTestLaunchLoopSources(ctx)
+		shutdowns := make(chan string, 1)
+		err := runLaunchLoop(src, func(reason string) { shutdowns <- reason }, time.Hour, launchDiagnosticPeriod)
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("exit = %v, want context.Canceled", err)
+		}
+		if reason := <-shutdowns; reason != "context-cancelled" {
+			t.Fatalf("shutdown reason = %q, want context-cancelled", reason)
+		}
+	})
+	t.Run("wm-delete-window", func(t *testing.T) {
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+		var counters launchLoopCounters
+		src := newTestLaunchLoopSources(ctx)
+		inputReady := make(chan struct{}, 1)
+		src.inputReady = inputReady
+		src.pump = func() error { counters.pumps.Add(1); return x11.ErrClosed }
+		src.refreshFocusedText = func(time.Time) { counters.refreshes.Add(1) }
+		shutdowns := make(chan string, 1)
+		inputReady <- struct{}{}
+		if err := runLaunchLoop(src, func(reason string) { shutdowns <- reason }, time.Hour, launchDiagnosticPeriod); err != nil {
+			t.Fatalf("closed-window exit = %v, want nil", err)
+		}
+		if reason := <-shutdowns; reason != "wm-delete-window" {
+			t.Fatalf("shutdown reason = %q, want wm-delete-window", reason)
+		}
+		if counters.pumps.Load() != 1 || counters.refreshes.Load() != 0 {
+			t.Fatalf("closed pump: pumps=%d refreshes=%d, want 1/0", counters.pumps.Load(), counters.refreshes.Load())
+		}
+	})
+	t.Run("x11-pump-error", func(t *testing.T) {
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+		var counters launchLoopCounters
+		src := newTestLaunchLoopSources(ctx)
+		inputReady := make(chan struct{}, 1)
+		src.inputReady = inputReady
+		sentinel := errors.New("pump failed")
+		src.pump = func() error { counters.pumps.Add(1); return sentinel }
+		shutdowns := make(chan string, 1)
+		inputReady <- struct{}{}
+		err := runLaunchLoop(src, func(reason string) { shutdowns <- reason }, time.Hour, launchDiagnosticPeriod)
+		if !errors.Is(err, sentinel) {
+			t.Fatalf("pump-failure exit = %v, want %v", err, sentinel)
+		}
+		if reason := <-shutdowns; reason != "x11-pump-error" {
+			t.Fatalf("shutdown reason = %q, want x11-pump-error", reason)
+		}
+		if counters.pumps.Load() != 1 {
+			t.Fatalf("pump calls = %d, want 1", counters.pumps.Load())
+		}
+	})
+	t.Run("input-wake", func(t *testing.T) {
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+		var counters launchLoopCounters
+		src := newTestLaunchLoopSources(ctx)
+		inputReady := make(chan struct{}, 1)
+		src.inputReady = inputReady
+		src.pump = func() error { counters.pumps.Add(1); return nil }
+		src.refreshFocusedText = func(time.Time) { counters.refreshes.Add(1) }
+		done := make(chan error, 1)
+		go func() {
+			done <- runLaunchLoop(src, func(string) {}, time.Hour, launchDiagnosticPeriod)
+		}()
+		inputReady <- struct{}{}
+		waitForLoopCounter(t, &counters.pumps, 1, "pump calls after an input wake")
+		waitForLoopCounter(t, &counters.refreshes, 1, "focused-text refreshes after an input wake")
+		cancel()
+		select {
+		case <-done:
+		case <-time.After(time.Second):
+			t.Fatal("launch loop did not stop on context cancellation")
+		}
+	})
 }
