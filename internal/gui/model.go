@@ -196,6 +196,70 @@ type ApplyResult struct {
 	FrameRateNote   string
 }
 
+// ControllerSettings is the lean controller surface (simplified
+// 2026-09-12). It is presentation-neutral widget state: enable plus one
+// global stick floor both sticks share. Validation and widget defaults live
+// here; the persisted section shape, merge rules, and calibration semantics
+// live in the Input-owned gamepad package. Missing values always mean
+// gamepad defaults (enabled, device-flat baseline). No per-game profiles,
+// no per-stick sliders, no Y-invert, no rumble preference (deleted vs v1,
+// see gamepad-simplify-2026-09-12.md).
+type ControllerSettings struct {
+	Enabled  bool
+	Deadzone float64
+}
+
+const (
+	// DefaultControllerDeadzone is the widget default when no persisted
+	// calibration exists: 0 selects the honest device-flat baseline (the
+	// small 0.08 reader fallback underneath still applies when a device
+	// reports flat=0).
+	DefaultControllerDeadzone = 0.0
+	// MaxControllerDeadzone caps the deadzone slider (0.0-0.5).
+	MaxControllerDeadzone = 0.5
+)
+
+// DefaultControllerSettings returns the lean defaults: on, device-flat
+// deadzone.
+func DefaultControllerSettings() ControllerSettings {
+	return ControllerSettings{
+		Enabled:  true,
+		Deadzone: DefaultControllerDeadzone,
+	}
+}
+
+// ValidateControllerSettings rejects NaN and out-of-range deadzones.
+func ValidateControllerSettings(settings ControllerSettings) error {
+	if settings.Deadzone != settings.Deadzone || settings.Deadzone < 0 || settings.Deadzone > MaxControllerDeadzone {
+		return fmt.Errorf("controller deadzone must be between 0 and %.2f", MaxControllerDeadzone)
+	}
+	return nil
+}
+
+// ControllerPad is one diagnosed pad row: content-free name/status/mapping
+// only, never input values and never secrets.
+type ControllerPad struct {
+	Path    string
+	Name    string
+	Vendor  string
+	Product string
+	Mapping string
+	Detail  string
+	Caps    string
+}
+
+// ControllerState is the read-only pad enumeration the Controller card
+// renders. It binds to the diagnose gamepad report; the GUI computes
+// nothing about devices itself.
+type ControllerState struct {
+	Enabled        bool
+	PathSelector   string
+	Pads           []ControllerPad
+	Denied         []string
+	PermissionHint string
+	Note           string
+}
+
 type CheckStatus string
 
 const (
@@ -313,6 +377,9 @@ type Service interface {
 	RendererOptions(context.Context) []RendererOption
 	ApplySettings(context.Context, Settings) (ApplyResult, error)
 	ResetSettings(context.Context) (Settings, error)
+	// ControllerPads returns the read-only diagnose gamepad enumeration
+	// for the Controller settings card. It never opens pads for input.
+	ControllerPads(context.Context) (ControllerState, error)
 }
 
 // LaunchAuthority is presentation-safe authority state returned by a secure

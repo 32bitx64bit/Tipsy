@@ -29,6 +29,7 @@ type fakeService struct {
 	installCalls    []InstallRequest
 	applyCalls      []Settings
 	noRestart       bool
+	controller      ControllerState
 	launches        int
 	launchReq       LaunchRequest
 	launchErr       error
@@ -109,6 +110,9 @@ func (f *fakeService) ApplySettings(_ context.Context, settings Settings) (Apply
 func (f *fakeService) ResetSettings(context.Context) (Settings, error) {
 	f.settings = DefaultSettings()
 	return f.settings, nil
+}
+func (f *fakeService) ControllerPads(context.Context) (ControllerState, error) {
+	return f.controller, nil
 }
 
 func TestWizardTransitionsAndSourceValidation(t *testing.T) {
@@ -645,5 +649,80 @@ func waitForModel(t *testing.T, model *SetupModel) {
 	defer cancel()
 	if err := model.Wait(ctx); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestDefaultControllerSettingsAreEnabledWithDeviceFlatBaseline(t *testing.T) {
+	t.Parallel()
+	got := DefaultControllerSettings()
+	if !got.Enabled {
+		t.Fatalf("defaults=%+v", got)
+	}
+	// The widget default equals the effective floor of the Input-owned
+	// gamepad defaults (0 = device-flat baseline).
+	if got.Deadzone != DefaultControllerDeadzone {
+		t.Fatalf("deadzone default=%+v", got)
+	}
+	if DefaultControllerDeadzone != 0 {
+		t.Fatalf("DefaultControllerDeadzone = %v, want device-flat 0", DefaultControllerDeadzone)
+	}
+	if err := ValidateControllerSettings(got); err != nil {
+		t.Fatalf("defaults rejected: %v", err)
+	}
+}
+
+func TestValidateControllerSettingsRejectsOutOfRangeDeadzone(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name     string
+		settings ControllerSettings
+	}{
+		{"negative", ControllerSettings{Deadzone: -0.01}},
+		{"above max", ControllerSettings{Deadzone: 0.51}},
+		{"NaN", ControllerSettings{Deadzone: nanDeadzone()}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if err := ValidateControllerSettings(tc.settings); err == nil {
+				t.Fatalf("accepted %+v", tc.settings)
+			}
+		})
+	}
+	for _, valid := range []ControllerSettings{
+		DefaultControllerSettings(),
+		{Enabled: false, Deadzone: 0},
+		{Enabled: true, Deadzone: MaxControllerDeadzone},
+	} {
+		if err := ValidateControllerSettings(valid); err != nil {
+			t.Fatalf("rejected %+v: %v", valid, err)
+		}
+	}
+}
+
+// nanDeadzone returns a quiet NaN without importing math in the test.
+func nanDeadzone() float64 {
+	x := 0.0
+	return x / x
+}
+
+func TestControllerPadsSurfacesDiagnoseState(t *testing.T) {
+	t.Parallel()
+	want := ControllerState{
+		Enabled:      true,
+		PathSelector: "direct",
+		Pads: []ControllerPad{{
+			Path: "/dev/input/event5", Name: "Xbox pad", Vendor: "045e",
+			Product: "028e", Mapping: "xpad", Detail: "right=RX/RY triggers=Z/RZ dpad=btn+hat",
+			Caps: "abs=X,Y,Z,RZ buttons=15 androidKeys=[96,97] androidAxes=[0,1]",
+		}},
+		Note: "1 gamepad(s) accessible",
+	}
+	fake := &fakeService{controller: want}
+	got, err := fake.ControllerPads(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !got.Enabled || len(got.Pads) != 1 || got.Pads[0].Mapping != "xpad" {
+		t.Fatalf("pads=%+v", got)
 	}
 }

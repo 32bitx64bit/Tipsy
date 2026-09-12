@@ -334,6 +334,7 @@ func (w *mainWindow) buildSettingsPage() *qt.QWidget {
 	actions.AddWidget(w.settingsApply.QWidget)
 	cardLayout.AddLayout(actions.QLayout)
 	layout.AddWidget(card.QWidget)
+	layout.AddWidget(w.buildControllerCard().QWidget)
 	layout.AddWidget(w.buildIntegrationCard().QWidget)
 
 	if w.settingsErr != nil {

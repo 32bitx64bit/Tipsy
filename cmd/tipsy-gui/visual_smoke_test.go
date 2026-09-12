@@ -529,6 +529,14 @@ func (visualService) ResetSettings(context.Context) (guimodel.Settings, error) {
 	return guimodel.DefaultSettings(), nil
 }
 
+func (visualService) ControllerPads(context.Context) (guimodel.ControllerState, error) {
+	return guimodel.ControllerState{
+		Enabled:      true,
+		PathSelector: "direct",
+		Note:         "synthetic visual-test state: no gamepad",
+	}, nil
+}
+
 func waitGUI(t *testing.T, ready func() bool) {
 	t.Helper()
 	deadline := time.Now().Add(3 * time.Second)

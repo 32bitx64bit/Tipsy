@@ -305,6 +305,32 @@ func (s *productionService) ResetSettings(ctx context.Context) (guimodel.Setting
 	return guiSettings(settings), err
 }
 
+// ControllerPads binds the Controller card to the existing diagnose
+// gamepad report. It copies content-free name/status/mapping rows only and
+// computes nothing about devices.
+func (s *productionService) ControllerPads(ctx context.Context) (guimodel.ControllerState, error) {
+	report := diagnostics.Doctor(ctx)
+	if report == nil {
+		return guimodel.ControllerState{}, fmt.Errorf("diagnostics returned no report")
+	}
+	info := report.Gamepad
+	state := guimodel.ControllerState{
+		Enabled:        info.Enabled,
+		PathSelector:   info.PathSelector,
+		Denied:         append([]string(nil), info.Denied...),
+		PermissionHint: info.PermissionHint,
+		Note:           info.Note,
+	}
+	for _, pad := range info.Pads {
+		state.Pads = append(state.Pads, guimodel.ControllerPad{
+			Path: pad.Path, Name: pad.Name, Vendor: pad.Vendor,
+			Product: pad.Product, Mapping: pad.Mapping,
+			Detail: pad.Detail, Caps: pad.Caps,
+		})
+	}
+	return state, nil
+}
+
 func (s *productionService) Doctor(ctx context.Context) (guimodel.DoctorSummary, error) {
 	report := diagnostics.Doctor(ctx)
 	if report == nil {

@@ -641,6 +641,14 @@ func (s *acceptanceService) ResetSettings(context.Context) (guimodel.Settings, e
 	return guimodel.DefaultSettings(), nil
 }
 
+func (s *acceptanceService) ControllerPads(context.Context) (guimodel.ControllerState, error) {
+	return guimodel.ControllerState{
+		Enabled:      true,
+		PathSelector: "direct",
+		Note:         "synthetic acceptance-test state: no gamepad",
+	}, nil
+}
+
 func (s *acceptanceService) setInstallBehavior(behavior installBehavior) {
 	s.mu.Lock()
 	s.behavior = behavior

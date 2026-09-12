@@ -54,6 +54,27 @@ type mainWindow struct {
 	settingsStartFullscreen                          *qt.QCheckBox
 	settingsDisplayKeys                              []string
 	settingsSyncing                                  bool
+	controllerSettings                               guimodel.ControllerSettings
+	controllerLoadErr                                error
+	controllerSyncing                                bool
+	controllerEnable                                 *qt.QCheckBox
+	controllerStateNote                              *qt.QLabel
+	controllerPadRows                                *qt.QVBoxLayout
+	controllerPadNote                                *qt.QLabel
+	controllerDeadL                                  *qt.QSlider
+	controllerDeadR                                  *qt.QSlider
+	controllerDeadLValue                             *qt.QLabel
+	controllerDeadRValue                             *qt.QLabel
+	controllerInvL                                   *qt.QCheckBox
+	controllerInvR                                   *qt.QCheckBox
+	controllerRumble                                 *qt.QCheckBox
+	controllerHint                                   *qt.QLabel
+	controllerTestButton                             *qt.QPushButton
+	controllerTestState                              *qt.QLabel
+	controllerBars                                   map[string]*qt.QProgressBar
+	controllerButtonLamps                            map[int]*qt.QLabel
+	controllerProbe                                  *controllerProbe
+	controllerTimer                                  *qt.QTimer
 	settingsApply                                    *qt.QPushButton
 	settingsReset                                    *qt.QPushButton
 	settingsHint                                     *qt.QLabel
@@ -132,6 +153,7 @@ func newMainWindow(service guimodel.Service, icon *qt.QIcon) *mainWindow {
 	w := newWindowBase(service, icon)
 	w.setupLoadErr = w.setup.Load(context.Background())
 	w.settingsErr = w.settings.Load(context.Background())
+	w.controllerSettings, w.controllerLoadErr = loadControllerSettings()
 	w.finishShell()
 	return w
 }
@@ -240,6 +262,15 @@ func (w *mainWindow) selectPage(index int) {
 		// Another install may have adopted or released the launcher since
 		// this window opened; re-read the desktop before showing the row.
 		w.refreshIntegration()
+	}
+	if index == 2 && w.controllerPadRows != nil {
+		// Fresh pad enumeration each time Settings opens; observation
+		// only, no pad is opened for input.
+		w.refreshControllerPads()
+	}
+	if index != 2 && w.controllerProbe != nil {
+		// Never hold a pad handle outside the Controller card.
+		w.stopControllerTest("Test is stopped.")
 	}
 	if index < len(w.pageEntry) && w.pageEntry[index] != nil {
 		w.pageEntry[index].SetFocusWithReason(qt.OtherFocusReason)
