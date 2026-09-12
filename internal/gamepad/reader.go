@@ -190,7 +190,9 @@ type Reader struct {
 	// (BTN_TL) only; hid-linear pads must SetMapping so WEST is L1.
 	mapping Mapping
 	// aimRest is the right-stick origin captured on the rising edge of
-	// L1/LT (GuliKit motion assist). Cleared on release.
+	// L1/LT (GuliKit motion assist) when that axis is still at rest.
+	// A stick already aimed is left on connect-time rest so ADS/ZL
+	// cannot invert right→left or down→up. Cleared on release.
 	aimRest map[uint16]int32
 	aimHeld bool
 
@@ -321,8 +323,11 @@ func (r *Reader) snapshot() *Frame {
 }
 
 // updateAimRest captures the right-stick raw origin when motion-aim hold
-// starts (L1 or LT) so gyro-to-stick is measured from the pose at press,
-// not the connect-time Value. Release clears it.
+// starts (L1 or LT) so gyro-to-stick is measured from the idle pose at
+// press, not the connect-time Value. An axis already outside the idle
+// band is left alone: capturing a held right/down pose made ZL invert
+// it (firmware spring toward HID centre then read as left/up).
+// Release clears it.
 func (r *Reader) updateAimRest() {
 	held := r.aimAssistHeld()
 	if held && !r.aimHeld {
@@ -333,15 +338,33 @@ func (r *Reader) updateAimRest() {
 			if c == 0 || c == NoAxis {
 				continue
 			}
-			if raw, ok := r.raw[c]; ok {
-				r.aimRest[c] = raw
+			raw, ok := r.raw[c]
+			if !ok || !r.stickNearIdle(c, raw) {
+				continue
 			}
+			r.aimRest[c] = raw
 		}
 	}
 	if !held && r.aimHeld {
 		r.aimRest = nil
 	}
 	r.aimHeld = held
+}
+
+// stickNearIdle reports whether raw sits inside the stick deadband around
+// the connect-time rest (or geo centre when rest is a held-stick Value).
+func (r *Reader) stickNearIdle(code uint16, raw int32) bool {
+	info, ok := r.Abs[code]
+	if !ok || info.Maximum <= info.Minimum {
+		return false
+	}
+	half := float64(info.Maximum-info.Minimum) / 2
+	if half <= 0 {
+		return false
+	}
+	centre := stickCentre(info.Minimum, info.Maximum, info.Flat, info.Value)
+	deadRaw, _ := stickDeadRaw(half, info.Flat)
+	return absF(float64(raw)-centre) <= deadRaw
 }
 
 func (r *Reader) aimAssistHeld() bool {

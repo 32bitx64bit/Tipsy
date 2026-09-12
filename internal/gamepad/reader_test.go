@@ -275,6 +275,50 @@ func TestReaderAimAssistRecenter(t *testing.T) {
 	}
 }
 
+func TestReaderAimAssistDoesNotInvertHeldStick(t *testing.T) {
+	info, m := gulikitDevice()
+	r := NewReader(info.Abs)
+	r.SetMapping(m)
+	// Physical aim right (RX 50000) then analog ZL: capturing that
+	// pose as origin made firmware spring toward HID 32767 read as left.
+	right := feedStream(t, r, [][]byte{
+		EncodeInputEvent(EvAbs, AbsRX, 50000),
+		EncodeInputEvent(EvAbs, AbsRY, 34497),
+		EncodeInputEvent(EvAbs, AbsZ, 400),
+		EncodeInputEvent(EvSyn, SynReport, 0),
+	})
+	if right.Axes[AbsRX] <= 0 {
+		t.Fatalf("aim right + ZL must stay positive, got RX %v", right.Axes[AbsRX])
+	}
+	sprung := feedStream(t, r, [][]byte{
+		EncodeInputEvent(EvAbs, AbsRX, 32767),
+		EncodeInputEvent(EvSyn, SynReport, 0),
+	})
+	if sprung.Axes[AbsRX] < 0 {
+		t.Fatalf("spring toward HID centre must not invert right→left, got %v", sprung.Axes[AbsRX])
+	}
+
+	r2 := NewReader(info.Abs)
+	r2.SetMapping(m)
+	// Physical aim down (RY toward min) then ZL must not become look-up.
+	down := feedStream(t, r2, [][]byte{
+		EncodeInputEvent(EvAbs, AbsRX, 30737),
+		EncodeInputEvent(EvAbs, AbsRY, 15000),
+		EncodeInputEvent(EvAbs, AbsZ, 400),
+		EncodeInputEvent(EvSyn, SynReport, 0),
+	})
+	if down.Axes[AbsRY] >= 0 {
+		t.Fatalf("aim down + ZL must stay negative, got RY %v", down.Axes[AbsRY])
+	}
+	sprungY := feedStream(t, r2, [][]byte{
+		EncodeInputEvent(EvAbs, AbsRY, 32767),
+		EncodeInputEvent(EvSyn, SynReport, 0),
+	})
+	if sprungY.Axes[AbsRY] > 0 {
+		t.Fatalf("spring toward HID centre must not invert down→up, got %v", sprungY.Axes[AbsRY])
+	}
+}
+
 func TestDisconnectFrameZeroes(t *testing.T) {
 	held := map[uint16]bool{BtnSouth: true, BtnStart: true}
 	f := DisconnectFrame(held, []uint16{AbsX, AbsZ})
