@@ -17,7 +17,7 @@ Commands:
   diagnose-native     ELF imports/exports for a native library
   compare-roblox      Compare two Roblox package trees
   report              Combined compatibility report
-  diagnose            Diagnose a subsystem (x11, graphics, audio, jni, loader, roblox, auth)
+  diagnose            Diagnose a subsystem (x11, graphics, audio, jni, loader, roblox, auth, gamepad|pad|controller)
   config              Show or edit XDG config
   version             Print version
   logs                Show log directory and TIPSY_LOG usage
@@ -37,14 +37,27 @@ Never commit Roblox APKs or native libraries.
 
 const doctorHelp = `Usage: tipsy doctor [--json]
 
-Print a host environment overview (OS, X11, GPU, audio, Qt, Roblox data dir).
+Print a host environment overview (OS, X11, GPU, audio, Qt, gamepad pads, Roblox data dir).
 Output is secret-redacted and suitable for sharing.
 `
 
 const diagnoseHelp = `Usage: tipsy diagnose [--json] [subsystem]
 
-Subsystems: x11, graphics, audio, jni, loader, roblox, auth
+Subsystems: x11, graphics, audio, jni, loader, roblox, auth, gamepad|pad|controller
 Omit the subsystem to print all of them.
+
+Controller environment (headless parity; env wins per key over the
+persisted "gamepad" section in the config file, missing JSON = defaults):
+  TIPSY_GAMEPAD=0|off               whole subsystem off (engine sees zero pads)
+  TIPSY_GAMEPAD_PATH=direct         pad feed-in arm (direct-only; others deliver nothing)
+  TIPSY_GAMEPAD_DEADZONE=0.0-0.5    global stick deadzone floor (default: device flat)
+  TIPSY_GAMEPAD_DEADZONE_LEFT/RIGHT=…
+                                    per-stick override (default: follow global)
+  TIPSY_GAMEPAD_INVERT_Y=1          invert both stick-Y axes
+  TIPSY_GAMEPAD_INVERT_Y_LEFT/RIGHT=1
+                                    invert one stick-Y (ORs with global)
+  TIPSY_GAMEPAD_RUMBLE=0|1          rumble preference (default on-if-supported; Phase 4)
+  TIPSY_GAMEPAD_DEBUG=1             per-event arg logging (off by default)
 `
 
 const inspectHelp = `Usage: tipsy inspect [--json] <apk-or-dir> [...]

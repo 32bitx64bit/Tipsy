@@ -168,7 +168,15 @@ func TestDiagnoseImplementedSubsystems(t *testing.T) {
 		t.Run(sub, func(t *testing.T) {
 			t.Parallel()
 			r := Diagnose(context.Background(), sub)
-			if r.Status != "active" || r.Milestone != "" {
+			if sub == "gamepad" {
+				// Host-dependent honest states: active (pads or empty),
+				// degraded (EACCES denials), disabled (kill-switch).
+				switch r.Status {
+				case "active", "degraded", "disabled":
+				default:
+					t.Fatalf("status=%q milestone=%q", r.Status, r.Milestone)
+				}
+			} else if r.Status != "active" || r.Milestone != "" {
 				t.Fatalf("status=%q milestone=%q", r.Status, r.Milestone)
 			}
 			for _, text := range []string{r.Status, r.Message} {

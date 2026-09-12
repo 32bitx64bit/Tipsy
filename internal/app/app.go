@@ -114,7 +114,7 @@ func cmdDiagnose(ctx context.Context, args []string, stdout, stderr io.Writer) i
 		return 2
 	}
 	if sub == "" {
-		for i, name := range []string{"x11", "graphics", "audio", "jni", "loader", "roblox", "auth"} {
+		for i, name := range []string{"x11", "graphics", "audio", "jni", "loader", "roblox", "auth", "gamepad"} {
 			rep := diagnostics.Diagnose(ctx, name)
 			if f.json {
 				b, err := diagnostics.FormatSubsystemJSON(rep)

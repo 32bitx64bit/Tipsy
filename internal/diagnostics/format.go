@@ -47,6 +47,9 @@ func FormatDoctor(r *DoctorReport) string {
 	w("Qt")
 	w("  Widgets: %s", nz(r.Qt.Widgets, "unknown"))
 	w("")
+	w("Gamepad")
+	w("%s", formatGamepadLines(r.Gamepad))
+	w("")
 	w("Roblox")
 	w("  Data dir: %s", nz(r.Roblox.DataDir, "unknown"))
 	w("  Runtime files: %s", nz(r.Roblox.RuntimeFiles, "unknown"))
@@ -148,4 +151,44 @@ func nz(s, fallback string) string {
 		return fallback
 	}
 	return s
+}
+
+// formatGamepadLines renders the honest pad enumeration for doctor output:
+// content-free pad topology, env/path state, and the EACCES hint. A zero
+// GamepadInfo (fixtures predating the probe) reports unknown instead of a
+// misleading disabled state.
+func formatGamepadLines(g GamepadInfo) string {
+	var b strings.Builder
+	w := func(format string, args ...any) {
+		fmt.Fprintf(&b, format+"\n", args...)
+	}
+	if g.PathSelector == "" && g.Note == "" && g.PadCount == 0 && len(g.Pads) == 0 && len(g.Denied) == 0 && len(g.Env) == 0 {
+		w("  Status: unknown (no gamepad probe data)")
+		return strings.TrimSuffix(b.String(), "\n")
+	}
+	w("  Enabled: %s", boolString(g.Enabled))
+	w("  Path: %s", nz(g.PathSelector, "unknown"))
+	if g.PadCount == 0 && len(g.Pads) == 0 {
+		w("  Pads: 0 (none — honest empty, never a fake pad)")
+	} else {
+		w("  Pads: %d", len(g.Pads))
+		for _, p := range g.Pads {
+			w("    - %s %q vendor=%s product=%s mapping=%s caps=%s",
+				nz(p.Path, "unknown"), nz(p.Name, "unknown"),
+				nz(p.Vendor, "????"), nz(p.Product, "????"),
+				nz(p.Mapping, "spec-default"), nz(p.Caps, "-"))
+		}
+	}
+	if len(g.Denied) > 0 {
+		eg := strings.Join(g.Denied, ", ")
+		if len(g.Denied) > 3 {
+			eg = strings.Join(g.Denied[:3], ", ") + ", ..."
+		}
+		w("  Denied: %d node(s) EACCES (%s)", len(g.Denied), eg)
+		w("  Hint: %s", nz(g.PermissionHint, gamepadPermissionHint))
+	}
+	if g.Note != "" {
+		w("  Note: %s", g.Note)
+	}
+	return strings.TrimSuffix(b.String(), "\n")
 }

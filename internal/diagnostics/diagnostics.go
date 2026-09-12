@@ -66,6 +66,7 @@ type DoctorReport struct {
 	GPU     GPUInfo           `json:"gpu"`
 	Audio   AudioInfo         `json:"audio"`
 	Qt      QtInfo            `json:"qt"`
+	Gamepad GamepadInfo       `json:"gamepad"`
 	Roblox  RobloxInfo        `json:"roblox"`
 	Runtime RuntimeInfo       `json:"runtime"`
 	Paths   config.Layout     `json:"paths"`
@@ -84,7 +85,7 @@ type SubsystemReport struct {
 }
 
 // DiagnoseSubsystems lists the subsystem names accepted by Diagnose.
-var DiagnoseSubsystems = []string{"x11", "graphics", "audio", "jni", "loader", "roblox", "auth"}
+var DiagnoseSubsystems = []string{"x11", "graphics", "audio", "jni", "loader", "roblox", "auth", "gamepad"}
 
 func Doctor(ctx context.Context) *DoctorReport {
 	if ctx == nil {
@@ -99,6 +100,7 @@ func Doctor(ctx context.Context) *DoctorReport {
 	r.GPU = probeGPU(ctx)
 	r.Audio = probeAudio()
 	r.Qt = probeQt(ctx)
+	r.Gamepad = probeGamepad()
 	r.Roblox = probeRoblox()
 	r.Runtime = RuntimeInfo{
 		NativeSymbols: "official x86_64 client maps and runs (JNI_OnLoad and initializeNativeCode complete)",
@@ -122,6 +124,10 @@ func reportEnv() map[string]string {
 	keys := []string{
 		"DISPLAY", "XDG_SESSION_TYPE", "XDG_CURRENT_DESKTOP",
 		"WAYLAND_DISPLAY", "TIPSY_LOG", "TIPSY_LOG_LEVEL",
+		"TIPSY_GAMEPAD", "TIPSY_GAMEPAD_PATH", "TIPSY_GAMEPAD_DEBUG",
+		"TIPSY_GAMEPAD_DEADZONE", "TIPSY_GAMEPAD_DEADZONE_LEFT", "TIPSY_GAMEPAD_DEADZONE_RIGHT",
+		"TIPSY_GAMEPAD_INVERT_Y", "TIPSY_GAMEPAD_INVERT_Y_LEFT", "TIPSY_GAMEPAD_INVERT_Y_RIGHT",
+		"TIPSY_GAMEPAD_RUMBLE",
 	}
 	out := make(map[string]string)
 	for _, k := range keys {
@@ -240,6 +246,8 @@ func Diagnose(ctx context.Context, subsystem string) *SubsystemReport {
 			},
 			Message: "Official login and authenticated restart are user-confirmed. This diagnostic does not read cookies, tokens, or account state, and does not verify join or gameplay.",
 		}
+	case "gamepad", "pad", "controller":
+		return diagnoseGamepad()
 	default:
 		return &SubsystemReport{
 			Subsystem: sub,
@@ -264,6 +272,10 @@ func collectIssues(r *DoctorReport) []string {
 	}
 	if strings.EqualFold(r.GPU.EGL, "not found") {
 		issues = append(issues, "EGL libraries not detected")
+	}
+	if len(r.Gamepad.Denied) > 0 {
+		eg := r.Gamepad.Denied[0]
+		issues = append(issues, "Gamepad access denied on "+strconv.Itoa(len(r.Gamepad.Denied))+" input node(s) (e.g. "+eg+"): "+gamepadPermissionHint)
 	}
 	if !r.Roblox.DataDirPresent {
 		issues = append(issues, "Roblox data directory is empty or missing; run `tipsy setup` to install the official client")
