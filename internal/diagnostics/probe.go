@@ -260,7 +260,7 @@ func isMesaDriver(driver string) bool {
 	return false
 }
 
-func probeAudio() AudioInfo {
+func probeAudio(ctx context.Context) AudioInfo {
 	uid := strconv.Itoa(os.Getuid())
 	pw := "not found"
 	if _, err := exec.LookPath("pipewire"); err == nil || commandExists("pw-cli") || commandExists("pw-dump") {
@@ -274,7 +274,9 @@ func probeAudio() AudioInfo {
 	} else if fileExists(filepath.Join("/run/user", uid, "pulse", "native")) {
 		pulse = "OK (socket)"
 	}
-	return AudioInfo{PipeWire: pw, Pulse: pulse}
+	info := AudioInfo{PipeWire: pw, Pulse: pulse}
+	attachMicrophone(ctx, &info)
+	return info
 }
 
 func probeQt(ctx context.Context) QtInfo {

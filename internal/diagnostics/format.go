@@ -43,6 +43,9 @@ func FormatDoctor(r *DoctorReport) string {
 	w("Audio")
 	w("  PipeWire: %s", nz(r.Audio.PipeWire, "unknown"))
 	w("  Pulse: %s", nz(r.Audio.Pulse, "unknown"))
+	if extra := formatAudioMicLines(r.Audio); extra != "" {
+		w("%s", extra)
+	}
 	w("")
 	w("Qt")
 	w("  Widgets: %s", nz(r.Qt.Widgets, "unknown"))

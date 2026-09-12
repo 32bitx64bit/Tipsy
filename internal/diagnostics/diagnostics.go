@@ -39,6 +39,16 @@ type GPUInfo struct {
 type AudioInfo struct {
 	PipeWire string `json:"pipewire"`
 	Pulse    string `json:"pulse"`
+	// Microphone door and capture-source telemetry. Pointers so doctor
+	// --json can distinguish false/0 from "not probed". Never PCM, and
+	// never a Pulse source name (use CaptureSourcePinned).
+	MicrophoneEnabled   *bool  `json:"microphoneEnabled,omitempty"`
+	MicrophoneControl   string `json:"microphoneControl,omitempty"`
+	MicrophoneFeature   string `json:"microphoneFeature,omitempty"`
+	MicrophoneNote      string `json:"microphoneNote,omitempty"`
+	CaptureSources      *int   `json:"captureSources,omitempty"`
+	CaptureSourcePinned *bool  `json:"sourcePinned,omitempty"`
+	CaptureProbe        string `json:"captureProbe,omitempty"`
 }
 
 type QtInfo struct {
@@ -98,7 +108,7 @@ func Doctor(ctx context.Context) *DoctorReport {
 	r.System = probeSystem()
 	r.Display = probeDisplay()
 	r.GPU = probeGPU(ctx)
-	r.Audio = probeAudio()
+	r.Audio = probeAudio(ctx)
 	r.Qt = probeQt(ctx)
 	r.Gamepad = probeGamepad()
 	r.Roblox = probeRoblox()
@@ -128,6 +138,7 @@ func reportEnv() map[string]string {
 		"TIPSY_GAMEPAD_DEADZONE", "TIPSY_GAMEPAD_DEADZONE_LEFT", "TIPSY_GAMEPAD_DEADZONE_RIGHT",
 		"TIPSY_GAMEPAD_INVERT_Y", "TIPSY_GAMEPAD_INVERT_Y_LEFT", "TIPSY_GAMEPAD_INVERT_Y_RIGHT",
 		"TIPSY_GAMEPAD_RUMBLE",
+		"TIPSY_MICROPHONE", "TIPSY_DISABLE_MICROPHONE",
 	}
 	out := make(map[string]string)
 	for _, k := range keys {
@@ -180,24 +191,7 @@ func Diagnose(ctx context.Context, subsystem string) *SubsystemReport {
 			Message: "EGL/GLES presentation on X11 is active; the official login UI renders through the host GL stack.",
 		}
 	case "audio":
-		a := probeAudio()
-		mic := "opens on demand when Roblox starts recording"
-		if disabled, _ := strconv.ParseBool(os.Getenv("TIPSY_DISABLE_MICROPHONE")); disabled {
-			mic = "disabled by TIPSY_DISABLE_MICROPHONE"
-		}
-		return &SubsystemReport{
-			Subsystem: "audio",
-			Status:    "active",
-			Facts: []string{
-				"Client APIs: FMOD AudioTrack playback and OpenSL ES buffer queues",
-				"Host bridge: PulseAudio / PipeWire Pulse server",
-				"Playback: user-confirmed audible through the host device",
-				"Microphone: " + mic,
-				"PipeWire: " + a.PipeWire,
-				"Pulse: " + a.Pulse,
-			},
-			Message: "Playback through the host PulseAudio/PipeWire bridge is user-confirmed audible. This diagnostic reports the installed bridge only; it does not play sound and does not verify microphone capture or in-experience audio.",
-		}
+		return diagnoseAudio(ctx)
 	case "jni":
 		return &SubsystemReport{
 			Subsystem: "jni",
@@ -277,6 +271,7 @@ func collectIssues(r *DoctorReport) []string {
 		eg := r.Gamepad.Denied[0]
 		issues = append(issues, "Gamepad access denied on "+strconv.Itoa(len(r.Gamepad.Denied))+" input node(s) (e.g. "+eg+"): "+gamepadPermissionHint)
 	}
+	issues = append(issues, collectAudioIssues(r)...)
 	if !r.Roblox.DataDirPresent {
 		issues = append(issues, "Roblox data directory is empty or missing; run `tipsy setup` to install the official client")
 	}

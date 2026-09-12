@@ -33,7 +33,14 @@ type Config struct {
 	// defaults (on, device-flat deadzone baseline, rumble
 	// on-if-supported). Never edited by hand for engine behavior: it
 	// shapes host stick calibration only, never GlobalBasicSettings_13.xml.
-	Gamepad            json.RawMessage     `json:"gamepad,omitempty"`
+	Gamepad json.RawMessage `json:"gamepad,omitempty"`
+	// Microphone carries the persisted capture-door section verbatim.
+	// CLI/mic owns its shape/defaults/merge rules (see internal/mic
+	// MicrophoneConfig under the "microphone" key); this package only
+	// preserves the bytes across atomic read-modify-write cycles. Missing
+	// or null means defaults (allowed; OpenSL still lazy-opens). Never
+	// PCM, and never a Pulse source name in this package.
+	Microphone         json.RawMessage     `json:"microphone,omitempty"`
 	DevelopmentConsent *DevelopmentConsent `json:"developmentConsent,omitempty"`
 }
 

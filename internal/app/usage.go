@@ -58,6 +58,16 @@ persisted "gamepad" section in the config file, missing JSON = defaults):
                                     invert one stick-Y (ORs with global)
   TIPSY_GAMEPAD_RUMBLE=0|1          rumble preference (default on-if-supported; Phase 4)
   TIPSY_GAMEPAD_DEBUG=1             per-event arg logging (off by default)
+
+Microphone environment (headless parity; env wins per key over the
+persisted "microphone" section in the config file, missing JSON = defaults;
+enabled means allowed, not always-open — OpenSL still lazy-opens):
+  TIPSY_MICROPHONE=0|off|false|no   whole input off
+  TIPSY_MICROPHONE=1|on|true|yes    force on (env wins over file)
+  TIPSY_DISABLE_MICROPHONE=1|true|yes
+                                    deprecated alias of TIPSY_MICROPHONE=0
+  TIPSY_MICROPHONE_SOURCE=<name>    optional Pulse source pin (unset = host default;
+                                    diagnose never prints the name)
 `
 
 const inspectHelp = `Usage: tipsy inspect [--json] <apk-or-dir> [...]

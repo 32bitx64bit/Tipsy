@@ -226,16 +226,30 @@ func TestDiagnoseMeasuredState(t *testing.T) {
 }
 
 func TestDiagnoseAudioBridge(t *testing.T) {
+	isolateGamepadConfig(t, "")
+	t.Setenv("TIPSY_MICROPHONE", "")
 	t.Setenv("TIPSY_DISABLE_MICROPHONE", "true")
+	t.Setenv("TIPSY_MICROPHONE_SOURCE", "")
 	r := Diagnose(context.Background(), "audio")
 	if r.Status != "active" || r.Milestone != "" {
 		t.Fatalf("audio status=%q milestone=%q", r.Status, r.Milestone)
 	}
 	text := FormatSubsystem(r)
-	for _, want := range []string{"FMOD AudioTrack", "OpenSL ES", "PulseAudio", "disabled by TIPSY_DISABLE_MICROPHONE", "does not play sound", "microphone capture"} {
+	for _, want := range []string{
+		"FMOD AudioTrack", "OpenSL ES", "PulseAudio",
+		"user-confirmed audible",
+		"Microphone: disabled (TIPSY_DISABLE_MICROPHONE)",
+		"JNI feature follows the env mic door",
+		"host-verified",
+		"does not play sound",
+		"never reports PCM",
+	} {
 		if !strings.Contains(text, want) {
 			t.Fatalf("audio diagnostics missing %q:\n%s", want, text)
 		}
+	}
+	if strings.Contains(text, "does not verify microphone capture") {
+		t.Fatalf("stale capture-unverified disclaimer:\n%s", text)
 	}
 }
 
