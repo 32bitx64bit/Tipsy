@@ -11,7 +11,9 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
+	"unicode"
 
 	"github.com/tipsy-linux/tipsy/internal/clientsettings"
 	"github.com/tipsy-linux/tipsy/internal/logging"
@@ -61,6 +63,12 @@ func applicationSettingsFromResponseWithOverrides(body []byte, overrides map[str
 		delete(m, "FFlagDebugGraphicsDisableVulkan")
 	}
 	for k, v := range overrides {
+		if v == nil {
+			// A nil override removes a shipped key (used for the
+			// `_PlaceFilter` companions of raised FastLog groups).
+			delete(m, k)
+			continue
+		}
 		m[k] = v
 	}
 	// 7a14858 / ShadowFValuesEnabled defaults false and is absent from CDN.
@@ -87,6 +95,147 @@ func cloneFlagMap(m map[string]any) map[string]any {
 	return out
 }
 
+// flogOverridesEnv is a diagnostics-only knob: a space- or `;`-separated
+// list of official FastLog groups and levels, e.g.
+// `VoiceChatLogs=Verbose,7 SoundTrace=Verbose`. Each entry raises the
+// `FLog<Group>` and `DFLog<Group>` levels in the client settings handed to
+// Roblox. It can only change how much the official client logs; it never
+// sets an FFlag/FInt/FString and never alters engine behavior.
+const flogOverridesEnv = "TIPSY_FLOG_OVERRIDES"
+
+// flogLevelNames are the named FastLog severities the official settings use
+// (`FLogAudio = Info`, `FLogX = Verbose,6`, `..._PlaceFilter = Verbose;<placeId>`).
+// A value is `<number>`, `<Severity>`, or `<Severity>,<number>`.
+var flogLevelNames = map[string]bool{"error": true, "warning": true, "info": true, "debug": true, "verbose": true, "trace": true}
+
+// flogFilterSuffixes are the per-place / per-datacenter companions Roblox
+// ships next to a group (`FLogVoiceChatLogs_PlaceFilter = Verbose;1111…`).
+// Raising a group must drop them, or the filter pins the group back to its
+// shipped value in every other place. A nil override value means delete.
+var flogFilterSuffixes = []string{"_PlaceFilter", "_DataCenterFilter"}
+
+// flogOverrides parses a flogOverridesEnv value. Malformed entries are
+// skipped: the group must be an identifier and the level a small integer or
+// one of flogLevelNames. The returned map counts one group as len/2 keys
+// with non-nil values.
+func flogOverrides(spec string) map[string]any {
+	out := map[string]any{}
+	items := strings.FieldsFunc(spec, func(r rune) bool { return r == ';' || unicode.IsSpace(r) })
+	for _, item := range items {
+		group, level, ok := strings.Cut(item, "=")
+		if !ok || !isFlogGroupName(group) || !isFlogLevel(level) {
+			continue
+		}
+		for _, prefix := range []string{"FLog", "DFLog"} {
+			out[prefix+group] = level
+			for _, suffix := range flogFilterSuffixes {
+				out[prefix+group+suffix] = nil
+			}
+		}
+	}
+	return out
+}
+
+// flogGroupCount counts the groups in a flogOverrides result.
+func flogGroupCount(m map[string]any) int {
+	n := 0
+	for k, v := range m {
+		if v != nil && strings.HasPrefix(k, "FLog") {
+			n++
+		}
+	}
+	return n
+}
+
+func isFlogGroupName(s string) bool {
+	if s == "" {
+		return false
+	}
+	for i, r := range s {
+		switch {
+		case r >= 'A' && r <= 'Z', r >= 'a' && r <= 'z', r == '_':
+		case r >= '0' && r <= '9' && i > 0:
+		default:
+			return false
+		}
+	}
+	return true
+}
+
+func isFlogLevel(s string) bool {
+	name, number, hasNumber := strings.Cut(s, ",")
+	if flogLevelNames[strings.ToLower(name)] {
+		return !hasNumber || isFlogNumber(number)
+	}
+	return !hasNumber && isFlogNumber(name)
+}
+
+func isFlogNumber(s string) bool {
+	if s == "" || len(s) > 3 {
+		return false
+	}
+	for _, r := range s {
+		if r < '0' || r > '9' {
+			return false
+		}
+	}
+	return true
+}
+
+// luaLogEnv is the companion diagnostics knob for Roblox's own Lua Logger:
+// `level` or `level:pattern`, e.g. `debug:Voice`. It sets only the two
+// logging fast strings the official CoreScripts Logger reads
+// (`FStringDebugLuaLogLevel`, `FStringDebugLuaLogPattern`) so Lua-side
+// decisions print into the Player log as `[Name (level)] - message`.
+const luaLogEnv = "TIPSY_LUA_LOG"
+
+const (
+	luaLogLevelFlag   = "FStringDebugLuaLogLevel"
+	luaLogPatternFlag = "FStringDebugLuaLogPattern"
+)
+
+var luaLogLevels = map[string]bool{"trace": true, "debug": true, "info": true, "warning": true, "error": true}
+
+// luaLogOverrides parses a luaLogEnv value; anything but a known level and
+// a short printable pattern yields nothing.
+func luaLogOverrides(spec string) map[string]any {
+	level, pattern, _ := strings.Cut(strings.TrimSpace(spec), ":")
+	level = strings.ToLower(strings.TrimSpace(level))
+	pattern = strings.TrimSpace(pattern)
+	if !luaLogLevels[level] || len(pattern) > 64 {
+		return nil
+	}
+	for _, r := range pattern {
+		if r < 0x21 || r > 0x7e {
+			return nil
+		}
+	}
+	out := map[string]any{luaLogLevelFlag: level}
+	if pattern != "" {
+		out[luaLogPatternFlag] = pattern
+	}
+	return out
+}
+
+// withFlogOverrides merges the flogOverridesEnv groups and the luaLogEnv
+// logger settings into overrides. It returns the number of FastLog groups
+// raised and whether the Lua logger was configured.
+func withFlogOverrides(overrides map[string]any, spec, luaSpec string) (map[string]any, int, bool) {
+	extra := flogOverrides(spec)
+	lua := luaLogOverrides(luaSpec)
+	if len(extra) == 0 && len(lua) == 0 {
+		return overrides, 0, false
+	}
+	overrides = cloneFlagMap(overrides)
+	for k, v := range extra {
+		overrides[k] = v
+	}
+	for k, v := range lua {
+		overrides[k] = v
+	}
+	return overrides, flogGroupCount(extra), len(lua) > 0
+}
+
 func loadAndroidAppSettings(ctx context.Context, cachePath, version string) (string, int, error) {
 	if ctx == nil {
 		ctx = context.Background()
@@ -107,6 +256,14 @@ func loadAndroidAppSettings(ctx context.Context, cachePath, version string) (str
 		logging.Logger(logging.CatGameActivity).Info("desktop app policy override omitted", "err", overrideErr)
 	} else if policyApplied {
 		logging.Logger(logging.CatGameActivity).Info("desktop app policy override applied", "presentation_fields", 4)
+	}
+	var (
+		flogGroups int
+		luaLog     bool
+	)
+	overrides, flogGroups, luaLog = withFlogOverrides(overrides, os.Getenv(flogOverridesEnv), os.Getenv(luaLogEnv))
+	if flogGroups > 0 || luaLog {
+		logging.Logger(logging.CatGameActivity).Info("log level overrides applied", "flogGroups", flogGroups, "luaLogger", luaLog)
 	}
 	body, err := fetchAndroidAppSettings(ctx, version)
 	if err != nil {
