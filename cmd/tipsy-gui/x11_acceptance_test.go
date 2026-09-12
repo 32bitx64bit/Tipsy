@@ -649,6 +649,14 @@ func (s *acceptanceService) ControllerPads(context.Context) (guimodel.Controller
 	}, nil
 }
 
+func (s *acceptanceService) MicrophoneStatus(context.Context) (guimodel.MicrophoneState, error) {
+	return guimodel.MicrophoneState{
+		Enabled: true,
+		Control: "default",
+		Note:    "synthetic acceptance-test state: microphone not probed",
+	}, nil
+}
+
 func (s *acceptanceService) setInstallBehavior(behavior installBehavior) {
 	s.mu.Lock()
 	s.behavior = behavior

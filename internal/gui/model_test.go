@@ -30,6 +30,7 @@ type fakeService struct {
 	applyCalls      []Settings
 	noRestart       bool
 	controller      ControllerState
+	microphone      MicrophoneState
 	launches        int
 	launchReq       LaunchRequest
 	launchErr       error
@@ -113,6 +114,9 @@ func (f *fakeService) ResetSettings(context.Context) (Settings, error) {
 }
 func (f *fakeService) ControllerPads(context.Context) (ControllerState, error) {
 	return f.controller, nil
+}
+func (f *fakeService) MicrophoneStatus(context.Context) (MicrophoneState, error) {
+	return f.microphone, nil
 }
 
 func TestWizardTransitionsAndSourceValidation(t *testing.T) {
@@ -724,5 +728,33 @@ func TestControllerPadsSurfacesDiagnoseState(t *testing.T) {
 	}
 	if !got.Enabled || len(got.Pads) != 1 || got.Pads[0].Mapping != "xpad" {
 		t.Fatalf("pads=%+v", got)
+	}
+}
+
+func TestDefaultMicrophoneSettingsAreEnabled(t *testing.T) {
+	t.Parallel()
+	got := DefaultMicrophoneSettings()
+	if !got.Enabled {
+		t.Fatalf("defaults=%+v", got)
+	}
+}
+
+func TestMicrophoneStatusSurfacesDiagnoseState(t *testing.T) {
+	t.Parallel()
+	n := 2
+	want := MicrophoneState{
+		Enabled:        true,
+		Control:        "config file",
+		CaptureSources: &n,
+		SourcePinned:   true,
+		Note:           "synthetic diagnose bind",
+	}
+	fake := &fakeService{microphone: want}
+	got, err := fake.MicrophoneStatus(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !got.Enabled || got.Control != "config file" || got.CaptureSources == nil || *got.CaptureSources != 2 || !got.SourcePinned {
+		t.Fatalf("microphone=%+v", got)
 	}
 }

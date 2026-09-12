@@ -537,6 +537,14 @@ func (visualService) ControllerPads(context.Context) (guimodel.ControllerState, 
 	}, nil
 }
 
+func (visualService) MicrophoneStatus(context.Context) (guimodel.MicrophoneState, error) {
+	return guimodel.MicrophoneState{
+		Enabled: true,
+		Control: "default",
+		Note:    "synthetic visual-test state: microphone not probed",
+	}, nil
+}
+
 func waitGUI(t *testing.T, ready func() bool) {
 	t.Helper()
 	deadline := time.Now().Add(3 * time.Second)

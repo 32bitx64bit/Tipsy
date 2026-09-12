@@ -260,6 +260,31 @@ type ControllerState struct {
 	Note           string
 }
 
+// MicrophoneSettings is presentation-neutral widget state for the
+// Settings microphone consent toggle. Persist enabled only; Pulse source
+// pins stay in the mic-owned config section and are never edited here.
+type MicrophoneSettings struct {
+	Enabled bool
+}
+
+// DefaultMicrophoneSettings returns the missing-JSON defaults: allowed
+// (capture still lazy-opens only when the client records).
+func DefaultMicrophoneSettings() MicrophoneSettings {
+	return MicrophoneSettings{Enabled: true}
+}
+
+// MicrophoneState is the read-only diagnose audio bind for the
+// microphone card. CaptureSources is a count pointer so "not probed"
+// stays distinct from zero; SourcePinned is a boolean only. Never a
+// Pulse source name, never PCM.
+type MicrophoneState struct {
+	Enabled        bool
+	Control        string // which control set the door
+	CaptureSources *int
+	SourcePinned   bool
+	Note           string
+}
+
 type CheckStatus string
 
 const (
@@ -380,6 +405,10 @@ type Service interface {
 	// ControllerPads returns the read-only diagnose gamepad enumeration
 	// for the Controller settings card. It never opens pads for input.
 	ControllerPads(context.Context) (ControllerState, error)
+	// MicrophoneStatus returns the read-only diagnose audio microphone
+	// door for the Settings card. It never opens capture and never
+	// includes Pulse source names.
+	MicrophoneStatus(context.Context) (MicrophoneState, error)
 }
 
 // LaunchAuthority is presentation-safe authority state returned by a secure

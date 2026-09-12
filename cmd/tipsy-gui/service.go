@@ -331,6 +331,32 @@ func (s *productionService) ControllerPads(ctx context.Context) (guimodel.Contro
 	return state, nil
 }
 
+// MicrophoneStatus binds the microphone card to the existing diagnose
+// audio report. It copies door control, capture count, and pin boolean
+// only — never Pulse source names and never PCM.
+func (s *productionService) MicrophoneStatus(ctx context.Context) (guimodel.MicrophoneState, error) {
+	report := diagnostics.Doctor(ctx)
+	if report == nil {
+		return guimodel.MicrophoneState{}, fmt.Errorf("diagnostics returned no report")
+	}
+	info := report.Audio
+	state := guimodel.MicrophoneState{
+		Control: info.MicrophoneControl,
+		Note:    info.MicrophoneNote,
+	}
+	if info.MicrophoneEnabled != nil {
+		state.Enabled = *info.MicrophoneEnabled
+	}
+	if info.CaptureSources != nil {
+		n := *info.CaptureSources
+		state.CaptureSources = &n
+	}
+	if info.CaptureSourcePinned != nil {
+		state.SourcePinned = *info.CaptureSourcePinned
+	}
+	return state, nil
+}
+
 func (s *productionService) Doctor(ctx context.Context) (guimodel.DoctorSummary, error) {
 	report := diagnostics.Doctor(ctx)
 	if report == nil {

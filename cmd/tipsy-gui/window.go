@@ -75,6 +75,13 @@ type mainWindow struct {
 	controllerButtonLamps                            map[int]*qt.QLabel
 	controllerProbe                                  *controllerProbe
 	controllerTimer                                  *qt.QTimer
+	microphoneSettings                               guimodel.MicrophoneSettings
+	microphoneLoadErr                                error
+	microphoneSyncing                                bool
+	microphoneEnable                                 *qt.QCheckBox
+	microphoneStateNote                              *qt.QLabel
+	microphoneStatusNote                             *qt.QLabel
+	microphoneHint                                   *qt.QLabel
 	settingsApply                                    *qt.QPushButton
 	settingsReset                                    *qt.QPushButton
 	settingsHint                                     *qt.QLabel
@@ -154,6 +161,7 @@ func newMainWindow(service guimodel.Service, icon *qt.QIcon) *mainWindow {
 	w.setupLoadErr = w.setup.Load(context.Background())
 	w.settingsErr = w.settings.Load(context.Background())
 	w.controllerSettings, w.controllerLoadErr = loadControllerSettings()
+	w.microphoneSettings, w.microphoneLoadErr = loadMicrophoneSettings()
 	w.finishShell()
 	return w
 }
@@ -267,6 +275,11 @@ func (w *mainWindow) selectPage(index int) {
 		// Fresh pad enumeration each time Settings opens; observation
 		// only, no pad is opened for input.
 		w.refreshControllerPads()
+	}
+	if index == 2 && w.microphoneEnable != nil {
+		// Fresh diagnose audio bind each time Settings opens; observation
+		// only, no capture is opened.
+		w.refreshMicrophoneStatus()
 	}
 	if index != 2 && w.controllerProbe != nil {
 		// Never hold a pad handle outside the Controller card.
