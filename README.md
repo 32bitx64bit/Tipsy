@@ -514,7 +514,7 @@ Diagnostics never print passwords, cookies, tokens, or `.ROBLOSECURITY`.
 
 **Still limited or unverified**
 
-- Microphone capture is not advertised and remains unverified
+- In-experience voice chat works (hear and talk) for voice-eligible accounts; the in-game Input Device list only offers the host default microphone — pick the source on the desktop or with `TIPSY_MICROPHONE_SOURCE`
 - Gamepads / controllers are not implemented
 - Native Wayland is not the display target
 - In-experience join while a session is already running is not wired
