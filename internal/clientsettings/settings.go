@@ -82,6 +82,10 @@ const (
 	maxSettingsBytes  = 64 << 10
 	maxRobloxXMLBytes = 4 << 20
 	unlimitedFPSValue = "9999"
+	// engineDefaultFramerateCap is Roblox's stored "no Tipsy override"
+	// value (Auto / client-owned). Used when Tipsy must write a working
+	// UserGameSettings document without having observed a prior cap.
+	engineDefaultFramerateCap = "-1"
 )
 
 type RendererOption struct {
@@ -324,65 +328,81 @@ func (s *Service) applyLocked(ctx context.Context, wanted Settings) (ApplyResult
 	newDoc.Settings = wanted
 
 	xmlPath := s.xmlPath()
-	oldXML, readErr := readRegularFile(xmlPath, maxRobloxXMLBytes)
+	diskXML, readErr := readRegularFile(xmlPath, maxRobloxXMLBytes)
 	xmlExists := readErr == nil
 	if readErr != nil && !errors.Is(readErr, os.ErrNotExist) {
 		return ApplyResult{}, readErr
 	}
-	newXML := oldXML
-	xmlChanged := false
+	seed := diskXML
+	createdWorking := false
 	note := ""
-	frameRateApplied := xmlExists
+	frameRateApplied := false
 	if xmlExists {
-		_, current, err := updateFramerateCap(oldXML, "")
+		_, _, err := updateFramerateCap(diskXML, "")
 		if err != nil {
-			// Roblox's settings document is user data, never a launch gate. An
-			// unclean shutdown can truncate it to zero bytes or cut it
-			// mid-tag; preserve the bytes, then drop a document the XML
-			// decoder could not parse at all so the engine recreates defaults.
-			// Either way the saved frame-rate choice is applied on a later
-			// launch instead of aborting this one.
-			s.backupMalformedXML(oldXML)
+			// Roblox's settings document is user data, never a launch gate.
+			// An unclean shutdown can truncate it to zero bytes or cut it
+			// mid-tag. Preserve those bytes, then write a working
+			// UserGameSettings document so this launch (and older Tipsy
+			// builds that still parse the file strictly) have a real XML
+			// instead of an empty path.
+			s.backupMalformedXML(diskXML)
 			var parseErr xmlParseError
 			if errors.As(err, &parseErr) {
-				if rmErr := os.Remove(xmlPath); rmErr != nil && !errors.Is(rmErr, os.ErrNotExist) {
-					return ApplyResult{}, fmt.Errorf("remove malformed Roblox settings XML: %w", rmErr)
-				}
-				xmlExists = false
-				note = "Roblox settings XML was malformed and has been preserved; the client will recreate it on launch and the frame-rate choice applies on a later launch."
+				seed = workingUserGameSettingsXML(xmlFramerateCap(wanted.FrameRate))
+				createdWorking = true
+				note = "Roblox settings XML was malformed and has been preserved; Tipsy wrote a working settings document so this launch can use it."
 			} else {
 				note = "Roblox settings XML cannot take a frame-rate override yet; the choice is saved and will be applied on a later launch."
 			}
-			frameRateApplied = false
+		}
+	} else if wanted.FrameRate.Mode != FrameRateAuto {
+		seed = workingUserGameSettingsXML(xmlFramerateCap(wanted.FrameRate))
+		createdWorking = true
+	}
+
+	newXML := diskXML
+	xmlChanged := false
+	if len(seed) > 0 {
+		_, current, err := updateFramerateCap(seed, "")
+		if err != nil {
+			if createdWorking {
+				return ApplyResult{}, fmt.Errorf("write working Roblox settings XML: %w", err)
+			}
 		} else {
 			switch wanted.FrameRate.Mode {
 			case FrameRateAuto:
+				newXML = seed
 				if oldDoc.FPSOwned && current == oldDoc.FPSApplied {
-					newXML, _, err = updateFramerateCap(oldXML, oldDoc.FPSOriginal)
+					newXML, _, err = updateFramerateCap(seed, oldDoc.FPSOriginal)
 					if err != nil {
 						return ApplyResult{}, err
 					}
-					xmlChanged = !bytes.Equal(oldXML, newXML)
 				}
 				newDoc.FPSOwned = false
 				newDoc.FPSOriginal = ""
 				newDoc.FPSApplied = ""
+				xmlChanged = !bytes.Equal(diskXML, newXML)
+				frameRateApplied = xmlExists || createdWorking
 			case FrameRateLimited, FrameRateUnlimited:
 				value := fpsValue(wanted.FrameRate)
 				if !oldDoc.FPSOwned {
-					newDoc.FPSOriginal = current
+					if createdWorking {
+						newDoc.FPSOriginal = engineDefaultFramerateCap
+					} else {
+						newDoc.FPSOriginal = current
+					}
 				}
 				newDoc.FPSOwned = true
 				newDoc.FPSApplied = value
-				newXML, _, err = updateFramerateCap(oldXML, value)
+				newXML, _, err = updateFramerateCap(seed, value)
 				if err != nil {
 					return ApplyResult{}, err
 				}
-				xmlChanged = !bytes.Equal(oldXML, newXML)
+				xmlChanged = !bytes.Equal(diskXML, newXML)
+				frameRateApplied = true
 			}
 		}
-	} else if wanted.FrameRate.Mode != FrameRateAuto {
-		note = "Roblox has not created GlobalBasicSettings_13.xml yet; the choice is saved and will be applied on a later launch."
 	}
 
 	graphicsChanged := oldDoc.Renderer != wanted.Renderer || oldDoc.FrameRate != wanted.FrameRate || oldDoc.VSync != wanted.VSync || oldDoc.LowTextureMode != wanted.LowTextureMode
@@ -397,8 +417,8 @@ func (s *Service) applyLocked(ctx context.Context, wanted Settings) (ApplyResult
 	}
 	if docChanged {
 		if err := s.writeDocument(newDoc); err != nil {
-			if xmlChanged {
-				_ = config.AtomicWriteFile(xmlPath, oldXML, 0o600)
+			if xmlChanged && !createdWorking {
+				_ = config.AtomicWriteFile(xmlPath, diskXML, 0o600)
 			}
 			return ApplyResult{}, err
 		}
@@ -421,15 +441,14 @@ func (s *Service) applyLocked(ctx context.Context, wanted Settings) (ApplyResult
 	}, nil
 }
 
-// ReconcileWhileClientLocked reapplies an explicit XML frame-rate choice just
-// before launch. The caller must hold the client lock for the full launch.
+// ReconcileWhileClientLocked writes a working Roblox settings document when
+// the on-disk XML is missing or unparseable, then reapplies an explicit
+// frame-rate choice. Auto still leaves a healthy document's cap under
+// client ownership. The caller must hold the client lock for the full launch.
 func (s *Service) ReconcileWhileClientLocked(ctx context.Context) error {
 	doc, err := s.loadDocument(ctx)
 	if err != nil {
 		return err
-	}
-	if doc.FrameRate.Mode == FrameRateAuto {
-		return nil
 	}
 	_, err = s.applyLocked(ctx, doc.Settings)
 	return err
@@ -547,6 +566,36 @@ func fpsValue(f FrameRate) string {
 		return unlimitedFPSValue
 	}
 	return strconv.Itoa(f.Limit)
+}
+
+func xmlFramerateCap(f FrameRate) string {
+	switch f.Mode {
+	case FrameRateLimited, FrameRateUnlimited:
+		return fpsValue(f)
+	default:
+		return engineDefaultFramerateCap
+	}
+}
+
+// workingUserGameSettingsXML is a minimal official-shaped rbx settings
+// document: version-4 roblox wrapper, the stock External sentinels, and one
+// UserGameSettings FramerateCap. Missing properties stay absent so Roblox
+// fills class defaults on load instead of Tipsy inventing graphics, camera,
+// or volume values. cap must be a decimal integer.
+func workingUserGameSettingsXML(cap string) []byte {
+	if _, err := strconv.Atoi(cap); err != nil {
+		cap = engineDefaultFramerateCap
+	}
+	return []byte(`<roblox xmlns:xmime="http://www.w3.org/2005/05/xmlmime" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:noNamespaceSchemaLocation="http://www.roblox.com/roblox.xsd" version="4">
+	<External>null</External>
+	<External>nil</External>
+	<Item class="UserGameSettings">
+		<Properties>
+			<int name="FramerateCap">` + cap + `</int>
+		</Properties>
+	</Item>
+</roblox>
+`)
 }
 
 func noteForFrameRate(f FrameRate, prior string) string {

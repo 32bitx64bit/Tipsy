@@ -390,23 +390,22 @@ func TestAutoPreservesClientChangeOutsideTipsyOwnership(t *testing.T) {
 	}
 }
 
-func TestFrameRatePendingUntilRobloxCreatesXML(t *testing.T) {
+func TestFrameRateWritesWorkingXMLWhenMissing(t *testing.T) {
 	s := testService(t)
 	wanted := Settings{Renderer: RendererAuto, FrameRate: FrameRate{Mode: FrameRateLimited, Limit: 90}}
 	result, err := s.Apply(context.Background(), wanted)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if result.FrameRateApplied || !strings.Contains(result.FrameRateNote, "not created") {
-		t.Fatalf("pending result=%+v", result)
+	if !result.FrameRateApplied {
+		t.Fatalf("missing XML should be replaced with a working document: %+v", result)
 	}
-	writeXML(t, s, "-1")
-	if err := s.ReconcileWhileClientLocked(context.Background()); err != nil {
+	raw, err := os.ReadFile(s.XMLPath)
+	if err != nil {
 		t.Fatal(err)
 	}
-	raw, _ := os.ReadFile(s.XMLPath)
-	if !bytes.Contains(raw, []byte(`name="FramerateCap">90</int>`)) {
-		t.Fatalf("reconcile XML=%s", raw)
+	if _, current, err := updateFramerateCap(raw, ""); err != nil || current != "90" {
+		t.Fatalf("created cap=%q err=%v xml=%s", current, err, raw)
 	}
 }
 
@@ -591,11 +590,21 @@ func TestMalformedFilesRecoveredWithoutPayloadLeak(t *testing.T) {
 	if strings.Contains(result.FrameRateNote, secret) {
 		t.Fatal("frame-rate note leaked malformed payload")
 	}
-	if result.FrameRateApplied {
-		t.Fatal("malformed XML reported a frame-rate override as applied")
+	if !result.FrameRateApplied {
+		t.Fatal("working replacement XML should apply the frame-rate override on this launch")
 	}
-	if _, statErr := os.Stat(s.XMLPath); !errors.Is(statErr, os.ErrNotExist) {
-		t.Fatalf("unparseable XML was not removed for engine recreation: %v", statErr)
+	if !strings.Contains(result.FrameRateNote, "wrote a working settings document") {
+		t.Fatalf("repair note=%q", result.FrameRateNote)
+	}
+	replaced, err := os.ReadFile(s.XMLPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(replaced), secret) {
+		t.Fatalf("live XML leaked malformed payload: %q", replaced)
+	}
+	if _, current, err := updateFramerateCap(replaced, ""); err != nil || current != "60" {
+		t.Fatalf("replacement XML cap=%q err=%v xml=%s", current, err, replaced)
 	}
 	xmlBackup := s.XMLPath + ".invalid-20260904T120000.000000000Z"
 	if copied, err := os.ReadFile(xmlBackup); err != nil || !bytes.Equal(copied, badXML) {
@@ -605,7 +614,8 @@ func TestMalformedFilesRecoveredWithoutPayloadLeak(t *testing.T) {
 
 // TestTruncatedXMLDoesNotBlockLaunch pins the unclean-shutdown contract: a
 // zero-byte settings document must not abort a launch. The bytes are
-// preserved under a new name and the engine recreates its defaults.
+// preserved under a new name and replaced with a working UserGameSettings
+// document that already carries the owned frame-rate.
 func TestTruncatedXMLDoesNotBlockLaunch(t *testing.T) {
 	s := testService(t)
 	if err := os.MkdirAll(filepath.Dir(s.Path), 0o700); err != nil {
@@ -627,8 +637,12 @@ func TestTruncatedXMLDoesNotBlockLaunch(t *testing.T) {
 	if err := s.ReconcileWhileClientLocked(context.Background()); err != nil {
 		t.Fatalf("truncated XML blocked launch: %v", err)
 	}
-	if _, err := os.Stat(s.XMLPath); !errors.Is(err, os.ErrNotExist) {
-		t.Fatalf("truncated XML still present: %v", err)
+	replaced, err := os.ReadFile(s.XMLPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, current, err := updateFramerateCap(replaced, ""); err != nil || current != "60" {
+		t.Fatalf("replacement cap=%q err=%v xml=%s", current, err, replaced)
 	}
 	if _, err := os.Stat(s.XMLPath + ".invalid-20260904T120000.000000000Z"); err != nil {
 		t.Fatalf("truncated XML was not preserved: %v", err)
@@ -663,6 +677,43 @@ func TestMissingFramerateFieldDoesNotBlockLaunch(t *testing.T) {
 	kept, err := os.ReadFile(s.XMLPath)
 	if err != nil || !bytes.Equal(kept, valid) {
 		t.Fatalf("parseable XML was modified: err=%v", err)
+	}
+}
+
+func TestAutoReconcileRepairsTruncatedXML(t *testing.T) {
+	s := testService(t)
+	if err := os.MkdirAll(filepath.Dir(s.Path), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.writeDocument(persistedSettings{Settings: Default()}); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Dir(s.XMLPath), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(s.XMLPath, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.ReconcileWhileClientLocked(context.Background()); err != nil {
+		t.Fatalf("auto reconcile blocked launch: %v", err)
+	}
+	replaced, err := os.ReadFile(s.XMLPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, current, err := updateFramerateCap(replaced, ""); err != nil || current != engineDefaultFramerateCap {
+		t.Fatalf("auto replacement cap=%q err=%v xml=%s", current, err, replaced)
+	}
+}
+
+func TestWorkingUserGameSettingsXMLIsPatchable(t *testing.T) {
+	raw := workingUserGameSettingsXML("120")
+	got, current, err := updateFramerateCap(raw, "144")
+	if err != nil || current != "120" {
+		t.Fatalf("seed cap=%q err=%v", current, err)
+	}
+	if _, current, err = updateFramerateCap(got, ""); err != nil || current != "144" {
+		t.Fatalf("patched cap=%q err=%v xml=%s", current, err, got)
 	}
 }
 
