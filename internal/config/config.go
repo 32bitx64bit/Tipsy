@@ -23,9 +23,17 @@ type DevelopmentConsent struct {
 }
 
 type Config struct {
-	DataDir            string              `json:"dataDir,omitempty"`
-	LogLevel           string              `json:"logLevel,omitempty"`
-	LogCategories      []string            `json:"logCategories,omitempty"`
+	DataDir       string   `json:"dataDir,omitempty"`
+	LogLevel      string   `json:"logLevel,omitempty"`
+	LogCategories []string `json:"logCategories,omitempty"`
+	// Gamepad carries the persisted controller section verbatim. Input owns
+	// its shape/defaults/merge rules (see internal/gamepad GamepadConfig
+	// under the "gamepad" key); this package only preserves the bytes
+	// across atomic read-modify-write cycles. Missing or null means
+	// defaults (on, device-flat deadzone baseline, rumble
+	// on-if-supported). Never edited by hand for engine behavior: it
+	// shapes host stick calibration only, never GlobalBasicSettings_13.xml.
+	Gamepad            json.RawMessage     `json:"gamepad,omitempty"`
 	DevelopmentConsent *DevelopmentConsent `json:"developmentConsent,omitempty"`
 }
 
