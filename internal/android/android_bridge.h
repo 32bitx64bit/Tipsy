@@ -316,6 +316,13 @@ uint64_t tipsy_image_generation(void);
 int tipsy_image_code_range(uintptr_t address, uintptr_t *start, uintptr_t *end, uint64_t *generation);
 int tipsy_dl_iterate_count(void);
 
+/* Process-wide OpenSL recorder mute/disable. Mute completes buffers with
+ * silence and still fires the queue callback. Disable refuses host open/read
+ * at the next buffer boundary. Neither path logs PCM. */
+void tipsy_audio_set_capture_muted(int muted);
+int tipsy_audio_capture_muted(void);
+int tipsy_audio_microphone_disabled(void);
+
 /* OpenSL ES host bridge test probes. These exercise the same public interface
  * vtables used by the client while selecting a deterministic in-memory host. */
 int tipsy_audio_test_playback(uint32_t rate, uint32_t channels, uint32_t bytes,
@@ -324,8 +331,37 @@ int tipsy_audio_test_capture(uint32_t rate, uint32_t channels, uint32_t bytes,
                              uint64_t *read_bytes, uint32_t *callbacks);
 int tipsy_audio_test_invalid_format(void);
 int tipsy_audio_test_retry(uint32_t *opens, uint32_t *writes, uint32_t *callbacks);
+int tipsy_audio_test_capture_retry(uint32_t *opens, uint32_t *reads, uint32_t *callbacks);
 int tipsy_audio_test_host_playback(uint32_t rate, uint32_t channels, uint32_t bytes,
                                    uint64_t *written, uint32_t *callbacks);
+int tipsy_audio_test_host_capture(uint32_t rate, uint32_t channels, uint32_t bytes,
+                                  uint64_t *read_bytes, uint32_t *callbacks);
+/* Host playback through a player tagged SL_ANDROID_STREAM_VOICE (WebRTC's
+ * voice player): opens the real Pulse endpoint with the voice-sized buffer. */
+int tipsy_audio_test_host_voice_playback(uint32_t rate, uint32_t channels, uint32_t bytes,
+                                         uint64_t *written, uint32_t *callbacks);
+int tipsy_audio_test_duplex(uint32_t rate, uint32_t channels, uint32_t bytes,
+                            uint64_t *written, uint32_t *play_callbacks,
+                            uint64_t *read_bytes, uint32_t *capture_callbacks);
+int tipsy_audio_test_host_duplex(uint32_t rate, uint32_t channels, uint32_t bytes,
+                                 uint64_t *written, uint32_t *play_callbacks,
+                                 uint64_t *read_bytes, uint32_t *capture_callbacks);
+int tipsy_audio_test_capture_muted(uint64_t *read_bytes, uint32_t *callbacks, int *had_nonzero);
+int tipsy_audio_test_capture_refused(void);
+int tipsy_audio_test_capture_midstream_disable(uint32_t *callbacks, uint32_t *reads);
+/* Exact WebRTC legacy Android ADM player+recorder sequence against the fake
+ * host (see opensles.c). Reports callbacks per direction, whether the voice
+ * stream type / recording preset were recorded, and the queue state after the
+ * upstream stop sequence (Clear must leave count 0, index 0). */
+int tipsy_audio_test_webrtc_shape(uint32_t *play_callbacks, uint32_t *capture_callbacks,
+                                  int *player_voice, int *recorder_voice,
+                                  uint32_t *cleared_count, uint32_t *cleared_index);
+/* Capability probes a client runs before creating streams (FMOD's OpenSL
+ * output plug-in, WebRTC): engine interface census, extensions, OutputMix
+ * destination ids, refused interfaces, configuration keys. failed is a bit
+ * per check (see opensles.c); the value outputs pin the Android answers. */
+int tipsy_audio_test_probe_shape(uint32_t *failed, uint32_t *recorder_iids, uint32_t *mix_device,
+                                 uint32_t *config_unknown_result, uint32_t *config_perf_result);
 
 #ifdef __cplusplus
 }

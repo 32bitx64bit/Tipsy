@@ -323,6 +323,58 @@ func audioTestHostPlayback(rate, channels, bytes uint32) (uint64, uint32, int) {
 	return uint64(written), uint32(callbacks), int(rc)
 }
 
+func audioTestHostCapture(rate, channels, bytes uint32) (uint64, uint32, int) {
+	var read C.uint64_t
+	var callbacks C.uint32_t
+	rc := C.tipsy_audio_test_host_capture(C.uint32_t(rate), C.uint32_t(channels), C.uint32_t(bytes), &read, &callbacks)
+	return uint64(read), uint32(callbacks), int(rc)
+}
+
+func audioTestCaptureRetry() (uint32, uint32, uint32, int) {
+	var opens C.uint32_t
+	var reads C.uint32_t
+	var callbacks C.uint32_t
+	rc := C.tipsy_audio_test_capture_retry(&opens, &reads, &callbacks)
+	return uint32(opens), uint32(reads), uint32(callbacks), int(rc)
+}
+
+func audioTestDuplex(rate, channels, bytes uint32) (uint64, uint32, uint64, uint32, int) {
+	var written C.uint64_t
+	var playCB C.uint32_t
+	var read C.uint64_t
+	var capCB C.uint32_t
+	rc := C.tipsy_audio_test_duplex(C.uint32_t(rate), C.uint32_t(channels), C.uint32_t(bytes), &written, &playCB, &read, &capCB)
+	return uint64(written), uint32(playCB), uint64(read), uint32(capCB), int(rc)
+}
+
+func audioTestHostDuplex(rate, channels, bytes uint32) (uint64, uint32, uint64, uint32, int) {
+	var written C.uint64_t
+	var playCB C.uint32_t
+	var read C.uint64_t
+	var capCB C.uint32_t
+	rc := C.tipsy_audio_test_host_duplex(C.uint32_t(rate), C.uint32_t(channels), C.uint32_t(bytes), &written, &playCB, &read, &capCB)
+	return uint64(written), uint32(playCB), uint64(read), uint32(capCB), int(rc)
+}
+
+func audioTestCaptureMuted() (uint64, uint32, int, int) {
+	var read C.uint64_t
+	var callbacks C.uint32_t
+	var hadNonzero C.int
+	rc := C.tipsy_audio_test_capture_muted(&read, &callbacks, &hadNonzero)
+	return uint64(read), uint32(callbacks), int(hadNonzero), int(rc)
+}
+
+func audioTestCaptureRefused() int {
+	return int(C.tipsy_audio_test_capture_refused())
+}
+
+func audioTestCaptureMidstreamDisable() (uint32, uint32, int) {
+	var callbacks C.uint32_t
+	var reads C.uint32_t
+	rc := C.tipsy_audio_test_capture_midstream_disable(&callbacks, &reads)
+	return uint32(callbacks), uint32(reads), int(rc)
+}
+
 func soname(lib string) string {
 	lib = strings.TrimSpace(lib)
 	if lib == "" {
