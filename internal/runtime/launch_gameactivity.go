@@ -64,6 +64,13 @@ const (
 	directGamepadDisconnSym   = "Java_com_roblox_engine_jni_NativeInputInterface_nativeGamepadDisconnectEvent"
 	directGamepadSetKeySym    = "Java_com_roblox_engine_jni_NativeInputInterface_nativeSetGamepadSupportedKeyWithGamepadType"
 	directGamepadSetMotionSym = "Java_com_roblox_engine_jni_NativeInputInterface_nativeSetGamepadSupportedMotionWithGamepadType"
+	// universalapp MessageBus exports the APK's Java PermissionsProtocol
+	// (classes2.dex sm/k) calls to register itself; Tipsy plays that role
+	// (voice-permissions-messagebus-2026-09-12.md). Java→native dynsyms,
+	// resolved by name; none are hooks.
+	messageBusSetRequestHandlerRawSym = "Java_com_roblox_universalapp_messagebus_MessageBus_setRequestHandlerRaw"
+	messageBusSubscribeRequestRawSym  = "Java_com_roblox_universalapp_messagebus_MessageBus_doSubscribeProtocolMethodRequestRaw"
+	messageBusPublishResponseRawSym   = "Java_com_roblox_universalapp_messagebus_MessageBus_publishProtocolMethodResponseRaw"
 	// setInputConnectionName/Sig is the exact Java→native handshake the
 	// engine registered (DEX ground truth, classes2.dex method table,
 	// 2.734.917 — descriptors only, never vendored):
@@ -154,6 +161,10 @@ func startGameActivity(ctx context.Context, vm *jni.VM, mod *loader.Module, aw *
 	}
 	assetsObj := env.AllocObject(env.FindClass("android/content/res/AssetManager"))
 	cfg := env.AllocObject(env.FindClass("android/content/res/Configuration"))
+	// The APK's NativeHelper startup calls org.fmod.FMOD.init(context)
+	// before the engine initializes (classes2.dex); FMOD's output selection
+	// later reads that Context via checkInit(). Java-side role, jni-owned.
+	vm.FmodInit(activity)
 	initJNIAAssetManager(mod, env, assetsObj)
 	fn, err := mod.Lookup(initNativeSym)
 	if err != nil {
@@ -189,6 +200,7 @@ func startGameActivity(ctx context.Context, vm *jni.VM, mod *loader.Module, aw *
 	// kill-switch internally and stays silent with zero host pads.
 	jni.StartRobloxDirectGamepadPump()
 	wireRobloxTextInput(mod, env)
+	wireRobloxPermissionsProtocol(mod, env)
 	return dispatchGameActivityLifecycle(ctx, vm, mod, env, activity, uintptr(handle), commands, files, cache, preferences, assets, version,
 		width, height, currentRefreshHz, supportedRefreshHz, aw, req), nil
 }
@@ -285,6 +297,34 @@ func wireRobloxDirectGamepad(mod *loader.Module, env *jni.Env) {
 	}
 	class := env.FindClass("com/roblox/engine/jni/NativeInputInterface")
 	jni.SetRobloxDirectGamepadTarget(env.Raw(), class, axisFn, buttonFn, connectFn, disconnectFn, setKeyFn, setMotionFn)
+}
+
+// wireRobloxPermissionsProtocol registers Tipsy as the MessageBus answerer
+// for the official PermissionsProtocol, the path the engine's voice stack
+// (RBX::Voice::RobloxAudioDevice::CheckMicrophonePermissionAsync →
+// PermissionsProtocolCore::hasPermissions) uses instead of
+// Context.checkSelfPermission. On a phone the APK's Java protocol registers
+// at Activity creation; Tipsy does it at the same phase, right after
+// initializeNativeCode. Missing exports log the honest missing line; each
+// arm degrades independently inside jni.
+func wireRobloxPermissionsProtocol(mod *loader.Module, env *jni.Env) {
+	var exports jni.PermissionsProtocolExports
+	for _, want := range []struct {
+		sym string
+		dst *uintptr
+	}{
+		{messageBusSetRequestHandlerRawSym, &exports.SetRequestHandlerRaw},
+		{messageBusSubscribeRequestRawSym, &exports.DoSubscribeProtocolMethodRequestRaw},
+		{messageBusPublishResponseRawSym, &exports.PublishProtocolMethodResponseRaw},
+	} {
+		fn, err := mod.Lookup(want.sym)
+		if err != nil || fn == 0 {
+			logging.Logger(logging.CatJNI).Info("[jni] missing MessageBus export", "sym", want.sym, "err", err)
+			continue
+		}
+		*want.dst = fn
+	}
+	env.RegisterPermissionsProtocol(exports)
 }
 
 // wireRobloxTextInput resolves the exact public static natives used by the

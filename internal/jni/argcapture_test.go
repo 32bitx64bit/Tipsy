@@ -126,7 +126,8 @@ func TestArgCaptureFiltered(t *testing.T) {
 	buf := captureLogs(t)
 
 	glc := "com/roblox/engine/jni/NativeGLJavaInterface"
-	// Real user-adjacent identity: never captured, whatever the args.
+	// Real user-adjacent identity: handled from the DID_LOG_IN snapshot
+	// (empty before login) and never argument-captured.
 	_, _ = callDispatchOrStub(vm, jnull(), "com/roblox/engine/jni/user/NativeUserJavaInterface", "getUsername", "()Ljava/lang/String;", nil, 'L')
 	_, _ = callDispatchOrStub(vm, jnull(), "com/roblox/engine/jni/user/NativeUserJavaInterface", "gameLoadedCallback", "(J)V", packJlong(9), 'V')
 	// Lookalike identities: wrong sig, wrong class.
@@ -141,7 +142,7 @@ func TestArgCaptureFiltered(t *testing.T) {
 		t.Fatalf("capture leaked outside approved identities: %s", out)
 	}
 	// Fallback diagnostics unchanged: every unhandled call still reports.
-	if got := strings.Count(out, "stub-dispatch"); got != 5 {
-		t.Fatalf("stub-dispatch diagnostics = %d, want 5: %s", got, out)
+	if got := strings.Count(out, "stub-dispatch"); got != 4 {
+		t.Fatalf("stub-dispatch diagnostics = %d, want 4: %s", got, out)
 	}
 }

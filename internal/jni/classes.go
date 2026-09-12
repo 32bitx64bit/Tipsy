@@ -101,10 +101,25 @@ func (vm *VM) seedClasses() {
 		"java/util/Iterator",
 		"org/fmod/AudioDevice",
 		"org/fmod/FMOD",
+		// Seed-only: live voice capture is FMOD OpenSL (§276), not this
+		// Java wrapper. FindClass must still succeed if the engine looks.
+		"com/roblox/audio/AppRtcDeviceWrapper",
+		"com/roblox/audio/WebRtcLoader",
+		"org/webrtc/voiceengine/WebRtcAudioManager",
+		"org/webrtc/voiceengine/WebRtcAudioRecord",
+		"org/webrtc/voiceengine/WebRtcAudioTrack",
+		"org/webrtc/voiceengine/WebRtcAudioUtils",
 		"com/roblox/universalapp/cookie/CookieProtocol",
 		"com/roblox/universalapp/cookie/CookieProtocol$OnSetCookieHandlerImpl",
 		"com/roblox/universalapp/cookie/JNICookieProtocol",
 		"com/roblox/universalapp/cookie/JNICookieProtocol$OnSetCookieHandler",
+		// MessageBus Java surface Tipsy provides for the PermissionsProtocol
+		// (permissions_protocol.go). Connection is what the exported
+		// doSubscribe* natives construct via <init>(J)V.
+		"com/roblox/universalapp/messagebus/MessageBus",
+		"com/roblox/universalapp/messagebus/Connection",
+		"com/roblox/universalapp/messagebus/RequestHandlerRaw",
+		"com/roblox/universalapp/messagebus/RawCallback",
 	} {
 		if vm.classes[name] == nil {
 			vm.defineClass(name, object)
@@ -173,14 +188,40 @@ func (vm *VM) defineClass(name string, super *Class) *Class {
 }
 
 var implementedMethods = map[string]bool{
-	"onSetCookie([Ljava/lang/String;Ljava/lang/String;)V":                                true,
-	"setCookie(Ljava/lang/String;Ljava/lang/String;)V":                                   true,
-	"syncCookiesFromEngine()V":                                                           true,
-	"init(IIII)Z":                                                                        true,
-	"write([BI)V":                                                                        true,
-	"close()V":                                                                           true,
-	"checkInit()Z":                                                                       true,
-	"supportsAAudio()Z":                                                                  true,
+	"onSetCookie([Ljava/lang/String;Ljava/lang/String;)V": true,
+	"setCookie(Ljava/lang/String;Ljava/lang/String;)V":    true,
+	"syncCookiesFromEngine()V":                            true,
+	"init(IIII)Z":                                         true,
+	"write([BI)V":                                         true,
+	"close()V":                                            true,
+	"checkInit()Z":                                        true,
+	"supportsAAudio()Z":                                   true,
+	"supportsLowLatency()Z":                               true,
+	// org/fmod/FMOD output-sizing helpers FMOD's OpenSL/AAudio outputs call
+	// (fmod_audio.go). Unique name+sig.
+	"getOutputSampleRate()I":                                 true,
+	"getOutputBlockSize()I":                                  true,
+	"checkSelfPermission(Ljava/lang/String;)I":               true,
+	"checkPermission(Ljava/lang/String;Ljava/lang/String;)I": true,
+	"requestPermissions([Ljava/lang/String;I)V":              true,
+	"onRequestPermissionsResult(I[Ljava/lang/String;[I)V":    true,
+	// WebRTC legacy Android ADM Java surface
+	// (org/webrtc/voiceengine/WebRtcAudioManager, webrtc_audio_manager.go):
+	// GetMethodID'd by AudioManager::JavaAudioManager (upstream
+	// audio_manager.cc) plus Roblox's setMicrophoneMute; live client
+	// 2.738.1397. <init>(J)V is class-interned, not listed here.
+	"init()Z":                                true,
+	"dispose()V":                             true,
+	"isCommunicationModeEnabled()Z":          true,
+	"isDeviceBlacklistedForOpenSLESUsage()Z": true,
+	"setMicrophoneMute(Z)V":                  true,
+	// universalapp MessageBus PermissionsProtocol answered by Tipsy
+	// (permissions_protocol.go): RequestHandlerRaw.run(String)String is the
+	// synchronous handler contract, RawCallback.run(String)V the legacy
+	// request-topic subscription contract (APK classes2.dex MessageBus$b/$a).
+	"run(Ljava/lang/String;)Ljava/lang/String;":                                          true,
+	"run(Ljava/lang/String;)V":                                                           true,
+	"isValid()Z":                                                                         true,
 	"getFilesDir()Ljava/io/File;":                                                        true,
 	"getCacheDir()Ljava/io/File;":                                                        true,
 	"getObbDir()Ljava/io/File;":                                                          true,
@@ -286,6 +327,10 @@ var implementedMethods = map[string]bool{
 	// Received and recorded in nativehelper.go — never fabricated, never
 	// acted on.
 	"gameActivity_onGameLoaded(J)V": true,
+	// NativeHelper.gameActivity_onDidLogInReceived(String): official
+	// DID_LOG_IN JSON for NativeUserJavaInterface getters. Parsed in
+	// nativeuser.go — never logged (no names, ids, or raw JSON).
+	"gameActivity_onDidLogInReceived(Ljava/lang/String;)V": true,
 	// Keyboard text-input contract, engine→Java direction, CALLED when a Lua
 	// text box gains focus (live focus storm: NativeGLInterface first, then
 	// the NativeHelper fallback pair). Received and recorded in textinput.go

@@ -93,7 +93,9 @@ func appReadyStepName(s string) string {
 
 // dispatchNativeHelper serves the observed NativeHelper engine→Java
 // callback contract. Only identities with local evidence are handled;
-// everything else falls through to the honest stub path.
+// everything else falls through to the honest stub path. Login JSON is
+// forwarded to the NativeUser snapshot; AppReady/orientation/gameLoaded
+// behavior is otherwise unchanged.
 func (vm *VM) dispatchNativeHelper(o *Object, class, name, sig string, args *C.jvalue) (C.jobject, bool) {
 	if class != nativeHelperClass {
 		return jnull(), false
@@ -130,6 +132,10 @@ func (vm *VM) dispatchNativeHelper(o *Object, class, name, sig string, args *C.j
 		gameLoadedMu.Unlock()
 		logging.Logger(logging.CatJNI).Info("[jni] onGameLoaded", "placeId", placeID)
 		noteGameLoadedPlaceID(placeID)
+	case name == "gameActivity_onDidLogInReceived" && sig == "(Ljava/lang/String;)V":
+		// Official DID_LOG_IN JSON. The string is read once and parsed
+		// into the NativeUser snapshot; the payload is never logged.
+		applyNativeUserLoginJSON(vm.stringFromArg(args, 0))
 	default:
 		return jnull(), false
 	}

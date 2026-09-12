@@ -187,3 +187,101 @@ func TestAppReadyStepNameSanitized(t *testing.T) {
 		t.Fatalf("empty step = %q, want empty", got)
 	}
 }
+
+// TestNativeHelperOnDidLogInReceived drives the exact production dispatch
+// path for gameActivity_onDidLogInReceived(Ljava/lang/String;)V: the call
+// is handled, planted DID_LOG_IN JSON fills NativeUser getters, and the
+// payload is never logged.
+func TestNativeHelperOnDidLogInReceived(t *testing.T) {
+	vm, err := NewVM()
+	if err != nil {
+		t.Fatal(err)
+	}
+	ResetNativeUserForTest()
+	t.Cleanup(ResetNativeUserForTest)
+	buf := captureLogs(t)
+
+	vm.mu.Lock()
+	cls := vm.ensureClassLocked(nativeHelperClass)
+	h := vm.newObjectLocked(cls)
+	s := vm.newStringLocked(fakeNativeUserLoginJSON)
+	vm.mu.Unlock()
+
+	v, handled := vm.dispatch(idToJobject(h.id), nativeHelperClass, "gameActivity_onDidLogInReceived", "(Ljava/lang/String;)V", testPackObjectArg(s.id))
+	if !handled {
+		t.Fatal("gameActivity_onDidLogInReceived not handled by dispatchNativeHelper")
+	}
+	if uintptr(v) != uintptr(idToJobject(h.id)) {
+		t.Fatalf("void dispatch return = %#x, want the receiver", uintptr(v))
+	}
+	if !isImplementedMethod("gameActivity_onDidLogInReceived", "(Ljava/lang/String;)V") {
+		t.Fatal("gameActivity_onDidLogInReceived missing from implementedMethods")
+	}
+	if _, handled := vm.dispatch(idToJobject(h.id), "java/io/File", "gameActivity_onDidLogInReceived", "(Ljava/lang/String;)V", testPackObjectArg(s.id)); handled {
+		t.Fatal("non-NativeHelper class handled by NativeHelper dispatch")
+	}
+
+	recv := nativeUserRecv(allocNativeUser(t, vm))
+	if nativeUserString(t, vm, recv, "getUsername") != "tester" {
+		t.Fatalf("getUsername after login = %q, want tester", nativeUserString(t, vm, recv, "getUsername"))
+	}
+	uid, handled := callDispatchOrStub(vm, idToJobject(jobjectToID(recv)), nativeUserClass, "getUserId", "()J", nil, 'J')
+	if !handled || int64(uintptr(uid)) != 1 {
+		t.Fatalf("getUserId after login handled=%v v=%d, want 1", handled, uintptr(uid))
+	}
+	if nativeUserString(t, vm, recv, "getPlatformName") != "Windows" {
+		t.Fatal("getPlatformName after login want Windows")
+	}
+
+	out := buf.String()
+	if !strings.Contains(out, "[jni] native-user snapshot") || !strings.Contains(out, "hasUserId=true") {
+		t.Fatalf("log missing native-user snapshot: %s", out)
+	}
+	if strings.Contains(out, "tester") || strings.Contains(out, fakeNativeUserLoginJSON) {
+		t.Fatalf("login identity leaked into log: %s", out)
+	}
+}
+
+// TestNativeHelperOnDidLogInReceivedMalformedLeavesSnapshot pins that empty
+// or malformed JSON still handles the void call and does not wipe a
+// previously planted snapshot (and does not crash).
+func TestNativeHelperOnDidLogInReceivedMalformedLeavesSnapshot(t *testing.T) {
+	vm, err := NewVM()
+	if err != nil {
+		t.Fatal(err)
+	}
+	ResetNativeUserForTest()
+	t.Cleanup(ResetNativeUserForTest)
+
+	plantNativeUserLogin(t, vm, fakeNativeUserLoginJSON)
+	recv := nativeUserRecv(allocNativeUser(t, vm))
+
+	vm.mu.Lock()
+	cls := vm.ensureClassLocked(nativeHelperClass)
+	h := vm.newObjectLocked(cls)
+	bad := vm.newStringLocked("{")
+	empty := vm.newStringLocked("")
+	junk := vm.newStringLocked("not-json")
+	vm.mu.Unlock()
+
+	if _, handled := vm.dispatch(idToJobject(h.id), nativeHelperClass, "gameActivity_onDidLogInReceived", "(Ljava/lang/String;)V", testPackObjectArg(bad.id)); !handled {
+		t.Fatal("malformed JSON must still be handled")
+	}
+	if _, handled := vm.dispatch(idToJobject(h.id), nativeHelperClass, "gameActivity_onDidLogInReceived", "(Ljava/lang/String;)V", testPackObjectArg(empty.id)); !handled {
+		t.Fatal("empty JSON must still be handled")
+	}
+	if _, handled := vm.dispatch(idToJobject(h.id), nativeHelperClass, "gameActivity_onDidLogInReceived", "(Ljava/lang/String;)V", testPackObjectArg(junk.id)); !handled {
+		t.Fatal("non-JSON must still be handled")
+	}
+	if _, handled := vm.dispatch(idToJobject(h.id), nativeHelperClass, "gameActivity_onDidLogInReceived", "(Ljava/lang/String;)V", nil); !handled {
+		t.Fatal("nil args must still be handled")
+	}
+
+	if nativeUserString(t, vm, recv, "getUsername") != "tester" {
+		t.Fatalf("snapshot wiped by malformed JSON: %q", nativeUserString(t, vm, recv, "getUsername"))
+	}
+	uid, handled := callDispatchOrStub(vm, idToJobject(jobjectToID(recv)), nativeUserClass, "getUserId", "()J", nil, 'J')
+	if !handled || int64(uintptr(uid)) != 1 {
+		t.Fatalf("userId after malformed = handled=%v v=%d, want 1", handled, uintptr(uid))
+	}
+}

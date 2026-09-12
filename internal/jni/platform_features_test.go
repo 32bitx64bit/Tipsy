@@ -8,7 +8,10 @@ package jni
 import "testing"
 
 func TestDesktopPlatformSystemFeatures(t *testing.T) {
+	isolateMicrophoneConfigHome(t)
 	t.Setenv("TIPSY_INPUT_DEVICE", "")
+	t.Setenv("TIPSY_DISABLE_MICROPHONE", "")
+	t.Setenv("TIPSY_MICROPHONE", "")
 	ResetPointerDeviceMode()
 	t.Cleanup(ResetPointerDeviceMode)
 	tests := []struct {
@@ -17,7 +20,7 @@ func TestDesktopPlatformSystemFeatures(t *testing.T) {
 	}{
 		{name: "android.hardware.type.pc", want: true},
 		{name: "android.hardware.touchscreen", want: false},
-		{name: "android.hardware.microphone", want: false},
+		{name: androidHardwareMicrophone, want: true},
 		{name: "android.hardware.camera", want: false},
 		{name: "", want: false},
 		{name: "android.hardware.type.pc.extra", want: false},
@@ -31,8 +34,61 @@ func TestDesktopPlatformSystemFeatures(t *testing.T) {
 	}
 }
 
+func TestDesktopPlatformSystemFeaturesMicrophoneDoor(t *testing.T) {
+	isolateMicrophoneConfigHome(t)
+	t.Setenv("TIPSY_INPUT_DEVICE", "")
+	ResetPointerDeviceMode()
+	t.Cleanup(ResetPointerDeviceMode)
+
+	t.Setenv("TIPSY_DISABLE_MICROPHONE", "")
+	t.Setenv("TIPSY_MICROPHONE", "0")
+	if platformSystemFeature(androidHardwareMicrophone) {
+		t.Fatal("TIPSY_MICROPHONE=0 advertised android.hardware.microphone")
+	}
+	t.Setenv("TIPSY_MICROPHONE", "")
+	t.Setenv("TIPSY_DISABLE_MICROPHONE", "1")
+	if platformSystemFeature(androidHardwareMicrophone) {
+		t.Fatal("TIPSY_DISABLE_MICROPHONE=1 advertised android.hardware.microphone")
+	}
+}
+
+func TestDesktopPlatformSystemFeaturesMicrophoneFileDoor(t *testing.T) {
+	t.Setenv("TIPSY_INPUT_DEVICE", "")
+	ResetPointerDeviceMode()
+	t.Cleanup(ResetPointerDeviceMode)
+
+	writeMicrophoneConfigFile(t, `{"microphone":{"enabled":false}}`)
+	t.Setenv("TIPSY_DISABLE_MICROPHONE", "")
+	t.Setenv("TIPSY_MICROPHONE", "")
+	if platformSystemFeature(androidHardwareMicrophone) {
+		t.Fatal("file enabled:false advertised android.hardware.microphone")
+	}
+
+	writeMicrophoneConfigFile(t, `{"microphone":{"enabled":true}}`)
+	t.Setenv("TIPSY_MICROPHONE", "0")
+	if platformSystemFeature(androidHardwareMicrophone) {
+		t.Fatal("file enabled:true with TIPSY_MICROPHONE=0 advertised microphone")
+	}
+
+	writeMicrophoneConfigFile(t, `{"microphone":{"enabled":false}}`)
+	t.Setenv("TIPSY_MICROPHONE", "1")
+	if !platformSystemFeature(androidHardwareMicrophone) {
+		t.Fatal("TIPSY_MICROPHONE=1 must win over file enabled:false")
+	}
+
+	isolateMicrophoneConfigHome(t)
+	t.Setenv("TIPSY_DISABLE_MICROPHONE", "")
+	t.Setenv("TIPSY_MICROPHONE", "")
+	if !platformSystemFeature(androidHardwareMicrophone) {
+		t.Fatal("missing file and empty env must advertise android.hardware.microphone")
+	}
+}
+
 func TestTouchDiagnosticPlatformSystemFeatures(t *testing.T) {
+	isolateMicrophoneConfigHome(t)
 	t.Setenv("TIPSY_INPUT_DEVICE", "touch")
+	t.Setenv("TIPSY_DISABLE_MICROPHONE", "")
+	t.Setenv("TIPSY_MICROPHONE", "")
 	ResetPointerDeviceMode()
 	t.Cleanup(ResetPointerDeviceMode)
 
@@ -42,8 +98,15 @@ func TestTouchDiagnosticPlatformSystemFeatures(t *testing.T) {
 	if !platformSystemFeature(androidHardwareTouchscreen) {
 		t.Fatal("touch diagnostic profile does not advertise android.hardware.touchscreen")
 	}
-	if platformSystemFeature("android.hardware.microphone") {
-		t.Fatal("unverified microphone feature was advertised")
+	if !platformSystemFeature(androidHardwareMicrophone) {
+		t.Fatal("open mic door must advertise microphone even in touch mode")
+	}
+	t.Setenv("TIPSY_MICROPHONE", "0")
+	if platformSystemFeature(androidHardwareMicrophone) {
+		t.Fatal("closed mic door advertised microphone in touch mode")
+	}
+	if platformSystemFeature("android.hardware.camera") {
+		t.Fatal("unverified camera feature was advertised")
 	}
 }
 

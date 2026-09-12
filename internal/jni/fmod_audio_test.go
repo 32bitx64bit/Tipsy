@@ -142,6 +142,95 @@ func TestFmodAudioCapabilityPredicates(t *testing.T) {
 	}
 }
 
+// org.fmod.FMOD.init(Context) is the APK's own startup step (NativeHelper);
+// Tipsy plays it with the real activity object, and only with a live one.
+func TestFmodInitBacksCheckInit(t *testing.T) {
+	vm, err := NewVM()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if vm.FmodInit(0) {
+		t.Fatal("FmodInit(0) claimed an initialized context")
+	}
+	if vm.FmodInit(1 << 40) {
+		t.Fatal("FmodInit of a non-object claimed an initialized context")
+	}
+	if value, _ := vm.dispatch(jnull(), "org/fmod/FMOD", "checkInit", "()Z", nil); uintptr(value) != 0 {
+		t.Fatal("checkInit()Z true before FMOD.init")
+	}
+	vm.mu.Lock()
+	ctx := vm.newObjectLocked(vm.classes["com/roblox/client/startup/MainGameActivity"])
+	vm.mu.Unlock()
+	if !vm.FmodInit(uintptr(ctx.id)) {
+		t.Fatal("FmodInit with the activity object failed")
+	}
+	if value, handled := vm.dispatch(jnull(), "org/fmod/FMOD", "checkInit", "()Z", nil); !handled || uintptr(value) != 1 {
+		t.Fatalf("checkInit()Z = %d after FMOD.init(activity)", uintptr(value))
+	}
+}
+
+// FMOD's Android autodetect: AAudio when the SDK allows (not here, SDK 26),
+// else its OpenSL ES output when the Java supportsLowLatency() helper is
+// true, else AudioTrack, which FMOD documents as having no recording. Tipsy
+// answers the helper the way FMOD's Java does — FEATURE_AUDIO_LOW_LATENCY
+// from PackageManager plus a block size in (0, 1024] — so the two surfaces
+// agree, and TIPSY_FMOD_OUTPUT=audiotrack turns both off together.
+func TestFmodAudioLowLatencyFollowsHostAnswer(t *testing.T) {
+	vm, err := NewVM()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv(fmodOutputEnv, "")
+	value, handled := vm.dispatch(jnull(), "org/fmod/FMOD", "supportsLowLatency", "()Z", nil)
+	if !handled || uintptr(value) != 1 {
+		t.Fatalf("supportsLowLatency()Z = %d handled=%v, want true on the host bridge", uintptr(value), handled)
+	}
+	if !platformSystemFeature(androidHardwareAudioLowLatency) {
+		t.Fatal("PackageManager denies android.hardware.audio.low_latency while FMOD is told low latency")
+	}
+	if platformSystemFeature("android.hardware.audio.pro") {
+		t.Fatal("android.hardware.audio.pro advertised without a host guarantee")
+	}
+	if fmodHostOutputBlockFrames <= 0 || fmodHostOutputBlockFrames > 1024 {
+		t.Fatalf("block size %d contradicts the low-latency answer", fmodHostOutputBlockFrames)
+	}
+
+	t.Setenv(fmodOutputEnv, "AudioTrack")
+	value, handled = vm.dispatch(jnull(), "org/fmod/FMOD", "supportsLowLatency", "()Z", nil)
+	if !handled || uintptr(value) != 0 {
+		t.Fatalf("TIPSY_FMOD_OUTPUT=audiotrack still answered supportsLowLatency()Z = %d", uintptr(value))
+	}
+	if platformSystemFeature(androidHardwareAudioLowLatency) {
+		t.Fatal("TIPSY_FMOD_OUTPUT=audiotrack left android.hardware.audio.low_latency advertised")
+	}
+}
+
+// FMOD's OpenSL/AAudio outputs size their device stream from the two
+// AudioManager property helpers; Java answers 0 when the property is
+// unknown, which makes FMOD guess. Tipsy answers PipeWire's defaults and the
+// methods are on the implemented list so GetMethodID does not flag them.
+func TestFmodAudioOutputProperties(t *testing.T) {
+	vm, err := NewVM()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for name, want := range map[string]uintptr{
+		"getOutputSampleRate": fmodHostOutputSampleRate,
+		"getOutputBlockSize":  fmodHostOutputBlockFrames,
+	} {
+		value, handled := vm.dispatch(jnull(), "org/fmod/FMOD", name, "()I", nil)
+		if !handled || uintptr(value) != want {
+			t.Fatalf("%s()I = %d handled=%v, want %d", name, uintptr(value), handled, want)
+		}
+		if !isImplementedMethod(name, "()I") {
+			t.Fatalf("%s()I missing from implementedMethods", name)
+		}
+	}
+	if _, handled := vm.dispatch(jnull(), "org/fmod/AudioDevice", "getOutputBlockSize", "()I", nil); handled {
+		t.Fatal("output property answered on the wrong class")
+	}
+}
+
 // This explicitly selected integration test exercises the actual JNI
 // AudioDevice dispatch against a real output. It never opens capture.
 func TestFmodAudioHostPlayback(t *testing.T) {

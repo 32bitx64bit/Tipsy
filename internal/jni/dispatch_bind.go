@@ -28,6 +28,9 @@ type familyFn func(vm *VM, o *Object, class, name, sig string, args *C.jvalue) (
 
 var dispatchFamilies = []familyFn{
 	(*VM).dispatchFmodAudio,
+	(*VM).dispatchAudioPermission,
+	(*VM).dispatchPermissionsProtocol,
+	(*VM).dispatchWebRtcAudioManager,
 	(*VM).dispatchInput,
 	(*VM).dispatchConnectivity,
 	func(vm *VM, o *Object, class, name, sig string, args *C.jvalue) (C.jobject, bool) {
@@ -106,6 +109,15 @@ func oClassName(o *Object) string {
 
 func (vm *VM) resolveDispatch(env unsafe.Pointer, obj C.jobject, class, name, sig string, args *C.jvalue) (C.jobject, bool, callHandler) {
 	if name == "<init>" {
+		// WebRtcAudioManager.<init>(J)V must call back the registered
+		// nativeCacheAudioParameters. Every other constructor still uses
+		// the generic no-arg handler.
+		o := vm.get(jobjectToID(uintptr(obj)))
+		if class == webRtcAudioManagerClass || oClassName(o) == webRtcAudioManagerClass {
+			if v, ok := vm.dispatchWebRtcAudioManager(o, webRtcAudioManagerClass, name, sig, args); ok {
+				return v, true, wrapFamily((*VM).dispatchWebRtcAudioManager, webRtcAudioManagerClass, name, sig)
+			}
+		}
 		return obj, true, initCallHandler
 	}
 	o := vm.get(jobjectToID(uintptr(obj)))
