@@ -19,6 +19,31 @@ void tipsy_direct_mouse_wheel(void *fn, uintptr_t env, uintptr_t cls,
 unsigned char tipsy_direct_mouse_locked(void *fn, uintptr_t env, uintptr_t cls);
 void tipsy_direct_key_event(void *fn, uintptr_t env, uintptr_t cls,
 	unsigned char down, int scan_code, int key_code, unsigned char repeat);
+// Gamepad direct natives (Phase 0 §1: six DEX-proven NativeInputInterface
+// dynsyms, static jclass ABI; never a guessed nativePassGamepad* name).
+// Float arguments travel in SysV XMM registers, so the pointer-only CallP8
+// helper is not ABI-correct for the axis event.
+void tipsy_direct_gamepad_axis(void *fn, uintptr_t env, uintptr_t cls,
+	int device_id, int axis, float f1, float f2, float f3);
+void tipsy_direct_gamepad_button(void *fn, uintptr_t env, uintptr_t cls,
+	int device_id, int key_code, int down);
+void tipsy_direct_gamepad_connect(void *fn, uintptr_t env, uintptr_t cls,
+	int device_id, int gamepad_type);
+void tipsy_direct_gamepad_disconnect(void *fn, uintptr_t env, uintptr_t cls,
+	int device_id);
+void tipsy_direct_gamepad_set_key(void *fn, uintptr_t env, uintptr_t cls,
+	int device_id, int key_code, unsigned char supported, int gamepad_type);
+void tipsy_direct_gamepad_set_motion(void *fn, uintptr_t env, uintptr_t cls,
+	int device_id, int axis, int arg, unsigned char supported, int gamepad_type);
+// Test-only ABI witnesses for the gamepad callers above: a bounded
+// sequence buffer so golden tests can pin the connect-time E() capability
+// order as well as single event args.
+void *tipsy_direct_gamepad_rec_fn_ptr(int kind);
+int tipsy_direct_gamepad_rec_count(void);
+int tipsy_direct_gamepad_rec_kind(int i);
+int tipsy_direct_gamepad_rec_int(int i, int j);
+float tipsy_direct_gamepad_rec_float(int i, int j);
+void tipsy_direct_gamepad_rec_reset(void);
 void *tipsy_direct_record_button_fn(void);
 void *tipsy_direct_record_move_fn(void);
 void *tipsy_direct_record_wheel_fn(void);

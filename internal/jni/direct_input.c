@@ -42,6 +42,214 @@ void tipsy_direct_key_event(void *fn, uintptr_t env, uintptr_t cls,
 		(JNIEnv *)env, (jclass)cls, down, scan_code, key_code, repeat);
 }
 
+// Exact callers for the six DEX-proven direct gamepad natives on
+// NativeInputInterface (Phase 0 gamepad-ground-truth §1, 2.736.1408):
+// nativeGamepadAxisEvent(IIFFF)V, nativeGamepadButtonEvent(III)V,
+// nativeGamepadConnectEventWithGamepadType(II)V,
+// nativeGamepadDisconnectEvent(I)V,
+// nativeSetGamepadSupportedKeyWithGamepadType(IIZI)V,
+// nativeSetGamepadSupportedMotionWithGamepadType(IIIZI)V.
+// Axis f-slots are packed in Go (handleGamepadFrame): stick pairs
+// (x,-y,0)/(z,-rz,0), hat/trigger singles (0,0,v) with HAT_Y negated.
+void tipsy_direct_gamepad_axis(void *fn, uintptr_t env, uintptr_t cls,
+	int device_id, int axis, float f1, float f2, float f3) {
+	((void (*)(JNIEnv *, jclass, jint, jint, jfloat, jfloat, jfloat))fn)(
+		(JNIEnv *)env, (jclass)cls, device_id, axis, f1, f2, f3);
+}
+
+void tipsy_direct_gamepad_button(void *fn, uintptr_t env, uintptr_t cls,
+	int device_id, int key_code, int down) {
+	((void (*)(JNIEnv *, jclass, jint, jint, jint))fn)(
+		(JNIEnv *)env, (jclass)cls, device_id, key_code, down);
+}
+
+void tipsy_direct_gamepad_connect(void *fn, uintptr_t env, uintptr_t cls,
+	int device_id, int gamepad_type) {
+	((void (*)(JNIEnv *, jclass, jint, jint))fn)(
+		(JNIEnv *)env, (jclass)cls, device_id, gamepad_type);
+}
+
+void tipsy_direct_gamepad_disconnect(void *fn, uintptr_t env, uintptr_t cls,
+	int device_id) {
+	((void (*)(JNIEnv *, jclass, jint))fn)(
+		(JNIEnv *)env, (jclass)cls, device_id);
+}
+
+void tipsy_direct_gamepad_set_key(void *fn, uintptr_t env, uintptr_t cls,
+	int device_id, int key_code, unsigned char supported, int gamepad_type) {
+	((void (*)(JNIEnv *, jclass, jint, jint, jboolean, jint))fn)(
+		(JNIEnv *)env, (jclass)cls, device_id, key_code, supported, gamepad_type);
+}
+
+void tipsy_direct_gamepad_set_motion(void *fn, uintptr_t env, uintptr_t cls,
+	int device_id, int axis, int arg, unsigned char supported, int gamepad_type) {
+	((void (*)(JNIEnv *, jclass, jint, jint, jint, jboolean, jint))fn)(
+		(JNIEnv *)env, (jclass)cls, device_id, axis, arg, supported, gamepad_type);
+}
+
+// Recording natives are test-only ABI witnesses. They capture exactly what
+// the typed callers above place in the native method's parameters.
+#define TIPSY_GP_REC_CAP 256
+
+typedef struct {
+	int kind;
+	int a;
+	int b;
+	int c;
+	int d;
+	int e;
+	float f1;
+	float f2;
+	float f3;
+} tipsy_gp_rec_t;
+
+static tipsy_gp_rec_t tipsy_gp_rec[TIPSY_GP_REC_CAP];
+static int tipsy_gp_rec_n;
+
+static void tipsy_gp_push(int kind, int a, int b, int c, int d, int e,
+	float f1, float f2, float f3) {
+	if (tipsy_gp_rec_n < 0 || tipsy_gp_rec_n >= TIPSY_GP_REC_CAP) {
+		return;
+	}
+	tipsy_gp_rec[tipsy_gp_rec_n].kind = kind;
+	tipsy_gp_rec[tipsy_gp_rec_n].a = a;
+	tipsy_gp_rec[tipsy_gp_rec_n].b = b;
+	tipsy_gp_rec[tipsy_gp_rec_n].c = c;
+	tipsy_gp_rec[tipsy_gp_rec_n].d = d;
+	tipsy_gp_rec[tipsy_gp_rec_n].e = e;
+	tipsy_gp_rec[tipsy_gp_rec_n].f1 = f1;
+	tipsy_gp_rec[tipsy_gp_rec_n].f2 = f2;
+	tipsy_gp_rec[tipsy_gp_rec_n].f3 = f3;
+	tipsy_gp_rec_n++;
+}
+
+// Recording-native kinds, mirrored by the Go test hooks.
+enum {
+	TIPSY_GP_AXIS = 1,
+	TIPSY_GP_BUTTON = 2,
+	TIPSY_GP_CONNECT = 3,
+	TIPSY_GP_DISCONNECT = 4,
+	TIPSY_GP_SET_KEY = 5,
+	TIPSY_GP_SET_MOTION = 6
+};
+
+static void tipsy_direct_record_gp_axis(JNIEnv *env, jclass cls,
+	jint dev, jint axis, jfloat f1, jfloat f2, jfloat f3) {
+	(void)env;
+	(void)cls;
+	tipsy_gp_push(TIPSY_GP_AXIS, dev, axis, 0, 0, 0, f1, f2, f3);
+}
+
+static void tipsy_direct_record_gp_button(JNIEnv *env, jclass cls,
+	jint dev, jint key, jint down) {
+	(void)env;
+	(void)cls;
+	tipsy_gp_push(TIPSY_GP_BUTTON, dev, key, down, 0, 0, 0, 0, 0);
+}
+
+static void tipsy_direct_record_gp_connect(JNIEnv *env, jclass cls,
+	jint dev, jint type) {
+	(void)env;
+	(void)cls;
+	tipsy_gp_push(TIPSY_GP_CONNECT, dev, type, 0, 0, 0, 0, 0, 0);
+}
+
+static void tipsy_direct_record_gp_disconnect(JNIEnv *env, jclass cls,
+	jint dev) {
+	(void)env;
+	(void)cls;
+	tipsy_gp_push(TIPSY_GP_DISCONNECT, dev, 0, 0, 0, 0, 0, 0, 0);
+}
+
+static void tipsy_direct_record_gp_set_key(JNIEnv *env, jclass cls,
+	jint dev, jint key, jboolean sup, jint type) {
+	(void)env;
+	(void)cls;
+	tipsy_gp_push(TIPSY_GP_SET_KEY, dev, key, sup, type, 0, 0, 0, 0);
+}
+
+static void tipsy_direct_record_gp_set_motion(JNIEnv *env, jclass cls,
+	jint dev, jint axis, jint arg, jboolean sup, jint type) {
+	(void)env;
+	(void)cls;
+	tipsy_gp_push(TIPSY_GP_SET_MOTION, dev, axis, arg, sup, type, 0, 0, 0);
+}
+
+void *tipsy_direct_gamepad_rec_fn_ptr(int kind) {
+	switch (kind) {
+	case TIPSY_GP_AXIS:
+		return (void *)tipsy_direct_record_gp_axis;
+	case TIPSY_GP_BUTTON:
+		return (void *)tipsy_direct_record_gp_button;
+	case TIPSY_GP_CONNECT:
+		return (void *)tipsy_direct_record_gp_connect;
+	case TIPSY_GP_DISCONNECT:
+		return (void *)tipsy_direct_record_gp_disconnect;
+	case TIPSY_GP_SET_KEY:
+		return (void *)tipsy_direct_record_gp_set_key;
+	case TIPSY_GP_SET_MOTION:
+		return (void *)tipsy_direct_record_gp_set_motion;
+	default:
+		return 0;
+	}
+}
+
+int tipsy_direct_gamepad_rec_count(void) { return tipsy_gp_rec_n; }
+
+int tipsy_direct_gamepad_rec_kind(int i) {
+	if (i < 0 || i >= tipsy_gp_rec_n) {
+		return 0;
+	}
+	return tipsy_gp_rec[i].kind;
+}
+
+int tipsy_direct_gamepad_rec_int(int i, int j) {
+	if (i < 0 || i >= tipsy_gp_rec_n) {
+		return 0;
+	}
+	switch (j) {
+	case 0:
+		return tipsy_gp_rec[i].a;
+	case 1:
+		return tipsy_gp_rec[i].b;
+	case 2:
+		return tipsy_gp_rec[i].c;
+	case 3:
+		return tipsy_gp_rec[i].d;
+	default:
+		return tipsy_gp_rec[i].e;
+	}
+}
+
+float tipsy_direct_gamepad_rec_float(int i, int j) {
+	if (i < 0 || i >= tipsy_gp_rec_n) {
+		return 0;
+	}
+	switch (j) {
+	case 0:
+		return tipsy_gp_rec[i].f1;
+	case 1:
+		return tipsy_gp_rec[i].f2;
+	default:
+		return tipsy_gp_rec[i].f3;
+	}
+}
+
+void tipsy_direct_gamepad_rec_reset(void) {
+	tipsy_gp_rec_n = 0;
+	for (int i = 0; i < TIPSY_GP_REC_CAP; ++i) {
+		tipsy_gp_rec[i].kind = 0;
+		tipsy_gp_rec[i].a = 0;
+		tipsy_gp_rec[i].b = 0;
+		tipsy_gp_rec[i].c = 0;
+		tipsy_gp_rec[i].d = 0;
+		tipsy_gp_rec[i].e = 0;
+		tipsy_gp_rec[i].f1 = 0;
+		tipsy_gp_rec[i].f2 = 0;
+		tipsy_gp_rec[i].f3 = 0;
+	}
+}
+
 // Recording natives are test-only ABI witnesses. They capture exactly what
 // the typed callers above place in the native method's parameters.
 static float tipsy_direct_rec_button_f[2];

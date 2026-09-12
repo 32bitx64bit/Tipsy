@@ -53,6 +53,17 @@ const (
 	directMouseWheelSym  = "Java_com_roblox_engine_jni_NativeInputInterface_nativePassMouseWheel"
 	directMouseLockedSym = "Java_com_roblox_engine_jni_NativeInputInterface_nativeGetMainWindowIsMouseLockedCenter"
 	directKeyEventSym    = "Java_com_roblox_engine_jni_NativeGLInterface_nativePassKeyEvent"
+	// Direct gamepad family: the six DEX-proven NativeInputInterface
+	// dynsyms from Phase 0 (gamepad-ground-truth-2026-09-12.md §1,
+	// 2.736.1408). Only these names are resolved; nativePassGamepad*-,
+	// nativePassJoystick*-, and nativePassController*-shaped names were
+	// verified absent from dynsym and must never be guessed.
+	directGamepadAxisSym      = "Java_com_roblox_engine_jni_NativeInputInterface_nativeGamepadAxisEvent"
+	directGamepadButtonSym    = "Java_com_roblox_engine_jni_NativeInputInterface_nativeGamepadButtonEvent"
+	directGamepadConnectSym   = "Java_com_roblox_engine_jni_NativeInputInterface_nativeGamepadConnectEventWithGamepadType"
+	directGamepadDisconnSym   = "Java_com_roblox_engine_jni_NativeInputInterface_nativeGamepadDisconnectEvent"
+	directGamepadSetKeySym    = "Java_com_roblox_engine_jni_NativeInputInterface_nativeSetGamepadSupportedKeyWithGamepadType"
+	directGamepadSetMotionSym = "Java_com_roblox_engine_jni_NativeInputInterface_nativeSetGamepadSupportedMotionWithGamepadType"
 	// setInputConnectionName/Sig is the exact Java→native handshake the
 	// engine registered (DEX ground truth, classes2.dex method table,
 	// 2.734.917 — descriptors only, never vendored):
@@ -98,6 +109,10 @@ func (s *gameActivitySession) shutdown(reason string) time.Duration {
 	s.shutdownOnce.Do(func() {
 		started := time.Now()
 		logging.Logger(logging.CatGameActivity).Info("graceful shutdown started", "reason", reason)
+		// Park the evdev pad pump with the session it feeds: after
+		// terminateNativeCode no direct gamepad target is live, so further
+		// polls would only count parked drops.
+		jni.StopRobloxDirectGamepadPump()
 		// The runtime is an in-process host: returning and unmapping libroblox
 		// while terminateNativeCode is still executing is unsafe. Give the
 		// official lifecycle/join path a generous deadline, then terminate the
@@ -168,6 +183,11 @@ func startGameActivity(ctx context.Context, vm *jni.VM, mod *loader.Module, aw *
 	deliverTextInputConnection(vm, env, activity, uintptr(handle))
 	wireRobloxDirectInput(mod, env)
 	wireRobloxDirectKey(mod, env)
+	wireRobloxDirectGamepad(mod, env)
+	// The evdev pad pump bypasses the X11 ring (own goroutine into the
+	// JNI gamepad frame handler). It honors the TIPSY_GAMEPAD
+	// kill-switch internally and stays silent with zero host pads.
+	jni.StartRobloxDirectGamepadPump()
 	wireRobloxTextInput(mod, env)
 	return dispatchGameActivityLifecycle(ctx, vm, mod, env, activity, uintptr(handle), commands, files, cache, preferences, assets, version,
 		width, height, currentRefreshHz, supportedRefreshHz, aw, req), nil
@@ -235,6 +255,36 @@ func wireRobloxDirectKey(mod *loader.Module, env *jni.Env) {
 	}
 	class := env.FindClass("com/roblox/engine/jni/NativeGLInterface")
 	jni.SetRobloxDirectKeyTarget(env.Raw(), class, fn)
+}
+
+// wireRobloxDirectGamepad resolves only the six DEX-proven direct gamepad
+// methods on NativeInputInterface. Missing exports log the honest missing
+// line and park pad delivery (drops, never queues), exactly like the mouse
+// and key arms.
+func wireRobloxDirectGamepad(mod *loader.Module, env *jni.Env) {
+	axisFn, axisErr := mod.Lookup(directGamepadAxisSym)
+	buttonFn, buttonErr := mod.Lookup(directGamepadButtonSym)
+	connectFn, connectErr := mod.Lookup(directGamepadConnectSym)
+	disconnectFn, disconnectErr := mod.Lookup(directGamepadDisconnSym)
+	setKeyFn, setKeyErr := mod.Lookup(directGamepadSetKeySym)
+	setMotionFn, setMotionErr := mod.Lookup(directGamepadSetMotionSym)
+	for _, missing := range []struct {
+		sym string
+		err error
+	}{
+		{directGamepadAxisSym, axisErr},
+		{directGamepadButtonSym, buttonErr},
+		{directGamepadConnectSym, connectErr},
+		{directGamepadDisconnSym, disconnectErr},
+		{directGamepadSetKeySym, setKeyErr},
+		{directGamepadSetMotionSym, setMotionErr},
+	} {
+		if missing.err != nil {
+			logging.Logger(logging.CatJNI).Info("[jni] missing direct gamepad export", "sym", missing.sym, "err", missing.err)
+		}
+	}
+	class := env.FindClass("com/roblox/engine/jni/NativeInputInterface")
+	jni.SetRobloxDirectGamepadTarget(env.Raw(), class, axisFn, buttonFn, connectFn, disconnectFn, setKeyFn, setMotionFn)
 }
 
 // wireRobloxTextInput resolves the exact public static natives used by the

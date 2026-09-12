@@ -335,6 +335,12 @@ func (vm *VM) dispatchInput(o *Object, class, name, sig string, args *C.jvalue) 
 			return floatOut(floatVal("x"))
 		case motionAxisY:
 			return floatOut(floatVal("y"))
+		case motionAxisZ, motionAxisRX, motionAxisRY, motionAxisRZ,
+			motionAxisHatX, motionAxisHatY, motionAxisLTrigger, motionAxisRTrigger:
+			// Gamepad axes (Z/RZ + RX/RY mirror, hats, triggers) ride the
+			// per-object gamepadAxes map; pointer/key objects without the
+			// map answer 0, exactly as before.
+			return floatOut(vm.gamepadAxisValue(o, jvalueIAt(args, 0)))
 		}
 		return floatOut(0)
 	case "getHistoricalAxisValue(III)F":
@@ -344,6 +350,9 @@ func (vm *VM) dispatchInput(o *Object, class, name, sig string, args *C.jvalue) 
 			return floatOut(floatVal("x"))
 		case motionAxisY:
 			return floatOut(floatVal("y"))
+		case motionAxisZ, motionAxisRX, motionAxisRY, motionAxisRZ,
+			motionAxisHatX, motionAxisHatY, motionAxisLTrigger, motionAxisRTrigger:
+			return floatOut(vm.gamepadAxisValue(o, jvalueIAt(args, 0)))
 		}
 		return floatOut(0)
 
@@ -1211,6 +1220,10 @@ func dispatchX11KeyToOwner(owner x11KeyGestureOwner, ev x11.InputEvent) {
 func handleX11InputEvent(ev x11.InputEvent) {
 	switch ev.Kind {
 	case x11.InputFocus:
+		// Pads share the window focus gate: quiet while unfocused, UP
+		// synthesis + zero axes on focus loss. Keyboard/mouse/text arms
+		// below are untouched.
+		gamepadNoteFocus(ev.FocusGained)
 		if !ev.FocusGained {
 			// Host focus loss already ungrabs in X11. Do not send an explicit
 			// unlock here: that would clear the sticky first-person grab so
