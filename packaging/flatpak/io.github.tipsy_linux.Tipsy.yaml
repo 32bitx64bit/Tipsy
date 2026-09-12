@@ -16,6 +16,14 @@ finish-args:
   - --socket=x11
   - --socket=pulseaudio
   - --device=dri
+  # Gamepad evdev nodes (/dev/input/event*): Tipsy opens pads
+  # O_RDONLY|O_NONBLOCK for reads (O_RDWR only for Phase 4 rumble), never
+  # grabs them. Without this, `tipsy diagnose gamepad` reports EACCES
+  # inside the sandbox even when the host session has access. Existing
+  # installs can grant it without reinstalling:
+  #   flatpak override --user --device=input io.github.tipsy_linux.Tipsy
+  # See packaging/gamepad-input.md.
+  - --device=input
   - --filesystem=xdg-data/tipsy:create
   - --filesystem=xdg-config/tipsy:create
   # Desktop launcher ownership (Settings > Desktop integration, `tipsy desktop`):
