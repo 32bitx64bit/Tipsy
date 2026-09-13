@@ -49,20 +49,26 @@ If `diagnose gamepad` reports `degraded` with denied nodes:
 
 ## Per-format notes
 
-### Flatpak — `--device=input` is required
+### Flatpak — `--device=all` is required on Flatpak 1.14
 
 The manifest (`packaging/flatpak/io.github.tipsy_linux.Tipsy.yaml`)
-grants `--device=input` alongside `--device=dri`. Pinned by
-`packaging/flatpak/gamepad_test.go` (source + rendered manifest).
+grants `--device=all` alongside `--device=dri`. `--device=input` is
+Flatpak 1.15.6+; Ubuntu 24.04 and the GitHub `ubuntu-24.04` publish
+runner ship 1.14.6, which rejects that token at `build-finish`
+(`Unknown device type input, valid types are: dri, all, kvm, shm`)
+and ignores it at runtime. `--device=all` is the 1.14-safe grant that
+includes `/dev/input`. Pinned by `packaging/flatpak/gamepad_test.go`
+(source + rendered manifest; `--device=input` must stay absent).
 
 Existing installs granted before this landed can opt in without
 reinstalling:
 
 ```sh
-flatpak override --user --device=input io.github.tipsy_linux.Tipsy
+flatpak override --user --device=all io.github.tipsy_linux.Tipsy
 ```
 
-(or toggle *Devices > input* in Flatseal). The host permission model
+(or toggle *Devices > All* in Flatseal). On Flatpak 1.15.6+ you can
+narrow that to `--device=input` instead. The host permission model
 above still applies inside the sandbox: the Flatpak user needs the
 logind ACL or the `input` group on the host.
 
@@ -126,7 +132,7 @@ Pairing, PINs, and reconnects are OS-level; Tipsy only rescans evdev.
   `active`/`degraded`/`disabled`.
 - `tipsy doctor`: reports EACCES on `/dev/input/event*` as one
   actionable issue (input group / udev rule / logind ACL /
-  Flatpak `--device=input`).
+  Flatpak `--device=all`).
 - Env parity (`TIPSY_GAMEPAD`, `TIPSY_GAMEPAD_PATH`,
   `TIPSY_GAMEPAD_DEADZONE*`, `TIPSY_GAMEPAD_INVERT_*`,
   `TIPSY_GAMEPAD_RUMBLE`, `TIPSY_GAMEPAD_DEBUG=1`): `tipsy diagnose`

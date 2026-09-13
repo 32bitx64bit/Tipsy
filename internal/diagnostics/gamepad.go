@@ -16,7 +16,7 @@ import (
 )
 
 // Gamepad permission guidance. Content-free: never carries input values.
-const gamepadPermissionHint = "add user to input group and relogin; check udev rule / logind ACL; Flatpak needs --device=input"
+const gamepadPermissionHint = "add user to input group and relogin; check udev rule / logind ACL; Flatpak needs --device=all"
 
 // GamepadPad is one accessible pad: name/vendor/product/capabilities only.
 // Field shapes are kept for the doctor formatter and GUI card; Detail is

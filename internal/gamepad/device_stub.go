@@ -19,11 +19,11 @@ var (
 	// ErrNoGamepad means enumeration found zero accessible gamepads.
 	ErrNoGamepad = errors.New("gamepad: no gamepad found (zero devices is the honest state)")
 	// ErrPermissionDenied means nodes exist but cannot be opened.
-	ErrPermissionDenied = errors.New("gamepad: permission denied on /dev/input/event* (add user to input group and relogin; Flatpak needs --device=input)")
+	ErrPermissionDenied = errors.New("gamepad: permission denied on /dev/input/event* (add user to input group and relogin; Flatpak needs --device=all)")
 )
 
 // PermissionHint is the actionable EACCES guidance.
-const PermissionHint = "add user to input group and relogin; Flatpak needs --device=input"
+const PermissionHint = "add user to input group and relogin; Flatpak needs --device=all"
 
 // ErrorForErrno maps an open failure to its honest error.
 func ErrorForErrno(path string, err error) error {

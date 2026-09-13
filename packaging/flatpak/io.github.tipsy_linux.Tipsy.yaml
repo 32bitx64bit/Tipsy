@@ -18,12 +18,15 @@ finish-args:
   - --device=dri
   # Gamepad evdev nodes (/dev/input/event*): Tipsy opens pads
   # O_RDONLY|O_NONBLOCK for reads (O_RDWR only for Phase 4 rumble), never
-  # grabs them. Without this, `tipsy diagnose gamepad` reports EACCES
-  # inside the sandbox even when the host session has access. Existing
-  # installs can grant it without reinstalling:
-  #   flatpak override --user --device=input io.github.tipsy_linux.Tipsy
+  # grabs them. --device=input is Flatpak 1.15.6+; Ubuntu 24.04 and the
+  # GitHub ubuntu-24.04 publish runner ship 1.14.6, which rejects the
+  # token at build-finish ("Unknown device type input") and ignores it
+  # at runtime. --device=all is the 1.14-safe grant that includes
+  # /dev/input (and dri). Existing installs can grant it without
+  # reinstalling:
+  #   flatpak override --user --device=all io.github.tipsy_linux.Tipsy
   # See packaging/gamepad-input.md.
-  - --device=input
+  - --device=all
   - --filesystem=xdg-data/tipsy:create
   - --filesystem=xdg-config/tipsy:create
   # Desktop launcher ownership (Settings > Desktop integration, `tipsy desktop`):

@@ -149,7 +149,7 @@ func TestDiagnoseGamepadEACCESHint(t *testing.T) {
 	for _, want := range []string{
 		"input group",
 		"udev",
-		"--device=input",
+		"--device=all",
 		"/dev/input/event0",
 	} {
 		if !strings.Contains(text, want) {
@@ -232,13 +232,13 @@ func TestDoctorGamepadEACCESHint(t *testing.T) {
 	if found == "" {
 		t.Fatalf("doctor issues omit gamepad EACCES: %v", rep.Issues)
 	}
-	for _, want := range []string{"input group", "udev", "--device=input"} {
+	for _, want := range []string{"input group", "udev", "--device=all"} {
 		if !strings.Contains(found, want) {
 			t.Errorf("doctor hint missing %q: %q", want, found)
 		}
 	}
 	text := FormatDoctor(rep)
-	if !strings.Contains(text, "Gamepad") || !strings.Contains(text, "--device=input") {
+	if !strings.Contains(text, "Gamepad") || !strings.Contains(text, "--device=all") {
 		t.Errorf("doctor text omits gamepad hint:\n%s", text)
 	}
 }
