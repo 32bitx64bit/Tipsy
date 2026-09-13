@@ -427,7 +427,7 @@ func TestInstallStagesThenAtomicallyActivatesGeneration(t *testing.T) {
 	if len(phases) < 5 || phases[len(phases)-1] != PhaseComplete {
 		t.Fatalf("progress phases=%v", phases)
 	}
-	prior, err := (integrity.Store{Root: s.GenerationStoreRoot}).Active(context.Background())
+	prior, err := StoreForTrust(s.GenerationStoreRoot, s.Trust).Active(context.Background())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -435,7 +435,8 @@ func TestInstallStagesThenAtomicallyActivatesGeneration(t *testing.T) {
 	prior.Close()
 
 	// Cancellation after a different generation has been staged and checked
-	// must leave active.json and account data bound to the prior generation.
+	// must leave the trust-matched active record and account data bound to
+	// the prior generation.
 	nativeBody = []byte("verified-second")
 	interrupted, cancel := context.WithCancel(context.Background())
 	s.authorizeStaged = func(context.Context, integrity.Store, string, TrustPolicy) error {
@@ -445,7 +446,7 @@ func TestInstallStagesThenAtomicallyActivatesGeneration(t *testing.T) {
 	if _, err := s.Install(interrupted, InstallRequest{Mode: InstallLocal, LocalPaths: []string{input}}, nil); ErrorKindOf(err) != ErrCanceled {
 		t.Fatalf("interrupted activation err=%v", err)
 	}
-	active, err := (integrity.Store{Root: s.GenerationStoreRoot}).Active(context.Background())
+	active, err := StoreForTrust(s.GenerationStoreRoot, s.Trust).Active(context.Background())
 	if err != nil {
 		t.Fatal(err)
 	}

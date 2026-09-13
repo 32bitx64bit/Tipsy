@@ -17,13 +17,23 @@ import (
 )
 
 const (
-	activeFileName    = "active.json"
-	inventoryFileName = "inventory.json"
+	activeFileName            = "active.json"
+	developmentActiveFileName = "active-development.json"
+	inventoryFileName         = "inventory.json"
+
+	// ActiveSlotOfficial and ActiveSlotDevelopment keep the live Roblox
+	// client and a development build from overwriting each other's active
+	// generation. An empty slot is the historical single-pointer behavior
+	// used by existing tests.
+	ActiveSlotOfficial    = "official"
+	ActiveSlotDevelopment = "development"
+	developmentAuthMode   = "development-unrestricted"
 )
 
 type Store struct {
-	Root      string
-	afterCopy func(string)
+	Root       string
+	ActiveSlot string
+	afterCopy  func(string)
 }
 
 // Stage copies exactly the authenticated inventory from sourceRoot into a new
@@ -165,8 +175,16 @@ func (s Store) Stage(ctx context.Context, sourceRoot string, in Inventory) (stri
 	return id, nil
 }
 
+func (s Store) activeFileName() string {
+	if s.ActiveSlot == ActiveSlotDevelopment {
+		return developmentActiveFileName
+	}
+	return activeFileName
+}
+
 // Activate atomically selects a completely verified generation. Previous
-// generation directories are retained.
+// generation directories are retained. Official and development slots are
+// independent: activating one does not rewrite the other.
 func (s Store) Activate(ctx context.Context, id string) error {
 	if err := ValidateGenerationID(id); err != nil {
 		return err
@@ -183,7 +201,91 @@ func (s Store) Activate(ctx context.Context, id string) error {
 	if err := generation.Close(); err != nil {
 		return err
 	}
-	record := ActiveRecord{Schema: ActiveSchema, Generation: id, InventorySHA256: inventoryDigest}
+	return writeActiveRecord(root, s.activeFileName(), id, inventoryDigest)
+}
+
+func (s Store) Active(ctx context.Context) (*Generation, error) {
+	root, err := s.prepareRoot()
+	if err != nil {
+		return nil, err
+	}
+	switch s.ActiveSlot {
+	case ActiveSlotOfficial:
+		return s.activeOfficial(ctx, root)
+	case ActiveSlotDevelopment:
+		return s.activeDevelopment(ctx, root)
+	default:
+		return openActiveFile(ctx, root, activeFileName)
+	}
+}
+
+func (s Store) activeOfficial(ctx context.Context, root string) (*Generation, error) {
+	generation, err := openActiveFile(ctx, root, activeFileName)
+	if err != nil {
+		return nil, err
+	}
+	if generation.Inventory.AuthorizationMode != developmentAuthMode {
+		return generation, nil
+	}
+	_ = writeActiveRecordIfMissing(root, developmentActiveFileName, generation.ID, generation.InventorySHA256)
+	_ = generation.Close()
+	return nil, fmt.Errorf("integrity: official active record points at a development generation: %w", os.ErrNotExist)
+}
+
+func (s Store) activeDevelopment(ctx context.Context, root string) (*Generation, error) {
+	generation, err := openActiveFile(ctx, root, developmentActiveFileName)
+	if err == nil {
+		return generation, nil
+	}
+	legacy, legacyErr := openActiveFile(ctx, root, activeFileName)
+	if legacyErr != nil {
+		return nil, err
+	}
+	if legacy.Inventory.AuthorizationMode != developmentAuthMode {
+		_ = legacy.Close()
+		return nil, err
+	}
+	_ = writeActiveRecordIfMissing(root, developmentActiveFileName, legacy.ID, legacy.InventorySHA256)
+	return legacy, nil
+}
+
+func openActiveFile(ctx context.Context, root, name string) (*Generation, error) {
+	raw, err := readBoundedSafe(root, name, 4096, false)
+	if err != nil {
+		return nil, fmt.Errorf("integrity: read active record: %w", err)
+	}
+	var record ActiveRecord
+	decoder := json.NewDecoder(bytes.NewReader(raw))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&record); err != nil || record.Schema != ActiveSchema || ValidateGenerationID(record.Generation) != nil || !validDigest(record.InventorySHA256) {
+		return nil, fmt.Errorf("integrity: active record is malformed")
+	}
+	canonical, err := json.Marshal(record)
+	if err != nil || string(canonical) != string(raw) {
+		return nil, fmt.Errorf("integrity: active record is not canonical")
+	}
+	generation, err := OpenGeneration(ctx, root, record.Generation)
+	if err != nil {
+		return nil, err
+	}
+	if generation.InventorySHA256 != record.InventorySHA256 {
+		generation.Close()
+		return nil, fmt.Errorf("integrity: active inventory digest mismatch")
+	}
+	return generation, nil
+}
+
+func writeActiveRecordIfMissing(root, name, id, digest string) error {
+	if _, err := os.Lstat(filepath.Join(root, name)); err == nil {
+		return nil
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
+	return writeActiveRecord(root, name, id, digest)
+}
+
+func writeActiveRecord(root, name, id, digest string) error {
+	record := ActiveRecord{Schema: ActiveSchema, Generation: id, InventorySHA256: digest}
 	raw, err := json.Marshal(record)
 	if err != nil {
 		return err
@@ -212,41 +314,11 @@ func (s Store) Activate(ctx context.Context, id string) error {
 	if err := tmp.Close(); err != nil {
 		return err
 	}
-	if err := os.Rename(tmpName, filepath.Join(root, activeFileName)); err != nil {
+	if err := os.Rename(tmpName, filepath.Join(root, name)); err != nil {
 		return fmt.Errorf("integrity: activate generation: %w", err)
 	}
 	keep = true
 	return syncDirectory(root)
-}
-
-func (s Store) Active(ctx context.Context) (*Generation, error) {
-	root, err := s.prepareRoot()
-	if err != nil {
-		return nil, err
-	}
-	raw, err := readBoundedSafe(root, activeFileName, 4096, false)
-	if err != nil {
-		return nil, fmt.Errorf("integrity: read active record: %w", err)
-	}
-	var record ActiveRecord
-	decoder := json.NewDecoder(bytes.NewReader(raw))
-	decoder.DisallowUnknownFields()
-	if err := decoder.Decode(&record); err != nil || record.Schema != ActiveSchema || ValidateGenerationID(record.Generation) != nil || !validDigest(record.InventorySHA256) {
-		return nil, fmt.Errorf("integrity: active record is malformed")
-	}
-	canonical, err := json.Marshal(record)
-	if err != nil || string(canonical) != string(raw) {
-		return nil, fmt.Errorf("integrity: active record is not canonical")
-	}
-	generation, err := OpenGeneration(ctx, root, record.Generation)
-	if err != nil {
-		return nil, err
-	}
-	if generation.InventorySHA256 != record.InventorySHA256 {
-		generation.Close()
-		return nil, fmt.Errorf("integrity: active inventory digest mismatch")
-	}
-	return generation, nil
 }
 
 func (s Store) prepareRoot() (string, error) {

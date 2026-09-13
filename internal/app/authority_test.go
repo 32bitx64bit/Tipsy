@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/tipsy-linux/tipsy/internal/config"
 	"github.com/tipsy-linux/tipsy/internal/integrity"
@@ -258,6 +259,59 @@ func TestNilGenerationResultFailsClosedAndCanRepair(t *testing.T) {
 	got, err := openOrRepairGeneration(context.Background(), authority, deps)
 	if err != nil || got != want {
 		t.Fatalf("repaired nil generation = %#v, %v", got, err)
+	}
+	defer got.Close()
+}
+
+func TestRepairPicksNewestOfMultipleRetainedAPKs(t *testing.T) {
+	xdg := t.TempDir()
+	t.Setenv("XDG_DATA_HOME", filepath.Join(xdg, "data"))
+	retainedDir := filepath.Join(generationStoreRoot(), "apks", "sha256")
+	if err := os.MkdirAll(retainedDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	older := filepath.Join(retainedDir, strings.Repeat("a", 64)+".apk")
+	newer := filepath.Join(retainedDir, strings.Repeat("b", 64)+".apk")
+	if err := os.WriteFile(older, []byte("older-apk"), 0o400); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(newer, []byte("newer-apk"), 0o400); err != nil {
+		t.Fatal(err)
+	}
+	oldTime := time.Now().Add(-2 * time.Hour)
+	newTime := time.Now().Add(-time.Minute)
+	if err := os.Chtimes(older, oldTime, oldTime); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chtimes(newer, newTime, newTime); err != nil {
+		t.Fatal(err)
+	}
+
+	openCalls := 0
+	want := &fakeLaunchGeneration{authorization: setupsvc.Authorization{Mode: setupsvc.OfficialVerified, PolicyAuthorized: true}}
+	wrong := &fakeLaunchGeneration{authorization: setupsvc.Authorization{Mode: setupsvc.DevelopmentUnrestricted}}
+	deps := generationDependencies{
+		open: func(context.Context, integrity.Store, setupsvc.TrustPolicy) (launchGeneration, error) {
+			openCalls++
+			if openCalls == 1 {
+				return wrong, nil
+			}
+			return want, nil
+		},
+		derive: func(_ context.Context, paths []string, _ string, trust setupsvc.TrustPolicy) (string, error) {
+			if len(paths) != 1 || paths[0] != newer {
+				t.Fatalf("repair paths = %v, want only newest %q", paths, newer)
+			}
+			if trust.Mode != setupsvc.OfficialVerified {
+				t.Fatalf("repair trust mode = %q", trust.Mode)
+			}
+			return strings.Repeat("c", 64), nil
+		},
+	}
+	authority := authorityResolution{Mode: setupsvc.OfficialVerified, Trust: setupsvc.KeylessReleaseTrustPolicy()}
+	got, err := openOrRepairGeneration(context.Background(), authority, deps)
+	if err != nil || got != want {
+		t.Fatalf("official repair = %#v, %v", got, err)
 	}
 	defer got.Close()
 }

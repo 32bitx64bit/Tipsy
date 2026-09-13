@@ -188,7 +188,7 @@ func (s *Service) Install(ctx context.Context, req InstallRequest, progress Prog
 	if err := s.prepareFn()(); err != nil {
 		return nil, setupError(ErrInstall, "preserve account data", "persistent account storage could not be prepared", err)
 	}
-	store := integrity.Store{Root: s.generationStoreRoot()}
+	store := StoreForTrust(s.generationStoreRoot(), s.trust())
 	id, err := PrepareGeneration(ctx, stagedRuntime, store.Root, rep, s.trust())
 	if err != nil {
 		return nil, setupError(ErrIntegrity, "stage generation", "extracted client provenance could not be authenticated", err)

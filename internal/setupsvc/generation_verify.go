@@ -48,6 +48,7 @@ func OpenAuthorizedGenerationWithExternal(ctx context.Context, store integrity.S
 	if err != nil || store.Root == "" {
 		return nil, fmt.Errorf("setup: generation store is unavailable")
 	}
+	store = StoreForTrust(store.Root, trust)
 	generation, err := store.Active(ctx)
 	if err != nil {
 		return nil, err

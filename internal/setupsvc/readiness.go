@@ -18,7 +18,7 @@ func verifyInstalledClientSnapshot(ctx context.Context, storeRoot string, config
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	store := integrity.Store{Root: storeRoot}
+	store := StoreForTrust(storeRoot, configured)
 	generation, err := store.Active(ctx)
 	if err != nil {
 		return InstallSnapshot{}, err

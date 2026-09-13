@@ -11,6 +11,7 @@ import (
 	"regexp"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/tipsy-linux/tipsy/internal/integrity"
 	"github.com/tipsy-linux/tipsy/internal/runtime"
@@ -44,7 +45,7 @@ func openOrRepairGeneration(ctx context.Context, authority authorityResolution, 
 		return nil, fmt.Errorf("runtime generation integration is incomplete")
 	}
 	storeRoot := generationStoreRoot()
-	store := integrity.Store{Root: storeRoot}
+	store := setupsvc.StoreForTrust(storeRoot, authority.Trust)
 	generation, openErr := deps.open(ctx, store, authority.Trust)
 	if openErr == nil {
 		if err := requireGenerationMode(generation, authority.Mode); err == nil {
@@ -58,9 +59,13 @@ func openOrRepairGeneration(ctx context.Context, authority authorityResolution, 
 	if err != nil {
 		return nil, fmt.Errorf("inspect retained package set: %w", err)
 	}
+	retained, err = selectRetainedAPK(retained)
+	if err != nil {
+		return nil, fmt.Errorf("inspect retained package set: %w", err)
+	}
 	if len(retained) == 0 {
 		if openErr != nil {
-			return nil, fmt.Errorf("runtime not set up; run: tipsy setup --development <official-apk-or-dir>: %w", openErr)
+			return nil, fmt.Errorf("runtime not set up; run: %s: %w", setupCommand(authority.Mode), openErr)
 		}
 		return nil, fmt.Errorf("runtime generation authorization differs from the selected mode")
 	}
@@ -144,4 +149,36 @@ func regularAPKFiles(dir string, contentAddressed bool) ([]string, error) {
 	}
 	sort.Strings(paths)
 	return paths, nil
+}
+
+func setupCommand(mode setupsvc.AuthorizationMode) string {
+	if mode == setupsvc.OfficialVerified {
+		return "tipsy setup <official-apk-or-dir>"
+	}
+	return "tipsy setup --development <official-apk-or-dir>"
+}
+
+// selectRetainedAPK keeps a single package for repair. Content-addressed
+// blobs are named {sha256}.apk, so passing every retained version as a split
+// set makes keepX86FromSplitSet look for base.apk and fail.
+func selectRetainedAPK(paths []string) ([]string, error) {
+	if len(paths) <= 1 {
+		return paths, nil
+	}
+	best := ""
+	var bestTime time.Time
+	for _, path := range paths {
+		info, err := os.Lstat(path)
+		if err != nil {
+			return nil, err
+		}
+		if info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() {
+			return nil, fmt.Errorf("retained package candidate is not a regular file")
+		}
+		if best == "" || info.ModTime().After(bestTime) || (info.ModTime().Equal(bestTime) && path > best) {
+			best = path
+			bestTime = info.ModTime()
+		}
+	}
+	return []string{best}, nil
 }

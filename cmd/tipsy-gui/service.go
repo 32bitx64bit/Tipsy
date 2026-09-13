@@ -70,6 +70,12 @@ func (s *productionService) Snapshot(ctx context.Context) (guimodel.InstallSnaps
 	if s == nil || s.installer == nil {
 		return guimodel.InstallSnapshot{}, fmt.Errorf("installation verification service is unavailable")
 	}
+	if err := s.bindPackageTrust(ctx); err != nil && !errors.Is(err, app.ErrDevelopmentConsentRequired) {
+		if errors.Is(err, context.Canceled) || setupsvc.ErrorKindOf(err) == setupsvc.ErrCanceled {
+			return guimodel.InstallSnapshot{}, context.Canceled
+		}
+		return guimodel.InstallSnapshot{}, err
+	}
 	snapshot, err := s.installer.Snapshot(ctx)
 	if err != nil {
 		kind := setupsvc.ErrorKindOf(err)

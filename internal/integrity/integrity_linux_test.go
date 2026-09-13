@@ -378,6 +378,81 @@ func TestActiveRecordRejectsMixedGenerationInventoryBinding(t *testing.T) {
 	}
 }
 
+func TestOfficialAndDevelopmentActiveSlotsDoNotClobberEachOther(t *testing.T) {
+	root := t.TempDir()
+	storeRoot := filepath.Join(root, "runtime-generations")
+	t.Cleanup(func() { makeTreeWritableForCleanup(storeRoot) })
+
+	devSource, devInventory := generationFixtureAt(t, filepath.Join(root, "source-dev"), "apk-dev", "native-dev", 2908)
+	officialSource := filepath.Join(root, "source-official")
+	officialInventory := officialFixtureInventory("apk-official", "native-official", 2909)
+	if err := os.MkdirAll(filepath.Join(officialSource, "apk"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(officialSource, "lib", "x86_64"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(officialSource, "apk", "base.apk"), []byte("apk-official"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(officialSource, "lib", "x86_64", "libroblox.so"), []byte("native-official"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	legacy := Store{Root: storeRoot}
+	devID, err := legacy.Stage(context.Background(), devSource, devInventory)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := legacy.Activate(context.Background(), devID); err != nil {
+		t.Fatal(err)
+	}
+
+	official := Store{Root: storeRoot, ActiveSlot: ActiveSlotOfficial}
+	if generation, err := official.Active(context.Background()); err == nil {
+		generation.Close()
+		t.Fatal("official slot accepted a development generation as live")
+	}
+	if _, err := os.Stat(filepath.Join(storeRoot, developmentActiveFileName)); err != nil {
+		t.Fatalf("development active pointer was not adopted: %v", err)
+	}
+
+	dev := Store{Root: storeRoot, ActiveSlot: ActiveSlotDevelopment}
+	activeDev, err := dev.Active(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if activeDev.ID != devID {
+		t.Fatalf("development slot id=%q want=%q", activeDev.ID, devID)
+	}
+	activeDev.Close()
+
+	officialID, err := official.Stage(context.Background(), officialSource, officialInventory)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := official.Activate(context.Background(), officialID); err != nil {
+		t.Fatal(err)
+	}
+	activeOfficial, err := official.Active(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer activeOfficial.Close()
+	if activeOfficial.ID != officialID {
+		t.Fatalf("official slot id=%q want=%q", activeOfficial.ID, officialID)
+	}
+
+	stillDev, err := dev.Active(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer stillDev.Close()
+	if stillDev.ID != devID {
+		t.Fatalf("official activate stole development slot: got=%q want=%q", stillDev.ID, devID)
+	}
+}
+
 func TestInventoryRejectsPathsDuplicatesAndNonCanonicalData(t *testing.T) {
 	_, inventory := generationFixture(t, "apk", "native", 2908)
 	raw, _, err := CanonicalInventory(inventory)
@@ -545,6 +620,15 @@ func fixtureInventory(apkData, nativeData string, version int64) Inventory {
 			{Path: "lib/x86_64/libroblox.so", Size: int64(len(nativeData)), SHA256: digestString(nativeData), Origin: OriginAPK, APKEntry: "lib/x86_64/libroblox.so", APKDigest: apkDigest, Executable: true},
 		},
 	}
+}
+
+func officialFixtureInventory(apkData, nativeData string, version int64) Inventory {
+	inventory := fixtureInventory(apkData, nativeData, version)
+	inventory.AuthorizationMode = "official-verified"
+	inventory.PolicyAuthorized = true
+	inventory.SignerLineageID = keylessReleaseSignerLineageID
+	inventory.PolicySequence = 0
+	return inventory
 }
 
 func digestString(value string) string {

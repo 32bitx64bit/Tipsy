@@ -61,7 +61,7 @@ func DeriveAndActivateRetainedAPKs(ctx context.Context, retainedPaths []string, 
 	if err != nil {
 		return "", err
 	}
-	store := integrity.Store{Root: storeRoot}
+	store := StoreForTrust(storeRoot, trust)
 	generation, err := integrity.OpenGeneration(ctx, storeRoot, id)
 	if err != nil {
 		return "", err
