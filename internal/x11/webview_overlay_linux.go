@@ -145,16 +145,18 @@ func ShowWebViewOverlay(p WebViewOpen) error {
 		secure = &secA[0]
 		httpOnly = &httpA[0]
 	}
+	// Publish presentation state while the open is queued. A fast local page
+	// may call back from GTK immediately after queuing; its dismissal must
+	// observe this presentation rather than race the visible assignment.
+	webViewOverlay.Lock()
 	rc := C.tipsy_webview_overlay_open(C.ulong(parent), C.int(width), C.int(height),
 		urlC, themeC, titleC, assetsC, names, values, domains, paths, secure, httpOnly, C.int(n))
 	if rc != 0 {
-		webViewOverlay.Lock()
 		webViewOverlay.failed = true
 		webViewOverlay.Unlock()
 		logging.Logger(logging.CatX11).Error("webkit overlay unavailable")
 		return fmt.Errorf("x11: webkit overlay unavailable")
 	}
-	webViewOverlay.Lock()
 	webViewOverlay.started = true
 	webViewOverlay.visible = true
 	webViewOverlay.Unlock()
@@ -172,15 +174,23 @@ func stringsBlank(s string) bool {
 
 // HideWebViewOverlay unmaps the child so Roblox input is restored.
 func HideWebViewOverlay() {
+	hideWebViewOverlay()
+}
+
+// hideWebViewOverlay consumes a presentation before any close publication.
+// Programmatic hides still suppress the user-close event.
+func hideWebViewOverlay() bool {
 	webViewOverlay.Lock()
+	wasVisible := webViewOverlay.visible
 	webViewOverlay.visible = false
 	started := webViewOverlay.started
 	failed := webViewOverlay.failed
 	webViewOverlay.Unlock()
 	if !started || failed {
-		return
+		return wasVisible
 	}
 	C.tipsy_webview_overlay_hide()
+	return wasVisible
 }
 
 // CloseWebViewOverlay destroys the child widgets. Safe to call from the
@@ -208,6 +218,16 @@ func testWebViewCursor(kind int) int {
 	return int(C.tipsy_webview_overlay_test_cursor(C.int(kind)))
 }
 
+func testWebViewMapped() bool {
+	return C.tipsy_webview_overlay_visible() != 0
+}
+
+func testWebViewPolicy(uri string) int {
+	uriC := C.CString(uri)
+	defer C.free(unsafe.Pointer(uriC))
+	return int(C.tipsy_webview_overlay_test_policy(uriC))
+}
+
 //export tipsy_go_webview_policy
 func tipsy_go_webview_policy(uri *C.char) C.int {
 	if uri == nil {
@@ -221,8 +241,5 @@ func tipsy_go_webview_policy(uri *C.char) C.int {
 
 //export tipsy_go_webview_closed
 func tipsy_go_webview_closed() {
-	webViewOverlay.Lock()
-	webViewOverlay.visible = false
-	webViewOverlay.Unlock()
-	notifyWebViewUserClosed()
+	dismissWebViewOverlay()
 }

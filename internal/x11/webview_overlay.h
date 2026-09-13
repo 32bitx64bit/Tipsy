@@ -22,6 +22,7 @@ void tipsy_webview_overlay_close(void);
 int tipsy_webview_overlay_visible(void);
 /* Test synchronization and cursor-contract inspection on the GTK thread. */
 int tipsy_webview_overlay_test_cursor(int kind);
+int tipsy_webview_overlay_test_policy(const char *uri);
 
 /* Implemented in Go (webview_overlay_linux.go). Returns 1 if the URI was
  * handled as a join or close command (navigation should be ignored). */

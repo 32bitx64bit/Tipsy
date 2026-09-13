@@ -33,6 +33,8 @@ func SetWebViewAssetsDir(dir string) {}
 
 func HideWebViewOverlay() {}
 
+func hideWebViewOverlay() bool { return false }
+
 func CloseWebViewOverlay() {}
 
 func WebViewOverlayVisible() bool { return false }

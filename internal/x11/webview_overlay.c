@@ -377,6 +377,14 @@ static gboolean on_key_press(GtkWidget *w, GdkEventKey *ev, gpointer data)
 	return FALSE;
 }
 
+static int dispatch_overlay_policy(WebKitWebView *view, const char *uri)
+{
+	if (view == NULL || view != g_ov.view || !g_ov.mapped || uri == NULL) {
+		return 0;
+	}
+	return tipsy_go_webview_policy((char *)uri);
+}
+
 static gboolean on_decide_policy(WebKitWebView *view, WebKitPolicyDecision *decision,
 	WebKitPolicyDecisionType type, gpointer data)
 {
@@ -385,8 +393,11 @@ static gboolean on_decide_policy(WebKitWebView *view, WebKitPolicyDecision *deci
 	WebKitURIRequest *req;
 	const char *uri;
 
-	(void)view;
 	(void)data;
+	if (view != g_ov.view || !g_ov.mapped) {
+		webkit_policy_decision_ignore(decision);
+		return TRUE;
+	}
 	if (type != WEBKIT_POLICY_DECISION_TYPE_NAVIGATION_ACTION &&
 		type != WEBKIT_POLICY_DECISION_TYPE_NEW_WINDOW_ACTION) {
 		return FALSE;
@@ -401,7 +412,7 @@ static gboolean on_decide_policy(WebKitWebView *view, WebKitPolicyDecision *deci
 		return FALSE;
 	}
 	uri = webkit_uri_request_get_uri(req);
-	if (uri != NULL && tipsy_go_webview_policy((char *)uri) != 0) {
+	if (dispatch_overlay_policy(view, uri) != 0) {
 		webkit_policy_decision_ignore(decision);
 		return TRUE;
 	}
@@ -412,14 +423,17 @@ static void on_script_message(WebKitUserContentManager *mgr, JSCValue *value, gp
 {
 	char *s;
 
-	(void)mgr;
 	(void)data;
+	if (!g_ov.mapped || g_ov.view == NULL ||
+		mgr != webkit_web_view_get_user_content_manager(g_ov.view)) {
+		return;
+	}
 	if (value == NULL || !jsc_value_is_string(value)) {
 		return;
 	}
 	s = jsc_value_to_string(value);
 	if (s != NULL) {
-		(void)tipsy_go_webview_policy(s);
+		(void)dispatch_overlay_policy(g_ov.view, s);
 		g_free(s);
 	}
 }
@@ -534,9 +548,9 @@ static gboolean idle_hide(gpointer data)
 	(void)data;
 	if (g_ov.window != NULL && g_ov.mapped) {
 		restore_parent_focus();
-		gtk_widget_hide(g_ov.window);
 		g_ov.mapped = 0;
 		g_ov.load_serial++;
+		gtk_widget_hide(g_ov.window);
 		webkit_web_view_stop_loading(g_ov.view);
 	}
 	return G_SOURCE_REMOVE;
@@ -546,6 +560,38 @@ static gboolean idle_close(gpointer data)
 {
 	(void)data;
 	destroy_overlay_widgets();
+	return G_SOURCE_REMOVE;
+}
+
+/* Policy and script callbacks already run on the private GTK main loop. A
+ * join can enter nativeAppBridgeV2StartGameWithParam for the whole experience
+ * lifetime, so queueing the hide behind it leaves this child mapped over the
+ * returning Home surface. Run lifecycle work now when we own that loop; Go
+ * callers from every other thread still enqueue it safely. */
+static int on_overlay_main_thread(void)
+{
+	GMainContext *context;
+
+	if (g_loop == NULL) return 0;
+	context = g_main_loop_get_context(g_loop);
+	return context != NULL && g_main_context_is_owner(context);
+}
+
+struct tipsy_close_wait {
+	pthread_mutex_t mutex;
+	pthread_cond_t done;
+	int complete;
+};
+
+static gboolean idle_close_wait(gpointer data)
+{
+	struct tipsy_close_wait *wait = data;
+
+	(void)idle_close(NULL);
+	pthread_mutex_lock(&wait->mutex);
+	wait->complete = 1;
+	pthread_cond_signal(&wait->done);
+	pthread_mutex_unlock(&wait->mutex);
 	return G_SOURCE_REMOVE;
 }
 
@@ -893,15 +939,35 @@ void tipsy_webview_overlay_hide(void)
 	if (!g_init_ok) {
 		return;
 	}
+	if (on_overlay_main_thread()) {
+		(void)idle_hide(NULL);
+		return;
+	}
 	g_idle_add(idle_hide, NULL);
 }
 
 void tipsy_webview_overlay_close(void)
 {
+	struct tipsy_close_wait wait = {
+		.mutex = PTHREAD_MUTEX_INITIALIZER,
+		.done = PTHREAD_COND_INITIALIZER,
+	};
 	if (!g_init_ok) {
 		return;
 	}
-	g_idle_add(idle_close, NULL);
+	if (on_overlay_main_thread()) {
+		(void)idle_close(NULL);
+		return;
+	}
+	/* The Roblox parent may be destroyed immediately after this call. Destroy
+	 * its GTK child on the owner thread first, otherwise GTK later sends an X
+	 * request to a child XID the parent has already removed (BadWindow). */
+	pthread_mutex_lock(&wait.mutex);
+	g_idle_add(idle_close_wait, &wait);
+	while (!wait.complete) pthread_cond_wait(&wait.done, &wait.mutex);
+	pthread_mutex_unlock(&wait.mutex);
+	pthread_cond_destroy(&wait.done);
+	pthread_mutex_destroy(&wait.mutex);
 }
 
 int tipsy_webview_overlay_visible(void)
@@ -950,6 +1016,47 @@ int tipsy_webview_overlay_test_cursor(int kind)
 	if (!g_init_ok) return 0;
 	pthread_mutex_lock(&check.mutex);
 	g_idle_add(idle_cursor_check, &check);
+	while (!check.complete) pthread_cond_wait(&check.done, &check.mutex);
+	pthread_mutex_unlock(&check.mutex);
+	pthread_cond_destroy(&check.done);
+	pthread_mutex_destroy(&check.mutex);
+	return check.result;
+}
+
+struct tipsy_policy_check {
+	pthread_mutex_t mutex;
+	pthread_cond_t done;
+	const char *uri;
+	int result;
+	int complete;
+};
+
+static gboolean idle_policy_check(gpointer data)
+{
+	struct tipsy_policy_check *check = data;
+	int result = 0;
+
+	if (check != NULL && check->uri != NULL) {
+		result = dispatch_overlay_policy(g_ov.view, check->uri);
+	}
+	pthread_mutex_lock(&check->mutex);
+	check->result = result;
+	check->complete = 1;
+	pthread_cond_signal(&check->done);
+	pthread_mutex_unlock(&check->mutex);
+	return G_SOURCE_REMOVE;
+}
+
+int tipsy_webview_overlay_test_policy(const char *uri)
+{
+	struct tipsy_policy_check check = {
+		.mutex = PTHREAD_MUTEX_INITIALIZER,
+		.done = PTHREAD_COND_INITIALIZER,
+		.uri = uri,
+	};
+	if (!g_init_ok || uri == NULL || uri[0] == 0) return 0;
+	pthread_mutex_lock(&check.mutex);
+	g_idle_add(idle_policy_check, &check);
 	while (!check.complete) pthread_cond_wait(&check.done, &check.mutex);
 	pthread_mutex_unlock(&check.mutex);
 	pthread_cond_destroy(&check.done);

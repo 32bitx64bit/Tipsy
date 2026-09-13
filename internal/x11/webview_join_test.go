@@ -81,6 +81,23 @@ func TestHandleWebViewPolicyURIJoinCallsStartGame(t *testing.T) {
 	}
 }
 
+func TestHandoffWebViewJoinClosesBeforeStartGame(t *testing.T) {
+	var sequence []string
+	want := rbxuri.Request{PlaceID: 1818}
+	handoffWebViewJoin(want,
+		func() { sequence = append(sequence, "close") },
+		func(got rbxuri.Request) {
+			if got != want {
+				t.Fatalf("start request = %+v, want %+v", got, want)
+			}
+			sequence = append(sequence, "start")
+		},
+	)
+	if got := strings.Join(sequence, ","); got != "close,start" {
+		t.Fatalf("join handoff sequence = %q, want close,start", got)
+	}
+}
+
 func TestHandleHybridExecuteRobloxLaunchGame(t *testing.T) {
 	const fakeJob = "SYNTHETIC-JOB-ID"
 	var got rbxuri.Request
@@ -106,15 +123,15 @@ func TestHandleHybridExecuteRobloxLaunchGame(t *testing.T) {
 	}
 }
 
-func TestHandleHybridExecuteRobloxOverlayClose(t *testing.T) {
+func TestHandleHybridExecuteRobloxOverlayCloseWithoutPresentation(t *testing.T) {
 	var closed bool
 	SetWebViewUserClosed(func() { closed = true })
 	t.Cleanup(func() { SetWebViewUserClosed(nil) })
 	if !HandleHybridExecuteRoblox(`{"moduleID":"Overlay","functionName":"close"}`) {
 		t.Fatal("overlay close should be handled")
 	}
-	if !closed {
-		t.Fatal("Overlay.close must publish handleWindowClose")
+	if closed {
+		t.Fatal("Overlay.close without a presentation must not publish handleWindowClose")
 	}
 }
 

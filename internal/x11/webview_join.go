@@ -10,6 +10,7 @@ import (
 	"strings"
 	"sync"
 
+	"github.com/tipsy-linux/tipsy/internal/logging"
 	"github.com/tipsy-linux/tipsy/internal/rbxuri"
 )
 
@@ -46,6 +47,26 @@ func dispatchWebViewStartGame(req rbxuri.Request) {
 	}
 }
 
+// handoffWebViewJoin completes the browser transition before entering
+// StartGame, which may span the experience lifetime. Ordinary URL forwarding
+// closes the browser route; Hybrid launchGame only hides its host content.
+func handoffWebViewJoin(req rbxuri.Request, leaveBrowser func(), start func(rbxuri.Request)) {
+	if leaveBrowser != nil {
+		leaveBrowser()
+	}
+	if start != nil {
+		start(req)
+	}
+}
+
+func dismissWebViewOverlay() {
+	// Consume visibility before publication because the MessageBus callback
+	// can re-enter the host close path. One presentation emits one close.
+	if hideWebViewOverlay() {
+		notifyWebViewUserClosed()
+	}
+}
+
 // SetWebViewJavascriptSignal registers the official
 // WebViewProtocol.signalJavascriptCallback door. cmd is the Hybrid JSON
 // string; callers must never log it.
@@ -65,7 +86,7 @@ func signalWebViewJavascript(cmd string) {
 }
 
 // SetWebViewUserClosed registers the MessageBus handleWindowClose publisher
-// used when the user dismisses the overlay (Escape / Overlay.close).
+// used when the user dismisses the overlay, including an ordinary join URL.
 func SetWebViewUserClosed(fn func()) {
 	webViewUserClosed.Lock()
 	webViewUserClosed.fn = fn
@@ -266,8 +287,7 @@ func isWebViewJoinURI(raw string) bool {
 // default navigation. Returns true when the URI must not load in WebKit.
 func HandleWebViewPolicyURI(raw string) bool {
 	if IsWebViewCloseCommand(raw) {
-		HideWebViewOverlay()
-		notifyWebViewUserClosed()
+		dismissWebViewOverlay()
 		return true
 	}
 	if strings.HasPrefix(strings.TrimSpace(raw), "{") {
@@ -277,8 +297,11 @@ func HandleWebViewPolicyURI(raw string) bool {
 	if !ok {
 		return false
 	}
-	dispatchWebViewStartGame(req)
-	HideWebViewOverlay()
+	// Android's ordinary WebView URL callback closes the fragment and
+	// publishes handleWindowClose before forwarding the URL to Linking.
+	// Hiding alone leaves GenericWebPage over the originating details route.
+	logging.Logger(logging.CatX11).Info("WebView join handoff", "route", "uri", "browser", "dismiss")
+	handoffWebViewJoin(req, dismissWebViewOverlay, dispatchWebViewStartGame)
 	return true
 }
 
@@ -309,14 +332,15 @@ func HandleHybridExecuteRoblox(raw string) bool {
 	signalWebViewJavascript(raw)
 	switch {
 	case strings.EqualFold(cmd.ModuleID, "Overlay") && strings.EqualFold(cmd.FunctionName, "close"):
-		HideWebViewOverlay()
-		notifyWebViewUserClosed()
+		dismissWebViewOverlay()
 		return true
 	case strings.EqualFold(cmd.ModuleID, "Game") && strings.EqualFold(cmd.FunctionName, "launchGame"):
 		req, ok := parseHybridLaunchGame(cmd.Params)
 		if ok {
-			dispatchWebViewStartGame(req)
-			HideWebViewOverlay()
+			// Hybrid posts RequestGame through Android's experience manager;
+			// its inspected path does not publish WebView.handleWindowClose.
+			logging.Logger(logging.CatX11).Info("WebView join handoff", "route", "hybrid", "browser", "hide")
+			handoffWebViewJoin(req, HideWebViewOverlay, dispatchWebViewStartGame)
 		}
 		return true
 	}
