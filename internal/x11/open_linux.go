@@ -475,6 +475,7 @@ func (w *Window) Close() error {
 	if w == nil {
 		return nil
 	}
+	CloseWebViewOverlay()
 	clearActiveWindow(w)
 	w.mu.Lock()
 	defer w.mu.Unlock()

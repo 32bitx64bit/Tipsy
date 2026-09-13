@@ -126,6 +126,9 @@ func TestNativeUserGettersEmptyBeforeLogin(t *testing.T) {
 	if nativeUserString(t, vm, recv, "getTheme") != "" {
 		t.Fatal("getTheme before login want empty")
 	}
+	if NativeUserTheme() != "" {
+		t.Fatal("NativeUserTheme before login want empty")
+	}
 	if nativeUserString(t, vm, recv, "getPlatformName") != "Windows" {
 		t.Fatal("getPlatformName before login want Windows")
 	}
@@ -254,6 +257,9 @@ func TestNativeUserOptionalFieldsWhenPresent(t *testing.T) {
 	}
 	if nativeUserString(t, vm, recv, "getTheme") != "Dark" {
 		t.Fatalf("getTheme = %q, want Dark", nativeUserString(t, vm, recv, "getTheme"))
+	}
+	if NativeUserTheme() != "Dark" {
+		t.Fatalf("NativeUserTheme = %q, want Dark", NativeUserTheme())
 	}
 }
 

@@ -30,6 +30,24 @@ func TestWebsiteLaunchJNIExports(t *testing.T) {
 	}
 }
 
+func TestWebViewProtocolJNIExports(t *testing.T) {
+	if messageBusDoSubscribeRawSym != "Java_com_roblox_universalapp_messagebus_MessageBus_doSubscribeRaw" {
+		t.Fatalf("doSubscribeRaw=%q", messageBusDoSubscribeRawSym)
+	}
+	if messageBusGetMessageIdSym != "Java_com_roblox_universalapp_messagebus_MessageBus_getMessageId" {
+		t.Fatalf("getMessageId=%q", messageBusGetMessageIdSym)
+	}
+	if webViewInitializeSym != "Java_com_roblox_protocols_webview_WebViewProtocol_initializeAndroidWebViewProtocol" {
+		t.Fatalf("initialize=%q", webViewInitializeSym)
+	}
+	if messageBusPublishRawSym != "Java_com_roblox_universalapp_messagebus_MessageBus_publishRaw" {
+		t.Fatalf("publishRaw=%q", messageBusPublishRawSym)
+	}
+	if webViewSignalJavascriptSym != "Java_com_roblox_protocols_webview_WebViewProtocol_signalJavascriptCallback" {
+		t.Fatalf("signalJavascript=%q", webViewSignalJavascriptSym)
+	}
+}
+
 func TestAppStarterPlaceFromWebsiteRequest(t *testing.T) {
 	if got := appStarterPlace(rbxuri.Request{}); got != "" {
 		t.Fatalf("empty request place=%q", got)

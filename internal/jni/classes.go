@@ -120,6 +120,7 @@ func (vm *VM) seedClasses() {
 		"com/roblox/universalapp/messagebus/Connection",
 		"com/roblox/universalapp/messagebus/RequestHandlerRaw",
 		"com/roblox/universalapp/messagebus/RawCallback",
+		"com/roblox/protocols/webview/WebViewProtocol",
 	} {
 		if vm.classes[name] == nil {
 			vm.defineClass(name, object)
@@ -215,10 +216,10 @@ var implementedMethods = map[string]bool{
 	"isCommunicationModeEnabled()Z":          true,
 	"isDeviceBlacklistedForOpenSLESUsage()Z": true,
 	"setMicrophoneMute(Z)V":                  true,
-	// universalapp MessageBus PermissionsProtocol answered by Tipsy
-	// (permissions_protocol.go): RequestHandlerRaw.run(String)String is the
-	// synchronous handler contract, RawCallback.run(String)V the legacy
-	// request-topic subscription contract (APK classes2.dex MessageBus$b/$a).
+	// universalapp MessageBus PermissionsProtocol and WebViewProtocol
+	// (permissions_protocol.go, webview_protocol.go): RequestHandlerRaw.run
+	// and RawCallback.run are shared Java classes; Tipsy tags each handler
+	// with a protocol-specific field so the families do not swallow each other.
 	"run(Ljava/lang/String;)Ljava/lang/String;":                                          true,
 	"run(Ljava/lang/String;)V":                                                           true,
 	"isValid()Z":                                                                         true,

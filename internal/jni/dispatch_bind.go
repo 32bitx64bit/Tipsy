@@ -30,6 +30,7 @@ var dispatchFamilies = []familyFn{
 	(*VM).dispatchFmodAudio,
 	(*VM).dispatchAudioPermission,
 	(*VM).dispatchPermissionsProtocol,
+	(*VM).dispatchWebViewProtocol,
 	(*VM).dispatchWebRtcAudioManager,
 	(*VM).dispatchInput,
 	(*VM).dispatchConnectivity,
@@ -67,6 +68,37 @@ func wrapFamily(fn familyFn, class, name, sig string) callHandler {
 			return v, true
 		}
 		return stubFallback(vm, class, name, sig, args, retKind)
+	}
+}
+
+// messageBusSharedRun is RequestHandlerRaw.run(String)String and
+// RawCallback.run(String)V. PermissionsProtocol and WebViewProtocol share
+// those Java classes; interning the first family that handled a call would
+// stub later receivers (live Servers click: Permissions intern then
+// untagged WebView RawCallback → stub-dispatch, no overlay).
+func messageBusSharedRun(name, sig string) bool {
+	if name != "run" {
+		return false
+	}
+	return sig == rawCallbackRunSig || sig == requestHandlerRawRunSig
+}
+
+func wrapDispatchFamilies(class, name, sig string) callHandler {
+	return func(vm *VM, env unsafe.Pointer, obj C.jobject, args *C.jvalue, retKind rune) (C.jobject, bool) {
+		_ = env
+		o := vm.get(jobjectToID(uintptr(obj)))
+		for _, fn := range dispatchFamilies {
+			if v, ok := fn(vm, o, class, name, sig, args); ok {
+				return v, true
+			}
+		}
+		if o != nil {
+			if v, ok := vm.fieldGetter(o, name, sig); ok {
+				return v, true
+			}
+		}
+		v, _ := stubFallback(vm, class, name, sig, args, retKind)
+		return v, true
 	}
 }
 
@@ -121,6 +153,11 @@ func (vm *VM) resolveDispatch(env unsafe.Pointer, obj C.jobject, class, name, si
 		return obj, true, initCallHandler
 	}
 	o := vm.get(jobjectToID(uintptr(obj)))
+	if messageBusSharedRun(name, sig) {
+		h := wrapDispatchFamilies(class, name, sig)
+		v, _ := h(vm, env, obj, args, 0)
+		return v, true, h
+	}
 	for _, fn := range dispatchFamilies {
 		if v, ok := fn(vm, o, class, name, sig, args); ok {
 			return v, true, wrapFamily(fn, class, name, sig)
@@ -186,8 +223,12 @@ type callAResult struct {
 }
 
 func (vm *VM) callA(objID int64, mid C.jmethodID, isStatic int, retKind rune) callAResult {
+	return vm.callAArgs(objID, mid, isStatic, retKind, nil)
+}
+
+func (vm *VM) callAArgs(objID int64, mid C.jmethodID, isStatic int, retKind rune, args *C.jvalue) callAResult {
 	var out C.jvalue
-	GoJNI_CallA((*C.JNIEnv)(vm.envRaw), idToJobject(objID), jclassNull(), mid, nil, C.jint(isStatic), C.jint(retKind), &out)
+	GoJNI_CallA((*C.JNIEnv)(vm.envRaw), idToJobject(objID), jclassNull(), mid, args, C.jint(isStatic), C.jint(retKind), &out)
 	return callAResult{
 		l: jobjectToID(uintptr(jvalueL(&out))),
 		i: int32(jvalueI(&out)),

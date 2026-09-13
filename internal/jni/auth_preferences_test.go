@@ -228,3 +228,63 @@ func TestImportAuthSetCookiesPersistsOfficialSetCookie(t *testing.T) {
 		t.Fatal("imported cookie was not restored")
 	}
 }
+
+func TestCopyAuthCookiesForWebViewScopedSnapshot(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.Chmod(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(dir, "cookies")
+	vm, err := NewVM()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := vm.ConfigureAuthCookies(path, "https://www.example.test/"); err != nil {
+		t.Fatal(err)
+	}
+	if err := vm.StoreAuthCookies("https://www.example.test/", []string{
+		"fixture=synthetic; Domain=example.test; Path=/; Secure; HttpOnly; Max-Age=3600",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	copies := CopyAuthCookiesForWebView()
+	if len(copies) != 1 {
+		t.Fatalf("copy count=%d", len(copies))
+	}
+	if copies[0].Domain != "example.test" || copies[0].Path != "/" || copies[0].Name != "fixture" || copies[0].Value != "synthetic" {
+		t.Fatal("scoped cookie snapshot mismatch")
+	}
+	if copies[0].HostOnly {
+		t.Fatal("Domain=example.test must not be host-only")
+	}
+	if !copies[0].Secure || !copies[0].HTTPOnly {
+		t.Fatal("cookie flags dropped")
+	}
+}
+
+func TestCopyAuthCookiesDomainCookieIsNotHostOnly(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.Chmod(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(dir, "cookies")
+	vm, err := NewVM()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := vm.ConfigureAuthCookies(path, "https://www.roblox.com/"); err != nil {
+		t.Fatal(err)
+	}
+	if err := vm.StoreAuthCookies("https://www.roblox.com/", []string{
+		"fixture=synthetic; Domain=.roblox.com; Path=/; Secure; HttpOnly; Max-Age=3600",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	copies := CopyAuthCookiesForWebView()
+	if len(copies) != 1 {
+		t.Fatalf("copy count=%d", len(copies))
+	}
+	if copies[0].Domain != "roblox.com" || copies[0].HostOnly {
+		t.Fatal("Domain=.roblox.com must store as roblox.com hostOnly=false")
+	}
+}

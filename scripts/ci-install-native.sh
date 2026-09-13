@@ -26,6 +26,7 @@ native_modules=(
 	pangocairo pangoft2 cairo-xlib
 	egl glesv2
 	libpulse libpulse-simple
+	gtk+-3.0 webkit2gtk-4.1
 )
 qt_modules=(Qt6Widgets Qt6Gui Qt6Core)
 qt_pc_dir=/tmp/tipsy-ci-pkgconfig
@@ -130,6 +131,7 @@ if command -v apt-get >/dev/null 2>&1; then
 		libx11-dev libx11-xcb-dev libxext-dev libxrandr-dev libxtst-dev libxi-dev libxcb1-dev \
 		libegl1-mesa-dev libgles2-mesa-dev libgl1-mesa-dev libcairo2-dev \
 		libpango1.0-dev libpulse-dev \
+		libgtk-3-dev libwebkit2gtk-4.1-dev \
 		qt6-base-dev qt6-base-dev-tools
 elif command -v dnf >/dev/null 2>&1; then
 	as_root dnf install -y --setopt=install_weak_deps=False \
@@ -138,6 +140,7 @@ elif command -v dnf >/dev/null 2>&1; then
 		libX11-devel libXext-devel libXrandr-devel libXtst-devel libXi-devel libxcb-devel \
 		mesa-libEGL-devel mesa-libGLES-devel mesa-libGL-devel \
 		pango-devel cairo-devel pulseaudio-libs-devel \
+		gtk3-devel webkit2gtk4.1-devel \
 		qt6-qtbase-devel
 else
 	fail 'need apt-get or dnf'

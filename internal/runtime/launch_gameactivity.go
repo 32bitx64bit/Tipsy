@@ -71,6 +71,11 @@ const (
 	messageBusSetRequestHandlerRawSym = "Java_com_roblox_universalapp_messagebus_MessageBus_setRequestHandlerRaw"
 	messageBusSubscribeRequestRawSym  = "Java_com_roblox_universalapp_messagebus_MessageBus_doSubscribeProtocolMethodRequestRaw"
 	messageBusPublishResponseRawSym   = "Java_com_roblox_universalapp_messagebus_MessageBus_publishProtocolMethodResponseRaw"
+	messageBusDoSubscribeRawSym       = "Java_com_roblox_universalapp_messagebus_MessageBus_doSubscribeRaw"
+	messageBusGetMessageIdSym         = "Java_com_roblox_universalapp_messagebus_MessageBus_getMessageId"
+	messageBusPublishRawSym           = "Java_com_roblox_universalapp_messagebus_MessageBus_publishRaw"
+	webViewInitializeSym              = "Java_com_roblox_protocols_webview_WebViewProtocol_initializeAndroidWebViewProtocol"
+	webViewSignalJavascriptSym        = "Java_com_roblox_protocols_webview_WebViewProtocol_signalJavascriptCallback"
 	// setInputConnectionName/Sig is the exact Java→native handshake the
 	// engine registered (DEX ground truth, classes2.dex method table,
 	// 2.734.917 — descriptors only, never vendored):
@@ -143,6 +148,9 @@ func (s *gameActivitySession) shutdown(reason string) time.Duration {
 		s.call("onSurfaceDestroyedNative", "(J)V")
 		s.call("onStopNative", "(J)V")
 		s.call("terminateNativeCode", "(J)V")
+		x11.SetWebViewStartGame(nil)
+		x11.SetWebViewAssetsDir("")
+		x11.CloseWebViewOverlay()
 		if watchdog != nil {
 			watchdog.Stop()
 		}
@@ -201,6 +209,8 @@ func startGameActivity(ctx context.Context, vm *jni.VM, mod *loader.Module, aw *
 	jni.StartRobloxDirectGamepadPump()
 	wireRobloxTextInput(mod, env)
 	wireRobloxPermissionsProtocol(mod, env)
+	x11.SetWebViewAssetsDir(assets)
+	wireRobloxWebViewProtocol(mod, env)
 	return dispatchGameActivityLifecycle(ctx, vm, mod, env, activity, uintptr(handle), commands, files, cache, preferences, assets, version,
 		width, height, currentRefreshHz, supportedRefreshHz, aw, req), nil
 }
@@ -327,6 +337,34 @@ func wireRobloxPermissionsProtocol(mod *loader.Module, env *jni.Env) {
 	env.RegisterPermissionsProtocol(exports)
 }
 
+// wireRobloxWebViewProtocol registers Tipsy as the MessageBus answerer for
+// the official WebView protocol (Servers and similar in-app listings). On a
+// phone the APK's Java WebViewProtocol registers at Activity creation
+// (classes2.dex <init>); Tipsy does it at the same phase.
+func wireRobloxWebViewProtocol(mod *loader.Module, env *jni.Env) {
+	var exports jni.WebViewProtocolExports
+	for _, want := range []struct {
+		sym string
+		dst *uintptr
+	}{
+		{messageBusSetRequestHandlerRawSym, &exports.SetRequestHandlerRaw},
+		{messageBusPublishResponseRawSym, &exports.PublishProtocolMethodResponseRaw},
+		{messageBusDoSubscribeRawSym, &exports.DoSubscribeRaw},
+		{messageBusGetMessageIdSym, &exports.GetMessageId},
+		{messageBusPublishRawSym, &exports.PublishRaw},
+		{webViewInitializeSym, &exports.InitializeAndroidWebViewProtocol},
+		{webViewSignalJavascriptSym, &exports.SignalJavascriptCallback},
+	} {
+		fn, err := mod.Lookup(want.sym)
+		if err != nil || fn == 0 {
+			logging.Logger(logging.CatJNI).Info("[jni] missing MessageBus export", "sym", want.sym, "err", err)
+			continue
+		}
+		*want.dst = fn
+	}
+	env.RegisterWebViewProtocol(exports)
+}
+
 // wireRobloxTextInput resolves the exact public static natives used by the
 // APK's RbxKeyboard EditText. nativePassText is the required typing route;
 // editor action and cursor selection are optional companions. All are named
@@ -387,6 +425,9 @@ func dispatchGameActivityLifecycle(ctx context.Context, vm *jni.VM, mod *loader.
 	startParams := makeStartAppParams(env, activity, platform, surface, req)
 	callRobloxJNI(mod, env.Raw(), gl, "Java_com_roblox_engine_jni_NativeGLInterface_nativeAppBridgeV2StartAppWithParams", startParams)
 	startWebsiteGame(mod, env, gl, activity, platform, device, surface, req)
+	x11.SetWebViewStartGame(func(join rbxuri.Request) {
+		startWebsiteGame(mod, env, gl, activity, platform, device, surface, join)
+	})
 	for _, cmd := range []byte{appCmdInitWindow, appCmdStart, appCmdResume, appCmdGainedFocus, appCmdWindowResized, appCmdWindowRedraw} {
 		postAndroidAppCmd(commands, cmd)
 	}

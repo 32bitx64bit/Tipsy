@@ -13,6 +13,7 @@ import "C"
 import (
 	"errors"
 	"sync"
+	"time"
 
 	"github.com/tipsy-linux/tipsy/internal/logging"
 )
@@ -67,6 +68,42 @@ func (vm *VM) RestoreAuthCookies() (string, error) {
 		return "", errors.New("cookie storage unavailable")
 	}
 	return authCookies.store.header(), nil
+}
+
+// AuthCookie is a scoped in-memory cookie for the in-window WebKit overlay.
+// Callers must never log Name or Value.
+type AuthCookie struct {
+	Name     string
+	Value    string
+	Domain   string
+	Path     string
+	HostOnly bool
+	Secure   bool
+	HTTPOnly bool
+	Expires  time.Time
+}
+
+// CopyAuthCookiesForWebView returns a snapshot of unexpired cookies scoped
+// to the official origin. Values are for the overlay cookie manager only.
+func CopyAuthCookiesForWebView() []AuthCookie {
+	authCookies.Lock()
+	defer authCookies.Unlock()
+	if authCookies.store == nil {
+		return nil
+	}
+	now := authCookies.store.now()
+	out := make([]AuthCookie, 0, len(authCookies.store.cookies))
+	for _, c := range authCookies.store.cookies {
+		if !c.Expires.IsZero() && !c.Expires.After(now) {
+			continue
+		}
+		out = append(out, AuthCookie{
+			Name: c.Name, Value: c.Value, Domain: c.Domain, Path: c.Path,
+			HostOnly: c.HostOnly, Secure: c.Secure, HTTPOnly: c.HTTPOnly,
+			Expires: c.Expires,
+		})
+	}
+	return out
 }
 
 // SetAuthCookieRegistration prepares the Java-owned CookieProtocol constructor.

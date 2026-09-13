@@ -64,6 +64,12 @@ func nativeUserSnapshotCopy() nativeUserSnapshot {
 	return snap
 }
 
+// NativeUserTheme is the DID_LOG_IN theme string for host WebView chrome.
+// Empty before login or when the official JSON omitted it.
+func NativeUserTheme() string {
+	return nativeUserSnapshotCopy().Theme
+}
+
 func storeNativeUserSnapshot(snap nativeUserSnapshot) {
 	nativeUserMu.Lock()
 	nativeUserSnap = snap
