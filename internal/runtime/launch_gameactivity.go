@@ -7,6 +7,7 @@ package runtime
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -24,6 +25,7 @@ import (
 type gameActivitySession struct {
 	resize           *surfaceResize
 	call             func(name, sig string, extra ...uintptr)
+	closeLifecycle   func()
 	forceExit        func(int)
 	shutdownDeadline time.Duration
 	shutdownOnce     sync.Once
@@ -94,11 +96,19 @@ const (
 	//   J, Ljava/lang/String;, Z, I)V
 	// The caller is focus-gated by the engine's own showKeyboard textbox
 	// handle. Its text comes only from the X11 input method's committed UTF-8.
-	nativePassTextSym        = "Java_com_roblox_engine_jni_NativeGLInterface_nativePassText"
-	nativePassTextSig        = "(JLjava/lang/String;ZI)V"
-	nativeReturnPressedSym   = "Java_com_roblox_engine_jni_NativeGLInterface_nativeReturnPressedFromOnScreenKeyboard"
-	syncTextboxSelectionSym  = "Java_com_roblox_engine_jni_NativeGLInterface_syncTextboxTextAndCursorPosition2"
-	nativeGetTextBoxInfoSym  = "Java_com_roblox_engine_jni_NativeGLInterface_nativeGetTextBoxInfo"
+	nativePassTextSym       = "Java_com_roblox_engine_jni_NativeGLInterface_nativePassText"
+	nativePassTextSig       = "(JLjava/lang/String;ZI)V"
+	nativeReturnPressedSym  = "Java_com_roblox_engine_jni_NativeGLInterface_nativeReturnPressedFromOnScreenKeyboard"
+	syncTextboxSelectionSym = "Java_com_roblox_engine_jni_NativeGLInterface_syncTextboxTextAndCursorPosition2"
+	nativeGetTextBoxInfoSym = "Java_com_roblox_engine_jni_NativeGLInterface_nativeGetTextBoxInfo"
+	// postExitForegroundSym is the named static native ActivityNativeMain
+	// invokes through AppShell's foreground callback after an experience ends.
+	// Its Focused/AppInput event resumes the retained app, preserving its page.
+	postExitForegroundSym = "Java_com_roblox_engine_jni_NativeGLInterface_nativeAppBridgeV2SendAppEventOnGameLoaded"
+	// postExitLeaveGameSym is the exact static native invoked by the current
+	// APK's ExperienceSession.D(false) cleanup path after gameDidLeave. It is
+	// session cleanup, not a second destination request or process shutdown.
+	postExitLeaveGameSym     = "Java_com_roblox_engine_jni_NativeGLInterface_nativeAppBridgeV2LeaveGame"
 	appCmdInitWindow         = 1
 	appCmdWindowResized      = 3
 	appCmdWindowRedraw       = 4
@@ -108,6 +118,354 @@ const (
 	appCmdResume             = 12
 )
 
+// appForegroundEvent follows the current APK's fi/e.A(true) argument order.
+// Foreground restoration carries no destination, place, or account payload.
+type appForegroundEvent struct {
+	Protocol string
+	Payload  string
+	Topic    string
+}
+
+var postExitForegroundEvent = appForegroundEvent{
+	Protocol: "AppInput",
+	Payload:  "",
+	Topic:    "Focused",
+}
+
+// postExitForegroundUnavailableError is the typed, fail-closed
+// diagnostic for a client whose named AppShell foreground export is unavailable.
+// The caller deliberately registers no lifecycle consumer in that case.
+type postExitForegroundUnavailableError struct {
+	Symbol string
+	Cause  error
+}
+
+func (e *postExitForegroundUnavailableError) Error() string {
+	if e == nil {
+		return "post-exit app foreground export unavailable"
+	}
+	if e.Cause == nil {
+		return fmt.Sprintf("post-exit app foreground export unavailable: %s", e.Symbol)
+	}
+	return fmt.Sprintf("post-exit app foreground export unavailable: %s: %v", e.Symbol, e.Cause)
+}
+
+func (e *postExitForegroundUnavailableError) Unwrap() error {
+	if e == nil {
+		return nil
+	}
+	return e.Cause
+}
+
+// resolvePostExitForeground resolves one APK-named native export. It
+// is kept separate from session construction so the unavailable case stays
+// testable and cannot silently subscribe a consumer that has nowhere honest
+// to send the event.
+func resolvePostExitForeground(lookup func(string) (uintptr, error)) (uintptr, error) {
+	if lookup == nil {
+		return 0, &postExitForegroundUnavailableError{
+			Symbol: postExitForegroundSym,
+			Cause:  errors.New("module lookup is unavailable"),
+		}
+	}
+	fn, err := lookup(postExitForegroundSym)
+	if err != nil {
+		return 0, &postExitForegroundUnavailableError{Symbol: postExitForegroundSym, Cause: err}
+	}
+	if fn == 0 {
+		return 0, &postExitForegroundUnavailableError{
+			Symbol: postExitForegroundSym,
+			Cause:  errors.New("export resolved to address zero"),
+		}
+	}
+	return fn, nil
+}
+
+// postExitGameRestorationUnavailableError is the typed, fail-closed
+// diagnostic for a client missing the named ExperienceSession cleanup export.
+type postExitGameRestorationUnavailableError struct {
+	Symbol string
+	Cause  error
+}
+
+func (e *postExitGameRestorationUnavailableError) Error() string {
+	if e == nil {
+		return "post-exit game restoration export unavailable"
+	}
+	if e.Cause == nil {
+		return fmt.Sprintf("post-exit game restoration export unavailable: %s", e.Symbol)
+	}
+	return fmt.Sprintf("post-exit game restoration export unavailable: %s: %v", e.Symbol, e.Cause)
+}
+
+func (e *postExitGameRestorationUnavailableError) Unwrap() error {
+	if e == nil {
+		return nil
+	}
+	return e.Cause
+}
+
+func resolvePostExitLeaveGame(lookup func(string) (uintptr, error)) (uintptr, error) {
+	if lookup == nil {
+		return 0, &postExitGameRestorationUnavailableError{
+			Symbol: postExitLeaveGameSym,
+			Cause:  errors.New("module lookup is unavailable"),
+		}
+	}
+	fn, err := lookup(postExitLeaveGameSym)
+	if err != nil {
+		return 0, &postExitGameRestorationUnavailableError{Symbol: postExitLeaveGameSym, Cause: err}
+	}
+	if fn == 0 {
+		return 0, &postExitGameRestorationUnavailableError{
+			Symbol: postExitLeaveGameSym,
+			Cause:  errors.New("export resolved to address zero"),
+		}
+	}
+	return fn, nil
+}
+
+type postExitAppState uint8
+
+const (
+	postExitAppIdle postExitAppState = iota
+	postExitAppStarted
+	postExitAppLoadedExperience
+	postExitAppStopped
+)
+
+// postExitAppResume owns one GameActivity session's observed lifecycle
+// state. A non-zero onGameLoaded is the engine's direct statement that an
+// experience DataModel loaded, so the matching later onGameLoaded(0) is a
+// sufficient return-to-Home sequence even on APK paths that do not emit the
+// optional NativeHelper start/stop callbacks. The explicit start -> stop ->
+// Home sequence remains accepted when those callbacks are present. Startup
+// Home, Lua notifications, and incomplete sequences remain no-ops. A later
+// real start or non-zero load rearms an independent experience.
+type postExitAppResume struct {
+	mu             sync.Mutex
+	state          postExitAppState
+	closed         bool
+	resumeInFlight bool
+	leaveConsumed  bool
+	leavePending   bool
+	inflight       sync.WaitGroup
+	invokeResume   func(appForegroundEvent)
+	invokeLeave    func()
+}
+
+func newPostExitAppResume(invokeResume func(appForegroundEvent), invokeLeave func()) *postExitAppResume {
+	return &postExitAppResume{invokeResume: invokeResume, invokeLeave: invokeLeave}
+}
+
+func (r *postExitAppResume) observe(event jni.NativeHelperLifecycleEvent) {
+	if r == nil {
+		return
+	}
+	r.mu.Lock()
+	if r.closed {
+		r.mu.Unlock()
+		return
+	}
+	var invoke func(appForegroundEvent)
+	eventName := "unknown"
+	idClass := "none"
+	gate := "ignored"
+	action := "none"
+	switch event.Kind {
+	case jni.NativeHelperExperienceStarted:
+		eventName = "experience_start"
+		r.state = postExitAppStarted
+		r.leaveConsumed = false
+		gate = "armed"
+	case jni.NativeHelperExperienceStopped:
+		eventName = "experience_stop"
+		if r.state == postExitAppStarted || r.state == postExitAppLoadedExperience {
+			r.state = postExitAppStopped
+			gate = "awaiting_home"
+		} else {
+			// A second stop (or a stop without a session start) is not the
+			// required ordered pair. Clear any stale state rather than
+			// allowing a following Home notification to complete it.
+			r.state = postExitAppIdle
+			gate = "disarmed"
+		}
+	case jni.NativeHelperGameLoadedEvent:
+		eventName = "game_loaded"
+		idClass = "nonzero"
+		if event.PlaceID != 0 {
+			// Live 2.734.917 does not announce NativeHelper start/stop on
+			// this join/exit path. Its non-zero DataModel load is the exact
+			// event-driven evidence needed to arm the later Home-zero return.
+			r.state = postExitAppLoadedExperience
+			r.leaveConsumed = false
+			gate = "armed"
+			break
+		}
+		idClass = "zero"
+		switch {
+		case r.state != postExitAppStopped && r.state != postExitAppLoadedExperience:
+			// A Home DataModel at launch, or any unordered callback, is not
+			// evidence of a completed experience.
+		case r.invokeResume == nil:
+			gate = "unavailable"
+		default:
+			// Consume before invoking so duplicate Home notifications cannot
+			// issue duplicate foreground events.
+			r.state = postExitAppIdle
+			invoke = r.invokeResume
+			r.resumeInFlight = true
+			r.inflight.Add(1)
+			gate = "consumed"
+			action = "resume_app"
+		}
+	case jni.NativeHelperLuaAppDidReturn:
+		eventName = "lua_return"
+		// The APK uses this callback for Android orientation restoration.
+		// It is observed but is neither an ordering substitute nor a route.
+	}
+	r.mu.Unlock()
+	// This bounded trace contains fixed lifecycle classes only. In
+	// particular, it never records the engine duration or a place identifier.
+	logging.Logger(logging.CatGameActivity).Info("post-exit app lifecycle",
+		"event", eventName, "id_class", idClass, "gate", gate, "action", action)
+	if invoke == nil {
+		return
+	}
+	invoke(postExitForegroundEvent)
+	r.mu.Lock()
+	r.resumeInFlight = false
+	var invokeLeave func()
+	if !r.closed && r.leavePending && r.invokeLeave != nil {
+		r.leavePending = false
+		invokeLeave = r.invokeLeave
+	}
+	r.mu.Unlock()
+	// The current APK does not call LeaveGame re-entrantly from the
+	// gameDidLeave wrapper. ExperienceSession.D(false) queues h0.j's runnable,
+	// which reaches h0.t only after the native call that emitted gameDidLeave
+	// has returned. Flush at that same safe boundary while retaining this
+	// route's existing in-flight teardown ownership.
+	if invokeLeave != nil {
+		logging.Logger(logging.CatGameActivity).Info("post-exit game session restoration",
+			"operation", "leave_game", "gate", "flushed")
+		invokeLeave()
+	}
+	r.inflight.Done()
+}
+
+// gameDidLeave synchronously consumes the callback and defers the one
+// engine-facing operation from ExperienceSession.D(false) until the outer
+// foreground native has returned. Consumption precedes the later call so
+// native re-entry cannot recurse. It never emits a destination request.
+func (r *postExitAppResume) gameDidLeave() {
+	if r == nil {
+		return
+	}
+	r.mu.Lock()
+	active := r.state == postExitAppStarted ||
+		r.state == postExitAppLoadedExperience ||
+		r.state == postExitAppStopped ||
+		r.resumeInFlight
+	if r.closed || r.invokeLeave == nil || r.leaveConsumed || !active {
+		r.mu.Unlock()
+		return
+	}
+	r.leaveConsumed = true
+	r.leavePending = true
+	r.mu.Unlock()
+
+	logging.Logger(logging.CatGameActivity).Info("post-exit game session restoration",
+		"operation", "leave_game", "gate", "deferred")
+}
+
+// close blocks until an already-dispatched route call has returned. Combined
+// with unsubscribing first, this prevents a dispatcher snapshot from calling
+// an unloaded client module during GameActivity teardown.
+func (r *postExitAppResume) close() {
+	if r == nil {
+		return
+	}
+	r.mu.Lock()
+	r.closed = true
+	r.leavePending = false
+	r.invokeResume = nil
+	r.invokeLeave = nil
+	r.mu.Unlock()
+	r.inflight.Wait()
+}
+
+// bindPostExitAppObservers owns both subscriptions and the shared in-flight
+// barrier. Cancellation happens before close waits, preventing new dispatcher
+// snapshots while allowing already-copied callbacks to finish safely.
+func bindPostExitAppObservers(
+	route *postExitAppResume,
+	subscribeLifecycle func(jni.NativeHelperLifecycleListener) func(),
+	subscribeLeave func(jni.NativeGLGameDidLeaveListener) func(),
+) func() {
+	if route == nil || subscribeLifecycle == nil || subscribeLeave == nil {
+		if route == nil {
+			return func() {}
+		}
+		return route.close
+	}
+	unsubLifecycle := subscribeLifecycle(route.observe)
+	unsubLeave := subscribeLeave(route.gameDidLeave)
+	var once sync.Once
+	return func() {
+		once.Do(func() {
+			unsubLeave()
+			unsubLifecycle()
+			route.close()
+		})
+	}
+}
+
+// subscribePostExitAppResume ties the exact lifecycle consumer to this
+// GameActivity session. Missing module exports are recorded as a typed
+// capability failure and leave navigation untouched.
+func subscribePostExitAppResume(mod *loader.Module, env *jni.Env, gl uintptr) func() {
+	fn, err := resolvePostExitForeground(func(sym string) (uintptr, error) {
+		if mod == nil {
+			return 0, errors.New("module is unavailable")
+		}
+		return mod.Lookup(sym)
+	})
+	if err != nil {
+		logging.Logger(logging.CatGameActivity).Error("post-exit app foreground unavailable",
+			"diagnostic", "app_foreground_export_unavailable", "sym", postExitForegroundSym, "err", err)
+		return func() {}
+	}
+	leaveFn, err := resolvePostExitLeaveGame(func(sym string) (uintptr, error) {
+		if mod == nil {
+			return 0, errors.New("module is unavailable")
+		}
+		return mod.Lookup(sym)
+	})
+	if err != nil {
+		logging.Logger(logging.CatGameActivity).Error("post-exit game restoration unavailable",
+			"diagnostic", "leave_game_export_unavailable", "sym", postExitLeaveGameSym, "err", err)
+		return func() {}
+	}
+	if env == nil || gl == 0 {
+		logging.Logger(logging.CatGameActivity).Error("post-exit app foreground unavailable",
+			"diagnostic", "app_foreground_target_unavailable", "sym", postExitForegroundSym)
+		return func() {}
+	}
+	route := newPostExitAppResume(func(event appForegroundEvent) {
+		loader.CallP8(fn, env.Raw(), gl,
+			env.NewStringUTF(event.Protocol), env.NewStringUTF(event.Payload), env.NewStringUTF(event.Topic),
+			0, 0, 0)
+		logging.Logger(logging.CatGameActivity).Info("post-exit app foreground requested",
+			"protocol", event.Protocol, "topic", event.Topic)
+	}, func() {
+		loader.CallP8(leaveFn, env.Raw(), gl, 0, 0, 0, 0, 0, 0)
+		logging.Logger(logging.CatGameActivity).Info("post-exit game session restored",
+			"operation", "leave_game")
+	})
+	return bindPostExitAppObservers(route, jni.SubscribeNativeHelperLifecycle, jni.SubscribeNativeGLGameDidLeave)
+}
+
 // shutdown follows the official GameActivity Java lifecycle already declared
 // by this APK: focus loss, pause, surface destruction, stop, then
 // terminateNativeCode. The final call posts APP_CMD_DESTROY and joins the
@@ -115,10 +473,19 @@ const (
 // prevents a context cancellation racing a WM close from double-destroying
 // the native handle.
 func (s *gameActivitySession) shutdown(reason string) time.Duration {
-	if s == nil || s.call == nil {
+	if s == nil {
 		return 0
 	}
 	s.shutdownOnce.Do(func() {
+		// Remove the session-owned NativeHelper observer before teardown. Its
+		// close waits for a copied dispatcher callback already in flight, so
+		// no post-exit foreground call can cross module unmap.
+		if s.closeLifecycle != nil {
+			s.closeLifecycle()
+		}
+		if s.call == nil {
+			return
+		}
 		started := time.Now()
 		logging.Logger(logging.CatGameActivity).Info("graceful shutdown started", "reason", reason)
 		// Park the evdev pad pump with the session it feeds: after
@@ -421,6 +788,7 @@ func dispatchGameActivityLifecycle(ctx context.Context, vm *jni.VM, mod *loader.
 	if gl == 0 {
 		gl = activity
 	}
+	closeLifecycle := subscribePostExitAppResume(mod, env, gl)
 	callRobloxJNI(mod, env.Raw(), gl, "Java_com_roblox_engine_jni_NativeGLInterface_nativeAppBridgeV2InitWithParams", initParams)
 	startParams := makeStartAppParams(env, activity, platform, surface, req)
 	callRobloxJNI(mod, env.Raw(), gl, "Java_com_roblox_engine_jni_NativeGLInterface_nativeAppBridgeV2StartAppWithParams", startParams)
@@ -445,6 +813,7 @@ func dispatchGameActivityLifecycle(ctx context.Context, vm *jni.VM, mod *loader.
 	}
 	return &gameActivitySession{
 		call:             call,
+		closeLifecycle:   closeLifecycle,
 		forceExit:        os.Exit,
 		shutdownDeadline: gracefulShutdownDeadline,
 		resize: &surfaceResize{

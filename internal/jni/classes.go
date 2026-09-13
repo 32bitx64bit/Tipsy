@@ -308,6 +308,13 @@ var implementedMethods = map[string]bool{
 	"addBoolean(Ljava/lang/String;ZZ)V": true,
 	"gameActivity_onFlagsFailed()V":     true,
 	"gameActivity_onFlagsLoaded()V":     true,
+	// NativeGLJavaInterface.gameDidLeave()V is the engine-to-Java exit
+	// callback. The active APK forwards it synchronously to the currently
+	// installed ExperienceSession exit implementation, which finishes the
+	// experience session before marking it ended successfully. Tipsy exposes
+	// that exact signal to the GameActivity owner; JNI does not guess a route
+	// or perform host UI work itself.
+	"gameDidLeave()V": true,
 	// NativeHelper.gameActivity_onAppReady(String): the engine's Java-side
 	// readiness announcement (GetMethodID'd every ~30 s in launch logs;
 	// official traces show step-name payloads like "Startup"/"Landing").
@@ -325,9 +332,17 @@ var implementedMethods = map[string]bool{
 	// announcement, CALLED once per launch at startup in the
 	// experience-lifecycle batch (launch logs: same second as
 	// NativeGLJavaInterface.gameLoadedCallback(J)V with handle=0).
-	// Received and recorded in nativehelper.go — never fabricated, never
-	// acted on.
+	// Received and recorded in nativehelper.go — never fabricated. It also
+	// fans out to independent lifecycle subscribers so it does not displace
+	// Discord presence.
 	"gameActivity_onGameLoaded(J)V": true,
+	// NativeHelper's APK-declared paired experience callbacks. The DEX
+	// implementation posts Android UI-session work and restores default
+	// orientation; Tipsy receives and fans out the exact callbacks so the
+	// GameActivity owner can use a named route rather than a timer or click.
+	"gameActivity_onExperienceStart()V": true,
+	"gameActivity_onExperienceStop(D)V": true,
+	"gameActivity_onLuaAppDidReturn()V": true,
 	// NativeHelper.gameActivity_onDidLogInReceived(String): official
 	// DID_LOG_IN JSON for NativeUserJavaInterface getters. Parsed in
 	// nativeuser.go — never logged (no names, ids, or raw JSON).

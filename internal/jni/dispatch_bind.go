@@ -38,6 +38,7 @@ var dispatchFamilies = []familyFn{
 		_ = o
 		return vm.dispatchInsets(class, name, sig, args)
 	},
+	(*VM).dispatchNativeGLJavaInterface,
 	(*VM).dispatchNativeHelper,
 	(*VM).dispatchNativeUser,
 	(*VM).dispatchAuthCookies,

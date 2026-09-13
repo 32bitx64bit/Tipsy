@@ -6,9 +6,11 @@
 package runtime
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"math"
 	"os"
 	"path/filepath"
@@ -562,6 +564,433 @@ func TestSurfaceUpdateExportName(t *testing.T) {
 	}
 }
 
+func TestPostExitForegroundExportAndExactEvent(t *testing.T) {
+	const wantSym = "Java_com_roblox_engine_jni_NativeGLInterface_nativeAppBridgeV2SendAppEventOnGameLoaded"
+	if postExitForegroundSym != wantSym {
+		t.Fatalf("postExitForegroundSym=%q want %q", postExitForegroundSym, wantSym)
+	}
+	if got, want := postExitForegroundEvent, (appForegroundEvent{
+		Protocol: "AppInput",
+		Payload:  "",
+		Topic:    "Focused",
+	}); got != want {
+		t.Fatalf("post-exit foreground event = %+v, want %+v", got, want)
+	}
+	const wantLeaveSym = "Java_com_roblox_engine_jni_NativeGLInterface_nativeAppBridgeV2LeaveGame"
+	if postExitLeaveGameSym != wantLeaveSym {
+		t.Fatalf("postExitLeaveGameSym=%q want %q", postExitLeaveGameSym, wantLeaveSym)
+	}
+}
+
+func TestResolvePostExitForegroundFailsClosed(t *testing.T) {
+	lookupErr := errors.New("not exported by fixture")
+	for _, tc := range []struct {
+		name   string
+		lookup func(string) (uintptr, error)
+	}{
+		{name: "nil lookup"},
+		{name: "lookup error", lookup: func(string) (uintptr, error) { return 0, lookupErr }},
+		{name: "zero address", lookup: func(string) (uintptr, error) { return 0, nil }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := resolvePostExitForeground(tc.lookup)
+			var unavailable *postExitForegroundUnavailableError
+			if !errors.As(err, &unavailable) {
+				t.Fatalf("error = %v, want typed unavailable diagnostic", err)
+			}
+			if unavailable.Symbol != postExitForegroundSym {
+				t.Fatalf("missing symbol = %q, want %q", unavailable.Symbol, postExitForegroundSym)
+			}
+		})
+	}
+	fn, err := resolvePostExitForeground(func(sym string) (uintptr, error) {
+		if sym != postExitForegroundSym {
+			t.Fatalf("lookup symbol = %q, want %q", sym, postExitForegroundSym)
+		}
+		return 0x1234, nil
+	})
+	if err != nil || fn != 0x1234 {
+		t.Fatalf("resolved foreground foreground = (%#x, %v), want (0x1234, nil)", fn, err)
+	}
+}
+
+func TestResolvePostExitLeaveGameFailsClosed(t *testing.T) {
+	lookupErr := errors.New("not exported by fixture")
+	for _, tc := range []struct {
+		name   string
+		lookup func(string) (uintptr, error)
+	}{
+		{name: "nil lookup"},
+		{name: "lookup error", lookup: func(string) (uintptr, error) { return 0, lookupErr }},
+		{name: "zero address", lookup: func(string) (uintptr, error) { return 0, nil }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := resolvePostExitLeaveGame(tc.lookup)
+			var unavailable *postExitGameRestorationUnavailableError
+			if !errors.As(err, &unavailable) {
+				t.Fatalf("error = %v, want typed unavailable diagnostic", err)
+			}
+			if unavailable.Symbol != postExitLeaveGameSym {
+				t.Fatalf("missing symbol = %q, want %q", unavailable.Symbol, postExitLeaveGameSym)
+			}
+		})
+	}
+	fn, err := resolvePostExitLeaveGame(func(sym string) (uintptr, error) {
+		if sym != postExitLeaveGameSym {
+			t.Fatalf("lookup symbol = %q, want %q", sym, postExitLeaveGameSym)
+		}
+		return 0x5678, nil
+	})
+	if err != nil || fn != 0x5678 {
+		t.Fatalf("resolved leave-game restoration = (%#x, %v), want (0x5678, nil)", fn, err)
+	}
+}
+
+func TestPostExitAppResumeRequiresOrderedSequenceAndIsOneShot(t *testing.T) {
+	var got []appForegroundEvent
+	route := newPostExitAppResume(func(event appForegroundEvent) {
+		got = append(got, event)
+	}, nil)
+	emit := func(kind jni.NativeHelperLifecycleKind, placeID int64) {
+		route.observe(jni.NativeHelperLifecycleEvent{Kind: kind, PlaceID: placeID})
+	}
+
+	// Startup Home, a stop without a matching start, and a Home load before
+	// stop must never manufacture a route.
+	emit(jni.NativeHelperGameLoadedEvent, 0)
+	emit(jni.NativeHelperExperienceStopped, 0)
+	emit(jni.NativeHelperExperienceStarted, 0)
+	emit(jni.NativeHelperGameLoadedEvent, 0)
+	if len(got) != 0 {
+		t.Fatalf("unordered lifecycle requested foreground %#v", got)
+	}
+
+	// The current live APK path emits no start/stop/Lua callbacks. Its exact
+	// engine sequence is a non-zero experience DataModel followed by Home
+	// zero; that sequence must request foreground once.
+	emit(jni.NativeHelperGameLoadedEvent, 123)
+	emit(jni.NativeHelperGameLoadedEvent, 0)
+	emit(jni.NativeHelperGameLoadedEvent, 0)
+	if gotWant := []appForegroundEvent{postExitForegroundEvent}; !reflect.DeepEqual(got, gotWant) {
+		t.Fatalf("live nonzero-to-zero foreground events = %#v, want %#v", got, gotWant)
+	}
+	// The pair is strict: a duplicate stop disarms rather than treating a
+	// later Home load as the original experience's return.
+	emit(jni.NativeHelperExperienceStarted, 0)
+	emit(jni.NativeHelperExperienceStopped, 0)
+	emit(jni.NativeHelperExperienceStopped, 0)
+	emit(jni.NativeHelperGameLoadedEvent, 0)
+	if len(got) != 1 {
+		t.Fatalf("duplicate stop left a post-exit route armed %#v", got)
+	}
+
+	// Lua return is observable but is not an ordering prerequisite. The
+	// verified start -> stop -> Home(0) transition produces exactly one
+	// foreground event, and duplicate Home callbacks cannot repeat it.
+	emit(jni.NativeHelperExperienceStarted, 0)
+	emit(jni.NativeHelperLuaAppDidReturn, 0)
+	emit(jni.NativeHelperExperienceStopped, 0)
+	emit(jni.NativeHelperGameLoadedEvent, 0)
+	emit(jni.NativeHelperGameLoadedEvent, 0)
+	if gotWant := []appForegroundEvent{postExitForegroundEvent, postExitForegroundEvent}; !reflect.DeepEqual(got, gotWant) {
+		t.Fatalf("first post-exit foreground events = %#v, want %#v", got, gotWant)
+	}
+
+	// A subsequent real non-zero load is independently armed and fires once.
+	emit(jni.NativeHelperGameLoadedEvent, 456)
+	emit(jni.NativeHelperGameLoadedEvent, 0)
+	if gotWant := []appForegroundEvent{postExitForegroundEvent, postExitForegroundEvent, postExitForegroundEvent}; !reflect.DeepEqual(got, gotWant) {
+		t.Fatalf("rearmed post-exit foreground events = %#v, want %#v", got, gotWant)
+	}
+}
+
+func TestPostExitAppResumeMixedLifecycleUsesLoadedExperience(t *testing.T) {
+	var got []appForegroundEvent
+	route := newPostExitAppResume(func(event appForegroundEvent) {
+		got = append(got, event)
+	}, nil)
+	for _, event := range []jni.NativeHelperLifecycleEvent{
+		{Kind: jni.NativeHelperExperienceStarted},
+		{Kind: jni.NativeHelperGameLoadedEvent, PlaceID: 99},
+		{Kind: jni.NativeHelperExperienceStopped},
+		{Kind: jni.NativeHelperLuaAppDidReturn},
+		{Kind: jni.NativeHelperGameLoadedEvent, PlaceID: 0},
+	} {
+		route.observe(event)
+	}
+	if gotWant := []appForegroundEvent{postExitForegroundEvent}; !reflect.DeepEqual(got, gotWant) {
+		t.Fatalf("mixed lifecycle foreground events = %#v, want %#v", got, gotWant)
+	}
+}
+
+func TestPostExitAppResumePreservesDestinationAndDoesNotInventLeave(t *testing.T) {
+	var got []appForegroundEvent
+	leaves := 0
+	resume := newPostExitAppResume(func(event appForegroundEvent) {
+		got = append(got, event)
+	}, func() { leaves++ })
+	resume.observe(jni.NativeHelperLifecycleEvent{Kind: jni.NativeHelperGameLoadedEvent, PlaceID: 10})
+	resume.observe(jni.NativeHelperLifecycleEvent{Kind: jni.NativeHelperGameLoadedEvent, PlaceID: 0})
+	resume.observe(jni.NativeHelperLifecycleEvent{Kind: jni.NativeHelperGameLoadedEvent, PlaceID: 0})
+	// Current APK xk/a -> xk/c -> fi/e.z passes protocol, payload, topic.
+	// A foreground event has no Navigations/Destination or place payload.
+	want := []appForegroundEvent{{Protocol: "AppInput", Payload: "", Topic: "Focused"}}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("post-exit events = %+v, want only %+v", got, want)
+	}
+	if leaves != 0 {
+		t.Fatalf("invoked LeaveGame %d times without gameDidLeave callback", leaves)
+	}
+}
+
+func TestPostExitAppLifecycleTraceClassifiesIDsAndGate(t *testing.T) {
+	var out bytes.Buffer
+	old := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&out, nil)))
+	t.Cleanup(func() { slog.SetDefault(old) })
+
+	route := newPostExitAppResume(func(appForegroundEvent) {}, nil)
+	route.observe(jni.NativeHelperLifecycleEvent{
+		Kind:    jni.NativeHelperGameLoadedEvent,
+		PlaceID: 8675309,
+	})
+	route.observe(jni.NativeHelperLifecycleEvent{
+		Kind:    jni.NativeHelperGameLoadedEvent,
+		PlaceID: 0,
+	})
+	logText := out.String()
+	for _, want := range []string{
+		"event=game_loaded id_class=nonzero gate=armed action=none",
+		"event=game_loaded id_class=zero gate=consumed action=resume_app",
+	} {
+		if !strings.Contains(logText, want) {
+			t.Fatalf("lifecycle trace missing %q: %s", want, logText)
+		}
+	}
+	if strings.Contains(logText, "8675309") {
+		t.Fatalf("lifecycle trace exposed a place identifier: %s", logText)
+	}
+}
+
+func TestPostExitAppResumeCloseSuppressesLateCallbacks(t *testing.T) {
+	var calls atomic.Int64
+	route := newPostExitAppResume(func(appForegroundEvent) { calls.Add(1) }, func() { calls.Add(1) })
+	route.close()
+	for _, event := range []jni.NativeHelperLifecycleEvent{
+		{Kind: jni.NativeHelperExperienceStarted},
+		{Kind: jni.NativeHelperExperienceStopped},
+		{Kind: jni.NativeHelperGameLoadedEvent, PlaceID: 0},
+	} {
+		route.observe(event)
+	}
+	route.gameDidLeave()
+	if calls.Load() != 0 {
+		t.Fatalf("closed route invoked %d times", calls.Load())
+	}
+}
+
+func TestPostExitAppResumeCloseWaitsForInFlightForeground(t *testing.T) {
+	entered := make(chan struct{})
+	release := make(chan struct{})
+	returned := make(chan struct{})
+	route := newPostExitAppResume(func(appForegroundEvent) {
+		close(entered)
+		<-release
+	}, nil)
+	route.observe(jni.NativeHelperLifecycleEvent{Kind: jni.NativeHelperExperienceStarted})
+	route.observe(jni.NativeHelperLifecycleEvent{Kind: jni.NativeHelperExperienceStopped})
+	go func() {
+		route.observe(jni.NativeHelperLifecycleEvent{Kind: jni.NativeHelperGameLoadedEvent, PlaceID: 0})
+		close(returned)
+	}()
+	<-entered
+	closed := make(chan struct{})
+	go func() {
+		route.close()
+		close(closed)
+	}()
+	select {
+	case <-closed:
+		t.Fatal("route close returned while a foreground call was in flight")
+	case <-time.After(20 * time.Millisecond):
+	}
+	close(release)
+	select {
+	case <-returned:
+	case <-time.After(500 * time.Millisecond):
+		t.Fatal("foreground callback did not return")
+	}
+	select {
+	case <-closed:
+	case <-time.After(500 * time.Millisecond):
+		t.Fatal("route close did not wait for then release in-flight foreground")
+	}
+}
+
+func TestPostExitGameDidLeaveConsumesSynchronouslyFlushesAfterRouteAndIsNonRecursive(t *testing.T) {
+	var events []string
+	var route *postExitAppResume
+	route = newPostExitAppResume(func(appForegroundEvent) {
+		events = append(events, "route-enter")
+		route.gameDidLeave()
+		events = append(events, "route-return")
+	}, func() {
+		events = append(events, "leave-game")
+		// The native export may re-enter the exact Java callback. Consumption
+		// before invocation must make that recursion a no-op.
+		route.gameDidLeave()
+	})
+	route.observe(jni.NativeHelperLifecycleEvent{Kind: jni.NativeHelperGameLoadedEvent, PlaceID: 10})
+	route.observe(jni.NativeHelperLifecycleEvent{Kind: jni.NativeHelperGameLoadedEvent, PlaceID: 0})
+	route.gameDidLeave()
+	if want := []string{"route-enter", "route-return", "leave-game"}; !reflect.DeepEqual(events, want) {
+		t.Fatalf("deferred restoration order = %v, want %v", events, want)
+	}
+
+	// A new real experience rearms both the route and its leave cleanup.
+	route.observe(jni.NativeHelperLifecycleEvent{Kind: jni.NativeHelperGameLoadedEvent, PlaceID: 20})
+	route.gameDidLeave()
+	route.observe(jni.NativeHelperLifecycleEvent{Kind: jni.NativeHelperGameLoadedEvent, PlaceID: 0})
+	if want := []string{"route-enter", "route-return", "leave-game", "route-enter", "route-return", "leave-game"}; !reflect.DeepEqual(events, want) {
+		t.Fatalf("rearmed restoration order = %v, want %v", events, want)
+	}
+}
+
+func TestPostExitGameDidLeaveCloseWaitsForInFlightRestoration(t *testing.T) {
+	entered := make(chan struct{})
+	release := make(chan struct{})
+	returned := make(chan struct{})
+	var route *postExitAppResume
+	route = newPostExitAppResume(func(appForegroundEvent) {
+		route.gameDidLeave()
+	}, func() {
+		close(entered)
+		<-release
+	})
+	route.observe(jni.NativeHelperLifecycleEvent{Kind: jni.NativeHelperGameLoadedEvent, PlaceID: 1})
+	go func() {
+		route.observe(jni.NativeHelperLifecycleEvent{Kind: jni.NativeHelperGameLoadedEvent, PlaceID: 0})
+		close(returned)
+	}()
+	<-entered
+	closed := make(chan struct{})
+	go func() {
+		route.close()
+		close(closed)
+	}()
+	select {
+	case <-closed:
+		t.Fatal("route close returned while leave-game restoration was in flight")
+	case <-time.After(20 * time.Millisecond):
+	}
+	close(release)
+	select {
+	case <-returned:
+	case <-time.After(500 * time.Millisecond):
+		t.Fatal("leave-game restoration did not return")
+	}
+	select {
+	case <-closed:
+	case <-time.After(500 * time.Millisecond):
+		t.Fatal("route close did not wait for in-flight leave-game restoration")
+	}
+}
+
+func TestBindPostExitAppObserversRegistersAndRemovesBothSources(t *testing.T) {
+	var events []string
+	var lifecycle jni.NativeHelperLifecycleListener
+	var leave jni.NativeGLGameDidLeaveListener
+	var calls atomic.Int64
+	route := newPostExitAppResume(func(appForegroundEvent) { calls.Add(1) }, func() { calls.Add(1) })
+	closeObservers := bindPostExitAppObservers(route,
+		func(fn jni.NativeHelperLifecycleListener) func() {
+			events = append(events, "subscribe-lifecycle")
+			lifecycle = fn
+			return func() { events = append(events, "unsubscribe-lifecycle") }
+		},
+		func(fn jni.NativeGLGameDidLeaveListener) func() {
+			events = append(events, "subscribe-leave")
+			leave = fn
+			return func() { events = append(events, "unsubscribe-leave") }
+		})
+	if lifecycle == nil || leave == nil {
+		t.Fatal("both session observers must be registered")
+	}
+	lifecycle(jni.NativeHelperLifecycleEvent{Kind: jni.NativeHelperGameLoadedEvent, PlaceID: 1})
+	leave()
+	if calls.Load() != 0 {
+		t.Fatalf("leave callback invoked %d operations before the foreground returned", calls.Load())
+	}
+	lifecycle(jni.NativeHelperLifecycleEvent{Kind: jni.NativeHelperGameLoadedEvent, PlaceID: 0})
+	if calls.Load() != 2 {
+		t.Fatalf("active observers invoked %d operations, want route then leave-game", calls.Load())
+	}
+	closeObservers()
+	closeObservers()
+	if want := []string{"subscribe-lifecycle", "subscribe-leave", "unsubscribe-leave", "unsubscribe-lifecycle"}; !reflect.DeepEqual(events, want) {
+		t.Fatalf("observer lifetime order = %v, want %v", events, want)
+	}
+	// Dispatcher snapshots copied before cancellation remain harmless because
+	// the session owner closes the shared controller before module teardown.
+	lifecycle(jni.NativeHelperLifecycleEvent{Kind: jni.NativeHelperGameLoadedEvent, PlaceID: 2})
+	leave()
+	if calls.Load() != 2 {
+		t.Fatalf("stale observer snapshots invoked %d operations after close", calls.Load())
+	}
+}
+
+func TestBindPostExitAppObserversUnsubscribesBeforeInflightWait(t *testing.T) {
+	entered := make(chan struct{})
+	release := make(chan struct{})
+	unsubscribedLeave := make(chan struct{})
+	unsubscribedLifecycle := make(chan struct{})
+	var lifecycle jni.NativeHelperLifecycleListener
+	var leave jni.NativeGLGameDidLeaveListener
+	route := newPostExitAppResume(func(appForegroundEvent) {}, func() {
+		close(entered)
+		<-release
+	})
+	closeObservers := bindPostExitAppObservers(route,
+		func(fn jni.NativeHelperLifecycleListener) func() {
+			lifecycle = fn
+			return func() { close(unsubscribedLifecycle) }
+		},
+		func(fn jni.NativeGLGameDidLeaveListener) func() {
+			leave = fn
+			return func() { close(unsubscribedLeave) }
+		})
+	lifecycle(jni.NativeHelperLifecycleEvent{Kind: jni.NativeHelperGameLoadedEvent, PlaceID: 1})
+	leave()
+	go lifecycle(jni.NativeHelperLifecycleEvent{Kind: jni.NativeHelperGameLoadedEvent, PlaceID: 0})
+	<-entered
+	closed := make(chan struct{})
+	go func() {
+		closeObservers()
+		close(closed)
+	}()
+	for name, ch := range map[string]<-chan struct{}{
+		"leave":     unsubscribedLeave,
+		"lifecycle": unsubscribedLifecycle,
+	} {
+		select {
+		case <-ch:
+		case <-time.After(500 * time.Millisecond):
+			t.Fatalf("%s observer was not removed before the in-flight wait", name)
+		}
+	}
+	select {
+	case <-closed:
+		t.Fatal("observer teardown returned while leave-game restoration was in flight")
+	case <-time.After(20 * time.Millisecond):
+	}
+	close(release)
+	select {
+	case <-closed:
+	case <-time.After(500 * time.Millisecond):
+		t.Fatal("observer teardown did not finish after in-flight restoration returned")
+	}
+}
+
 func TestDirectKeyExportName(t *testing.T) {
 	const want = "Java_com_roblox_engine_jni_NativeGLInterface_nativePassKeyEvent"
 	if directKeyEventSym != want {
@@ -585,6 +1014,7 @@ func TestDirectMouseLockGetterExportName(t *testing.T) {
 
 func TestGameActivitySessionShutdownOrderAndOnce(t *testing.T) {
 	var calls []string
+	var lifecycleCloses atomic.Int64
 	s := &gameActivitySession{call: func(name, sig string, extra ...uintptr) {
 		calls = append(calls, name+sig)
 		if name == "onWindowFocusChangedNative" {
@@ -592,10 +1022,17 @@ func TestGameActivitySessionShutdownOrderAndOnce(t *testing.T) {
 				t.Fatalf("focus-loss args = %v, want [0]", extra)
 			}
 		}
+	}, closeLifecycle: func() {
+		lifecycleCloses.Add(1)
+		calls = append(calls, "closeLifecycle")
 	}}
 	s.shutdown("test-wm-close")
 	s.shutdown("test-second-close")
+	if lifecycleCloses.Load() != 1 {
+		t.Fatalf("lifecycle close calls = %d, want 1", lifecycleCloses.Load())
+	}
 	want := []string{
+		"closeLifecycle",
 		"onWindowFocusChangedNative(JZ)V",
 		"onPauseNative(J)V",
 		"onSurfaceDestroyedNative(J)V",

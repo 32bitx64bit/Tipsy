@@ -14,6 +14,7 @@ import "C"
 import (
 	"sync"
 	"sync/atomic"
+	"unsafe"
 
 	"github.com/tipsy-linux/tipsy/internal/logging"
 )
@@ -94,8 +95,8 @@ func appReadyStepName(s string) string {
 // dispatchNativeHelper serves the observed NativeHelper engine→Java
 // callback contract. Only identities with local evidence are handled;
 // everything else falls through to the honest stub path. Login JSON is
-// forwarded to the NativeUser snapshot; AppReady/orientation/gameLoaded
-// behavior is otherwise unchanged.
+// forwarded to the NativeUser snapshot; lifecycle events are only recorded
+// and fanned out to explicit subscribers, never turned into a guessed route.
 func (vm *VM) dispatchNativeHelper(o *Object, class, name, sig string, args *C.jvalue) (C.jobject, bool) {
 	if class != nativeHelperClass {
 		return jnull(), false
@@ -119,6 +120,27 @@ func (vm *VM) dispatchNativeHelper(o *Object, class, name, sig string, args *C.j
 		orientationReceivedMu.Unlock()
 		logging.Logger(logging.CatJNI).Info("[jni] onScreenOrientationChanged",
 			"orientation", orient, "requestDefault", def)
+	case name == "gameActivity_onExperienceStart" && sig == "()V":
+		// DEX: this is the engine's paired experience-session start callback.
+		// The Android implementation also posts UI-session work; Tipsy's
+		// platform owner receives only this exact signal here.
+		logging.Logger(logging.CatJNI).Info("[jni] onExperienceStart")
+		noteNativeHelperLifecycle(NativeHelperLifecycleEvent{Kind: NativeHelperExperienceStarted})
+	case name == "gameActivity_onExperienceStop" && sig == "(D)V":
+		// The D argument is the engine-reported duration. It is carried
+		// through unchanged for the platform owner and intentionally not
+		// logged as session telemetry.
+		duration := jvalueD(args)
+		logging.Logger(logging.CatJNI).Info("[jni] onExperienceStop")
+		noteNativeHelperLifecycle(NativeHelperLifecycleEvent{
+			Kind: NativeHelperExperienceStopped, DurationSeconds: duration,
+		})
+	case name == "gameActivity_onLuaAppDidReturn" && sig == "()V":
+		// DEX only restores Android's default orientation. X11 has no
+		// equivalent orientation request, so expose the exact event without
+		// claiming that an orientation or a route was applied.
+		logging.Logger(logging.CatJNI).Info("[jni] onLuaAppDidReturn")
+		noteNativeHelperLifecycle(NativeHelperLifecycleEvent{Kind: NativeHelperLuaAppDidReturn})
 	case name == "gameActivity_onGameLoaded" && sig == "(J)V":
 		// The single J slot carries the loaded place id (0 = Home); a nil
 		// slot reads as 0, never a fabricated value.
@@ -132,6 +154,9 @@ func (vm *VM) dispatchNativeHelper(o *Object, class, name, sig string, args *C.j
 		gameLoadedMu.Unlock()
 		logging.Logger(logging.CatJNI).Info("[jni] onGameLoaded", "placeId", placeID)
 		noteGameLoadedPlaceID(placeID)
+		noteNativeHelperLifecycle(NativeHelperLifecycleEvent{
+			Kind: NativeHelperGameLoadedEvent, PlaceID: placeID,
+		})
 	case name == "gameActivity_onDidLogInReceived" && sig == "(Ljava/lang/String;)V":
 		// Official DID_LOG_IN JSON. The string is read once and parsed
 		// into the NativeUser snapshot; the payload is never logged.
@@ -143,6 +168,16 @@ func (vm *VM) dispatchNativeHelper(o *Object, class, name, sig string, args *C.j
 		return idToJobject(o.id), true
 	}
 	return jnull(), true
+}
+
+// jvalueD reads the D slot of the JNI union. A nil argument array is the
+// same zero slot behavior used by the existing integer receivers; it never
+// manufactures a duration.
+func jvalueD(v *C.jvalue) float64 {
+	if v == nil {
+		return 0
+	}
+	return float64(*(*C.jdouble)(unsafe.Pointer(v)))
 }
 
 // NativeHelperOrientationAnnouncements reports the
@@ -204,5 +239,13 @@ func testPackTwoInts(a, b int32) *C.jvalue {
 	sl := make([]C.jvalue, 2)
 	jvalueSetI(&sl[0], C.jint(a))
 	jvalueSetI(&sl[1], C.jint(b))
+	return &sl[0]
+}
+
+// packJdouble packs the exact D argument slot for NativeHelper lifecycle
+// tests. Test files cannot import C, so the cgo boundary stays here.
+func packJdouble(v float64) *C.jvalue {
+	sl := make([]C.jvalue, 1)
+	*(*C.jdouble)(unsafe.Pointer(&sl[0])) = C.jdouble(v)
 	return &sl[0]
 }
