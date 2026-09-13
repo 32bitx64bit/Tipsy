@@ -278,7 +278,7 @@ func TestMicrophoneCardBuildsBindsAndPersistsOffscreen(t *testing.T) {
 	if win.microphoneEnable == nil || win.microphoneStateNote == nil || win.microphoneStatusNote == nil || win.microphoneHint == nil {
 		t.Fatal("microphone card widgets are incomplete")
 	}
-	if win.microphoneEnable.Text() != microphoneConsentLabel {
+	if win.microphoneEnable.Text() != microphoneToggleText(true) {
 		t.Fatalf("label=%q", win.microphoneEnable.Text())
 	}
 	if !win.microphoneEnable.IsChecked() {
@@ -302,6 +302,9 @@ func TestMicrophoneCardBuildsBindsAndPersistsOffscreen(t *testing.T) {
 	qt.QCoreApplication_ProcessEvents()
 	if !strings.Contains(win.microphoneHint.Text(), "saved") {
 		t.Fatalf("save hint=%q", win.microphoneHint.Text())
+	}
+	if win.microphoneEnable.Text() != microphoneToggleText(false) {
+		t.Fatalf("microphone off text=%q", win.microphoneEnable.Text())
 	}
 	saved, err := loadMicrophoneSettings()
 	if err != nil {

@@ -163,6 +163,65 @@ func TestUpdateSerializesConcurrentWriters(t *testing.T) {
 	}
 }
 
+func TestUpdateJSONPreservesUnmodeledTopLevelFields(t *testing.T) {
+	tmp := t.TempDir()
+	t.Setenv("XDG_CONFIG_HOME", tmp)
+	p := Paths()
+	if err := os.MkdirAll(p.ConfigDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	initial := []byte(`{"future":{"keep":true},"gamepad":{"enabled":false},"microphone":{"enabled":false}}`)
+	if err := os.WriteFile(p.ConfigFile, initial, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := UpdateJSON(func(data []byte) ([]byte, error) {
+		var top map[string]json.RawMessage
+		if err := json.Unmarshal(data, &top); err != nil {
+			return nil, err
+		}
+		top["gamepad"] = json.RawMessage(`{"enabled":true}`)
+		return json.Marshal(top)
+	}); err != nil {
+		t.Fatal(err)
+	}
+	raw, err := os.ReadFile(p.ConfigFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var top map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &top); err != nil {
+		t.Fatal(err)
+	}
+	if string(top["future"]) != `{"keep":true}` {
+		t.Fatalf("unmodeled field was lost: %s", raw)
+	}
+	if string(top["gamepad"]) != `{"enabled":true}` || string(top["microphone"]) != `{"enabled":false}` {
+		t.Fatalf("section update clobbered a sibling: %s", raw)
+	}
+}
+
+func TestUpdateJSONRejectsNonObjectConfig(t *testing.T) {
+	tmp := t.TempDir()
+	t.Setenv("XDG_CONFIG_HOME", tmp)
+	p := Paths()
+	if err := os.MkdirAll(p.ConfigDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(p.ConfigFile, []byte(`null`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := UpdateJSON(func(data []byte) ([]byte, error) { return []byte(`{}`), nil }); err == nil {
+		t.Fatal("non-object config was replaced")
+	}
+	kept, err := os.ReadFile(p.ConfigFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(kept) != `null` {
+		t.Fatalf("non-object config changed: %s", kept)
+	}
+}
+
 func TestLoadMissingReturnsDefaults(t *testing.T) {
 	tmp := t.TempDir()
 	t.Setenv("XDG_CONFIG_HOME", tmp)

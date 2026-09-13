@@ -23,6 +23,13 @@ import (
 	guimodel "github.com/tipsy-linux/tipsy/internal/gui"
 )
 
+func controllerToggleText(enabled bool) string {
+	if enabled {
+		return "✓ Controller input enabled"
+	}
+	return "Controller input disabled"
+}
+
 func (w *mainWindow) buildControllerCard() *qt.QFrame {
 	card, cardLayout := newVerticalCard("card")
 	cardLayout.AddWidget(sectionLabel("Controller").QWidget)
@@ -32,7 +39,8 @@ func (w *mainWindow) buildControllerCard() *qt.QFrame {
 	setObjectName(intro.QObject, "mutedText")
 	cardLayout.AddWidget(intro.QWidget)
 
-	w.controllerEnable = qt.NewQCheckBox3("Enable controller input")
+	w.controllerEnable = qt.NewQCheckBox3(controllerToggleText(false))
+	setObjectName(w.controllerEnable.QObject, "inputToggle")
 	w.controllerEnable.SetAccessibleName("Enable controller input")
 	w.controllerEnable.SetAccessibleDescription("Default on. TIPSY_GAMEPAD=0 or off disables pads regardless of this setting.")
 	w.controllerEnable.SetToolTip("Default on. The TIPSY_GAMEPAD=0|off kill-switch disables pads regardless.")
@@ -122,6 +130,7 @@ func (w *mainWindow) bindControllerSettings(settings guimodel.ControllerSettings
 	defer func() { w.controllerSyncing = false }()
 	if w.controllerEnable != nil {
 		w.controllerEnable.SetChecked(settings.Enabled)
+		w.controllerEnable.SetText(controllerToggleText(settings.Enabled))
 	}
 	if w.controllerDeadL != nil {
 		w.controllerDeadL.SetValue(deadzoneSliderValue(settings.Deadzone))
@@ -168,6 +177,7 @@ func (w *mainWindow) persistControllerSettings() {
 		return
 	}
 	w.controllerSettings = settings
+	w.controllerEnable.SetText(controllerToggleText(settings.Enabled))
 	w.controllerHint.SetText("Controller settings saved.")
 	setObjectName(w.controllerHint.QObject, "noticeSuccess")
 	refreshStyle(w.controllerHint.QWidget)

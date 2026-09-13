@@ -143,6 +143,40 @@ func Update(fn func(*Config) error) error {
 	return saveLocked(c)
 }
 
+// UpdateJSON applies fn to the complete config JSON document while holding
+// the cross-process config lock. Unlike Update, it deliberately preserves
+// top-level fields that Config does not model yet. It is for owners of a
+// namespaced section (for example gamepad or microphone) that must update
+// that section without clobbering another Settings window's newer write.
+//
+// A missing document is supplied as nil. Existing documents must be
+// owner-private JSON objects; malformed, null, array, and scalar documents
+// are refused rather than being replaced with a partial settings file.
+func UpdateJSON(fn func([]byte) ([]byte, error)) error {
+	if fn == nil {
+		return errors.New("config JSON update function is nil")
+	}
+	release, err := acquireConfigLock()
+	if err != nil {
+		return err
+	}
+	defer release()
+
+	p := Paths()
+	data, err := readConfigJSONObject(p.ConfigFile)
+	if err != nil {
+		return err
+	}
+	updated, err := fn(append([]byte(nil), data...))
+	if err != nil {
+		return err
+	}
+	if err := requireJSONObject(updated); err != nil {
+		return fmt.Errorf("updated config must be a JSON object: %w", err)
+	}
+	return AtomicWriteFile(p.ConfigFile, updated, 0o600)
+}
+
 func Save(c *Config) error {
 	release, err := acquireConfigLock()
 	if err != nil {
@@ -163,4 +197,41 @@ func saveLocked(c *Config) error {
 	}
 	data = append(data, '\n')
 	return AtomicWriteFile(p.ConfigFile, data, 0o600)
+}
+
+// readConfigJSONObject is the raw counterpart to Load for section writers.
+// It performs the same ownership checks but retains every encoded field so a
+// narrow update can preserve forward-compatible and specialist-owned keys.
+func readConfigJSONObject(path string) ([]byte, error) {
+	info, err := os.Lstat(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	stat, ok := info.Sys().(*syscall.Stat_t)
+	if !info.Mode().IsRegular() || info.Mode()&os.ModeSymlink != 0 ||
+		info.Mode().Perm()&0o077 != 0 || !ok || stat.Uid != uint32(os.Geteuid()) {
+		return nil, fmt.Errorf("config file is not an owner-private regular file")
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil, err
+	}
+	if err := requireJSONObject(data); err != nil {
+		return nil, fmt.Errorf("config file is not a JSON object: %w", err)
+	}
+	return data, nil
+}
+
+func requireJSONObject(data []byte) error {
+	var object map[string]json.RawMessage
+	if err := json.Unmarshal(data, &object); err != nil {
+		return err
+	}
+	if object == nil {
+		return errors.New("expected an object")
+	}
+	return nil
 }

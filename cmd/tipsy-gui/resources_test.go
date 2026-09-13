@@ -149,6 +149,8 @@ func TestThemeUsesTipsyBrandPalette(t *testing.T) {
 		"QPushButton:focus", "QRadioButton:focus", "QRadioButton:checked", "QScrollBar:vertical", "QWidget#wizardPage",
 		"QCheckBox#vsyncToggle::indicator", "QCheckBox#vsyncToggle::indicator:checked", "QCheckBox#vsyncToggle:hover:enabled",
 		"QCheckBox#vsyncToggle:focus", "QCheckBox#vsyncToggle:disabled", "QCheckBox#vsyncToggle:disabled:focus",
+		"QCheckBox#inputToggle::indicator", "QCheckBox#inputToggle::indicator:checked", "QCheckBox#inputToggle:hover:enabled",
+		"QCheckBox#inputToggle:focus", "QCheckBox#inputToggle:disabled", "QCheckBox#inputToggle:disabled:focus",
 	} {
 		if !strings.Contains(appStyleSheet, selector) {
 			t.Errorf("theme missing interaction/layout selector %s", selector)

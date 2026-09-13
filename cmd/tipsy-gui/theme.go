@@ -98,6 +98,16 @@ QCheckBox#vsyncToggle::indicator { width: 18px; height: 18px; border: 2px solid 
 QCheckBox#vsyncToggle::indicator:checked { background: @accent; border-color: @accent; }
 QCheckBox#vsyncToggle::indicator:disabled { background: @hover; border-color: @disabled; }
 QCheckBox#vsyncToggle::indicator:checked:disabled { background: @disabled; }
+QCheckBox#inputToggle { spacing: 10px; padding: 8px 10px; border: 2px solid transparent; border-radius: 6px; background: @surface; }
+QCheckBox#inputToggle:hover:enabled { background: @hover; }
+QCheckBox#inputToggle:focus { border-color: @focus; }
+QCheckBox#inputToggle:checked { background: @selected; color: @link; border-color: @accent; }
+QCheckBox#inputToggle:disabled { color: @disabled; background: @hover; }
+QCheckBox#inputToggle:disabled:focus { border-color: @border; }
+QCheckBox#inputToggle::indicator { width: 18px; height: 18px; border: 2px solid @muted; border-radius: 4px; background: @surface; }
+QCheckBox#inputToggle::indicator:checked { background: @accent; border-color: @accent; }
+QCheckBox#inputToggle::indicator:disabled { background: @hover; border-color: @disabled; }
+QCheckBox#inputToggle::indicator:checked:disabled { background: @disabled; }
 QProgressBar { min-height: 12px; border: 0; border-radius: 6px; background: @hover; text-align: center; color: transparent; }
 QProgressBar::chunk { background: @accent; border-radius: 6px; }
 QStatusBar { background: @surface; color: @muted; border-top: 1px solid @border; font-size: 11px; }

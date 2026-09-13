@@ -17,6 +17,13 @@ import (
 
 const microphoneConsentLabel = "Allow Roblox to use your microphone"
 
+func microphoneToggleText(enabled bool) string {
+	if enabled {
+		return "✓ Microphone access allowed"
+	}
+	return "Microphone access disabled"
+}
+
 func (w *mainWindow) buildMicrophoneCard() *qt.QFrame {
 	card, cardLayout := newVerticalCard("card")
 	cardLayout.AddWidget(sectionLabel("Microphone").QWidget)
@@ -26,7 +33,8 @@ func (w *mainWindow) buildMicrophoneCard() *qt.QFrame {
 	setObjectName(intro.QObject, "mutedText")
 	cardLayout.AddWidget(intro.QWidget)
 
-	w.microphoneEnable = qt.NewQCheckBox3(microphoneConsentLabel)
+	w.microphoneEnable = qt.NewQCheckBox3(microphoneToggleText(false))
+	setObjectName(w.microphoneEnable.QObject, "inputToggle")
 	w.microphoneEnable.SetAccessibleName(microphoneConsentLabel)
 	w.microphoneEnable.SetAccessibleDescription("Microphone consent for Roblox. Default on. TIPSY_MICROPHONE=0 or off disables capture regardless of this setting.")
 	w.microphoneEnable.SetToolTip("Default on. TIPSY_MICROPHONE=0|off disables capture regardless of this setting.")
@@ -65,6 +73,7 @@ func (w *mainWindow) bindMicrophoneSettings(settings guimodel.MicrophoneSettings
 	defer func() { w.microphoneSyncing = false }()
 	if w.microphoneEnable != nil {
 		w.microphoneEnable.SetChecked(settings.Enabled)
+		w.microphoneEnable.SetText(microphoneToggleText(settings.Enabled))
 	}
 	w.updateMicrophoneStateNote()
 }
@@ -91,6 +100,7 @@ func (w *mainWindow) persistMicrophoneSettings() {
 		return
 	}
 	w.microphoneSettings = settings
+	w.microphoneEnable.SetText(microphoneToggleText(settings.Enabled))
 	w.microphoneHint.SetText("Microphone settings saved.")
 	setObjectName(w.microphoneHint.QObject, "noticeSuccess")
 	refreshStyle(w.microphoneHint.QWidget)

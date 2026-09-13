@@ -51,30 +51,48 @@ func loadMicrophoneSettingsAt(path string) (guimodel.MicrophoneSettings, error) 
 }
 
 func saveMicrophoneSettings(settings guimodel.MicrophoneSettings) error {
-	return saveMicrophoneSettingsAt(canonicalMicrophonePath(), settings)
+	return config.UpdateJSON(func(data []byte) ([]byte, error) {
+		return mergeMicrophoneSettings(data, settings)
+	})
 }
 
 // saveMicrophoneSettingsAt overlays enabled onto the "microphone" section
 // of path, preserving every other top-level key and any existing source
 // pin. A malformed existing file is never overwritten.
 func saveMicrophoneSettingsAt(path string, settings guimodel.MicrophoneSettings) error {
-	var data []byte
-	if existing, err := os.ReadFile(path); err == nil {
-		data = existing
-	} else if !os.IsNotExist(err) {
+	merged, err := mergeMicrophoneSettingsFromPath(path, settings)
+	if err != nil {
 		return err
 	}
+	return config.AtomicWriteFile(path, merged, 0o600)
+}
+
+// mergeMicrophoneSettings updates only the microphone section in one
+// complete config document. The canonical caller runs it under
+// config.UpdateJSON's cross-process lock; the path helper keeps isolated-file
+// tests simple.
+func mergeMicrophoneSettings(data []byte, settings guimodel.MicrophoneSettings) ([]byte, error) {
 	cfg, err := mic.ParseMicSection(data)
 	if err != nil {
-		return fmt.Errorf("microphone settings not saved: existing settings file is invalid (%v)", err)
+		return nil, fmt.Errorf("microphone settings not saved: existing settings file is invalid (%v)", err)
 	}
 	cfg.Enabled = settings.Enabled
 	merged, err := mic.UpsertMicSection(data, cfg)
 	if err != nil {
-		return fmt.Errorf("microphone settings not saved: existing settings file is invalid (%v)", err)
+		return nil, fmt.Errorf("microphone settings not saved: existing settings file is invalid (%v)", err)
 	}
 	merged = append(merged, '\n')
-	return config.AtomicWriteFile(path, merged, 0o600)
+	return merged, nil
+}
+
+func mergeMicrophoneSettingsFromPath(path string, settings guimodel.MicrophoneSettings) ([]byte, error) {
+	var data []byte
+	if existing, err := os.ReadFile(path); err == nil {
+		data = existing
+	} else if !os.IsNotExist(err) {
+		return nil, err
+	}
+	return mergeMicrophoneSettings(data, settings)
 }
 
 // microphoneEffectiveEnabled mirrors the mic-owned kill-switch without

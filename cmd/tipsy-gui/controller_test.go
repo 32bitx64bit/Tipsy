@@ -264,6 +264,9 @@ func TestControllerCardBuildsBindsAndPersistsOffscreen(t *testing.T) {
 	if !win.controllerEnable.IsChecked() {
 		t.Fatal("controller input is not enabled by default")
 	}
+	if win.controllerEnable.Text() != controllerToggleText(true) {
+		t.Fatalf("controller toggle text=%q", win.controllerEnable.Text())
+	}
 	if win.controllerDeadLValue.Text() != "0.00" {
 		t.Fatalf("deadzone label=%q", win.controllerDeadLValue.Text())
 	}
@@ -282,6 +285,9 @@ func TestControllerCardBuildsBindsAndPersistsOffscreen(t *testing.T) {
 	qt.QCoreApplication_ProcessEvents()
 	if !strings.Contains(win.controllerHint.Text(), "saved") {
 		t.Fatalf("save hint=%q", win.controllerHint.Text())
+	}
+	if win.controllerEnable.Text() != controllerToggleText(false) {
+		t.Fatalf("controller off text=%q", win.controllerEnable.Text())
 	}
 	saved, err := loadControllerSettings()
 	if err != nil {

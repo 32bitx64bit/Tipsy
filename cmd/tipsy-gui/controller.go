@@ -79,7 +79,9 @@ func loadControllerSettingsAt(path string) (guimodel.ControllerSettings, error) 
 }
 
 func saveControllerSettings(settings guimodel.ControllerSettings) error {
-	return saveControllerSettingsAt(canonicalControllerPath(), settings)
+	return config.UpdateJSON(func(data []byte) ([]byte, error) {
+		return mergeControllerSettings(data, settings)
+	})
 }
 
 // saveControllerSettingsAt validates, then overlays the "gamepad" section
@@ -87,21 +89,36 @@ func saveControllerSettings(settings guimodel.ControllerSettings) error {
 // is never overwritten: the save fails honestly so unrelated keys
 // (dataDir, consent, …) cannot be destroyed by a gamepad write.
 func saveControllerSettingsAt(path string, settings guimodel.ControllerSettings) error {
-	if err := guimodel.ValidateControllerSettings(settings); err != nil {
+	merged, err := mergeControllerSettingsFromPath(path, settings)
+	if err != nil {
 		return err
 	}
+	return config.AtomicWriteFile(path, merged, 0o600)
+}
+
+// mergeControllerSettings updates only the gamepad section in one complete
+// config document. The canonical caller runs it under config.UpdateJSON's
+// cross-process lock; the path helper keeps isolated-file tests simple.
+func mergeControllerSettings(data []byte, settings guimodel.ControllerSettings) ([]byte, error) {
+	if err := guimodel.ValidateControllerSettings(settings); err != nil {
+		return nil, err
+	}
+	merged, err := gamepad.UpsertGamepadSection(data, gamepadConfigFromController(settings))
+	if err != nil {
+		return nil, fmt.Errorf("controller settings not saved: existing settings file is invalid (%v)", err)
+	}
+	merged = append(merged, '\n')
+	return merged, nil
+}
+
+func mergeControllerSettingsFromPath(path string, settings guimodel.ControllerSettings) ([]byte, error) {
 	var data []byte
 	if existing, err := os.ReadFile(path); err == nil {
 		data = existing
 	} else if !os.IsNotExist(err) {
-		return err
+		return nil, err
 	}
-	merged, err := gamepad.UpsertGamepadSection(data, gamepadConfigFromController(settings))
-	if err != nil {
-		return fmt.Errorf("controller settings not saved: existing settings file is invalid (%v)", err)
-	}
-	merged = append(merged, '\n')
-	return config.AtomicWriteFile(path, merged, 0o600)
+	return mergeControllerSettings(data, settings)
 }
 
 // controllerEffectiveEnabled mirrors the Input-owned kill-switch without
