@@ -13,12 +13,14 @@ Roblox itself is proprietary and is **never** redistributed, patched, or committ
 
 <br>
 
+[![Website](https://img.shields.io/badge/Website-tipsyhq.org-2d6bff?style=for-the-badge)](https://tipsyhq.org)
 [![Download latest release](https://img.shields.io/github/v/release/32bitx64bit/Tipsy?style=for-the-badge&label=Download%20latest%20release&color=2d6bff)](https://github.com/32bitx64bit/Tipsy/releases/latest)
 [![License: GPL-3.0-or-later](https://img.shields.io/badge/License-GPL--3.0--or--later-227d48?style=for-the-badge)](LICENSE)
 [![Go 1.27](https://img.shields.io/badge/Go-1.27-00ADD8?style=for-the-badge&logo=go&logoColor=white)](https://go.dev/dl/)
 [![Linux x86_64](https://img.shields.io/badge/Linux-x86__64-black?style=for-the-badge&logo=linux&logoColor=white)](#requirements)
 
-[Latest release](https://github.com/32bitx64bit/Tipsy/releases/latest)
+[Website](https://tipsyhq.org)
+· [Latest release](https://github.com/32bitx64bit/Tipsy/releases/latest)
 · [AppImage](https://github.com/32bitx64bit/Tipsy/releases/latest)
 · [Discord](https://discord.gg/YQkZx8JT6R)
 · [Compile from source](#compile-from-source)
