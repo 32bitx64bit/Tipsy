@@ -18,7 +18,6 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
-	"time"
 	"unsafe"
 
 	"github.com/tipsy-linux/tipsy/internal/config"
@@ -772,10 +771,10 @@ func (vm *VM) gamepadAxisValue(o *Object, axis int32) float32 {
 	return m[axis]
 }
 
-// Evdev pump: single-pad owner. It bypasses the X11 ring: inotify + rescan
-// over /dev/input/event* plus nonblocking reads feed normalized frames into
-// handleGamepadFrame. Deadzone comes from the evdev flat via the gamepad
-// package (flat==0 fallback logged once per device); the single global
+// Evdev pump: single-pad owner. It bypasses the X11 ring: the gamepad
+// readiness pump waits on evdev, inotify, and shutdown then feeds normalized
+// frames into handleGamepadFrame. Deadzone comes from the evdev flat via the
+// gamepad package (flat==0 fallback logged once per device); the single global
 // TIPSY_GAMEPAD_DEADZONE floor is applied per Frame just before MapFrame.
 var gamepadPump struct {
 	mu      sync.Mutex
@@ -783,12 +782,6 @@ var gamepadPump struct {
 	stopCh  chan struct{}
 	doneCh  chan struct{}
 }
-
-const (
-	gamepadPollInterval = 5 * time.Millisecond
-	// gamepadRescanEvery polls per rescan (~1 s at the poll interval).
-	gamepadRescanEvery = 200
-)
 
 // StartRobloxDirectGamepadPump starts the evdev pump over the default
 // /dev/input directory. It refuses to start under the TIPSY_GAMEPAD
@@ -848,7 +841,6 @@ func StopRobloxDirectGamepadPump() {
 
 func gamepadPumpLoop(mgr *gamepad.Manager, stop <-chan struct{}, done chan<- struct{}) {
 	defer close(done)
-	defer mgr.Close()
 	// InputDeviceListener-equivalent wiring: hotplug connect runs the E()
 	// capability replay + typed connect; disconnect synthesizes UPs +
 	// zeroed axes in the same beat, then the disconnect event.
@@ -870,61 +862,26 @@ func gamepadPumpLoop(mgr *gamepad.Manager, stop <-chan struct{}, done chan<- str
 		GamepadDisconnected(int32(devID))
 	}
 	loggedDeny := false
-	rescan := func() {
-		changed, err := mgr.Rescan()
-		if err != nil {
-			// EACCES carries the actionable input-group/Flatpak hint.
-			// Log it once per denial streak at Info, then Debug.
-			if !loggedDeny {
-				logging.Logger(logging.CatJNI).Info("gamepad rescan", "err", err)
-				loggedDeny = true
-			} else {
-				logging.Logger(logging.CatJNI).Debug("gamepad rescan", "err", err)
-			}
+	pump := gamepad.NewReadyPump(mgr)
+	pump.OnFrame = func(pad gamepad.Pad, frame *gamepad.Frame) {
+		// ReadyPump invokes this only at a real SYN_REPORT boundary and keeps
+		// source order. The frame is owned by this callback until it returns.
+		gamepad.ApplyCalibration(frame, pad.Mapping, gamepadCalibration())
+		handleGamepadFrame(gamepad.MapFrame(frame, pad.DevID, pad.Mapping, pad.Info.Abs))
+	}
+	pump.OnRescanError = func(err error) {
+		// EACCES carries the actionable input-group/Flatpak hint. Log once per
+		// denial streak at Info, then Debug; ReadyPump keeps recovery rescans
+		// only while an inotify watch is unavailable.
+		if !loggedDeny {
+			logging.Logger(logging.CatJNI).Info("gamepad rescan", "err", err)
+			loggedDeny = true
 			return
 		}
-		loggedDeny = false
-		_ = changed
+		logging.Logger(logging.CatJNI).Debug("gamepad rescan", "err", err)
 	}
-	rescan()
-	// Inotify hotplug: directory creates/deletes/moves trigger an immediate
-	// rescan through the listener wiring above. When the watch cannot be
-	// installed the 1 s periodic rescan below remains the fallback.
-	if err := mgr.StartWatch(stop); err != nil {
-		logging.Logger(logging.CatJNI).Debug("gamepad watch unavailable; periodic rescan only", "err", err)
-	}
-	ticker := time.NewTicker(gamepadPollInterval)
-	defer ticker.Stop()
-	ticks := 0
-	for {
-		select {
-		case <-stop:
-			return
-		case <-ticker.C:
-		}
-		ticks++
-		if ticks%gamepadRescanEvery == 0 {
-			rescan()
-		}
-		for _, devID := range mgr.DeviceIDs() {
-			pad, cur, r, ok := mgr.Slot(devID)
-			if !ok || cur == nil || r == nil {
-				// A vanished node surfaces on the next rescan; never a fake.
-				continue
-			}
-			evs, err := cur.ReadAvailable()
-			if err != nil || len(evs) == 0 {
-				continue
-			}
-			info := pad.Info
-			mapping := pad.Mapping
-			for _, ev := range evs {
-				if f := r.Feed(ev); f != nil {
-					gamepad.ApplyCalibration(f, mapping, gamepadCalibration())
-					handleGamepadFrame(gamepad.MapFrame(f, devID, mapping, info.Abs))
-				}
-			}
-		}
+	if err := pump.Run(stop); err != nil {
+		logging.Logger(logging.CatJNI).Info("gamepad readiness pump stopped", "err", err)
 	}
 }
 

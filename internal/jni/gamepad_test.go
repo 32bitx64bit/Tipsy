@@ -628,10 +628,10 @@ func TestGamepadDisconnectSynthesis(t *testing.T) {
 	}
 }
 
-// TestGamepadNoPadMeansNoDevice proves the honest empty state two ways:
-// frames for an unannounced pad never emit, and the evdev pump over an
-// empty directory announces nothing.
-func TestGamepadNoPadMeansNoDevice(t *testing.T) {
+// TestGamepadReadyPumpNoPadShutdown exercises the production JNI consumer of
+// ReadyPump: frames for an unannounced pad never emit, an idle healthy input
+// directory announces nothing, and shutdown returns through its wake path.
+func TestGamepadReadyPumpNoPadShutdown(t *testing.T) {
 	selectGamepadPath(t, "direct")
 	wireRecordingDirectGamepadTarget(t, 0x1234, 0x5678)
 
@@ -645,8 +645,18 @@ func TestGamepadNoPadMeansNoDevice(t *testing.T) {
 	if !StartRobloxDirectGamepadPumpDir(dir) {
 		t.Fatal("pump did not start over an empty dir")
 	}
+	t.Cleanup(StopRobloxDirectGamepadPump)
 	time.Sleep(50 * time.Millisecond)
-	StopRobloxDirectGamepadPump()
+	stopped := make(chan struct{})
+	go func() {
+		StopRobloxDirectGamepadPump()
+		close(stopped)
+	}()
+	select {
+	case <-stopped:
+	case <-time.After(time.Second):
+		t.Fatal("ready pump did not stop after shutdown")
+	}
 	after := RobloxDirectGamepadStats()
 	if after.ConnectDelivered != before.ConnectDelivered {
 		t.Fatal("empty-dir pump announced a pad: fake device")
