@@ -6,13 +6,13 @@
 package gamepad
 
 import (
+	"encoding/binary"
 	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
 	"sort"
 	"strings"
-	"time"
 	"unsafe"
 
 	"golang.org/x/sys/unix"
@@ -320,12 +320,84 @@ func ioctlGetAbs(fd int, code uint16) (AbsInfo, error) {
 	return AbsInfo{Value: raw[0], Minimum: raw[1], Maximum: raw[2], Fuzz: raw[3], Flat: raw[4], Resolution: raw[5]}, nil
 }
 
-// watchInputDir installs an inotify watch on dir and calls onEvent (off the
-// watch goroutine, debounced per burst) on creates, deletes, moves and
-// attribute changes. It returns an error when the watch cannot be installed
-// (missing dir, inotify unavailable); the caller keeps its periodic rescan
-// fallback in that case. Close stop to end the watch goroutine. The callback
-// must be quick and never block: it triggers Manager.Rescan.
+// inputWatch owns one inotify fd. Its caller owns Close and is responsible for
+// serializing device reads, rescans, closes, and reopens. Drain is deliberately
+// content-free: it only tells the caller that a directory reconciliation is
+// needed, never exposing an input event or filename.
+type inputWatch struct {
+	fd int
+}
+
+// openInputWatch installs an inotify watch on dir. It does not start a
+// goroutine; readiness loops include the returned fd in their poll set.
+func openInputWatch(dir string) (*inputWatch, error) {
+	if dir == "" {
+		dir = InputNodeDir
+	}
+	fd, err := unix.InotifyInit1(unix.IN_CLOEXEC | unix.IN_NONBLOCK)
+	if err != nil {
+		return nil, err
+	}
+	const mask = uint32(unix.IN_CREATE | unix.IN_DELETE | unix.IN_MOVED_FROM |
+		unix.IN_MOVED_TO | unix.IN_ATTRIB | unix.IN_DELETE_SELF |
+		unix.IN_MOVE_SELF | unix.IN_IGNORED)
+	if _, err := unix.InotifyAddWatch(fd, dir, mask); err != nil {
+		_ = unix.Close(fd)
+		return nil, err
+	}
+	return &inputWatch{fd: fd}, nil
+}
+
+func (w *inputWatch) Close() error {
+	if w == nil || w.fd < 0 {
+		return nil
+	}
+	fd := w.fd
+	w.fd = -1
+	return unix.Close(fd)
+}
+
+// Drain drains an inotify burst. changed requests exactly one reconciliation;
+// invalid reports a watch whose directory attachment must be recreated. An
+// overflow is reconciled immediately but does not itself invalidate the watch.
+func (w *inputWatch) Drain() (changed, invalid bool, err error) {
+	if w == nil || w.fd < 0 {
+		return false, true, errors.New("gamepad: inotify watch closed")
+	}
+	buf := make([]byte, 4096)
+	for {
+		n, rerr := unix.Read(w.fd, buf)
+		if rerr != nil {
+			if errors.Is(rerr, unix.EAGAIN) || errors.Is(rerr, unix.EWOULDBLOCK) {
+				return changed, invalid, nil
+			}
+			return changed, true, rerr
+		}
+		if n <= 0 {
+			return changed, invalid, nil
+		}
+		changed = true
+		for off := 0; off+unix.SizeofInotifyEvent <= n; {
+			mask := binary.NativeEndian.Uint32(buf[off+4 : off+8])
+			nameLen := int(binary.NativeEndian.Uint32(buf[off+12 : off+16]))
+			if mask&(unix.IN_IGNORED|unix.IN_DELETE_SELF|unix.IN_MOVE_SELF) != 0 {
+				invalid = true
+			}
+			next := off + unix.SizeofInotifyEvent + nameLen
+			if next <= off || next > n {
+				break
+			}
+			off = next
+		}
+	}
+}
+
+// watchInputDir installs an inotify watch on dir and calls onEvent after a
+// ready inotify burst. It does not poll on a timer. It returns an error when
+// the watch cannot be installed (missing dir, inotify unavailable); callers
+// that need recovery must provide it explicitly. Close stop to end the watch
+// goroutine. The callback must be quick and never block: it triggers
+// Manager.Rescan.
 //
 // Lives here (not hotplug.go) only because inotify needs x/sys/unix Linux
 // symbols while hotplug.go stays portable; the !linux twin in
@@ -337,45 +409,58 @@ func watchInputDir(dir string, stop <-chan struct{}, onEvent func()) error {
 	if onEvent == nil {
 		return errors.New("gamepad: nil watch callback")
 	}
-	fd, err := unix.InotifyInit1(unix.IN_CLOEXEC | unix.IN_NONBLOCK)
+	w, err := openInputWatch(dir)
 	if err != nil {
 		return err
 	}
-	const mask = uint32(unix.IN_CREATE | unix.IN_DELETE | unix.IN_MOVED_FROM |
-		unix.IN_MOVED_TO | unix.IN_ATTRIB | unix.IN_DELETE_SELF |
-		unix.IN_MOVE_SELF | unix.IN_IGNORED)
-	if _, err := unix.InotifyAddWatch(fd, dir, mask); err != nil {
-		_ = unix.Close(fd)
-		return err
-	}
-	go watchInputLoop(fd, stop, onEvent)
+	go watchInputLoop(w, stop, onEvent)
 	return nil
 }
 
-func watchInputLoop(fd int, stop <-chan struct{}, onEvent func()) {
-	defer unix.Close(fd)
-	buf := make([]byte, 4096)
-	ticker := time.NewTicker(50 * time.Millisecond)
-	defer ticker.Stop()
+func watchInputLoop(w *inputWatch, stop <-chan struct{}, onEvent func()) {
+	defer w.Close()
+	wakeFD, err := unix.Eventfd(0, unix.EFD_CLOEXEC|unix.EFD_NONBLOCK)
+	if err != nil {
+		return
+	}
+	defer unix.Close(wakeFD)
+	finished := make(chan struct{})
+	defer close(finished)
+	if stop != nil {
+		go func() {
+			select {
+			case <-stop:
+				var one [8]byte
+				binary.NativeEndian.PutUint64(one[:], 1)
+				_, _ = unix.Write(wakeFD, one[:])
+			case <-finished:
+			}
+		}()
+	}
+	pollFDs := []unix.PollFd{
+		{Fd: int32(wakeFD), Events: unix.POLLIN},
+		{Fd: int32(w.fd), Events: unix.POLLIN | unix.POLLERR | unix.POLLHUP},
+	}
 	for {
-		select {
-		case <-stop:
+		_, err := unix.Poll(pollFDs, -1)
+		if err != nil {
+			if errors.Is(err, unix.EINTR) {
+				continue
+			}
 			return
-		case <-ticker.C:
 		}
-		n, err := unix.Read(fd, buf)
-		if err != nil || n <= 0 {
+		if pollFDs[0].Revents != 0 {
+			return
+		}
+		if pollFDs[1].Revents == 0 {
 			continue
 		}
-		// Burst debounce: one directory change (create + attrib + move)
-		// raises several events; drain the queue, then fire once.
-		deadline := time.Now().Add(100 * time.Millisecond)
-		for time.Now().Before(deadline) {
-			m, rerr := unix.Read(fd, buf)
-			if rerr != nil || m <= 0 {
-				break
-			}
+		changed, invalid, derr := w.Drain()
+		if changed {
+			onEvent()
 		}
-		onEvent()
+		if derr != nil || invalid {
+			return
+		}
 	}
 }

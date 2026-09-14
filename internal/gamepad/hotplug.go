@@ -302,6 +302,27 @@ func (m *Manager) Close() error {
 	return s.dev.Close()
 }
 
+// dropCurrent withdraws the open slot after its fd reports an unrecoverable
+// read-side failure. ReadyPump is its only production caller: that makes the
+// pump the single owner of read, close, and reopen operations. The callback
+// happens after the fd is closed and after the slot is gone, so consumers
+// synthesize releases before a later rescan can reconnect player 1.
+func (m *Manager) dropCurrent() bool {
+	m.mu.Lock()
+	s := m.slot
+	m.slot = nil
+	m.ignoredLogged = false
+	m.mu.Unlock()
+	if s == nil {
+		return false
+	}
+	_ = s.dev.Close()
+	if m.OnDisconnect != nil {
+		m.OnDisconnect(singlePadID)
+	}
+	return true
+}
+
 // DisconnectSnapshot synthesizes the disconnect frame for the pad's
 // currently held state: UP for every held button plus zeroed axes in the
 // same frame, so the engine never keeps a stuck button after unplug or focus

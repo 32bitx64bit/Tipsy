@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -174,10 +175,10 @@ func TestManagerWatchFiresOnVirtualNodes(t *testing.T) {
 	// Recorded inotify on a virtual dir: creating and deleting event*
 	// files triggers rescans without hardware.
 	dir := t.TempDir()
-	calls := 0
+	var calls atomic.Uint64
 	m := NewManager(dir, nil)
 	m.ScanFn = func(d string) (ScanResult, error) {
-		calls++
+		calls.Add(1)
 		return ScanResult{}, nil
 	}
 	stop := make(chan struct{})
@@ -185,26 +186,26 @@ func TestManagerWatchFiresOnVirtualNodes(t *testing.T) {
 	if err := m.StartWatch(stop); err != nil {
 		t.Skipf("inotify unavailable: %v", err)
 	}
-	before := calls
+	before := calls.Load()
 	if err := os.WriteFile(filepath.Join(dir, "event0"), []byte("x"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	deadline := time.Now().Add(3 * time.Second)
-	for calls == before && time.Now().Before(deadline) {
+	for calls.Load() == before && time.Now().Before(deadline) {
 		time.Sleep(20 * time.Millisecond)
 	}
-	if calls == before {
+	if calls.Load() == before {
 		t.Fatal("creating event0 must trigger a watch rescan")
 	}
-	before = calls
+	before = calls.Load()
 	if err := os.Remove(filepath.Join(dir, "event0")); err != nil {
 		t.Fatal(err)
 	}
 	deadline = time.Now().Add(3 * time.Second)
-	for calls == before && time.Now().Before(deadline) {
+	for calls.Load() == before && time.Now().Before(deadline) {
 		time.Sleep(20 * time.Millisecond)
 	}
-	if calls == before {
+	if calls.Load() == before {
 		t.Fatal("deleting event0 must trigger a watch rescan")
 	}
 }
