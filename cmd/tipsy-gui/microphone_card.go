@@ -125,13 +125,30 @@ func (w *mainWindow) updateMicrophoneStateNote() {
 // refreshMicrophoneStatus re-reads the diagnose audio microphone door
 // without opening capture and without listing Pulse source names.
 func (w *mainWindow) refreshMicrophoneStatus() {
+	w.refreshMicrophoneStatusWithPolicy(true)
+}
+
+func (w *mainWindow) refreshMicrophoneStatusAutomatically() {
+	w.refreshMicrophoneStatusWithPolicy(false)
+}
+
+func (w *mainWindow) refreshMicrophoneStatusWithPolicy(explicit bool) {
 	if w.microphoneStatusNote == nil {
 		return
 	}
-	state, err := w.service.MicrophoneStatus(context.Background())
-	if err != nil {
-		w.microphoneStatusNote.SetText("Microphone status is unavailable: " + err.Error())
+	now := w.now()
+	if !w.microphoneLookup.allow(now, explicit) {
+		w.metrics.optionalDeferred.Add(1)
+		w.setLabelText(w.microphoneStatusNote, "Microphone status is temporarily unavailable. Automatic retry is delayed.")
 		return
 	}
-	w.microphoneStatusNote.SetText(microphoneStatusText(state))
+	w.metrics.optionalCalls.Add(1)
+	state, err := w.service.MicrophoneStatus(context.Background())
+	if err != nil {
+		w.microphoneLookup.failed(now)
+		w.setLabelText(w.microphoneStatusNote, "Microphone status is unavailable: "+err.Error())
+		return
+	}
+	w.microphoneLookup.succeeded()
+	w.setLabelText(w.microphoneStatusNote, microphoneStatusText(state))
 }

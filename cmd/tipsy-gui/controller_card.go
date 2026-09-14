@@ -231,15 +231,32 @@ func clearControllerRows(layout *qt.QVBoxLayout) {
 // refreshControllerPads re-reads the diagnose pad enumeration without
 // opening any pad for input.
 func (w *mainWindow) refreshControllerPads() {
+	w.refreshControllerPadsWithPolicy(true)
+}
+
+func (w *mainWindow) refreshControllerPadsAutomatically() {
+	w.refreshControllerPadsWithPolicy(false)
+}
+
+func (w *mainWindow) refreshControllerPadsWithPolicy(explicit bool) {
 	if w.controllerPadRows == nil {
 		return
 	}
+	now := w.now()
+	if !w.controllerLookup.allow(now, explicit) {
+		w.metrics.optionalDeferred.Add(1)
+		w.setLabelText(w.controllerPadNote, "Pad list is temporarily unavailable. Automatic retry is delayed; press Refresh to retry now.")
+		return
+	}
+	w.metrics.optionalCalls.Add(1)
 	clearControllerRows(w.controllerPadRows)
 	state, err := w.service.ControllerPads(context.Background())
 	if err != nil {
-		w.controllerPadNote.SetText("Pad list is unavailable: " + err.Error())
+		w.controllerLookup.failed(now)
+		w.setLabelText(w.controllerPadNote, "Pad list is unavailable: "+err.Error())
 		return
 	}
+	w.controllerLookup.succeeded()
 	for _, pad := range state.Pads {
 		row, rowLayout := newVerticalCard("subtleCard")
 		title := qt.NewQLabel3(controllerPadTitle(pad))
@@ -265,7 +282,7 @@ func (w *mainWindow) refreshControllerPads() {
 	if note := strings.TrimSpace(state.Note); note != "" {
 		lines = append(lines, note)
 	}
-	w.controllerPadNote.SetText(strings.Join(lines, "\n"))
+	w.setLabelText(w.controllerPadNote, strings.Join(lines, "\n"))
 }
 
 // stopControllerTest is kept for window-lifetime compatibility: the lean

@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"fmt"
+	"time"
 
 	qt "github.com/mappu/miqt/qt6"
 
@@ -75,6 +76,7 @@ type mainWindow struct {
 	controllerButtonLamps                            map[int]*qt.QLabel
 	controllerProbe                                  *controllerProbe
 	controllerTimer                                  *qt.QTimer
+	controllerLookup                                 optionalLookup
 	microphoneSettings                               guimodel.MicrophoneSettings
 	microphoneLoadErr                                error
 	microphoneSyncing                                bool
@@ -82,6 +84,7 @@ type mainWindow struct {
 	microphoneStateNote                              *qt.QLabel
 	microphoneStatusNote                             *qt.QLabel
 	microphoneHint                                   *qt.QLabel
+	microphoneLookup                                 optionalLookup
 	settingsApply                                    *qt.QPushButton
 	settingsReset                                    *qt.QPushButton
 	settingsHint                                     *qt.QLabel
@@ -98,7 +101,11 @@ type mainWindow struct {
 
 	installReadiness       setupsvc.ReadinessState
 	lastLaunchState        guimodel.LaunchState
-	launchTimer            *qt.QTimer
+	ownerNotifier          *ownerThreadNotifier
+	metrics                *guiRuntimeMetrics
+	now                    func() time.Time
+	quit                   func()
+	appearanceTimer        *qt.QTimer
 	launcherHidden         bool
 	launchOrigin           launchOrigin
 	externalProgress       *launchProgressWindow
@@ -123,11 +130,10 @@ type mainWindow struct {
 
 func newWindowBase(service guimodel.Service, icon *qt.QIcon) *mainWindow {
 	w := &mainWindow{
-		service:  service,
-		icon:     icon,
-		setup:    guimodel.NewSetupModel(service),
-		settings: guimodel.NewSettingsModel(service),
-		launch:   guimodel.NewLaunchModel(service),
+		icon:    icon,
+		metrics: &guiRuntimeMetrics{},
+		now:     time.Now,
+		quit:    qt.QCoreApplication_Quit,
 	}
 
 	w.win = qt.NewQMainWindow2()
@@ -141,8 +147,27 @@ func newWindowBase(service guimodel.Service, icon *qt.QIcon) *mainWindow {
 			event.Ignore()
 			return
 		}
+		w.stopVisibleTimers()
+		w.ownerNotifier.close()
 		super(event)
 	})
+	w.win.OnShowEvent(func(super func(*qt.QShowEvent), event *qt.QShowEvent) {
+		super(event)
+		w.startVisibleTimers()
+	})
+	w.win.OnHideEvent(func(super func(*qt.QHideEvent), event *qt.QHideEvent) {
+		super(event)
+		w.stopVisibleTimers()
+	})
+	notifier, err := newOwnerThreadNotifier(w.win.QObject, w.refreshQueuedState, w.metrics)
+	if err != nil {
+		panic("Tipsy GUI could not create its owner-thread state notifier: " + err.Error())
+	}
+	w.ownerNotifier = notifier
+	w.service = ownerNotifyingService{Service: service, notify: w.queueOwnerState}
+	w.setup = guimodel.NewSetupModel(w.service)
+	w.settings = guimodel.NewSettingsModel(w.service)
+	w.launch = guimodel.NewLaunchModel(w.service)
 	w.initAppearance()
 
 	w.status = qt.NewQStatusBar2()
@@ -150,9 +175,6 @@ func newWindowBase(service guimodel.Service, icon *qt.QIcon) *mainWindow {
 	w.status.ShowMessage("Ready")
 	w.win.SetStatusBar(w.status)
 
-	w.launchTimer = qt.NewQTimer2(w.win.QObject)
-	w.launchTimer.OnTimeout(w.refreshLaunchState)
-	w.launchTimer.Start(125)
 	return w
 }
 
@@ -175,6 +197,31 @@ func (w *mainWindow) finishShell() {
 func (w *mainWindow) Show() {
 	placeWidgetOnDisplay(w.win.QWidget, configuredDisplay(w))
 	w.win.Show()
+	w.startVisibleTimers()
+}
+
+func (w *mainWindow) queueOwnerState() {
+	if w.ownerNotifier != nil {
+		w.ownerNotifier.notify()
+	}
+}
+
+func (w *mainWindow) refreshQueuedState() {
+	w.refreshLaunchState()
+}
+
+func (w *mainWindow) startVisibleTimers() {
+	if w.appearanceTimer != nil && !w.appearanceTimer.IsActive() {
+		w.appearanceTimer.Start(1000)
+		w.metrics.appearanceStarts.Add(1)
+	}
+}
+
+func (w *mainWindow) stopVisibleTimers() {
+	if w.appearanceTimer != nil && w.appearanceTimer.IsActive() {
+		w.appearanceTimer.Stop()
+		w.metrics.appearanceStops.Add(1)
+	}
 }
 
 func (w *mainWindow) FirstRun() bool {
@@ -274,12 +321,12 @@ func (w *mainWindow) selectPage(index int) {
 	if index == 2 && w.controllerPadRows != nil {
 		// Fresh pad enumeration each time Settings opens; observation
 		// only, no pad is opened for input.
-		w.refreshControllerPads()
+		w.refreshControllerPadsAutomatically()
 	}
 	if index == 2 && w.microphoneEnable != nil {
 		// Fresh diagnose audio bind each time Settings opens; observation
 		// only, no capture is opened.
-		w.refreshMicrophoneStatus()
+		w.refreshMicrophoneStatusAutomatically()
 	}
 	if index != 2 && w.controllerProbe != nil {
 		// Never hold a pad handle outside the Controller card.
@@ -498,6 +545,7 @@ func (w *mainWindow) refreshLaunchState() {
 	view := w.launch.View()
 	if view.State == guimodel.LaunchRunning && !w.launcherHidden {
 		qt.QGuiApplication_SetQuitOnLastWindowClosed(false)
+		w.stopVisibleTimers()
 		w.win.Hide()
 		if w.externalProgress != nil {
 			w.externalProgress.active = false
@@ -507,23 +555,23 @@ func (w *mainWindow) refreshLaunchState() {
 	}
 	busy := w.launchPreparing || view.State == guimodel.LaunchStarting
 	running := busy || view.State == guimodel.LaunchRunning
-	w.playButton.SetEnabled(!running && w.setup.View().Snapshot.LaunchReady())
+	w.setButtonEnabled(w.playButton, !running && w.setup.View().Snapshot.LaunchReady())
 	w.launchBusy.SetVisible(busy && w.launchOrigin == launchFromHome)
 	if busy {
-		w.playButton.SetText("Launching…")
+		w.setButtonText(w.playButton, "Launching…")
 		if w.launchPreparing {
-			w.playState.SetText("Checking launch authorization…")
+			w.setLabelText(w.playState, "Checking launch authorization…")
 		} else {
-			w.playState.SetText("Starting the official client in its own X11 window")
+			w.setLabelText(w.playState, "Starting the official client in its own X11 window")
 		}
 		setObjectName(w.playState.QObject, "mutedText")
 		w.playState.Show()
 	} else if view.State == guimodel.LaunchRunning {
-		w.playButton.SetText("Roblox is running")
+		w.setButtonText(w.playButton, "Roblox is running")
 	} else {
-		w.playButton.SetText("▶   Play Roblox")
+		w.setButtonText(w.playButton, "▶   Play Roblox")
 		if !w.launchFailure {
-			w.playState.SetText(installPresentation(w.installReadiness).idleText)
+			w.setLabelText(w.playState, installPresentation(w.installReadiness).idleText)
 		}
 	}
 	if !w.launchPreparing && !w.launchFailure && view.State == guimodel.LaunchFailed && w.lastLaunchState != guimodel.LaunchFailed {
@@ -534,7 +582,9 @@ func (w *mainWindow) refreshLaunchState() {
 		w.showLaunchFailure(message)
 	}
 	if view.State == guimodel.LaunchExited && view.Started {
-		qt.QCoreApplication_Quit()
+		if w.quit != nil {
+			w.quit()
+		}
 	}
 	w.lastLaunchState = view.State
 }
@@ -544,7 +594,11 @@ func (w *mainWindow) refreshSettingsProfile() {
 		return
 	}
 	profile := w.settings.View().Saved
-	w.settingsProfile.SetText(settingsProfileText(profile))
+	if !w.setLabelText(w.settingsProfile, settingsProfileText(profile)) {
+		w.metrics.settingsRefreshSkipped.Add(1)
+		return
+	}
+	w.metrics.settingsRefreshes.Add(1)
 	w.refreshLaunchPreferences()
 }
 

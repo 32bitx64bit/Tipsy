@@ -15,6 +15,21 @@ const (
 	launchFromExternal
 )
 
+// ownerNotifyingService reports only state boundaries. Its methods never touch
+// Qt; the notifier schedules presentation on the main Qt owner thread.
+type ownerNotifyingService struct {
+	guimodel.Service
+	notify func()
+}
+
+func (s ownerNotifyingService) Launch(ctx context.Context, request guimodel.LaunchRequest, started func()) error {
+	defer s.notify()
+	return s.Service.Launch(ctx, request, func() {
+		started()
+		s.notify()
+	})
+}
+
 type launchPreparation struct {
 	authority guimodel.LaunchAuthority
 	err       error
@@ -155,6 +170,7 @@ func (w *mainWindow) prepareLaunch(approved bool) {
 	// result and displays consent on the Qt thread if it is required.
 	service := w.service
 	go func() {
+		defer w.queueOwnerState()
 		authority, err := service.PrepareLaunch(context.Background(), approved)
 		result <- launchPreparation{authority, err}
 	}()
@@ -274,6 +290,7 @@ func (w *mainWindow) startExternalInitialization(uri string) {
 	w.launchInitialization = result
 	service := w.service
 	go func() {
+		defer w.queueOwnerState()
 		result <- loadWindowModels(service)
 	}()
 }
@@ -289,6 +306,7 @@ func (w *mainWindow) startSettingsInitialization() {
 	w.launchInitialization = result
 	service := w.service
 	go func() {
+		defer w.queueOwnerState()
 		result <- loadWindowModels(service)
 	}()
 }

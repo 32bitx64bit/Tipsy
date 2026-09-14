@@ -158,9 +158,9 @@ func (w *mainWindow) refreshLaunchPreferences() {
 	if w.settingsErr != nil {
 		fps, vsync, window = "Unavailable", "Unavailable", "Unavailable"
 	}
-	w.preferenceFPS.SetText(fps)
-	w.preferenceVSync.SetText(vsync)
-	w.preferenceWindow.SetText(window)
+	w.setLabelText(w.preferenceFPS, fps)
+	w.setLabelText(w.preferenceVSync, vsync)
+	w.setLabelText(w.preferenceWindow, window)
 	w.preferenceFPS.SetToolTip("Saved launch preference; actual frame rate depends on the client and hardware")
 	w.preferenceWindow.SetToolTip("Saved startup preference for the next Roblox window")
 }
@@ -399,56 +399,74 @@ func (w *mainWindow) bindSettings(settings guimodel.Settings) {
 	defer func() { w.settingsSyncing = false }()
 	switch settings.Renderer {
 	case guimodel.RendererOpenGL:
-		w.settingsRenderer.SetCurrentIndex(1)
+		w.setComboIndex(w.settingsRenderer, 1)
 	case guimodel.RendererVulkan:
 		// Unsupported persisted values are displayed honestly but cannot be
 		// newly selected or applied by this build.
-		w.settingsRenderer.SetCurrentIndex(2)
+		w.setComboIndex(w.settingsRenderer, 2)
 	default:
-		w.settingsRenderer.SetCurrentIndex(0)
+		w.setComboIndex(w.settingsRenderer, 0)
 	}
 	switch settings.FPSMode {
 	case guimodel.FPSLimited:
-		w.settingsFPSMode.SetCurrentIndex(1)
+		w.setComboIndex(w.settingsFPSMode, 1)
 	case guimodel.FPSUnlimited:
-		w.settingsFPSMode.SetCurrentIndex(2)
+		w.setComboIndex(w.settingsFPSMode, 2)
 	default:
-		w.settingsFPSMode.SetCurrentIndex(0)
+		w.setComboIndex(w.settingsFPSMode, 0)
 	}
 	if settings.FrameRate >= guimodel.MinFrameRate && settings.FrameRate <= guimodel.MaxFrameRate {
-		w.settingsFPS.SetValue(settings.FrameRate)
+		w.setSpinValue(w.settingsFPS, settings.FrameRate)
 	} else {
-		w.settingsFPS.SetValue(60)
+		w.setSpinValue(w.settingsFPS, 60)
 	}
-	w.settingsVSync.SetChecked(settings.VSync)
-	w.settingsVSync.SetText(vsyncToggleText(settings.VSync))
-	w.settingsLowTexture.SetChecked(settings.LowTextureMode)
-	w.settingsLowTexture.SetText(lowTextureToggleText(settings.LowTextureMode))
-	w.settingsDiscordPresence.SetChecked(settings.DiscordRichPresence)
-	w.settingsDiscordPresence.SetText(discordPresenceToggleText(settings.DiscordRichPresence))
-	w.settingsDiscordJoin.SetChecked(settings.DiscordJoinButton)
-	w.settingsDiscordJoin.SetText(discordJoinToggleText(settings.DiscordJoinButton))
+	w.setCheckBoxChecked(w.settingsVSync, settings.VSync)
+	w.setCheckBoxText(w.settingsVSync, vsyncToggleText(settings.VSync))
+	w.setCheckBoxChecked(w.settingsLowTexture, settings.LowTextureMode)
+	w.setCheckBoxText(w.settingsLowTexture, lowTextureToggleText(settings.LowTextureMode))
+	w.setCheckBoxChecked(w.settingsDiscordPresence, settings.DiscordRichPresence)
+	w.setCheckBoxText(w.settingsDiscordPresence, discordPresenceToggleText(settings.DiscordRichPresence))
+	w.setCheckBoxChecked(w.settingsDiscordJoin, settings.DiscordJoinButton)
+	w.setCheckBoxText(w.settingsDiscordJoin, discordJoinToggleText(settings.DiscordJoinButton))
 	w.populateDisplayChoices(settings.Display)
-	w.settingsStartFullscreen.SetChecked(settings.StartFullscreen)
-	w.settingsStartFullscreen.SetText(startFullscreenToggleText(settings.StartFullscreen))
+	w.setCheckBoxChecked(w.settingsStartFullscreen, settings.StartFullscreen)
+	w.setCheckBoxText(w.settingsStartFullscreen, startFullscreenToggleText(settings.StartFullscreen))
 }
 
 func (w *mainWindow) populateDisplayChoices(selected string) {
 	if w.settingsDisplay == nil {
 		return
 	}
+	selected = guimodel.NormalizeDisplay(selected)
+	choices := desktopDisplayChoices(selected)
+	if len(choices) == len(w.settingsDisplayKeys) {
+		unchanged := true
+		for i, choice := range choices {
+			if w.settingsDisplayKeys[i] != choice.key || w.settingsDisplay.ItemText(i) != choice.label {
+				unchanged = false
+				break
+			}
+		}
+		if unchanged {
+			for i, choice := range choices {
+				if choice.key == selected {
+					w.setComboIndex(w.settingsDisplay, i)
+					return
+				}
+			}
+		}
+	}
 	w.settingsDisplay.Clear()
 	w.settingsDisplayKeys = nil
-	selected = guimodel.NormalizeDisplay(selected)
 	matched := 0
-	for i, choice := range desktopDisplayChoices(selected) {
+	for i, choice := range choices {
 		w.settingsDisplay.AddItem(choice.label)
 		w.settingsDisplayKeys = append(w.settingsDisplayKeys, choice.key)
 		if choice.key == selected {
 			matched = i
 		}
 	}
-	w.settingsDisplay.SetCurrentIndex(matched)
+	w.setComboIndex(w.settingsDisplay, matched)
 }
 
 func (w *mainWindow) settingsEdited() {
@@ -480,12 +498,12 @@ func (w *mainWindow) settingsEdited() {
 
 func (w *mainWindow) updateSettingsControls() {
 	view := w.settings.View()
-	w.settingsFPS.SetEnabled(view.Draft.FPSMode == guimodel.FPSLimited)
+	w.setWidgetEnabled(w.settingsFPS.QWidget, view.Draft.FPSMode == guimodel.FPSLimited)
 	if w.settingsDiscordJoin != nil && w.settingsDiscordPresence != nil {
-		w.settingsDiscordJoin.SetEnabled(view.Draft.DiscordRichPresence)
+		w.setWidgetEnabled(w.settingsDiscordJoin.QWidget, view.Draft.DiscordRichPresence)
 	}
 	canApply := view.Dirty && view.ValidationError == ""
-	w.settingsApply.SetEnabled(canApply)
+	w.setButtonEnabled(w.settingsApply, canApply)
 	if view.ValidationError != "" {
 		w.settingsHint.SetText(view.ValidationError)
 		if reason := unavailableRendererReason(view.RendererOptions, view.Draft.Renderer); reason != "" {
@@ -661,6 +679,7 @@ func (w *mainWindow) runDoctor() {
 	w.doctorResult = result
 	service := w.service
 	go func() {
+		defer w.queueOwnerState()
 		summary, err := service.Doctor(context.Background())
 		result <- doctorOutcome{summary: summary, err: err}
 	}()
