@@ -17,6 +17,7 @@ import "C"
 import (
 	"fmt"
 	"os"
+	"time"
 	"unsafe"
 
 	"github.com/tipsy-linux/tipsy/internal/logging"
@@ -283,7 +284,15 @@ func (w *Window) Pump() error {
 	if w == nil {
 		return ErrClosed
 	}
+	diagnostics := inputDrainDiagnosticsEnabled()
+	var lockStarted time.Time
+	if diagnostics {
+		lockStarted = time.Now()
+	}
 	w.mu.Lock()
+	if diagnostics {
+		recordInputDrainWindowLockWait(time.Since(lockStarted))
+	}
 	if w.closed || w.display == 0 {
 		w.mu.Unlock()
 		return ErrClosed
@@ -308,7 +317,7 @@ func (w *Window) Pump() error {
 			return ErrClosed
 		}
 	}
-	evs, closeRequested := w.drainInputLocked()
+	evs, closeRequested := w.drainInputLockedWithDiagnostics(diagnostics)
 	if closed != 0 || closeRequested {
 		w.closed = true
 		_ = dismissLocked(w)
@@ -327,9 +336,20 @@ func (w *Window) Pump() error {
 // and applies focus state. Called with w.mu held. Reuses window scratch so
 // the ~40 B slots do not escape to a new 80 KiB heap allocation per wake.
 func (w *Window) drainInputLocked() ([]InputEvent, bool) {
+	return w.drainInputLockedWithDiagnostics(inputDrainDiagnosticsEnabled())
+}
+
+func (w *Window) drainInputLockedWithDiagnostics(diagnostics bool) ([]InputEvent, bool) {
+	var drainStarted time.Time
+	if diagnostics {
+		drainStarted = time.Now()
+	}
 	s := w.inputDrainScratch()
 	n := int(C.tipsy_x11_input_drain(&s.evs[0], (*C.char)(unsafe.Pointer(&s.texts[0][0])), C.int(len(s.evs))))
 	if n == 0 {
+		if diagnostics {
+			recordInputDrainDuration(time.Since(drainStarted))
+		}
 		return nil, false
 	}
 	if cap(w.inputEvents) < n {
@@ -417,6 +437,9 @@ func (w *Window) drainInputLocked() ([]InputEvent, bool) {
 			}
 			evs = append(evs, ev)
 		}
+	}
+	if diagnostics {
+		recordInputDrainDuration(time.Since(drainStarted))
 	}
 	return evs, closeRequested
 }

@@ -23,6 +23,7 @@
 #include <stdint.h>
 #include <stdlib.h>
 #include <unistd.h>
+#include <time.h>
 
 _Static_assert(sizeof(struct tipsy_input_ev) <= 48, "tipsy_input_ev must stay a small pointer slot");
 
@@ -65,6 +66,185 @@ static atomic_int tipsy_go_wake_pending;
 // Like the input ring, invalidation is process-wide: Tipsy owns one Roblox
 // window. A second test window can only cause a conservative extra query.
 static _Atomic uint64_t tipsy_refresh_version = 1;
+
+/* Default-off, content-free input-drain observer. It owns only aggregate
+ * counters and fixed histograms; event payloads, input identity, coordinates,
+ * text, timestamps, window IDs, and client content never enter this state. */
+struct tipsy_input_diag_duration {
+	_Atomic uint64_t samples;
+	_Atomic uint64_t total_ns;
+	_Atomic uint64_t max_ns;
+	_Atomic uint64_t buckets[TIPSY_X11_INPUT_DRAIN_LATENCY_BUCKETS];
+};
+
+static _Atomic int tipsy_input_diag_enabled;
+static _Atomic uint64_t tipsy_input_diag_drain_calls;
+static _Atomic uint64_t tipsy_input_diag_empty_drains;
+static _Atomic uint64_t tipsy_input_diag_nonempty_drains;
+static _Atomic uint64_t tipsy_input_diag_events;
+static _Atomic uint64_t tipsy_input_diag_batch_buckets[TIPSY_X11_INPUT_DRAIN_BATCH_BUCKETS];
+static struct tipsy_input_diag_duration tipsy_input_diag_lock_wait;
+static struct tipsy_input_diag_duration tipsy_input_diag_c_drain;
+static _Atomic uint64_t tipsy_input_diag_pump_wait_calls;
+static struct tipsy_input_diag_duration tipsy_input_diag_pump_wait;
+static _Atomic uint64_t tipsy_input_diag_pump_pending_ready;
+static _Atomic uint64_t tipsy_input_diag_pump_pipe_wakes;
+static _Atomic uint64_t tipsy_input_diag_pump_errors;
+static __thread uint32_t tipsy_input_diag_drain_sample;
+static __thread uint32_t tipsy_input_diag_pump_sample;
+
+static uint64_t tipsy_input_diag_now_ns(void) {
+	struct timespec ts;
+	if (clock_gettime(CLOCK_MONOTONIC, &ts) != 0) {
+		return 0;
+	}
+	return (uint64_t)ts.tv_sec * 1000000000u + (uint64_t)ts.tv_nsec + 1u;
+}
+
+static void tipsy_input_diag_max(_Atomic uint64_t *dst, uint64_t value) {
+	uint64_t old = atomic_load_explicit(dst, memory_order_relaxed);
+	while (old < value && !atomic_compare_exchange_weak_explicit(dst, &old, value,
+		memory_order_relaxed, memory_order_relaxed)) {
+	}
+}
+
+static int tipsy_input_diag_latency_bucket(uint64_t elapsed_ns) {
+	uint64_t us = elapsed_ns / 1000u;
+	int bucket = 0;
+	if (elapsed_ns <= 1000u) {
+		return 0;
+	}
+	if (elapsed_ns % 1000u != 0) {
+		us++;
+	}
+	while (us > 1u && bucket < TIPSY_X11_INPUT_DRAIN_LATENCY_BUCKETS - 1) {
+		us = (us + 1u) >> 1;
+		bucket++;
+	}
+	return bucket;
+}
+
+static int tipsy_input_diag_batch_bucket(int n) {
+	if (n <= 0) return 0;
+	if (n == 1) return 1;
+	if (n <= 3) return 2;
+	if (n <= 7) return 3;
+	if (n <= 15) return 4;
+	if (n <= 31) return 5;
+	if (n <= 63) return 6;
+	return 7;
+}
+
+static void tipsy_input_diag_record_duration(struct tipsy_input_diag_duration *dst,
+	uint64_t started_ns, uint64_t ended_ns) {
+	uint64_t elapsed;
+	if (started_ns == 0 || ended_ns == 0) {
+		return;
+	}
+	elapsed = ended_ns >= started_ns ? ended_ns - started_ns : 0;
+	atomic_fetch_add_explicit(&dst->samples, 1, memory_order_relaxed);
+	atomic_fetch_add_explicit(&dst->total_ns, elapsed, memory_order_relaxed);
+	tipsy_input_diag_max(&dst->max_ns, elapsed);
+	atomic_fetch_add_explicit(&dst->buckets[tipsy_input_diag_latency_bucket(elapsed)],
+		1, memory_order_relaxed);
+}
+
+static int tipsy_input_diag_begin(_Atomic uint64_t *calls, uint32_t *sample,
+	uint64_t *started_ns) {
+	if (started_ns != NULL) {
+		*started_ns = 0;
+	}
+	if (!atomic_load_explicit(&tipsy_input_diag_enabled, memory_order_relaxed)) {
+		return 0;
+	}
+	atomic_fetch_add_explicit(calls, 1, memory_order_relaxed);
+	/* Counts are exact; a 1/64 duration sample bounds observer perturbation. */
+	if (((*sample)++ & 63u) != 0) {
+		return 1;
+	}
+	if (started_ns != NULL) {
+		*started_ns = tipsy_input_diag_now_ns();
+	}
+	return 1;
+}
+
+enum tipsy_input_diag_pump_outcome {
+	TIPSY_INPUT_DIAG_PUMP_READY,
+	TIPSY_INPUT_DIAG_PUMP_PIPE_WAKE,
+	TIPSY_INPUT_DIAG_PUMP_ERROR,
+};
+
+static void tipsy_input_diag_finish_pump_wait(int enabled, uint64_t started_ns,
+	enum tipsy_input_diag_pump_outcome outcome) {
+	if (started_ns != 0) {
+		tipsy_input_diag_record_duration(&tipsy_input_diag_pump_wait, started_ns,
+			tipsy_input_diag_now_ns());
+	}
+	if (!enabled) {
+		return;
+	}
+	switch (outcome) {
+	case TIPSY_INPUT_DIAG_PUMP_READY:
+		atomic_fetch_add_explicit(&tipsy_input_diag_pump_pending_ready, 1, memory_order_relaxed);
+		break;
+	case TIPSY_INPUT_DIAG_PUMP_PIPE_WAKE:
+		atomic_fetch_add_explicit(&tipsy_input_diag_pump_pipe_wakes, 1, memory_order_relaxed);
+		break;
+	case TIPSY_INPUT_DIAG_PUMP_ERROR:
+		atomic_fetch_add_explicit(&tipsy_input_diag_pump_errors, 1, memory_order_relaxed);
+		break;
+	}
+}
+
+static void tipsy_input_diag_copy_duration(tipsy_x11_input_drain_duration_stats *out,
+	struct tipsy_input_diag_duration *src, int reset) {
+#define INPUT_DIAG_DURATION_STAT(field) (reset ? \
+	atomic_exchange_explicit(&src->field, 0, memory_order_relaxed) : \
+	atomic_load_explicit(&src->field, memory_order_relaxed))
+	out->samples = INPUT_DIAG_DURATION_STAT(samples);
+	out->total_ns = INPUT_DIAG_DURATION_STAT(total_ns);
+	out->max_ns = INPUT_DIAG_DURATION_STAT(max_ns);
+	for (int i = 0; i < TIPSY_X11_INPUT_DRAIN_LATENCY_BUCKETS; i++) {
+		out->buckets[i] = reset ? atomic_exchange_explicit(&src->buckets[i], 0,
+			memory_order_relaxed) : atomic_load_explicit(&src->buckets[i], memory_order_relaxed);
+	}
+#undef INPUT_DIAG_DURATION_STAT
+}
+
+void tipsy_x11_input_diagnostics_set_enabled(int enabled) {
+	atomic_store_explicit(&tipsy_input_diag_enabled, enabled != 0, memory_order_relaxed);
+}
+
+int tipsy_x11_input_diagnostics_enabled(void) {
+	return atomic_load_explicit(&tipsy_input_diag_enabled, memory_order_relaxed);
+}
+
+void tipsy_x11_input_diagnostics_snapshot(tipsy_x11_input_drain_stats *out, int reset) {
+	if (out == NULL) {
+		return;
+	}
+	memset(out, 0, sizeof(*out));
+#define INPUT_DIAG_STAT(field) (reset ? \
+	atomic_exchange_explicit(&tipsy_input_diag_##field, 0, memory_order_relaxed) : \
+	atomic_load_explicit(&tipsy_input_diag_##field, memory_order_relaxed))
+	out->drain_calls = INPUT_DIAG_STAT(drain_calls);
+	out->empty_drains = INPUT_DIAG_STAT(empty_drains);
+	out->nonempty_drains = INPUT_DIAG_STAT(nonempty_drains);
+	out->events = INPUT_DIAG_STAT(events);
+	out->pump_wait_calls = INPUT_DIAG_STAT(pump_wait_calls);
+	out->pump_pending_ready = INPUT_DIAG_STAT(pump_pending_ready);
+	out->pump_pipe_wakes = INPUT_DIAG_STAT(pump_pipe_wakes);
+	out->pump_errors = INPUT_DIAG_STAT(pump_errors);
+#undef INPUT_DIAG_STAT
+	for (int i = 0; i < TIPSY_X11_INPUT_DRAIN_BATCH_BUCKETS; i++) {
+		out->batch_buckets[i] = reset ? atomic_exchange_explicit(
+			&tipsy_input_diag_batch_buckets[i], 0, memory_order_relaxed) :
+			atomic_load_explicit(&tipsy_input_diag_batch_buckets[i], memory_order_relaxed);
+	}
+	tipsy_input_diag_copy_duration(&out->input_lock_wait, &tipsy_input_diag_lock_wait, reset);
+	tipsy_input_diag_copy_duration(&out->c_drain, &tipsy_input_diag_c_drain, reset);
+	tipsy_input_diag_copy_duration(&out->pump_wait, &tipsy_input_diag_pump_wait, reset);
+}
 
 uint64_t tipsy_x11_refresh_version(void) {
 	return atomic_load_explicit(&tipsy_refresh_version, memory_order_relaxed);
@@ -796,7 +976,11 @@ int tipsy_x11_input_drain(struct tipsy_input_ev *out, char *text_out, int max) {
 	if (out == NULL || max <= 0) {
 		return 0;
 	}
+	uint64_t started_ns;
+	int diagnostics = tipsy_input_diag_begin(&tipsy_input_diag_drain_calls,
+		&tipsy_input_diag_drain_sample, &started_ns);
 	pthread_mutex_lock(&tipsy_input_mu);
+	uint64_t locked_ns = started_ns == 0 ? 0 : tipsy_input_diag_now_ns();
 	int n = 0;
 	while (tipsy_input_tail != tipsy_input_head && n < max) {
 		out[n] = tipsy_input_ring[tipsy_input_tail];
@@ -815,6 +999,21 @@ int tipsy_x11_input_drain(struct tipsy_input_ev *out, char *text_out, int max) {
 		n++;
 	}
 	pthread_mutex_unlock(&tipsy_input_mu);
+	if (started_ns != 0) {
+		uint64_t ended_ns = tipsy_input_diag_now_ns();
+		tipsy_input_diag_record_duration(&tipsy_input_diag_lock_wait, started_ns, locked_ns);
+		tipsy_input_diag_record_duration(&tipsy_input_diag_c_drain, started_ns, ended_ns);
+	}
+	if (diagnostics) {
+		atomic_fetch_add_explicit(&tipsy_input_diag_batch_buckets[tipsy_input_diag_batch_bucket(n)],
+			1, memory_order_relaxed);
+		if (n == 0) {
+			atomic_fetch_add_explicit(&tipsy_input_diag_empty_drains, 1, memory_order_relaxed);
+		} else {
+			atomic_fetch_add_explicit(&tipsy_input_diag_nonempty_drains, 1, memory_order_relaxed);
+			atomic_fetch_add_explicit(&tipsy_input_diag_events, (uint64_t)n, memory_order_relaxed);
+		}
+	}
 	return n;
 }
 
@@ -1787,8 +1986,14 @@ struct tipsy_pump {
 // 0 when the thread should exit, and -1 on I/O failure.
 static int tipsy_wait_x11(Display *dpy, int wake_fd) {
 	if (dpy == NULL || wake_fd < 0) {
+		if (atomic_load_explicit(&tipsy_input_diag_enabled, memory_order_relaxed)) {
+			atomic_fetch_add_explicit(&tipsy_input_diag_pump_errors, 1, memory_order_relaxed);
+		}
 		return -1;
 	}
+	uint64_t started_ns;
+	int diagnostics = tipsy_input_diag_begin(&tipsy_input_diag_pump_wait_calls,
+		&tipsy_input_diag_pump_sample, &started_ns);
 	struct pollfd fds[2];
 	fds[0].fd = ConnectionNumber(dpy);
 	fds[0].events = POLLIN;
@@ -1796,12 +2001,14 @@ static int tipsy_wait_x11(Display *dpy, int wake_fd) {
 	fds[1].events = POLLIN;
 	for (;;) {
 		if (tipsy_x_io_error) {
+			tipsy_input_diag_finish_pump_wait(diagnostics, started_ns, TIPSY_INPUT_DIAG_PUMP_ERROR);
 			return -1;
 		}
 		pthread_mutex_lock(&tipsy_event_mu);
 		int pending = !tipsy_x_io_error && XPending(dpy) > 0;
 		pthread_mutex_unlock(&tipsy_event_mu);
 		if (pending) {
+			tipsy_input_diag_finish_pump_wait(diagnostics, started_ns, TIPSY_INPUT_DIAG_PUMP_READY);
 			return 1;
 		}
 		int n = poll(fds, 2, -1);
@@ -1809,15 +2016,18 @@ static int tipsy_wait_x11(Display *dpy, int wake_fd) {
 			if (errno == EINTR) {
 				continue;
 			}
+			tipsy_input_diag_finish_pump_wait(diagnostics, started_ns, TIPSY_INPUT_DIAG_PUMP_ERROR);
 			return -1;
 		}
 		if (fds[1].revents & (POLLIN | POLLHUP | POLLERR | POLLNVAL)) {
 			char buf[8];
 			while (read(wake_fd, buf, sizeof buf) > 0) {
 			}
+			tipsy_input_diag_finish_pump_wait(diagnostics, started_ns, TIPSY_INPUT_DIAG_PUMP_PIPE_WAKE);
 			return 0;
 		}
 		if (fds[0].revents & (POLLHUP | POLLERR | POLLNVAL)) {
+			tipsy_input_diag_finish_pump_wait(diagnostics, started_ns, TIPSY_INPUT_DIAG_PUMP_ERROR);
 			return -1;
 		}
 	}

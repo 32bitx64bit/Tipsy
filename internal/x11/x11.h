@@ -43,6 +43,12 @@ extern "C" {
 #define TIPSY_INPUT_RING 256
 #define TIPSY_INPUT_TEXT_BYTES 256
 
+/* The input-drain observer uses aggregate fixed-size histograms only. The
+ * buckets are logarithmic from 1 us: bucket i represents (2^(i-1), 2^i] us
+ * for i > 0, while bucket 0 is <= 1 us; the final bucket is saturated. */
+#define TIPSY_X11_INPUT_DRAIN_BATCH_BUCKETS 8
+#define TIPSY_X11_INPUT_DRAIN_LATENCY_BUCKETS 16
+
 struct tipsy_input_ev {
 	int kind;
 	int a;
@@ -65,12 +71,40 @@ typedef struct {
 	int primary;
 } tipsy_xrr_output;
 
+typedef struct {
+	uint64_t samples;
+	uint64_t total_ns;
+	uint64_t max_ns;
+	uint64_t buckets[TIPSY_X11_INPUT_DRAIN_LATENCY_BUCKETS];
+} tipsy_x11_input_drain_duration_stats;
+
+/* All fields are aggregate counters. This structure intentionally contains no
+ * event payload, coordinates, key identity, text, timestamp, window ID, or
+ * other user/client content. */
+typedef struct {
+	uint64_t drain_calls;
+	uint64_t empty_drains;
+	uint64_t nonempty_drains;
+	uint64_t events;
+	uint64_t batch_buckets[TIPSY_X11_INPUT_DRAIN_BATCH_BUCKETS];
+	tipsy_x11_input_drain_duration_stats input_lock_wait;
+	tipsy_x11_input_drain_duration_stats c_drain;
+	uint64_t pump_wait_calls;
+	tipsy_x11_input_drain_duration_stats pump_wait;
+	uint64_t pump_pending_ready;
+	uint64_t pump_pipe_wakes;
+	uint64_t pump_errors;
+} tipsy_x11_input_drain_stats;
+
 uint64_t tipsy_x11_refresh_version(void);
 void tipsy_x11_wake_ack(void);
 void tipsy_nudge_pump(void);
 int tipsy_x11_set_pointer_lock(uintptr_t dpy_ptr, unsigned long xid,
 	int locked, int center, int *out_x, int *out_y, int *out_status);
 int tipsy_x11_input_drain(struct tipsy_input_ev *out, char *text_out, int max);
+void tipsy_x11_input_diagnostics_set_enabled(int enabled);
+int tipsy_x11_input_diagnostics_enabled(void);
+void tipsy_x11_input_diagnostics_snapshot(tipsy_x11_input_drain_stats *out, int reset);
 void tipsy_x11_input_test_clear(void);
 void tipsy_x11_input_test_push(int kind, int a, long b, long c, float x, float y);
 void tipsy_x11_input_test_push_text(const char *text, int len);
