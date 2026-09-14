@@ -197,6 +197,53 @@ func testEGLSwapIntervalPolicy(vsync bool, requested, policyResult, policyError,
 	return result, int(cFirst), int(cSecond), int(cCalls), int(cReportedError)
 }
 
+type eglGuestHandoffEvent struct {
+	kind       uint32
+	window     uintptr
+	display    uintptr
+	surface    uintptr
+	generation uint64
+}
+
+type eglGuestHandoffFixture struct {
+	passed             bool
+	createCalls        int
+	createHostWindows  []uintptr
+	swapCalls          int
+	destroyCalls       int
+	destroyOrderFaults int
+	events             []eglGuestHandoffEvent
+}
+
+func testEGLGuestHandoffFixture() eglGuestHandoffFixture {
+	var cFixture C.TipsyEGLGuestHandoffFixture
+	passed := C.tipsy_test_egl_guest_handoff_fixture(&cFixture) != 0
+	fixture := eglGuestHandoffFixture{
+		passed:             passed && cFixture.passed != 0,
+		createCalls:        int(cFixture.create_calls),
+		swapCalls:          int(cFixture.swap_calls),
+		destroyCalls:       int(cFixture.destroy_calls),
+		destroyOrderFaults: int(cFixture.destroy_callback_order_violations),
+	}
+	for _, window := range cFixture.create_host_windows {
+		fixture.createHostWindows = append(fixture.createHostWindows, uintptr(window))
+	}
+	count := int(cFixture.callback_count)
+	if count > len(cFixture.callbacks) {
+		count = len(cFixture.callbacks)
+	}
+	for _, event := range cFixture.callbacks[:count] {
+		fixture.events = append(fixture.events, eglGuestHandoffEvent{
+			kind:       uint32(event.kind),
+			window:     uintptr(event.window),
+			display:    uintptr(event.display),
+			surface:    uintptr(event.surface),
+			generation: uint64(event.generation),
+		})
+	}
+	return fixture
+}
+
 // Sysconf is bionic sysconf: `name` is an AOSP `_SC_*` number, not glibc's.
 func Sysconf(name int32) int64 {
 	return int64(C.tipsy_sysconf(C.int(name)))

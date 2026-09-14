@@ -164,10 +164,38 @@ void tipsy_test_egl_note_successful_swap(void);
 int tipsy_test_egl_proc_is_wrapped(const char *name);
 int tipsy_test_egl_init_calls(void);
 int tipsy_test_egl_swap_interval_policy(int vsync, int requested,
-										int policy_result, int policy_error,
-										int client_result, int client_error,
+											int policy_result, int policy_error,
+											int client_result, int client_error,
                                         int *first_interval, int *second_interval,
                                         int *calls, int *reported_error);
+
+/* Direct Android EGL guest-handoff fixture. It substitutes host EGL and the
+ * optional graphics callbacks, records identity-only event order, and restores
+ * the production pointers before returning. No host display, renderer, or
+ * graphics package link is required. */
+enum {
+	TIPSY_EGL_GUEST_HANDOFF_CREATED = 1,
+	TIPSY_EGL_GUEST_HANDOFF_SWAP = 2,
+	TIPSY_EGL_GUEST_HANDOFF_DESTROYED = 3,
+};
+typedef struct {
+	uint32_t kind;
+	uintptr_t window;
+	uintptr_t display;
+	uintptr_t surface;
+	uint64_t generation;
+} TipsyEGLGuestHandoffEvent;
+typedef struct {
+	int passed;
+	int create_calls;
+	uintptr_t create_host_windows[4];
+	int swap_calls;
+	int destroy_calls;
+	int destroy_callback_order_violations;
+	uint32_t callback_count;
+	TipsyEGLGuestHandoffEvent callbacks[6];
+} TipsyEGLGuestHandoffFixture;
+int tipsy_test_egl_guest_handoff_fixture(TipsyEGLGuestHandoffFixture *out);
 
 /* liblog.so: C-side VERBOSE/DEBUG skip when slog Debug is off. */
 void tipsy_android_set_debug_log(int enabled);

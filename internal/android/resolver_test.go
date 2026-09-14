@@ -61,7 +61,7 @@ func TestAndroidLookupALooper(t *testing.T) {
 }
 
 func TestEGLPresentationLookupsUseCompatibilityWrappers(t *testing.T) {
-	for _, name := range []string{"eglSwapInterval", "eglSwapBuffers"} {
+	for _, name := range []string{"eglCreateWindowSurface", "eglSwapInterval", "eglSwapBuffers", "eglDestroySurface"} {
 		ours, err := Provider().Lookup("libEGL.so", name)
 		if err != nil || ours == 0 {
 			t.Fatalf("%s: p=%#x err=%v", name, ours, err)

@@ -4,6 +4,7 @@
  * Host glibc/Mesa dlsym helpers and EGL window-surface translation.
  */
 #include "android_bridge.h"
+#include "../graphics/guest_swap.h"
 
 #include <dlfcn.h>
 #include <link.h>
@@ -35,12 +36,14 @@ typedef EGLSurface (*egl_create_window_surface_fn)(EGLDisplay, EGLConfig, void *
 typedef void *(*egl_get_proc_address_fn)(const char *);
 typedef EGLBoolean (*egl_swap_interval_fn)(EGLDisplay, EGLint);
 typedef EGLBoolean (*egl_swap_buffers_fn)(EGLDisplay, EGLSurface);
+typedef EGLBoolean (*egl_destroy_surface_fn)(EGLDisplay, EGLSurface);
 typedef EGLint (*egl_get_error_fn)(void);
 
 static egl_create_window_surface_fn host_eglCreateWindowSurface;
 static egl_get_proc_address_fn host_eglGetProcAddress;
 static egl_swap_interval_fn host_eglSwapInterval;
 static egl_swap_buffers_fn host_eglSwapBuffers;
+static egl_destroy_surface_fn host_eglDestroySurface;
 static egl_get_error_fn host_eglGetError;
 static _Atomic int egl_vsync_enabled;
 /* Default off. Go enables this when the 2s graphics Info logger will emit. */
@@ -52,6 +55,177 @@ static _Atomic uint64_t egl_last_swap_ns;
 #define TIPSY_EGL_FALSE ((EGLBoolean)0)
 #define TIPSY_EGL_TRUE ((EGLBoolean)1)
 #define TIPSY_EGL_SUCCESS ((EGLint)0x3000)
+
+/* guest_swap.go lives in the optional graphics package. The Android ABI layer
+ * must remain independently test-linkable, so absent graphics exports are a
+ * normal no-op rather than a linker error. */
+#pragma weak GoEGLGuestSurfaceCreated
+#pragma weak GoEGLGuestSwap
+#pragma weak GoEGLGuestSurfaceDestroyed
+
+typedef uint64_t (*tipsy_egl_guest_surface_created_fn)(uintptr_t, uintptr_t, uintptr_t);
+typedef int (*tipsy_egl_guest_swap_fn)(uintptr_t, uintptr_t, uintptr_t, uint64_t);
+typedef void (*tipsy_egl_guest_surface_destroyed_fn)(uintptr_t, uintptr_t, uintptr_t, uint64_t);
+
+struct tipsy_egl_guest_surface {
+	uintptr_t window;
+	uintptr_t display;
+	uintptr_t surface;
+	uint64_t generation;
+	struct tipsy_egl_guest_surface *next;
+};
+
+static pthread_mutex_t egl_guest_surfaces_mu = PTHREAD_MUTEX_INITIALIZER;
+static struct tipsy_egl_guest_surface *egl_guest_surfaces;
+
+static uint64_t tipsy_egl_guest_surface_created(uintptr_t window, uintptr_t display,
+	uintptr_t surface)
+{
+	if (GoEGLGuestSurfaceCreated == NULL) {
+		return 0;
+	}
+	return GoEGLGuestSurfaceCreated(window, display, surface);
+}
+
+static int tipsy_egl_guest_swap(uintptr_t window, uintptr_t display, uintptr_t surface,
+	uint64_t generation)
+{
+	if (GoEGLGuestSwap == NULL) {
+		return 0;
+	}
+	return GoEGLGuestSwap(window, display, surface, generation);
+}
+
+static void tipsy_egl_guest_surface_destroyed(uintptr_t window, uintptr_t display,
+	uintptr_t surface, uint64_t generation)
+{
+	if (GoEGLGuestSurfaceDestroyed != NULL) {
+		GoEGLGuestSurfaceDestroyed(window, display, surface, generation);
+	}
+}
+
+static tipsy_egl_guest_surface_created_fn egl_guest_surface_created_fn =
+	tipsy_egl_guest_surface_created;
+static tipsy_egl_guest_swap_fn egl_guest_swap_fn = tipsy_egl_guest_swap;
+static tipsy_egl_guest_surface_destroyed_fn egl_guest_surface_destroyed_fn =
+	tipsy_egl_guest_surface_destroyed;
+
+/* All callbacks above are external (and can re-enter this shim), so the
+ * registry lock only protects local identity storage. A swap/destroy takes a
+ * value snapshot, drops the lock, and then calls graphics. Graphics performs
+ * the final generation check, which makes a destroy racing that callback a
+ * harmless rejected stale signal rather than a use-after-free. */
+static struct tipsy_egl_guest_surface *tipsy_egl_guest_surface_take(uintptr_t display,
+	uintptr_t surface)
+{
+	struct tipsy_egl_guest_surface **cursor;
+	struct tipsy_egl_guest_surface *found = NULL;
+
+	pthread_mutex_lock(&egl_guest_surfaces_mu);
+	for (cursor = &egl_guest_surfaces; *cursor != NULL; cursor = &(*cursor)->next) {
+		if ((*cursor)->display == display && (*cursor)->surface == surface) {
+			found = *cursor;
+			*cursor = found->next;
+			found->next = NULL;
+			break;
+		}
+	}
+	pthread_mutex_unlock(&egl_guest_surfaces_mu);
+	return found;
+}
+
+static void tipsy_egl_guest_surface_discard_window(uintptr_t window)
+{
+	struct tipsy_egl_guest_surface **cursor;
+	struct tipsy_egl_guest_surface *discarded = NULL;
+
+	pthread_mutex_lock(&egl_guest_surfaces_mu);
+	for (cursor = &egl_guest_surfaces; *cursor != NULL;) {
+		struct tipsy_egl_guest_surface *entry = *cursor;
+		if (entry->window != window) {
+			cursor = &entry->next;
+			continue;
+		}
+		*cursor = entry->next;
+		entry->next = discarded;
+		discarded = entry;
+	}
+	pthread_mutex_unlock(&egl_guest_surfaces_mu);
+	while (discarded != NULL) {
+		struct tipsy_egl_guest_surface *next = discarded->next;
+		free(discarded);
+		discarded = next;
+	}
+}
+
+static void tipsy_egl_guest_surface_store(struct tipsy_egl_guest_surface *entry)
+{
+	struct tipsy_egl_guest_surface **cursor;
+	struct tipsy_egl_guest_surface *old = NULL;
+
+	if (entry == NULL) {
+		return;
+	}
+	/* Graphics allows one active guest surface per XID. A new surface for that
+	 * window therefore invalidates all prior Android records, including a host
+	 * address the driver later recycles. */
+	pthread_mutex_lock(&egl_guest_surfaces_mu);
+	for (cursor = &egl_guest_surfaces; *cursor != NULL;) {
+		struct tipsy_egl_guest_surface *candidate = *cursor;
+		if (candidate->window != entry->window) {
+			cursor = &candidate->next;
+			continue;
+		}
+		*cursor = candidate->next;
+		candidate->next = old;
+		old = candidate;
+	}
+	entry->next = egl_guest_surfaces;
+	egl_guest_surfaces = entry;
+	pthread_mutex_unlock(&egl_guest_surfaces_mu);
+	while (old != NULL) {
+		struct tipsy_egl_guest_surface *next = old->next;
+		free(old);
+		old = next;
+	}
+}
+
+static int tipsy_egl_guest_surface_snapshot(uintptr_t display, uintptr_t surface,
+	struct tipsy_egl_guest_surface *out)
+{
+	struct tipsy_egl_guest_surface *entry;
+	int found = 0;
+
+	if (out == NULL) {
+		return 0;
+	}
+	pthread_mutex_lock(&egl_guest_surfaces_mu);
+	for (entry = egl_guest_surfaces; entry != NULL; entry = entry->next) {
+		if (entry->display == display && entry->surface == surface) {
+			*out = *entry;
+			out->next = NULL;
+			found = 1;
+			break;
+		}
+	}
+	pthread_mutex_unlock(&egl_guest_surfaces_mu);
+	return found;
+}
+
+static void tipsy_egl_guest_surface_clear_all(void)
+{
+	struct tipsy_egl_guest_surface *entry;
+
+	pthread_mutex_lock(&egl_guest_surfaces_mu);
+	entry = egl_guest_surfaces;
+	egl_guest_surfaces = NULL;
+	pthread_mutex_unlock(&egl_guest_surfaces_mu);
+	while (entry != NULL) {
+		struct tipsy_egl_guest_surface *next = entry->next;
+		free(entry);
+		entry = next;
+	}
+}
 
 extern void GoAndroid_LogEGLSwapInterval(int enabled, int requested, int effective,
 	int primary_ok, int primary_error, int fallback_ok, int fallback_error);
@@ -154,6 +328,7 @@ static void open_egl_libraries(void)
 		host_eglGetProcAddress = (egl_get_proc_address_fn)dlsym(lib_egl, "eglGetProcAddress");
 		host_eglSwapInterval = (egl_swap_interval_fn)dlsym(lib_egl, "eglSwapInterval");
 		host_eglSwapBuffers = (egl_swap_buffers_fn)dlsym(lib_egl, "eglSwapBuffers");
+		host_eglDestroySurface = (egl_destroy_surface_fn)dlsym(lib_egl, "eglDestroySurface");
 		host_eglGetError = (egl_get_error_fn)dlsym(lib_egl, "eglGetError");
 	}
 }
@@ -296,6 +471,7 @@ EGLBoolean tipsy_eglSwapInterval(EGLDisplay dpy, EGLint interval)
 
 EGLBoolean tipsy_eglSwapBuffers(EGLDisplay dpy, EGLSurface surface)
 {
+	struct tipsy_egl_guest_surface guest;
 	EGLBoolean ok;
 
 	ensure_egl();
@@ -306,23 +482,81 @@ EGLBoolean tipsy_eglSwapBuffers(EGLDisplay dpy, EGLSurface surface)
 	ok = host_eglSwapBuffers(dpy, surface);
 	if (ok == TIPSY_EGL_TRUE) {
 		tipsy_egl_note_successful_swap();
+		if (tipsy_egl_guest_surface_snapshot((uintptr_t)dpy, (uintptr_t)surface, &guest)) {
+			/* The bridge is deliberately after the host return: a failed client
+			 * present never reaches the graphics sentinel. */
+			(void)egl_guest_swap_fn(guest.window, guest.display, guest.surface,
+				guest.generation);
+		}
 	}
 	return ok;
 }
 
 EGLSurface tipsy_eglCreateWindowSurface(EGLDisplay dpy, EGLConfig config, void *native_window, const EGLint *attrib_list)
 {
+	struct tipsy_egl_guest_surface *guest;
+	EGLSurface surface;
 	void *host_win = native_window;
+	uintptr_t xid = 0;
+	uint64_t generation;
 
 	ensure_egl();
 	if (tipsy_is_anative_window(native_window)) {
-		host_win = (void *)tipsy_ANativeWindow_get_handle(native_window);
+		xid = tipsy_ANativeWindow_get_handle(native_window);
+		host_win = (void *)xid;
 	}
 	if (host_eglCreateWindowSurface == NULL) {
 		GoAndroid_LogMissing("eglCreateWindowSurface");
 		return NULL;
 	}
-	return host_eglCreateWindowSurface(dpy, config, host_win, attrib_list);
+	surface = host_eglCreateWindowSurface(dpy, config, host_win, attrib_list);
+	if (surface == NULL || xid == 0 || dpy == NULL) {
+		return surface;
+	}
+	/* Reserve local storage before publishing the guest surface. If allocation
+	 * fails, leave graphics unnotified: a non-retainable generation must never
+	 * later be signaled or destroyed as though it were tracked. */
+	guest = calloc(1, sizeof(*guest));
+	if (guest == NULL) {
+		return surface;
+	}
+	/* Prevent an old Android record for the same XID from signaling while the
+	 * graphics router replaces its surface mapping in the callback below. */
+	tipsy_egl_guest_surface_discard_window(xid);
+	generation = egl_guest_surface_created_fn(xid, (uintptr_t)dpy, (uintptr_t)surface);
+	if (generation == 0) {
+		free(guest);
+		return surface;
+	}
+	guest->window = xid;
+	guest->display = (uintptr_t)dpy;
+	guest->surface = (uintptr_t)surface;
+	guest->generation = generation;
+	tipsy_egl_guest_surface_store(guest);
+	return surface;
+}
+
+EGLBoolean tipsy_eglDestroySurface(EGLDisplay dpy, EGLSurface surface)
+{
+	struct tipsy_egl_guest_surface *guest;
+	EGLBoolean ok;
+
+	ensure_egl();
+	if (host_eglDestroySurface == NULL) {
+		GoAndroid_LogMissing("eglDestroySurface");
+		return TIPSY_EGL_FALSE;
+	}
+	/* Invalidate before forwarding to the host. This means a numeric host
+	 * surface reuse cannot revive the old generation, even if destruction and a
+	 * successful swap race on separate callers. */
+	guest = tipsy_egl_guest_surface_take((uintptr_t)dpy, (uintptr_t)surface);
+	if (guest != NULL) {
+		egl_guest_surface_destroyed_fn(guest->window, guest->display, guest->surface,
+			guest->generation);
+		free(guest);
+	}
+	ok = host_eglDestroySurface(dpy, surface);
+	return ok;
 }
 
 void *tipsy_eglGetProcAddress(const char *name)
@@ -339,6 +573,9 @@ void *tipsy_eglGetProcAddress(const char *name)
 		}
 		if (strcmp(name, "eglSwapBuffers") == 0) {
 			return (void *)tipsy_eglSwapBuffers;
+		}
+		if (strcmp(name, "eglDestroySurface") == 0) {
+			return (void *)tipsy_eglDestroySurface;
 		}
 		if (strcmp(name, "eglGetProcAddress") == 0) {
 			return (void *)tipsy_eglGetProcAddress;
@@ -377,6 +614,12 @@ int tipsy_test_egl_proc_is_wrapped(const char *name)
 	if (strcmp(name, "eglSwapBuffers") == 0) {
 		return got == (void *)tipsy_eglSwapBuffers;
 	}
+	if (strcmp(name, "eglCreateWindowSurface") == 0) {
+		return got == (void *)tipsy_eglCreateWindowSurface;
+	}
+	if (strcmp(name, "eglDestroySurface") == 0) {
+		return got == (void *)tipsy_eglDestroySurface;
+	}
 	return 0;
 }
 
@@ -400,6 +643,9 @@ void *tipsy_egl_dlsym(const char *name)
 	}
 	if (strcmp(name, "eglSwapBuffers") == 0) {
 		return (void *)tipsy_eglSwapBuffers;
+	}
+	if (strcmp(name, "eglDestroySurface") == 0) {
+		return (void *)tipsy_eglDestroySurface;
 	}
 	if (strcmp(name, "eglGetProcAddress") == 0) {
 		return (void *)tipsy_eglGetProcAddress;
@@ -507,6 +753,288 @@ int tipsy_test_egl_swap_interval_policy(int vsync, int requested,
 		*reported_error = t.reported_error;
 	}
 	return result == TIPSY_EGL_TRUE;
+}
+
+struct tipsy_egl_guest_handoff_test {
+	EGLSurface next_surface;
+	EGLBoolean swap_result;
+	EGLBoolean destroy_result;
+	uint64_t next_generation;
+	int reenter_created;
+	int reenter_destroyed;
+	int create_calls;
+	uintptr_t create_host_windows[4];
+	int swap_calls;
+	int destroy_calls;
+	int destroy_callback_order_violations;
+	uint32_t callback_count;
+	TipsyEGLGuestHandoffEvent callbacks[6];
+};
+
+static struct tipsy_egl_guest_handoff_test *active_egl_guest_handoff_test;
+
+static void tipsy_test_egl_guest_handoff_record(uint32_t kind, uintptr_t window,
+	uintptr_t display, uintptr_t surface, uint64_t generation)
+{
+	struct tipsy_egl_guest_handoff_test *t = active_egl_guest_handoff_test;
+	TipsyEGLGuestHandoffEvent *event;
+
+	if (t == NULL || t->callback_count >= sizeof(t->callbacks) / sizeof(t->callbacks[0])) {
+		return;
+	}
+	event = &t->callbacks[t->callback_count++];
+	event->kind = kind;
+	event->window = window;
+	event->display = display;
+	event->surface = surface;
+	event->generation = generation;
+}
+
+static EGLSurface tipsy_test_egl_guest_handoff_create(EGLDisplay dpy, EGLConfig config,
+	void *host_window, const EGLint *attrib_list)
+{
+	struct tipsy_egl_guest_handoff_test *t = active_egl_guest_handoff_test;
+	(void)dpy;
+	(void)config;
+	(void)attrib_list;
+	if (t == NULL) {
+		return NULL;
+	}
+	if (t->create_calls < (int)(sizeof(t->create_host_windows) /
+		sizeof(t->create_host_windows[0]))) {
+		t->create_host_windows[t->create_calls] = (uintptr_t)host_window;
+	}
+	t->create_calls++;
+	return t->next_surface;
+}
+
+static EGLBoolean tipsy_test_egl_guest_handoff_swap(EGLDisplay dpy, EGLSurface surface)
+{
+	struct tipsy_egl_guest_handoff_test *t = active_egl_guest_handoff_test;
+	(void)dpy;
+	(void)surface;
+	if (t == NULL) {
+		return TIPSY_EGL_FALSE;
+	}
+	t->swap_calls++;
+	return t->swap_result;
+}
+
+static EGLBoolean tipsy_test_egl_guest_handoff_destroy(EGLDisplay dpy, EGLSurface surface)
+{
+	struct tipsy_egl_guest_handoff_test *t = active_egl_guest_handoff_test;
+	(void)dpy;
+	(void)surface;
+	if (t == NULL) {
+		return TIPSY_EGL_FALSE;
+	}
+	if ((uintptr_t)dpy == 0x1001 && (uintptr_t)surface == 0x3001 &&
+		(t->callback_count == 0 ||
+		 t->callbacks[t->callback_count - 1].kind != TIPSY_EGL_GUEST_HANDOFF_DESTROYED)) {
+		t->destroy_callback_order_violations++;
+	}
+	t->destroy_calls++;
+	return t->destroy_result;
+}
+
+static uint64_t tipsy_test_egl_guest_handoff_created(uintptr_t window, uintptr_t display,
+	uintptr_t surface)
+{
+	struct tipsy_egl_guest_handoff_test *t = active_egl_guest_handoff_test;
+	uint64_t generation;
+
+	if (t == NULL) {
+		return 0;
+	}
+	tipsy_test_egl_guest_handoff_record(TIPSY_EGL_GUEST_HANDOFF_CREATED, window,
+		display, surface, t->next_generation);
+	generation = t->next_generation;
+	if (t->reenter_created) {
+		t->reenter_created = 0;
+		/* Creation has not retained an Android generation yet. An external
+		 * callback may re-enter the shim, but that early successful host swap
+		 * must not be guessed as a guest signal. */
+		(void)tipsy_eglSwapBuffers((EGLDisplay)display, (EGLSurface)surface);
+	}
+	return generation;
+}
+
+static int tipsy_test_egl_guest_handoff_swap_callback(uintptr_t window, uintptr_t display,
+	uintptr_t surface, uint64_t generation)
+{
+	tipsy_test_egl_guest_handoff_record(TIPSY_EGL_GUEST_HANDOFF_SWAP, window,
+		display, surface, generation);
+	return 1;
+}
+
+static void tipsy_test_egl_guest_handoff_destroyed(uintptr_t window, uintptr_t display,
+	uintptr_t surface, uint64_t generation)
+{
+	struct tipsy_egl_guest_handoff_test *t = active_egl_guest_handoff_test;
+
+	tipsy_test_egl_guest_handoff_record(TIPSY_EGL_GUEST_HANDOFF_DESTROYED, window,
+		display, surface, generation);
+	if (t != NULL && t->reenter_destroyed) {
+		t->reenter_destroyed = 0;
+		/* The entry was removed before this external callback, so a reentrant
+		 * successful host swap is stale and must not produce a second signal. */
+		(void)tipsy_eglSwapBuffers((EGLDisplay)display, (EGLSurface)surface);
+	}
+}
+
+static EGLSurface tipsy_test_egl_guest_handoff_create_window(uintptr_t display,
+	uintptr_t xid)
+{
+	TipsyNativeWindow window = {0};
+
+	window.magic = TIPSY_ANW_MAGIC;
+	window.native_handle = xid;
+	return tipsy_eglCreateWindowSurface((EGLDisplay)display, NULL, &window, NULL);
+}
+
+int tipsy_test_egl_guest_handoff_fixture(TipsyEGLGuestHandoffFixture *out)
+{
+	const uintptr_t display = 0x1001;
+	const uintptr_t other_display = 0x1002;
+	const uintptr_t xid = 0x2001;
+	const uintptr_t surface = 0x3001;
+	const uintptr_t other_surface = 0x3002;
+	const uint64_t first_generation = 41;
+	const uint64_t second_generation = 42;
+	struct tipsy_egl_guest_handoff_test t = {0};
+	egl_create_window_surface_fn saved_create;
+	egl_swap_buffers_fn saved_swap;
+	egl_destroy_surface_fn saved_destroy;
+	tipsy_egl_guest_surface_created_fn saved_created;
+	tipsy_egl_guest_swap_fn saved_guest_swap;
+	tipsy_egl_guest_surface_destroyed_fn saved_destroyed;
+	int passed = 1;
+
+	if (out == NULL) {
+		return 0;
+	}
+	memset(out, 0, sizeof(*out));
+	/* Complete host resolution before substituting every direct shim edge. */
+	ensure_egl();
+	tipsy_egl_guest_surface_clear_all();
+	saved_create = host_eglCreateWindowSurface;
+	saved_swap = host_eglSwapBuffers;
+	saved_destroy = host_eglDestroySurface;
+	saved_created = egl_guest_surface_created_fn;
+	saved_guest_swap = egl_guest_swap_fn;
+	saved_destroyed = egl_guest_surface_destroyed_fn;
+	active_egl_guest_handoff_test = &t;
+	host_eglCreateWindowSurface = tipsy_test_egl_guest_handoff_create;
+	host_eglSwapBuffers = tipsy_test_egl_guest_handoff_swap;
+	host_eglDestroySurface = tipsy_test_egl_guest_handoff_destroy;
+	egl_guest_surface_created_fn = tipsy_test_egl_guest_handoff_created;
+	egl_guest_swap_fn = tipsy_test_egl_guest_handoff_swap_callback;
+	egl_guest_surface_destroyed_fn = tipsy_test_egl_guest_handoff_destroyed;
+
+	/* A failed host create cannot register a generation. */
+	t.next_surface = NULL;
+	if (tipsy_test_egl_guest_handoff_create_window(display, xid) != NULL) {
+		passed = 0;
+	}
+
+	/* First exact surface: creation callback re-enters a successful swap before
+	 * local retention. The reentrant call is intentionally not signaled. */
+	t.next_surface = (EGLSurface)surface;
+	t.next_generation = first_generation;
+	t.swap_result = TIPSY_EGL_TRUE;
+	t.reenter_created = 1;
+	if (tipsy_test_egl_guest_handoff_create_window(display, xid) != (EGLSurface)surface) {
+		passed = 0;
+	}
+	if (tipsy_eglSwapBuffers((EGLDisplay)display, (EGLSurface)surface) != TIPSY_EGL_TRUE) {
+		passed = 0;
+	}
+	/* A failed host swap, a different surface, and a different display never
+	 * cross the bridge. */
+	t.swap_result = TIPSY_EGL_FALSE;
+	if (tipsy_eglSwapBuffers((EGLDisplay)display, (EGLSurface)surface) != TIPSY_EGL_FALSE) {
+		passed = 0;
+	}
+	t.swap_result = TIPSY_EGL_TRUE;
+	if (tipsy_eglSwapBuffers((EGLDisplay)display, (EGLSurface)other_surface) != TIPSY_EGL_TRUE ||
+		tipsy_eglSwapBuffers((EGLDisplay)other_display, (EGLSurface)surface) != TIPSY_EGL_TRUE) {
+		passed = 0;
+	}
+
+	/* Destroy removes the entry before invoking the external callback. Its
+	 * reentrant swap and a post-destroy swap are both stale. */
+	t.destroy_result = TIPSY_EGL_TRUE;
+	t.reenter_destroyed = 1;
+	if (tipsy_eglDestroySurface((EGLDisplay)display, (EGLSurface)surface) != TIPSY_EGL_TRUE ||
+		tipsy_eglSwapBuffers((EGLDisplay)display, (EGLSurface)surface) != TIPSY_EGL_TRUE) {
+		passed = 0;
+	}
+
+	/* A non-Tipsy/zero-XID native window is unwrapped for the host but never
+	 * registered. It cannot manufacture a bridge signal. */
+	t.next_surface = (EGLSurface)other_surface;
+	t.next_generation = first_generation;
+	if (tipsy_test_egl_guest_handoff_create_window(display, 0) != (EGLSurface)other_surface ||
+		tipsy_eglSwapBuffers((EGLDisplay)display, (EGLSurface)other_surface) != TIPSY_EGL_TRUE ||
+		tipsy_eglDestroySurface((EGLDisplay)display, (EGLSurface)other_surface) != TIPSY_EGL_TRUE) {
+		passed = 0;
+	}
+
+	/* Recreate the exact numeric host surface with a new generation. A destroy
+	 * callback is required before the host call even when that host call fails. */
+	t.next_surface = (EGLSurface)surface;
+	t.next_generation = second_generation;
+	t.reenter_created = 1;
+	if (tipsy_test_egl_guest_handoff_create_window(display, xid) != (EGLSurface)surface ||
+		tipsy_eglSwapBuffers((EGLDisplay)display, (EGLSurface)surface) != TIPSY_EGL_TRUE) {
+		passed = 0;
+	}
+	t.destroy_result = TIPSY_EGL_FALSE;
+	t.reenter_destroyed = 1;
+	if (tipsy_eglDestroySurface((EGLDisplay)display, (EGLSurface)surface) != TIPSY_EGL_FALSE ||
+		tipsy_eglSwapBuffers((EGLDisplay)display, (EGLSurface)surface) != TIPSY_EGL_TRUE) {
+		passed = 0;
+	}
+
+	if (t.create_calls != 4 || t.create_host_windows[0] != xid ||
+		t.create_host_windows[1] != xid || t.create_host_windows[2] != 0 ||
+		t.create_host_windows[3] != xid || t.destroy_callback_order_violations != 0 ||
+		t.callback_count != 6) {
+		passed = 0;
+	}
+	if (t.callback_count == 6 &&
+		(t.callbacks[0].kind != TIPSY_EGL_GUEST_HANDOFF_CREATED ||
+		 t.callbacks[1].kind != TIPSY_EGL_GUEST_HANDOFF_SWAP ||
+		 t.callbacks[2].kind != TIPSY_EGL_GUEST_HANDOFF_DESTROYED ||
+		 t.callbacks[3].kind != TIPSY_EGL_GUEST_HANDOFF_CREATED ||
+		 t.callbacks[4].kind != TIPSY_EGL_GUEST_HANDOFF_SWAP ||
+		 t.callbacks[5].kind != TIPSY_EGL_GUEST_HANDOFF_DESTROYED ||
+		 t.callbacks[0].generation != first_generation ||
+		 t.callbacks[1].generation != first_generation ||
+		 t.callbacks[2].generation != first_generation ||
+		 t.callbacks[3].generation != second_generation ||
+		 t.callbacks[4].generation != second_generation ||
+		 t.callbacks[5].generation != second_generation)) {
+		passed = 0;
+	}
+
+	out->create_calls = t.create_calls;
+	memcpy(out->create_host_windows, t.create_host_windows, sizeof(out->create_host_windows));
+	out->swap_calls = t.swap_calls;
+	out->destroy_calls = t.destroy_calls;
+	out->destroy_callback_order_violations = t.destroy_callback_order_violations;
+	out->callback_count = t.callback_count;
+	memcpy(out->callbacks, t.callbacks, sizeof(out->callbacks));
+	out->passed = passed;
+	tipsy_egl_guest_surface_clear_all();
+	egl_guest_surface_created_fn = saved_created;
+	egl_guest_swap_fn = saved_guest_swap;
+	egl_guest_surface_destroyed_fn = saved_destroyed;
+	host_eglCreateWindowSurface = saved_create;
+	host_eglSwapBuffers = saved_swap;
+	host_eglDestroySurface = saved_destroy;
+	active_egl_guest_handoff_test = NULL;
+	return passed;
 }
 
 void *tipsy_gles_dlsym(const char *name)
