@@ -154,8 +154,9 @@ type AndroidFrame struct {
 	// Axes maps Android axis → value: sticks -1..1, triggers 0..1,
 	// hats -1..1.
 	Axes map[int]float32
-	// Ranges holds honest MotionRanges for reported axes only.
-	Ranges map[int]MotionRange
+	// Ranges holds honest MotionRanges for reported axes only. It is a compact,
+	// independently owned slice because Android has a small fixed axis topology.
+	Ranges []MotionRange
 	// Disconnect mirrors Frame.Disconnect.
 	Disconnect bool
 }
@@ -172,11 +173,24 @@ type AndroidFrame struct {
 //     (duality, matching real Android drivers).
 //   - BTN_TL2/TR2 edges → BUTTON_L2/R2 keys alongside the analog axes.
 func MapFrame(f *Frame, deviceID int, m Mapping, infos map[uint16]AbsInfo) AndroidFrame {
+	buttonCap, axisCap := 0, 0
+	if f != nil {
+		// Android translation can add at most the two hat-derived DPAD keys
+		// beyond the normalized button snapshot, and only the physical right
+		// stick expands its two source axes into the Z/RZ + RX/RY mirrors.
+		// Reserve the bounded topology up front so the independently owned
+		// output frame does not grow its maps or compact range slice while it
+		// is being populated. Every call still allocates new containers:
+		// callers may retain or mutate a returned AndroidFrame after the next
+		// SYN_REPORT.
+		buttonCap = len(f.Buttons) + 2
+		axisCap = len(f.Axes) + 2
+	}
 	out := AndroidFrame{
 		DeviceID: deviceID,
-		Buttons:  make(map[int]bool),
-		Axes:     make(map[int]float32),
-		Ranges:   make(map[int]MotionRange),
+		Buttons:  make(map[int]bool, buttonCap),
+		Axes:     make(map[int]float32, axisCap),
+		Ranges:   make([]MotionRange, 0, axisCap),
 	}
 	if f == nil {
 		return out
@@ -196,11 +210,11 @@ func MapFrame(f *Frame, deviceID int, m Mapping, infos map[uint16]AbsInfo) Andro
 
 	if v, ok := axis(AbsX); ok {
 		out.Axes[AndroidAxisX] = float32(v)
-		setRange(out.Ranges, AndroidAxisX, infos, AbsX, -1, 1)
+		out.Ranges = setRange(out.Ranges, AndroidAxisX, infos, AbsX, -1, 1)
 	}
 	if v, ok := axis(AbsY); ok {
 		out.Axes[AndroidAxisY] = float32(v)
-		setRange(out.Ranges, AndroidAxisY, infos, AbsY, -1, 1)
+		out.Ranges = setRange(out.Ranges, AndroidAxisY, infos, AbsY, -1, 1)
 	}
 
 	// Right stick → Z/RZ + RX/RY mirror.
@@ -208,14 +222,14 @@ func MapFrame(f *Frame, deviceID int, m Mapping, infos map[uint16]AbsInfo) Andro
 		if vx, ok := axis(m.RightX); ok {
 			out.Axes[AndroidAxisZ] = float32(vx)
 			out.Axes[AndroidAxisRX] = float32(vx)
-			setRange(out.Ranges, AndroidAxisZ, infos, m.RightX, -1, 1)
-			setRange(out.Ranges, AndroidAxisRX, infos, m.RightX, -1, 1)
+			out.Ranges = setRange(out.Ranges, AndroidAxisZ, infos, m.RightX, -1, 1)
+			out.Ranges = setRange(out.Ranges, AndroidAxisRX, infos, m.RightX, -1, 1)
 		}
 		if vy, ok := axis(m.RightY); ok {
 			out.Axes[AndroidAxisRZ] = float32(vy)
 			out.Axes[AndroidAxisRY] = float32(vy)
-			setRange(out.Ranges, AndroidAxisRZ, infos, m.RightY, -1, 1)
-			setRange(out.Ranges, AndroidAxisRY, infos, m.RightY, -1, 1)
+			out.Ranges = setRange(out.Ranges, AndroidAxisRZ, infos, m.RightY, -1, 1)
+			out.Ranges = setRange(out.Ranges, AndroidAxisRY, infos, m.RightY, -1, 1)
 		}
 	}
 
@@ -223,13 +237,13 @@ func MapFrame(f *Frame, deviceID int, m Mapping, infos map[uint16]AbsInfo) Andro
 	if m.TriggerL != NoAxis {
 		if v, ok := axis(m.TriggerL); ok {
 			out.Axes[AndroidAxisLTrigger] = float32(v)
-			setRange(out.Ranges, AndroidAxisLTrigger, infos, m.TriggerL, 0, 1)
+			out.Ranges = setRange(out.Ranges, AndroidAxisLTrigger, infos, m.TriggerL, 0, 1)
 		}
 	}
 	if m.TriggerR != NoAxis {
 		if v, ok := axis(m.TriggerR); ok {
 			out.Axes[AndroidAxisRTrigger] = float32(v)
-			setRange(out.Ranges, AndroidAxisRTrigger, infos, m.TriggerR, 0, 1)
+			out.Ranges = setRange(out.Ranges, AndroidAxisRTrigger, infos, m.TriggerR, 0, 1)
 		}
 	}
 
@@ -240,11 +254,11 @@ func MapFrame(f *Frame, deviceID int, m Mapping, infos map[uint16]AbsInfo) Andro
 	hatY, hasHatY := axis(AbsHat0Y)
 	if hasHatX {
 		out.Axes[AndroidAxisHatX] = float32(hatX)
-		setRange(out.Ranges, AndroidAxisHatX, infos, AbsHat0X, -1, 1)
+		out.Ranges = setRange(out.Ranges, AndroidAxisHatX, infos, AbsHat0X, -1, 1)
 	}
 	if hasHatY {
 		out.Axes[AndroidAxisHatY] = float32(hatY)
-		setRange(out.Ranges, AndroidAxisHatY, infos, AbsHat0Y, -1, 1)
+		out.Ranges = setRange(out.Ranges, AndroidAxisHatY, infos, AbsHat0Y, -1, 1)
 	}
 	if hasHatX || hasHatY {
 		if hatX < -HatDpadThreshold {
@@ -285,15 +299,26 @@ func MapFrame(f *Frame, deviceID int, m Mapping, infos map[uint16]AbsInfo) Andro
 	return out
 }
 
+// Range returns the honest MotionRange for an Android axis, if that physical
+// axis was reported in this frame.
+func (f AndroidFrame) Range(androidAxis int) (MotionRange, bool) {
+	for _, r := range f.Ranges {
+		if int(r.Axis) == androidAxis {
+			return r, true
+		}
+	}
+	return MotionRange{}, false
+}
+
 // setRange records the honest device range for an Android axis. Flat is
 // normalized to the axis scale (stick half-range, trigger span) because
 // Android reports flat in axis units while evdev reports raw units.
 // Stick flats are capped at DefaultDeadzone so an oversized EVIOCGABS
 // flat cannot make the engine's |v|<=flat gate swallow gyro-to-stick.
-func setRange(ranges map[int]MotionRange, androidAxis int, infos map[uint16]AbsInfo, evdevCode uint16, lo, hi float32) {
+func setRange(ranges []MotionRange, androidAxis int, infos map[uint16]AbsInfo, evdevCode uint16, lo, hi float32) []MotionRange {
 	info, ok := infos[evdevCode]
 	if !ok || info.Maximum <= info.Minimum {
-		return
+		return ranges
 	}
 	var flat float32
 	span := float64(info.Maximum - info.Minimum)
@@ -304,7 +329,14 @@ func setRange(ranges map[int]MotionRange, androidAxis int, infos map[uint16]AbsI
 			flat = StickFlatNormalized(info.Minimum, info.Maximum, info.Flat)
 		}
 	}
-	ranges[androidAxis] = MotionRange{Axis: int32(androidAxis), Min: lo, Max: hi, Flat: flat}
+	r := MotionRange{Axis: int32(androidAxis), Min: lo, Max: hi, Flat: flat}
+	for i := range ranges {
+		if int(ranges[i].Axis) == androidAxis {
+			ranges[i] = r
+			return ranges
+		}
+	}
+	return append(ranges, r)
 }
 
 // SupportedKeys returns the Android keycodes advertised for the capability

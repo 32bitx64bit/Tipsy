@@ -95,14 +95,41 @@ func TestXboxGoldenRecordedStream(t *testing.T) {
 		t.Fatalf("hat-right must also set DPAD_RIGHT: %+v", af.Buttons)
 	}
 	// Honest ranges: reported axes present, unreported axes absent (never zero-filled).
-	if _, ok := af.Ranges[AndroidAxisGas]; ok {
+	if _, ok := af.Range(AndroidAxisGas); ok {
 		t.Fatal("unreported GAS axis must be absent, never zero-filled")
 	}
-	if rg, ok := af.Ranges[AndroidAxisX]; !ok || rg.Min != -1 || rg.Max != 1 {
+	if rg, ok := af.Range(AndroidAxisX); !ok || rg.Min != -1 || rg.Max != 1 {
 		t.Fatalf("AXIS_X range must be honest -1..1, got %+v", rg)
 	}
-	if rg, ok := af.Ranges[AndroidAxisLTrigger]; !ok || rg.Min != 0 || rg.Max != 1 {
+	if rg, ok := af.Range(AndroidAxisLTrigger); !ok || rg.Min != 0 || rg.Max != 1 {
 		t.Fatalf("LTRIGGER range must be honest 0..1, got %+v", rg)
+	}
+}
+
+// TestMapFrameReturnsIndependentContainers pins AndroidFrame ownership. Consumers
+// may retain and mutate a translated frame until after a later SYN_REPORT, so
+// MapFrame must never recycle its public maps or ranges for a subsequent frame.
+func TestMapFrameReturnsIndependentContainers(t *testing.T) {
+	info, m := xboxDevice()
+	first := MapFrame(&Frame{
+		Buttons: map[uint16]bool{BtnSouth: true},
+		Axes:    map[uint16]float64{AbsX: 0.5},
+	}, 1, m, info.Abs)
+
+	first.Buttons[AndroidButtonA] = false
+	first.Axes[AndroidAxisX] = 42
+	first.Ranges[0] = MotionRange{Axis: AndroidAxisX, Min: 42}
+
+	next := MapFrame(&Frame{
+		Buttons: map[uint16]bool{BtnSouth: true},
+		Axes:    map[uint16]float64{AbsX: -0.5},
+	}, 1, m, info.Abs)
+	if !next.Buttons[AndroidButtonA] || next.Axes[AndroidAxisX] != -0.5 {
+		t.Fatalf("next frame must reflect its own input, got %+v", next)
+	}
+	firstRange, firstRangeOK := first.Range(AndroidAxisX)
+	if first.Buttons[AndroidButtonA] || first.Axes[AndroidAxisX] != 42 || !firstRangeOK || firstRange.Min != 42 {
+		t.Fatalf("later MapFrame changed retained frame: %+v", first)
 	}
 }
 
@@ -246,7 +273,7 @@ func TestGuliKitUnsignedStickRest(t *testing.T) {
 			t.Fatalf("GuliKit rest axis %d must be 0, got %v (unsigned sticks were trigger-normalized)", a, v)
 		}
 	}
-	if got := af.Ranges[AndroidAxisX].Flat; math.Abs(float64(got)-DefaultDeadzone) > 0.002 {
+	if got, ok := af.Range(AndroidAxisX); !ok || math.Abs(float64(got.Flat)-DefaultDeadzone) > 0.002 {
 		t.Fatalf("GuliKit advertised stick flat = %v, want capped %v so engine |v|<=flat cannot eat gyro-to-stick", got, DefaultDeadzone)
 	}
 	// Gyro-scale right-stick mix: 3000 counts inside device flat 4095.

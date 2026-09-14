@@ -60,27 +60,33 @@ func TestPerAxisFlatHonesty(t *testing.T) {
 	})
 	af := MapFrame(f, 1, m, info.Abs)
 
-	rgX := af.Ranges[AndroidAxisX]
+	rgX, ok := af.Range(AndroidAxisX)
+	if !ok {
+		t.Fatal("reported AXIS_X range must be present")
+	}
 	wantX := float32(512.0 / (65535.0 / 2))
 	if math.Abs(float64(rgX.Flat-wantX)) > 1e-4 {
 		t.Fatalf("AXIS_X flat must be 512/half-range ≈ %v, got %v", wantX, rgX.Flat)
 	}
-	rgT := af.Ranges[AndroidAxisLTrigger]
+	rgT, ok := af.Range(AndroidAxisLTrigger)
+	if !ok {
+		t.Fatal("reported LTRIGGER range must be present")
+	}
 	wantT := float32(8.0 / 255)
 	if math.Abs(float64(rgT.Flat-wantT)) > 1e-4 {
 		t.Fatalf("LTRIGGER flat must be 8/span ≈ %v, got %v", wantT, rgT.Flat)
 	}
-	rgY, ok := af.Ranges[AndroidAxisY]
+	rgY, ok := af.Range(AndroidAxisY)
 	if !ok {
 		t.Fatal("flat==0 axis must still be PRESENT (honest zero flat), not absent")
 	}
 	if rgY.Flat != 0 {
 		t.Fatalf("flat==0 axis must report flat 0, got %v", rgY.Flat)
 	}
-	if _, ok := af.Ranges[AndroidAxisGas]; ok {
+	if _, ok := af.Range(AndroidAxisGas); ok {
 		t.Fatal("unreported GAS axis must be absent, never zero-filled")
 	}
-	if _, ok := af.Ranges[AndroidAxisBrake]; ok {
+	if _, ok := af.Range(AndroidAxisBrake); ok {
 		t.Fatal("unreported BRAKE axis must be absent, never zero-filled")
 	}
 }
