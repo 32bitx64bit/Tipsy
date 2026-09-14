@@ -64,6 +64,10 @@ typedef struct AAsset {
 	int64_t pos;
 	int fd;
 	int owned;
+	/* Opaque Go-owned lease. It is used only for a borrowed (owned == 0)
+	 * buffer and is consumed exactly once by tipsy_AAsset_close. It is never
+	 * a data pointer, asset name, path, or byte count. */
+	uintptr_t release_token;
 } AAsset;
 
 typedef struct AAssetManager {
@@ -304,6 +308,9 @@ int tipsy_test_glibc_bionic_ai_addr_null(void);
 
 AAssetManager *tipsy_AAssetManager_singleton(void);
 AAsset *tipsy_AAsset_from_buffer(void *buf, int64_t len, int owned, int fd);
+AAsset *tipsy_AAsset_from_buffer_with_release(void *buf, int64_t len, int owned,
+	int fd, uintptr_t release_token);
+void tipsy_AAsset_close(AAsset *asset);
 
 void *tipsy_dlopen(const char *filename, int flags);
 void *tipsy_dlsym(void *handle, const char *symbol);

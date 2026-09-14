@@ -265,6 +265,13 @@ func GoAndroid_AssetOpen(filename *C.char, mode C.int) unsafe.Pointer {
 	return assetFromBytes(b)
 }
 
+//export GoAndroid_AssetClosed
+func GoAndroid_AssetClosed(releaseToken C.uintptr_t) {
+	// The C ABI supplies an opaque per-handle token only. In particular, no
+	// asset buffer, content, path, byte count, or native handle crosses here.
+	releaseAssetBorrow(uintptr(releaseToken))
+}
+
 //export GoAndroid_dlopen
 func GoAndroid_dlopen(filename *C.char, flags C.int) unsafe.Pointer {
 	_ = flags

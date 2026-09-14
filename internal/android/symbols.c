@@ -29,7 +29,7 @@ extern void tipsy_ALooper_release(void *);
 extern void tipsy_ALooper_wake(void *);
 extern void *tipsy_AAssetManager_fromJava(void *, void *);
 extern void *tipsy_AAssetManager_open(void *, const char *, int);
-extern void tipsy_AAsset_close(void *);
+extern void tipsy_AAsset_close(AAsset *);
 extern const void *tipsy_AAsset_getBuffer(void *);
 extern int64_t tipsy_AAsset_getLength(void *);
 extern int tipsy_AAsset_openFileDescriptor(void *, int64_t *, int64_t *);
@@ -70,6 +70,7 @@ extern void *tipsy_eglCreateWindowSurface(void *, void *, void *, const int32_t 
 extern void *tipsy_eglGetProcAddress(const char *);
 extern uint32_t tipsy_eglSwapInterval(void *, int32_t);
 extern uint32_t tipsy_eglSwapBuffers(void *, void *);
+extern uint32_t tipsy_eglDestroySurface(void *, void *);
 extern void *tipsy_egl_dlsym(const char *);
 extern void *tipsy_gles_dlsym(const char *);
 
@@ -370,6 +371,7 @@ static const struct sym table[] = {
 	{ "libEGL.so", "eglCreateWindowSurface", (void *)tipsy_eglCreateWindowSurface },
 	{ "libEGL.so", "eglSwapInterval", (void *)tipsy_eglSwapInterval },
 	{ "libEGL.so", "eglSwapBuffers", (void *)tipsy_eglSwapBuffers },
+	{ "libEGL.so", "eglDestroySurface", (void *)tipsy_eglDestroySurface },
 	{ "libEGL.so", "eglGetProcAddress", (void *)tipsy_eglGetProcAddress },
 
 	{ "libmediandk.so", "AMediaCodec_createDecoderByType", (void *)tipsy_AMediaCodec_createDecoderByType },

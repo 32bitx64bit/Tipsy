@@ -28,6 +28,7 @@ extern void GoAndroid_LogWrite(int prio, char *tag, char *text);
 extern void GoAndroid_LogMissing(char *name);
 extern void GoAndroid_AbortMessage(char *msg);
 extern AAsset *GoAndroid_AssetOpen(char *filename, int mode);
+extern void GoAndroid_AssetClosed(uintptr_t release_token);
 
 #define MAX_LOOPER_FDS 64
 
@@ -1752,7 +1753,8 @@ AAssetManager *tipsy_AAssetManager_fromJava(void *env, void *assetManager)
 	return &g_amgr;
 }
 
-AAsset *tipsy_AAsset_from_buffer(void *buf, int64_t len, int owned, int fd)
+AAsset *tipsy_AAsset_from_buffer_with_release(void *buf, int64_t len, int owned,
+	int fd, uintptr_t release_token)
 {
 	AAsset *a = calloc(1, sizeof(*a));
 	if (a == NULL) {
@@ -1764,7 +1766,16 @@ AAsset *tipsy_AAsset_from_buffer(void *buf, int64_t len, int owned, int fd)
 	a->pos = 0;
 	a->fd = fd;
 	a->owned = owned;
+	/* A C-owned buffer has no Go pin to release. Keep the token opaque: only
+	 * Go knows its backing/pin accounting, and C never records asset content,
+	 * names, paths, or byte counts for it. */
+	a->release_token = owned ? 0 : release_token;
 	return a;
+}
+
+AAsset *tipsy_AAsset_from_buffer(void *buf, int64_t len, int owned, int fd)
+{
+	return tipsy_AAsset_from_buffer_with_release(buf, len, owned, fd, 0);
 }
 
 AAsset *tipsy_AAssetManager_open(AAssetManager *mgr, const char *filename, int mode)
@@ -1775,16 +1786,43 @@ AAsset *tipsy_AAssetManager_open(AAssetManager *mgr, const char *filename, int m
 
 void tipsy_AAsset_close(AAsset *asset)
 {
+	void *buffer;
+	int fd;
+	int owned;
+	uintptr_t release_token;
+
 	if (asset == NULL || asset->magic != TIPSY_ASSET_MAGIC) {
 		return;
 	}
-	if (asset->owned && asset->buffer != NULL) {
-		free(asset->buffer);
-	}
-	if (asset->fd >= 0) {
-		close(asset->fd);
-	}
+
+	/* Invalidate before any operation that could cross into Go. A release
+	 * callback is allowed to cause unrelated asset activity, but it cannot
+	 * make this descriptor close twice or observe a still-live borrowed
+	 * buffer. Copy everything C must dispose first so the callback cannot
+	 * create a use-after-free through this AAsset. */
+	buffer = asset->buffer;
+	fd = asset->fd;
+	owned = asset->owned;
+	release_token = asset->release_token;
 	asset->magic = 0;
+	asset->buffer = NULL;
+	asset->fd = -1;
+	asset->release_token = 0;
+
+	/* Preserve the established C resource destruction order. */
+	if (owned && buffer != NULL) {
+		free(buffer);
+	}
+	if (fd >= 0) {
+		(void)close(fd);
+	}
+	/* The callback runs only after C has stopped using a borrowed buffer.
+	 * Its token is consumed before entry, so re-entrancy cannot duplicate the
+	 * Go-side release. close(2) has no retry contract; a failed close still
+	 * relinquishes this AAsset and therefore still releases its Go lease. */
+	if (!owned && release_token != 0) {
+		GoAndroid_AssetClosed(release_token);
+	}
 	free(asset);
 }
 
