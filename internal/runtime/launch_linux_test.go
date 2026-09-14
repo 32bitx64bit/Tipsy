@@ -55,6 +55,228 @@ func TestStutterDiagnosticsRequiresExactOptIn(t *testing.T) {
 	}
 }
 
+func TestStutterInputDrainDiagnosticsDefaultOff(t *testing.T) {
+	var setCalls []bool
+	snapshotCalls := 0
+	logCalls := 0
+	diagnostics := stutterInputDrainDiagnostics{
+		setEnabled: func(enabled bool) { setCalls = append(setCalls, enabled) },
+		snapshot: func(bool) x11.InputDrainStats {
+			snapshotCalls++
+			return x11.InputDrainStats{}
+		},
+		log: func(string, ...any) { logCalls++ },
+	}
+	diagnostics.begin(false)
+	diagnostics.logInterval(false)
+	diagnostics.end(false)
+	if len(setCalls) != 0 || snapshotCalls != 0 || logCalls != 0 {
+		t.Fatalf("disabled input-drain diagnostics touched source: sets=%v snapshots=%d logs=%d", setCalls, snapshotCalls, logCalls)
+	}
+}
+
+func diagnosticAttr(t *testing.T, args []any, name string) any {
+	t.Helper()
+	for i := 0; i+1 < len(args); i += 2 {
+		key, ok := args[i].(string)
+		if ok && key == name {
+			return args[i+1]
+		}
+	}
+	t.Fatalf("missing diagnostic attribute %q in %#v", name, args)
+	return nil
+}
+
+func TestStutterInputDrainDiagnosticsAggregateAndTeardown(t *testing.T) {
+	interval := x11.InputDrainStats{
+		DrainCalls: 11, EmptyDrains: 3, NonEmptyDrains: 8, Events: 29,
+		BatchBuckets:      [x11.InputDrainBatchBuckets]uint64{3, 4, 2, 1},
+		InputRingLockWait: x11.InputDrainDurationStats{Samples: 2, TotalNS: 91, MaxNS: 70},
+		CDrain:            x11.InputDrainDurationStats{Samples: 2, TotalNS: 222, MaxNS: 140},
+		PumpWait:          x11.InputDrainDurationStats{Samples: 4, TotalNS: 600, MaxNS: 250},
+		PumpWaitCalls:     5, PumpReady: 4, PumpPipeWakes: 1,
+		GoWindowLockWait: x11.InputDrainDurationStats{Samples: 11, TotalNS: 88, MaxNS: 18},
+		GoDrain:          x11.InputDrainDurationStats{Samples: 11, TotalNS: 777, MaxNS: 145},
+	}
+	final := x11.InputDrainStats{DrainCalls: 2, Events: 2, GoDrain: x11.InputDrainDurationStats{Samples: 2, TotalNS: 50, MaxNS: 30}}
+	snapshots := []x11.InputDrainStats{{}, interval, final}
+	var resets []bool
+	var enabled []bool
+	type entry struct {
+		msg  string
+		args []any
+	}
+	var entries []entry
+	diagnostics := stutterInputDrainDiagnostics{
+		setEnabled: func(value bool) { enabled = append(enabled, value) },
+		snapshot: func(reset bool) x11.InputDrainStats {
+			resets = append(resets, reset)
+			if len(snapshots) == 0 {
+				t.Fatal("unexpected snapshot")
+			}
+			out := snapshots[0]
+			snapshots = snapshots[1:]
+			return out
+		},
+		log: func(msg string, args ...any) {
+			entries = append(entries, entry{msg: msg, args: append([]any(nil), args...)})
+		},
+	}
+	diagnostics.begin(true)
+	diagnostics.logInterval(true)
+	diagnostics.end(true)
+
+	if got, want := enabled, []bool{true, false}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("enable sequence = %v, want %v", got, want)
+	}
+	if got, want := resets, []bool{true, true, true}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("snapshot reset sequence = %v, want %v", got, want)
+	}
+	if len(entries) != 2 {
+		t.Fatalf("aggregate log count = %d, want 2", len(entries))
+	}
+	if entries[0].msg != "X11 input-drain diagnostic aggregate" || entries[1].msg != entries[0].msg {
+		t.Fatalf("aggregate log messages = %#v", entries)
+	}
+	if got := diagnosticAttr(t, entries[0].args, "events"); got != interval.Events {
+		t.Fatalf("interval events = %#v, want %d", got, interval.Events)
+	}
+	if got := diagnosticAttr(t, entries[0].args, "batchBuckets"); !reflect.DeepEqual(got, interval.BatchBuckets) {
+		t.Fatalf("interval batches = %#v, want %#v", got, interval.BatchBuckets)
+	}
+	if got := diagnosticAttr(t, entries[0].args, "cDrainMaxNS"); got != interval.CDrain.MaxNS {
+		t.Fatalf("interval C drain max = %#v, want %d", got, interval.CDrain.MaxNS)
+	}
+	if got := diagnosticAttr(t, entries[0].args, "pumpPipeWakes"); got != interval.PumpPipeWakes {
+		t.Fatalf("interval pump pipe wakes = %#v, want %d", got, interval.PumpPipeWakes)
+	}
+	if got := diagnosticAttr(t, entries[0].args, "goDrainTotalNS"); got != interval.GoDrain.TotalNS {
+		t.Fatalf("interval Go drain total = %#v, want %d", got, interval.GoDrain.TotalNS)
+	}
+	if got := diagnosticAttr(t, entries[1].args, "drainCalls"); got != final.DrainCalls {
+		t.Fatalf("final drain calls = %#v, want %d", got, final.DrainCalls)
+	}
+}
+
+func stringDiagnosticFixture(seed uint64) jni.JNIStringDiagnostics {
+	var out jni.JNIStringDiagnostics
+	for path := range out.Paths {
+		value := seed + uint64(path+1)*100
+		stats := jni.JNIStringPathStats{
+			Calls: value + 1, Succeeded: value + 2,
+			InputUTF8Bytes: value + 3, OutputUTF8Bytes: value + 4, OutputUTF16Bytes: value + 5,
+			CAllocatedBytes: value + 6, CopiedBytes: value + 7, StringObjects: value + 8,
+			DurationSamples: value + 9, SampledDurationNS: value + 10, MaxSampledDurationNS: value + 11,
+		}
+		for bucket := range stats.DurationBuckets {
+			stats.DurationBuckets[bucket] = value + uint64(bucket+12)
+		}
+		out.Paths[path] = stats
+	}
+	return out
+}
+
+func TestStutterJNIStringDiagnosticsDefaultOff(t *testing.T) {
+	setSnapshots := 0
+	logs := 0
+	diagnostics := stutterJNIStringDiagnostics{
+		snapshot: func(bool) jni.JNIStringDiagnostics {
+			setSnapshots++
+			return jni.JNIStringDiagnostics{}
+		},
+		log: func(string, ...any) { logs++ },
+	}
+	diagnostics.begin(false)
+	diagnostics.logInterval(false)
+	diagnostics.end(false)
+	if setSnapshots != 0 || logs != 0 {
+		t.Fatalf("disabled JNI string diagnostics touched source: snapshots=%d logs=%d", setSnapshots, logs)
+	}
+}
+
+func TestStutterJNIStringDiagnosticsAggregateAndTeardown(t *testing.T) {
+	interval := stringDiagnosticFixture(1_000)
+	final := stringDiagnosticFixture(2_000)
+	snapshots := []jni.JNIStringDiagnostics{{}, interval, final}
+	var resets []bool
+	type entry struct {
+		msg  string
+		args []any
+	}
+	var entries []entry
+	diagnostics := stutterJNIStringDiagnostics{
+		snapshot: func(reset bool) jni.JNIStringDiagnostics {
+			resets = append(resets, reset)
+			if len(snapshots) == 0 {
+				t.Fatal("unexpected JNI string snapshot")
+			}
+			out := snapshots[0]
+			snapshots = snapshots[1:]
+			return out
+		},
+		log: func(msg string, args ...any) {
+			entries = append(entries, entry{msg: msg, args: append([]any(nil), args...)})
+		},
+	}
+	diagnostics.begin(true)
+	diagnostics.logInterval(true)
+	diagnostics.end(true)
+	if got, want := resets, []bool{true, true, true}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("snapshot reset sequence = %v, want %v", got, want)
+	}
+	if len(entries) != 2 {
+		t.Fatalf("aggregate log count = %d, want 2", len(entries))
+	}
+	if entries[0].msg != "JNI string diagnostic aggregate" || entries[1].msg != entries[0].msg {
+		t.Fatalf("aggregate log messages = %#v", entries)
+	}
+	paths := []struct {
+		name string
+		path jni.JNIStringDiagnosticPath
+	}{
+		{"getStringChars", jni.JNIStringGetStringChars},
+		{"getStringUTFChars", jni.JNIStringGetStringUTFChars},
+		{"getStringCritical", jni.JNIStringGetStringCritical},
+		{"releaseStringChars", jni.JNIStringReleaseStringChars},
+		{"releaseStringUTFChars", jni.JNIStringReleaseStringUTF},
+		{"releaseStringCritical", jni.JNIStringReleaseStringCritical},
+		{"newStringUTF", jni.JNIStringNewStringUTF},
+		{"isInstanceOf", jni.JNIStringIsInstanceOf},
+		{"fieldGetterString", jni.JNIStringFieldGetterString},
+	}
+	for _, tc := range paths {
+		got, ok := diagnosticAttr(t, entries[0].args, tc.name).(jniStringPathDiagnosticFields)
+		if !ok {
+			t.Fatalf("%s log value has unexpected type %T", tc.name, diagnosticAttr(t, entries[0].args, tc.name))
+		}
+		want := jniStringDiagnosticFields(interval.Paths[tc.path])
+		if !reflect.DeepEqual(got, want) {
+			t.Fatalf("%s fields = %+v, want %+v", tc.name, got, want)
+		}
+		assertNumericAggregateType(t, reflect.TypeOf(got))
+	}
+	finalGetChars, ok := diagnosticAttr(t, entries[1].args, "getStringChars").(jniStringPathDiagnosticFields)
+	if !ok || !reflect.DeepEqual(finalGetChars, jniStringDiagnosticFields(final.Paths[jni.JNIStringGetStringChars])) {
+		t.Fatalf("final GetStringChars = %#v, want %+v", finalGetChars, jniStringDiagnosticFields(final.Paths[jni.JNIStringGetStringChars]))
+	}
+}
+
+func assertNumericAggregateType(t *testing.T, typ reflect.Type) {
+	t.Helper()
+	switch typ.Kind() {
+	case reflect.Uint64:
+		return
+	case reflect.Array:
+		assertNumericAggregateType(t, typ.Elem())
+	case reflect.Struct:
+		for field := range typ.NumField() {
+			assertNumericAggregateType(t, typ.Field(field).Type)
+		}
+	default:
+		t.Fatalf("diagnostic aggregate exposes non-numeric type %v", typ)
+	}
+}
+
 func TestInputDispatchInterval(t *testing.T) {
 	// The launch loop waits on Window.InputReady rather than a 4ms Pump ticker.
 	// Size() cannot change without InputResize on this X11 backend
@@ -2006,6 +2228,97 @@ func TestLaunchLoopDiagnosticsKeepOptInCadence(t *testing.T) {
 	waitForLoopCounter(t, &counters.diagnostics, 3, "diagnostic ticks")
 	if got := counters.publishes.Load(); got != 0 {
 		t.Fatalf("diagnostic ticks republished %d times; refresh must stay event-driven", got)
+	}
+	cancel()
+	select {
+	case err := <-done:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("loop exit = %v, want context.Canceled", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("launch loop did not stop on context cancellation")
+	}
+}
+
+// TestLaunchLoopDiagnosticsUseInjectedClock ties the aggregate logger to the
+// existing diagnostics turn without sleeping for a wall-clock ticker. The
+// production source leaves diagnosticsTick nil, so this is a test-only clock
+// seam rather than a new launch-loop wake source.
+func TestLaunchLoopDiagnosticsUseInjectedClock(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	ticks := make(chan time.Time, 2)
+	logged := make(chan struct{}, 3)
+	diagnostics := stutterInputDrainDiagnostics{
+		snapshot: func(reset bool) x11.InputDrainStats {
+			if !reset {
+				t.Fatal("diagnostic interval did not reset aggregate counters")
+			}
+			return x11.InputDrainStats{DrainCalls: 1, Events: 1}
+		},
+		log: func(string, ...any) { logged <- struct{}{} },
+	}
+	src := newTestLaunchLoopSources(ctx)
+	src.diagnostics = func() { diagnostics.logInterval(true) }
+	src.diagnosticsTick = ticks
+	done := make(chan error, 1)
+	go func() {
+		done <- runLaunchLoop(src, func(string) {}, time.Hour, time.Hour)
+	}()
+	for i := 0; i < 2; i++ {
+		ticks <- time.Unix(int64(100+i), 0)
+		select {
+		case <-logged:
+		case <-time.After(time.Second):
+			t.Fatalf("diagnostic log %d did not follow injected tick", i+1)
+		}
+	}
+	cancel()
+	select {
+	case err := <-done:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("loop exit = %v, want context.Canceled", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("launch loop did not stop on context cancellation")
+	}
+}
+
+func TestLaunchLoopJNIStringDiagnosticsUseInjectedClock(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	ticks := make(chan time.Time, 2)
+	logged := make(chan struct{}, 2)
+	var snapshots atomic.Int32
+	var nonReset atomic.Int32
+	diagnostics := stutterJNIStringDiagnostics{
+		snapshot: func(reset bool) jni.JNIStringDiagnostics {
+			if !reset {
+				nonReset.Add(1)
+			}
+			snapshots.Add(1)
+			return stringDiagnosticFixture(3_000)
+		},
+		log: func(string, ...any) { logged <- struct{}{} },
+	}
+	diagnostics.begin(true)
+	src := newTestLaunchLoopSources(ctx)
+	src.diagnostics = func() { diagnostics.logInterval(true) }
+	src.diagnosticsTick = ticks
+	done := make(chan error, 1)
+	go func() {
+		done <- runLaunchLoop(src, func(string) {}, time.Hour, time.Hour)
+	}()
+	for i := 0; i < 2; i++ {
+		ticks <- time.Unix(int64(200+i), 0)
+		select {
+		case <-logged:
+		case <-time.After(time.Second):
+			t.Fatalf("JNI string diagnostic log %d did not follow injected tick", i+1)
+		}
+	}
+	if got := snapshots.Load(); got != 3 || nonReset.Load() != 0 {
+		t.Fatalf("JNI string snapshots/reset violations = %d/%d, want 3/0", got, nonReset.Load())
 	}
 	cancel()
 	select {

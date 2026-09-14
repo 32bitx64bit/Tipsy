@@ -103,18 +103,34 @@ func Launch(ctx context.Context, opt LaunchOptions) error {
 		}()
 	}
 	stutterDiag := stutterDiagnosticsRequested(os.Getenv)
+	var inputDrainDiag stutterInputDrainDiagnostics
+	var stringDiag stutterJNIStringDiagnostics
 	if stutterDiag {
+		inputDrainDiag = stutterInputDrainDiagnostics{
+			setEnabled: x11.SetInputDrainDiagnostics,
+			snapshot:   x11.InputDrainSnapshot,
+			log:        logging.Logger(logging.CatRuntime).Info,
+		}
+		stringDiag = stutterJNIStringDiagnostics{
+			snapshot: jni.StringDiagnosticsSnapshot,
+			log:      logging.Logger(logging.CatRuntime).Info,
+		}
 		android.SetStutterWaitDiagnostics(true)
 		android.SetBionicSyncDiagnostics(true)
 		jni.SetStutterDiagnostics(true)
+		stringDiag.begin(true)
+		inputDrainDiag.begin(true)
 		_ = android.StutterWaitSnapshot(true)
 		_ = android.BionicSyncSnapshot(true)
 		_ = jni.StutterSnapshot(true)
 		logging.Logger(logging.CatRuntime).Info("shared-wait diagnostics enabled",
 			"sampleRate", "1/64", "interval", 2*time.Second,
+			"x11InputDrain", true,
 			"bionicResolverOnly", true)
 		defer func() {
 			logStutterDiagnostics(android.StutterWaitSnapshot(true), jni.StutterSnapshot(true), android.BionicSyncSnapshot(true))
+			stringDiag.end(true)
+			inputDrainDiag.end(true)
 			android.SetStutterWaitDiagnostics(false)
 			android.SetBionicSyncDiagnostics(false)
 			jni.SetStutterDiagnostics(false)
@@ -424,6 +440,8 @@ func Launch(ctx context.Context, opt LaunchOptions) error {
 			}
 			if stutterDiag {
 				logStutterDiagnostics(android.StutterWaitSnapshot(true), jni.StutterSnapshot(true), android.BionicSyncSnapshot(true))
+				stringDiag.logInterval(true)
+				inputDrainDiag.logInterval(true)
 			}
 			if os.Getenv("TIPSY_DIAG") == "1" {
 				presenter.logPresentStats()
@@ -493,6 +511,10 @@ type launchLoopSources struct {
 	flushResize        func()
 	publishRefresh     func()
 	diagnostics        func()
+	// diagnosticsTick is a test-only clock seam. Production leaves it nil and
+	// uses diagnosticsPeriod's ticker; injecting a channel pins cadence without
+	// adding another launch-loop event source.
+	diagnosticsTick <-chan time.Time
 }
 
 // runLaunchLoop is the live client event loop. It republishes Android display
@@ -509,9 +531,13 @@ func runLaunchLoop(src launchLoopSources, shutdownClient func(reason string), re
 	}
 	var diagnosticsC <-chan time.Time
 	if src.diagnostics != nil && diagnosticsPeriod > 0 {
-		diagnostics := time.NewTicker(diagnosticsPeriod)
-		defer diagnostics.Stop()
-		diagnosticsC = diagnostics.C
+		if src.diagnosticsTick != nil {
+			diagnosticsC = src.diagnosticsTick
+		} else {
+			diagnostics := time.NewTicker(diagnosticsPeriod)
+			defer diagnostics.Stop()
+			diagnosticsC = diagnostics.C
+		}
 	}
 	for {
 		select {

@@ -99,6 +99,149 @@ func logStutterDiagnostics(wait android.StutterWaitStats, calls jni.JNIStutterSt
 		"bionicWorkerUnknownMutexLock", bionic.Path(android.BionicSyncThreadRBXWorker, android.BionicSyncModuleUnknown, android.BionicSyncMutexLock).Calls)
 }
 
+// stutterInputDrainDiagnostics keeps the X11 input-drain observer on the same
+// explicitly opted-in lifecycle as the existing shared-wait diagnostics. The
+// function fields make its logger and counter source deterministic in runtime
+// tests; production supplies only aggregate-only X11 APIs.
+type stutterInputDrainDiagnostics struct {
+	setEnabled func(bool)
+	snapshot   func(reset bool) x11.InputDrainStats
+	log        func(msg string, args ...any)
+}
+
+// begin clears counters before the first measured interval. A disabled
+// capture intentionally makes no source or logger call, preserving zero
+// additional work on ordinary launches.
+func (d stutterInputDrainDiagnostics) begin(enabled bool) {
+	if !enabled || d.setEnabled == nil || d.snapshot == nil {
+		return
+	}
+	d.setEnabled(true)
+	_ = d.snapshot(true)
+}
+
+// logInterval emits only fixed-size, content-free aggregate counters. It is
+// called by the existing diagnostics ticker, never from the input pump.
+func (d stutterInputDrainDiagnostics) logInterval(enabled bool) {
+	if !enabled || d.snapshot == nil || d.log == nil {
+		return
+	}
+	stats := d.snapshot(true)
+	d.log("X11 input-drain diagnostic aggregate",
+		"drainCalls", stats.DrainCalls,
+		"emptyDrains", stats.EmptyDrains,
+		"nonEmptyDrains", stats.NonEmptyDrains,
+		"events", stats.Events,
+		"batchBuckets", stats.BatchBuckets,
+		"inputRingLockSamples", stats.InputRingLockWait.Samples,
+		"inputRingLockTotalNS", stats.InputRingLockWait.TotalNS,
+		"inputRingLockMaxNS", stats.InputRingLockWait.MaxNS,
+		"inputRingLockBuckets", stats.InputRingLockWait.Buckets,
+		"cDrainSamples", stats.CDrain.Samples,
+		"cDrainTotalNS", stats.CDrain.TotalNS,
+		"cDrainMaxNS", stats.CDrain.MaxNS,
+		"cDrainBuckets", stats.CDrain.Buckets,
+		"pumpWaitCalls", stats.PumpWaitCalls,
+		"pumpWaitSamples", stats.PumpWait.Samples,
+		"pumpWaitTotalNS", stats.PumpWait.TotalNS,
+		"pumpWaitMaxNS", stats.PumpWait.MaxNS,
+		"pumpWaitBuckets", stats.PumpWait.Buckets,
+		"pumpReady", stats.PumpReady,
+		"pumpPipeWakes", stats.PumpPipeWakes,
+		"pumpErrors", stats.PumpErrors,
+		"goWindowLockWaitSamples", stats.GoWindowLockWait.Samples,
+		"goWindowLockWaitTotalNS", stats.GoWindowLockWait.TotalNS,
+		"goWindowLockWaitMaxNS", stats.GoWindowLockWait.MaxNS,
+		"goWindowLockWaitBuckets", stats.GoWindowLockWait.Buckets,
+		"goDrainSamples", stats.GoDrain.Samples,
+		"goDrainTotalNS", stats.GoDrain.TotalNS,
+		"goDrainMaxNS", stats.GoDrain.MaxNS,
+		"goDrainBuckets", stats.GoDrain.Buckets)
+}
+
+// end reports the final partial interval before disabling the observer. This
+// matches the established Android/JNI stutter teardown sequence.
+func (d stutterInputDrainDiagnostics) end(enabled bool) {
+	if !enabled {
+		return
+	}
+	d.logInterval(true)
+	if d.setEnabled != nil {
+		d.setEnabled(false)
+	}
+}
+
+// jniStringPathDiagnosticFields is the fixed, content-free subset Runtime
+// emits for one JNI string boundary. Keeping the aggregate grouped by an
+// explicit vtable path avoids object, Java-class, handle, or payload identity
+// in a gameplay capture.
+type jniStringPathDiagnosticFields struct {
+	Calls                uint64
+	Succeeded            uint64
+	InputUTF8Bytes       uint64
+	OutputUTF8Bytes      uint64
+	OutputUTF16Bytes     uint64
+	CAllocatedBytes      uint64
+	CopiedBytes          uint64
+	StringObjects        uint64
+	DurationSamples      uint64
+	SampledDurationNS    uint64
+	MaxSampledDurationNS uint64
+	DurationBuckets      [8]uint64
+}
+
+func jniStringDiagnosticFields(stats jni.JNIStringPathStats) jniStringPathDiagnosticFields {
+	return jniStringPathDiagnosticFields{
+		Calls:                stats.Calls,
+		Succeeded:            stats.Succeeded,
+		InputUTF8Bytes:       stats.InputUTF8Bytes,
+		OutputUTF8Bytes:      stats.OutputUTF8Bytes,
+		OutputUTF16Bytes:     stats.OutputUTF16Bytes,
+		CAllocatedBytes:      stats.CAllocatedBytes,
+		CopiedBytes:          stats.CopiedBytes,
+		StringObjects:        stats.StringObjects,
+		DurationSamples:      stats.DurationSamples,
+		SampledDurationNS:    stats.SampledDurationNS,
+		MaxSampledDurationNS: stats.MaxSampledDurationNS,
+		DurationBuckets:      stats.DurationBuckets,
+	}
+}
+
+// stutterJNIStringDiagnostics takes interval snapshots only inside the
+// existing exact opt-in diagnostic lifecycle. JNI owns enabling its observer
+// through SetStutterDiagnostics; Runtime only clears and logs aggregates.
+type stutterJNIStringDiagnostics struct {
+	snapshot func(reset bool) jni.JNIStringDiagnostics
+	log      func(msg string, args ...any)
+}
+
+func (d stutterJNIStringDiagnostics) begin(enabled bool) {
+	if enabled && d.snapshot != nil {
+		_ = d.snapshot(true)
+	}
+}
+
+func (d stutterJNIStringDiagnostics) logInterval(enabled bool) {
+	if !enabled || d.snapshot == nil || d.log == nil {
+		return
+	}
+	stats := d.snapshot(true)
+	d.log("JNI string diagnostic aggregate",
+		"getStringChars", jniStringDiagnosticFields(stats.Paths[jni.JNIStringGetStringChars]),
+		"getStringUTFChars", jniStringDiagnosticFields(stats.Paths[jni.JNIStringGetStringUTFChars]),
+		"getStringCritical", jniStringDiagnosticFields(stats.Paths[jni.JNIStringGetStringCritical]),
+		"releaseStringChars", jniStringDiagnosticFields(stats.Paths[jni.JNIStringReleaseStringChars]),
+		"releaseStringUTFChars", jniStringDiagnosticFields(stats.Paths[jni.JNIStringReleaseStringUTF]),
+		"releaseStringCritical", jniStringDiagnosticFields(stats.Paths[jni.JNIStringReleaseStringCritical]),
+		"newStringUTF", jniStringDiagnosticFields(stats.Paths[jni.JNIStringNewStringUTF]),
+		"isInstanceOf", jniStringDiagnosticFields(stats.Paths[jni.JNIStringIsInstanceOf]),
+		"fieldGetterString", jniStringDiagnosticFields(stats.Paths[jni.JNIStringFieldGetterString]))
+}
+
+func (d stutterJNIStringDiagnostics) end(enabled bool) {
+	d.logInterval(enabled)
+}
+
 // configureEGLPresentationPolicy applies the independent VSync choice at the
 // Android EGL compatibility boundary. FPS mode and display refresh do not
 // participate: off always requests interval zero; on always requests one.
