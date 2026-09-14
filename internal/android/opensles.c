@@ -274,6 +274,7 @@ typedef struct queue_node {
 	void *client_buffer;
 	uint8_t *io_buffer;
 	uint32_t size;
+	uint32_t payload_capacity;
 	uint64_t generation;
 } queue_node;
 
@@ -307,6 +308,31 @@ typedef struct tipsy_sl_object {
 	uint64_t queue_generation;
 	queue_node *head;
 	queue_node *tail;
+	queue_node *free_nodes;
+	/* Resident queue storage is bounded by queue_capacity. nodes_owned counts
+	 * that per-stream pool; nodes_free are immediately reusable nodes. */
+	uint32_t queue_nodes_owned;
+	uint32_t queue_nodes_free;
+	uint64_t queue_node_allocations;
+	uint64_t queue_payload_allocations;
+	uint64_t queue_payload_bytes_allocated;
+	uint64_t queue_copy_operations;
+	uint64_t queue_copy_bytes;
+	uint64_t queue_node_reclamations;
+	uint64_t queue_payload_reclamations;
+	uint64_t queue_capacity_rejections;
+	uint64_t retry_waits;
+	uint64_t retry_interruptions;
+	uint64_t error_log_emissions;
+	uint64_t error_log_suppressions;
+	uint64_t last_error_log_ns;
+	struct timespec muted_deadline;
+	uint64_t muted_scheduled_interval_ns;
+	uint32_t muted_deadline_waits;
+	uint32_t muted_missed_deadline_clamps;
+	int muted_deadline_armed;
+	struct tipsy_sl_object *capture_next;
+	int capture_registered;
 	int inflight;
 	int close_requested;
 	int destroying;
@@ -344,13 +370,17 @@ static tipsy_sl_object *from_mix(SLOutputMixItf self) { return FROM_MEMBER(self,
 typedef struct {
 	pthread_mutex_t mu;
 	int enabled;
-	int fail_first_write;
-	int fail_first_read;
+	uint32_t fail_writes_remaining;
+	uint32_t fail_reads_remaining;
 	uint32_t opens;
 	uint32_t writes;
 	uint32_t reads;
 	uint64_t written_bytes;
 	uint64_t read_bytes;
+	uint8_t expected_playback_first[4];
+	uint32_t expected_playback_count;
+	uint32_t expected_playback_index;
+	int playback_copy_mismatch;
 } fake_backend_state;
 
 static fake_backend_state fake_backend = {
@@ -358,14 +388,90 @@ static fake_backend_state fake_backend = {
 };
 
 static pthread_mutex_t capture_gate_mu = PTHREAD_MUTEX_INITIALIZER;
+static pthread_mutex_t capture_recorders_mu = PTHREAD_MUTEX_INITIALIZER;
+static tipsy_sl_object *capture_recorders;
 static int capture_muted;
 static int capture_denied_logged;
 static int capture_muted_logged;
 static int capture_error_logged;
 
+static void reset_muted_deadline_locked(tipsy_sl_object *o)
+{
+	o->muted_deadline_armed = 0;
+	o->muted_scheduled_interval_ns = 0;
+}
+
+/* The mute gate is process-wide, while each recorder waits on its own
+ * condition. Keep a short-lived registry solely to interrupt those waits;
+ * it never stores audio or client data. Lock order is registry then stream
+ * mutex. Destruction removes a stream before its mutex can be destroyed. */
+static void reset_all_muted_deadlines(void)
+{
+	pthread_mutex_lock(&capture_recorders_mu);
+	for (tipsy_sl_object *o = capture_recorders; o != NULL; o = o->capture_next) {
+		pthread_mutex_lock(&o->mu);
+		reset_muted_deadline_locked(o);
+		pthread_cond_broadcast(&o->cond);
+		pthread_mutex_unlock(&o->mu);
+	}
+	pthread_mutex_unlock(&capture_recorders_mu);
+}
+
+static void capture_registry_add(tipsy_sl_object *o)
+{
+	if (o->kind != OBJ_RECORDER)
+		return;
+	pthread_mutex_lock(&capture_recorders_mu);
+	o->capture_next = capture_recorders;
+	capture_recorders = o;
+	o->capture_registered = 1;
+	pthread_mutex_unlock(&capture_recorders_mu);
+}
+
+static void capture_registry_remove(tipsy_sl_object *o)
+{
+	if (!o->capture_registered)
+		return;
+	pthread_mutex_lock(&capture_recorders_mu);
+	tipsy_sl_object **link = &capture_recorders;
+	while (*link != NULL && *link != o)
+		link = &(*link)->capture_next;
+	if (*link == o) {
+		*link = o->capture_next;
+		o->capture_next = NULL;
+		o->capture_registered = 0;
+	}
+	pthread_mutex_unlock(&capture_recorders_mu);
+}
+
 static void audio_log(const char *event, const char *detail)
 {
 	GoAndroid_LogAudio((char *)event, (char *)(detail ? detail : ""));
+}
+
+#define STREAM_ERROR_LOG_INTERVAL_NS 1000000000ull
+
+/* A failed device can be retried while a server is down. Keep retry errors
+ * observable without sending an unbounded log stream through the Go bridge.
+ * This is stream-local metadata only; no PCM or client address is retained. */
+static void stream_error_log(tipsy_sl_object *o, const char *event, const char *detail)
+{
+	struct timespec now;
+	uint64_t now_ns = 0;
+	if (clock_gettime(CLOCK_MONOTONIC, &now) == 0)
+		now_ns = (uint64_t)now.tv_sec * 1000000000ull + (uint64_t)now.tv_nsec;
+	int emit = 0;
+	pthread_mutex_lock(&o->mu);
+	if (now_ns == 0 || o->last_error_log_ns == 0 || now_ns - o->last_error_log_ns >= STREAM_ERROR_LOG_INTERVAL_NS) {
+		o->last_error_log_ns = now_ns;
+		o->error_log_emissions++;
+		emit = 1;
+	} else {
+		o->error_log_suppressions++;
+	}
+	pthread_mutex_unlock(&o->mu);
+	if (emit)
+		audio_log(event, detail);
 }
 
 static int iid_equal(SLInterfaceID a, SLInterfaceID b)
@@ -495,10 +601,14 @@ int tipsy_audio_microphone_disabled(void)
 void tipsy_audio_set_capture_muted(int muted)
 {
 	pthread_mutex_lock(&capture_gate_mu);
-	capture_muted = muted ? 1 : 0;
+	int next = muted ? 1 : 0;
+	int changed = capture_muted != next;
+	capture_muted = next;
 	if (!capture_muted)
 		capture_muted_logged = 0;
 	pthread_mutex_unlock(&capture_gate_mu);
+	if (changed)
+		reset_all_muted_deadlines();
 }
 
 int tipsy_audio_capture_muted(void)
@@ -618,7 +728,7 @@ static int backend_open(tipsy_sl_object *o)
 	if (o->stream == NULL) {
 		snprintf(detail, sizeof(detail), "%s (%u Hz, %u ch)", pa_strerror(error),
 		         o->sample.rate, o->sample.channels);
-		audio_log(o->kind == OBJ_RECORDER ? "capture device unavailable" : "playback device unavailable", detail);
+		stream_error_log(o, o->kind == OBJ_RECORDER ? "capture device unavailable" : "playback device unavailable", detail);
 		return -1;
 	}
 	const char *role = "";
@@ -660,8 +770,8 @@ static int backend_transfer(tipsy_sl_object *o, void *buffer, size_t bytes)
 		pthread_mutex_lock(&fake_backend.mu);
 		if (o->kind == OBJ_RECORDER) {
 			fake_backend.reads++;
-			if (fake_backend.fail_first_read) {
-				fake_backend.fail_first_read = 0;
+			if (fake_backend.fail_reads_remaining > 0) {
+				fake_backend.fail_reads_remaining--;
 				fail = 1;
 			} else {
 				memset(buffer, 0x5a, bytes);
@@ -669,17 +779,23 @@ static int backend_transfer(tipsy_sl_object *o, void *buffer, size_t bytes)
 			}
 		} else {
 			fake_backend.writes++;
-			if (fake_backend.fail_first_write) {
-				fake_backend.fail_first_write = 0;
+			if (fake_backend.fail_writes_remaining > 0) {
+				fake_backend.fail_writes_remaining--;
 				fail = 1;
 			} else {
+				if (fake_backend.expected_playback_index < fake_backend.expected_playback_count) {
+					if (bytes == 0 || ((const uint8_t *)buffer)[0] !=
+					    fake_backend.expected_playback_first[fake_backend.expected_playback_index])
+						fake_backend.playback_copy_mismatch = 1;
+					fake_backend.expected_playback_index++;
+				}
 				fake_backend.written_bytes += bytes;
 			}
 		}
 		pthread_mutex_unlock(&fake_backend.mu);
-		if (fail && o->kind == OBJ_RECORDER)
-			log_capture_error_once("host transfer failed");
-		else if (!fail && o->kind == OBJ_RECORDER)
+		if (fail)
+			stream_error_log(o, o->kind == OBJ_RECORDER ? "capture stream error" : "playback stream error", "host transfer failed");
+		else if (o->kind == OBJ_RECORDER)
 			capture_error_cleared();
 		return fail ? -1 : 0;
 	}
@@ -688,10 +804,7 @@ static int backend_transfer(tipsy_sl_object *o, void *buffer, size_t bytes)
 	             ? pa_simple_read(o->stream, buffer, bytes, &error)
 	             : pa_simple_write(o->stream, buffer, bytes, &error);
 	if (rc < 0) {
-		if (o->kind == OBJ_RECORDER)
-			log_capture_error_once(pa_strerror(error));
-		else
-			audio_log("playback stream error", pa_strerror(error));
+		stream_error_log(o, o->kind == OBJ_RECORDER ? "capture stream error" : "playback stream error", pa_strerror(error));
 	} else if (o->kind == OBJ_RECORDER)
 		capture_error_cleared();
 	return rc;
@@ -705,12 +818,44 @@ static void free_node(queue_node *n)
 	free(n);
 }
 
+/* o->mu protects the pool. Completed nodes return before the callback so a
+ * reentrant Enqueue can safely reserve that same storage. client_buffer is
+ * borrowed only for the active queue entry and is never retained in a free
+ * node; playback has already copied it, while recorder copies only at delivery. */
+static void recycle_node_locked(tipsy_sl_object *o, queue_node *n)
+{
+	if (n == NULL)
+		return;
+	n->client_buffer = NULL;
+	n->size = 0;
+	n->generation = 0;
+	n->next = o->free_nodes;
+	o->free_nodes = n;
+	o->queue_nodes_free++;
+	o->queue_node_reclamations++;
+	if (n->io_buffer != NULL)
+		o->queue_payload_reclamations++;
+}
+
+static void free_pool_nodes(tipsy_sl_object *o)
+{
+	queue_node *n = o->free_nodes;
+	while (n != NULL) {
+		queue_node *next = n->next;
+		free_node(n);
+		n = next;
+	}
+	o->free_nodes = NULL;
+	o->queue_nodes_free = 0;
+	o->queue_nodes_owned = 0;
+}
+
 static void free_pending_locked(tipsy_sl_object *o)
 {
 	queue_node *n = o->head;
 	while (n != NULL) {
 		queue_node *next = n->next;
-		free_node(n);
+		recycle_node_locked(o, n);
 		n = next;
 	}
 	o->head = o->tail = NULL;
@@ -723,10 +868,141 @@ static int state_active(const tipsy_sl_object *o)
 	       (o->kind == OBJ_RECORDER && o->state == SL_RECORDSTATE_RECORDING);
 }
 
-static void retry_pause(void)
+static int timespec_compare(const struct timespec *a, const struct timespec *b)
 {
-	struct timespec ts = {.tv_sec = 0, .tv_nsec = 100000000L};
-	nanosleep(&ts, NULL);
+	if (a->tv_sec != b->tv_sec)
+		return a->tv_sec < b->tv_sec ? -1 : 1;
+	if (a->tv_nsec != b->tv_nsec)
+		return a->tv_nsec < b->tv_nsec ? -1 : 1;
+	return 0;
+}
+
+static struct timespec timespec_add_ns(struct timespec value, uint64_t ns)
+{
+	value.tv_sec += (time_t)(ns / 1000000000ull);
+	value.tv_nsec += (long)(ns % 1000000000ull);
+	if (value.tv_nsec >= 1000000000L) {
+		value.tv_sec++;
+		value.tv_nsec -= 1000000000L;
+	}
+	return value;
+}
+
+static uint64_t muted_buffer_interval_ns(const tipsy_sl_object *o, const queue_node *n)
+{
+	size_t frame_bytes = pa_frame_size(&o->sample);
+	if (frame_bytes == 0 || o->sample.rate == 0)
+		return 0;
+	uint64_t frames = ((uint64_t)n->size + frame_bytes - 1) / frame_bytes;
+	uint64_t numerator = frames * 1000000000ull;
+	uint64_t interval = (numerator + o->sample.rate - 1) / o->sample.rate;
+	return interval == 0 ? 1 : interval;
+}
+
+/* Advances only on a newly dequeued muted buffer. A first muted completion is
+ * immediate, then each following completion targets one PCM-buffer interval.
+ * When a callback or host scheduling delay already passed its target, reset
+ * from now instead of iterating through stale deadlines; that bounds catch-up
+ * to one completion and prevents a requeue burst. o->mu must be held. */
+static int advance_muted_deadline_locked(tipsy_sl_object *o, const queue_node *n, const struct timespec *now)
+{
+	uint64_t interval = muted_buffer_interval_ns(o, n);
+	if (interval == 0)
+		return 0;
+	o->muted_scheduled_interval_ns = interval;
+	if (!o->muted_deadline_armed) {
+		o->muted_deadline = *now;
+		o->muted_deadline_armed = 1;
+		return 0;
+	}
+	o->muted_deadline = timespec_add_ns(o->muted_deadline, interval);
+	if (timespec_compare(&o->muted_deadline, now) <= 0) {
+		o->muted_missed_deadline_clamps++;
+		o->muted_deadline = timespec_add_ns(*now, interval);
+		return 0;
+	}
+	return 1;
+}
+
+/* Wait only while the recorder remains muted, recording, and on the same
+ * queue generation. Its condition uses CLOCK_MONOTONIC, so SetRecordState,
+ * Clear, destruction, and a mute transition can interrupt it without touching
+ * capture PCM. Returns false when that dequeued node must be discarded. */
+static int pace_muted_capture(tipsy_sl_object *o, const queue_node *n)
+{
+	if (!capture_is_muted())
+		return 1;
+	pthread_mutex_lock(&o->mu);
+	if (o->destroying || !state_active(o) || n->generation != o->queue_generation || !capture_is_muted()) {
+		int transfer = !o->destroying && state_active(o) && n->generation == o->queue_generation;
+		pthread_mutex_unlock(&o->mu);
+		return transfer;
+	}
+	struct timespec now;
+	if (clock_gettime(CLOCK_MONOTONIC, &now) == 0 && advance_muted_deadline_locked(o, n, &now)) {
+		o->muted_deadline_waits++;
+		while (!o->destroying && state_active(o) && n->generation == o->queue_generation &&
+		       o->muted_deadline_armed && capture_is_muted()) {
+			int rc = pthread_cond_timedwait(&o->cond, &o->mu, &o->muted_deadline);
+			if (rc == ETIMEDOUT)
+				break;
+			if (rc != 0)
+				break;
+		}
+	}
+	int transfer = !o->destroying && state_active(o) && n->generation == o->queue_generation;
+	pthread_mutex_unlock(&o->mu);
+	return transfer;
+}
+
+/* Fixed fake CLOCK_MONOTONIC values make the clamp contract independently
+ * testable: first completion is immediate, the second targets 10 ms, and a
+ * later callback resets from its observed time rather than catching up. */
+int tipsy_audio_test_muted_deadline_math(uint64_t *interval_ns, uint32_t *missed_deadline_clamps)
+{
+	if (interval_ns == NULL || missed_deadline_clamps == NULL)
+		return -1;
+	tipsy_sl_object o;
+	memset(&o, 0, sizeof(o));
+	o.sample.rate = 48000;
+	o.sample.channels = 1;
+	o.sample.format = PA_SAMPLE_S16LE;
+	queue_node n;
+	memset(&n, 0, sizeof(n));
+	n.size = 960; /* 480 frames = 10 ms at 48 kHz mono S16LE. */
+	struct timespec first = {.tv_sec = 1, .tv_nsec = 0};
+	struct timespec second = {.tv_sec = 1, .tv_nsec = 1};
+	struct timespec late = {.tv_sec = 1, .tv_nsec = 30000000L};
+	if (advance_muted_deadline_locked(&o, &n, &first) != 0 ||
+	    advance_muted_deadline_locked(&o, &n, &second) != 1 ||
+	    timespec_compare(&o.muted_deadline, &(struct timespec){.tv_sec = 1, .tv_nsec = 10000000L}) != 0 ||
+	    advance_muted_deadline_locked(&o, &n, &late) != 0 ||
+	    timespec_compare(&o.muted_deadline, &(struct timespec){.tv_sec = 1, .tv_nsec = 40000000L}) != 0 ||
+	    o.muted_missed_deadline_clamps != 1)
+		return -1;
+	*interval_ns = o.muted_scheduled_interval_ns;
+	*missed_deadline_clamps = o.muted_missed_deadline_clamps;
+	return 0;
+}
+
+/* The worker holds o->mu on entry. Unlike nanosleep, this can be interrupted
+ * by Stop, Clear, destruction, or a queue generation reset. Ordinary enqueue
+ * signals keep the same absolute deadline, so they cannot collapse a failed
+ * stream into a retry burst. */
+static void retry_pause_locked(tipsy_sl_object *o, uint64_t generation)
+{
+	struct timespec now;
+	if (clock_gettime(CLOCK_MONOTONIC, &now) != 0)
+		return;
+	struct timespec deadline = timespec_add_ns(now, 100000000ull);
+	o->retry_waits++;
+	while (!o->destroying && state_active(o) && generation == o->queue_generation) {
+		int rc = pthread_cond_timedwait(&o->cond, &o->mu, &deadline);
+		if (rc == ETIMEDOUT || rc != 0)
+			break;
+	}
+	if (o->destroying || !state_active(o) || generation != o->queue_generation)
+		o->retry_interruptions++;
 }
 
 static void *stream_worker(void *arg)
@@ -756,12 +1032,22 @@ static void *stream_worker(void *arg)
 		pthread_mutex_unlock(&o->mu);
 
 		int rc = 0;
-		if (o->kind == OBJ_RECORDER && microphone_disabled()) {
+		int transfer = o->kind != OBJ_RECORDER || pace_muted_capture(o, n);
+		if (!transfer) {
+			/* Stop, Clear, destroy, or a generation change interrupted the
+			 * muted deadline. Do not read a microphone merely to complete an
+			 * invalidated silent buffer. */
+			rc = 0;
+		} else if (o->kind == OBJ_RECORDER && microphone_disabled()) {
 			log_capture_denied_once();
 			backend_close(o);
 			rc = -1;
 		} else {
-			if (o->stream == NULL)
+			/* Muted buffers are clocked locally and zero-filled below. Do not
+			 * open (and therefore never read) a physical microphone merely to
+			 * pace silence; an unmute opens it at that later buffer boundary. */
+			int muted = o->kind == OBJ_RECORDER && capture_is_muted();
+			if (o->stream == NULL && !muted)
 				rc = backend_open(o);
 			if (rc == 0)
 				rc = backend_transfer(o, n->io_buffer, n->size);
@@ -776,15 +1062,14 @@ static void *stream_worker(void *arg)
 			o->head = n;
 			if (o->tail == NULL)
 				o->tail = n;
-			pthread_mutex_unlock(&o->mu);
-			retry_pause();
-			pthread_mutex_lock(&o->mu);
+			retry_pause_locked(o, n->generation);
 			continue;
 		}
 
 		if (o->queue_count > 0)
 			o->queue_count--;
-		int deliver = rc == 0 && !o->destroying && n->generation == o->queue_generation;
+		int deliver = rc == 0 && transfer && !o->destroying && state_active(o) &&
+		              n->generation == o->queue_generation;
 		if (deliver && o->kind == OBJ_RECORDER)
 			memcpy(n->client_buffer, n->io_buffer, n->size);
 		if (deliver) {
@@ -798,8 +1083,8 @@ static void *stream_worker(void *arg)
 			audio_log(o->kind == OBJ_RECORDER ? "capture flowing" : "playback flowing",
 			          "first buffer completed; audio content is not logged");
 		}
+		recycle_node_locked(o, n);
 		pthread_mutex_unlock(&o->mu);
-		free_node(n);
 		if (cb != NULL)
 			cb((SLBufferQueueItf)&o->queue_vt, ctx);
 		pthread_mutex_lock(&o->mu);
@@ -807,6 +1092,7 @@ static void *stream_worker(void *arg)
 	pthread_mutex_unlock(&o->mu);
 	backend_close(o);
 	if (o->destroy_deferred) {
+		free_pool_nodes(o);
 		pthread_cond_destroy(&o->cond);
 		pthread_mutex_destroy(&o->mu);
 		free(o);
@@ -999,10 +1285,12 @@ static void object_destroy(SLObjectItf self)
 	if (self == NULL)
 		return;
 	tipsy_sl_object *o = from_object(self);
+	capture_registry_remove(o);
 	if (o->thread_started) {
 		pthread_mutex_lock(&o->mu);
 		o->destroying = 1;
 		o->queue_generation++;
+		reset_muted_deadline_locked(o);
 		free_pending_locked(o);
 		pthread_cond_broadcast(&o->cond);
 		pthread_mutex_unlock(&o->mu);
@@ -1012,6 +1300,7 @@ static void object_destroy(SLObjectItf self)
 		}
 		pthread_join(o->thread, NULL);
 	}
+	free_pool_nodes(o);
 	pthread_cond_destroy(&o->cond);
 	pthread_mutex_destroy(&o->mu);
 	free(o);
@@ -1061,10 +1350,25 @@ static tipsy_sl_object *object_new(object_kind kind)
 	o->update_period = 1000;
 	o->queue_capacity = 4;
 	pthread_mutex_init(&o->mu, NULL);
-	pthread_cond_init(&o->cond, NULL);
+	pthread_condattr_t cond_attr;
+	if (pthread_condattr_init(&cond_attr) != 0) {
+		pthread_mutex_destroy(&o->mu);
+		free(o);
+		return NULL;
+	}
+	int cond_rc = pthread_condattr_setclock(&cond_attr, CLOCK_MONOTONIC);
+	if (cond_rc == 0)
+		cond_rc = pthread_cond_init(&o->cond, &cond_attr);
+	pthread_condattr_destroy(&cond_attr);
+	if (cond_rc != 0) {
+		pthread_mutex_destroy(&o->mu);
+		free(o);
+		return NULL;
+	}
 	pthread_mutex_lock(&fake_backend.mu);
 	o->backend_fake = fake_backend.enabled;
 	pthread_mutex_unlock(&fake_backend.mu);
+	capture_registry_add(o);
 	return o;
 }
 
@@ -1077,6 +1381,8 @@ static SLresult set_stream_state(tipsy_sl_object *o, SLuint32 state, int recordi
 		return SL_RESULT_PARAMETER_INVALID;
 	pthread_mutex_lock(&o->mu);
 	o->state = state;
+	if (o->kind == OBJ_RECORDER)
+		reset_muted_deadline_locked(o);
 	if (state == SL_PLAYSTATE_STOPPED || state == SL_RECORDSTATE_STOPPED)
 		o->close_requested = 1;
 	pthread_cond_broadcast(&o->cond);
@@ -1165,22 +1471,59 @@ static SLresult queue_enqueue(SLBufferQueueItf self, const void *buffer, SLuint3
 	if (self == NULL || buffer == NULL || size == 0)
 		return SL_RESULT_PARAMETER_INVALID;
 	tipsy_sl_object *o = from_queue(self);
-	queue_node *n = calloc(1, sizeof(*n));
-	if (n == NULL)
-		return SL_RESULT_MEMORY_FAILURE;
-	n->io_buffer = malloc(size);
-	if (n->io_buffer == NULL) { free(n); return SL_RESULT_MEMORY_FAILURE; }
-	n->client_buffer = (void *)buffer;
-	n->size = size;
-	if (o->kind == OBJ_PLAYER)
-		memcpy(n->io_buffer, buffer, size);
 	pthread_mutex_lock(&o->mu);
 	if (o->queue_count >= o->queue_capacity || o->destroying) {
+		o->queue_capacity_rejections++;
 		pthread_mutex_unlock(&o->mu);
-		free_node(n);
 		return SL_RESULT_BUFFER_INSUFFICIENT;
 	}
+	/* Capacity is reserved by o->mu before a node allocation, payload growth,
+	 * or playback copy. queue_count changes only after all three succeed, but
+	 * no other enqueuer can consume this slot while the mutex is held. */
+	queue_node *n = o->free_nodes;
+	int new_node = 0;
+	if (n != NULL) {
+		o->free_nodes = n->next;
+		n->next = NULL;
+		o->queue_nodes_free--;
+	} else {
+		n = calloc(1, sizeof(*n));
+		if (n == NULL) {
+			pthread_mutex_unlock(&o->mu);
+			return SL_RESULT_MEMORY_FAILURE;
+		}
+		new_node = 1;
+		o->queue_nodes_owned++;
+		o->queue_node_allocations++;
+	}
+	if (n->payload_capacity < size) {
+		uint8_t *payload = malloc(size);
+		if (payload == NULL) {
+			if (new_node) {
+				o->queue_nodes_owned--;
+				free(n);
+			} else {
+				n->next = o->free_nodes;
+				o->free_nodes = n;
+				o->queue_nodes_free++;
+			}
+			pthread_mutex_unlock(&o->mu);
+			return SL_RESULT_MEMORY_FAILURE;
+		}
+		free(n->io_buffer);
+		n->io_buffer = payload;
+		n->payload_capacity = size;
+		o->queue_payload_allocations++;
+		o->queue_payload_bytes_allocated += size;
+	}
+	n->client_buffer = (void *)buffer;
+	n->size = size;
 	n->generation = o->queue_generation;
+	if (o->kind == OBJ_PLAYER) {
+		memcpy(n->io_buffer, buffer, size);
+		o->queue_copy_operations++;
+		o->queue_copy_bytes += size;
+	}
 	if (o->tail != NULL)
 		o->tail->next = n;
 	else
@@ -1199,8 +1542,11 @@ static SLresult queue_clear(SLBufferQueueItf self)
 	tipsy_sl_object *o = from_queue(self);
 	pthread_mutex_lock(&o->mu);
 	o->queue_generation++;
+	if (o->kind == OBJ_RECORDER)
+		reset_muted_deadline_locked(o);
 	free_pending_locked(o);
 	o->queue_index = 0;
+	pthread_cond_broadcast(&o->cond);
 	pthread_mutex_unlock(&o->mu);
 	return SL_RESULT_SUCCESS;
 }
@@ -1415,6 +1761,7 @@ static SLresult create_stream_object(object_kind kind, SLObjectItf *out, SLDataS
 	o->sample = sample;
 	o->queue_capacity = bq->numBuffers > 0 && bq->numBuffers <= 64 ? bq->numBuffers : 4;
 	if (pthread_create(&o->thread, NULL, stream_worker, o) != 0) {
+		capture_registry_remove(o);
 		pthread_cond_destroy(&o->cond);
 		pthread_mutex_destroy(&o->mu);
 		free(o);
@@ -1574,6 +1921,99 @@ typedef struct {
 	uint32_t count;
 } test_callback_state;
 
+#define QUEUE_OWNERSHIP_CALLBACKS 4
+
+typedef struct {
+	test_callback_state state;
+	SLBufferQueueItf queue;
+	uint8_t *buffer;
+	uint32_t bytes;
+	int reenqueue_failed;
+} queue_ownership_test_state;
+
+static void queue_ownership_test_callback(SLBufferQueueItf queue, void *context)
+{
+	queue_ownership_test_state *state = context;
+	pthread_mutex_lock(&state->state.mu);
+	state->state.count++;
+	uint32_t count = state->state.count;
+	pthread_cond_signal(&state->state.cond);
+	pthread_mutex_unlock(&state->state.mu);
+	/* The worker must return the completed node before this reentrant enqueue.
+	 * Two primed buffers plus two re-enqueues complete exactly four buffers. */
+	if (count >= 3)
+		return;
+	if ((*queue)->Enqueue(queue, state->buffer, state->bytes) != SL_RESULT_SUCCESS) {
+		pthread_mutex_lock(&state->state.mu);
+		state->reenqueue_failed = 1;
+		pthread_mutex_unlock(&state->state.mu);
+	}
+}
+
+#define MUTED_CADENCE_CALLBACKS 8
+
+typedef struct {
+	test_callback_state state;
+	SLBufferQueueItf queue;
+	uint8_t *buffer;
+	uint32_t bytes;
+	uint64_t callback_started_ns[MUTED_CADENCE_CALLBACKS];
+	uint64_t callback_to_requeue_ns[MUTED_CADENCE_CALLBACKS - 1];
+	int enqueue_failed;
+} muted_cadence_test_state;
+
+static uint64_t monotonic_ns(void)
+{
+	struct timespec now;
+	if (clock_gettime(CLOCK_MONOTONIC, &now) != 0)
+		return 0;
+	return (uint64_t)now.tv_sec * 1000000000ull + (uint64_t)now.tv_nsec;
+}
+
+static uint64_t percentile_ns(uint64_t *samples, uint32_t count, uint32_t numerator, uint32_t denominator)
+{
+	if (count == 0 || denominator == 0)
+		return 0;
+	for (uint32_t i = 1; i < count; i++) {
+		uint64_t value = samples[i];
+		uint32_t j = i;
+		while (j > 0 && samples[j - 1] > value) {
+			samples[j] = samples[j - 1];
+			j--;
+		}
+		samples[j] = value;
+	}
+	uint32_t index = (numerator * count + denominator - 1) / denominator;
+	if (index == 0)
+		return samples[0];
+	return samples[index - 1];
+}
+
+static void muted_cadence_test_callback(SLBufferQueueItf queue, void *context)
+{
+	muted_cadence_test_state *state = context;
+	uint64_t started = monotonic_ns();
+	pthread_mutex_lock(&state->state.mu);
+	uint32_t index = state->state.count;
+	if (index < MUTED_CADENCE_CALLBACKS)
+		state->callback_started_ns[index] = started;
+	state->state.count++;
+	pthread_cond_signal(&state->state.cond);
+	pthread_mutex_unlock(&state->state.mu);
+	if (index + 1 >= MUTED_CADENCE_CALLBACKS)
+		return;
+	uint64_t requeue_started = monotonic_ns();
+	SLresult rc = (*queue)->Enqueue(queue, state->buffer, state->bytes);
+	uint64_t requeue_finished = monotonic_ns();
+	pthread_mutex_lock(&state->state.mu);
+	if (rc != SL_RESULT_SUCCESS)
+		state->enqueue_failed = 1;
+	else
+		state->callback_to_requeue_ns[index] = requeue_finished >= requeue_started
+			? requeue_finished - requeue_started : 0;
+	pthread_mutex_unlock(&state->state.mu);
+}
+
 static void test_queue_callback(SLBufferQueueItf queue, void *context)
 {
 	(void)queue;
@@ -1615,10 +2055,34 @@ static void fake_reset(int fail_first_write, int fail_first_read)
 	pthread_mutex_unlock(&capture_gate_mu);
 	pthread_mutex_lock(&fake_backend.mu);
 	fake_backend.enabled = 1;
-	fake_backend.fail_first_write = fail_first_write;
-	fake_backend.fail_first_read = fail_first_read;
+	fake_backend.fail_writes_remaining = fail_first_write ? 1u : 0u;
+	fake_backend.fail_reads_remaining = fail_first_read ? 1u : 0u;
 	fake_backend.opens = fake_backend.writes = fake_backend.reads = 0;
 	fake_backend.written_bytes = fake_backend.read_bytes = 0;
+	fake_backend.expected_playback_count = 0;
+	fake_backend.expected_playback_index = 0;
+	fake_backend.playback_copy_mismatch = 0;
+	pthread_mutex_unlock(&fake_backend.mu);
+}
+
+static void fake_set_failures(uint32_t writes, uint32_t reads)
+{
+	pthread_mutex_lock(&fake_backend.mu);
+	fake_backend.fail_writes_remaining = writes;
+	fake_backend.fail_reads_remaining = reads;
+	pthread_mutex_unlock(&fake_backend.mu);
+}
+
+static void fake_expect_playback_first(const uint8_t *values, uint32_t count)
+{
+	pthread_mutex_lock(&fake_backend.mu);
+	if (count > sizeof(fake_backend.expected_playback_first))
+		count = sizeof(fake_backend.expected_playback_first);
+	for (uint32_t i = 0; i < count; i++)
+		fake_backend.expected_playback_first[i] = values[i];
+	fake_backend.expected_playback_count = count;
+	fake_backend.expected_playback_index = 0;
+	fake_backend.playback_copy_mismatch = 0;
 	pthread_mutex_unlock(&fake_backend.mu);
 }
 
@@ -1802,6 +2266,193 @@ int tipsy_audio_test_playback(uint32_t rate, uint32_t channels, uint32_t bytes,
 	return rc;
 }
 
+static void queue_ownership_snapshot_locked(const tipsy_sl_object *o, uint32_t callbacks,
+	                                         tipsy_audio_queue_ownership_result *out)
+{
+	out->capacity = o->queue_capacity;
+	out->nodes_owned = o->queue_nodes_owned;
+	out->nodes_free = o->queue_nodes_free;
+	out->queued = o->queue_count;
+	out->inflight = o->inflight ? 1u : 0u;
+	out->callbacks = callbacks;
+	out->node_allocations = o->queue_node_allocations;
+	out->payload_allocations = o->queue_payload_allocations;
+	out->payload_bytes_allocated = o->queue_payload_bytes_allocated;
+	out->copy_operations = o->queue_copy_operations;
+	out->copy_bytes = o->queue_copy_bytes;
+	out->node_reclamations = o->queue_node_reclamations;
+	out->payload_reclamations = o->queue_payload_reclamations;
+	out->capacity_rejections = o->queue_capacity_rejections;
+}
+
+/* Bounded, fake-backend ownership fixture. It primes a two-node player queue,
+ * intentionally attempts one full-queue enqueue, then re-enqueues twice from
+ * the callback before stop+Clear. The buffer stays caller-owned throughout. */
+int tipsy_audio_test_queue_ownership(tipsy_audio_queue_ownership_result *out)
+{
+	if (out == NULL)
+		return -1;
+	memset(out, 0, sizeof(*out));
+	fake_reset(0, 0);
+	SLObjectItf engine = NULL, mix = NULL, player = NULL;
+	SLEngineItf engine_itf = NULL;
+	SLBufferQueueItf queue = NULL;
+	SLPlayItf play = NULL;
+	const uint32_t bytes = 1920;
+	uint8_t *buffer = calloc(1, bytes);
+	TipsyPCMFormat pcm = {SL_DATAFORMAT_PCM, 2, 48000000u, 16, 16, 0, SL_BYTEORDER_LITTLEENDIAN, 0};
+	SLDataLocator_BufferQueue bq = {SL_DATALOCATOR_ANDROIDSIMPLEBUFFERQUEUE, 2};
+	SLuint32 output_locator[4] = {SL_DATALOCATOR_OUTPUTMIX, 0, 0, 0};
+	SLDataSource source = {&bq, &pcm};
+	SLDataSink sink = {output_locator, NULL};
+	const uint8_t expected_playback_first[QUEUE_OWNERSHIP_CALLBACKS] = {0x31, 0x7c, 0x7c, 0x7c};
+	queue_ownership_test_state state = {
+		.state = {PTHREAD_MUTEX_INITIALIZER, PTHREAD_COND_INITIALIZER, 0},
+	};
+	state.buffer = buffer;
+	state.bytes = bytes;
+	int ok = 0;
+	if (buffer == NULL) goto done;
+	/* Enqueue owns the player PCM copy, not the caller's buffer. Mutating the
+	 * caller allocation after the first enqueue must not change its later host
+	 * transfer; the fake backend exposes only a pass/fail bit, never samples. */
+	fake_expect_playback_first(expected_playback_first, QUEUE_OWNERSHIP_CALLBACKS);
+	memset(buffer, expected_playback_first[0], bytes);
+	if (tipsy_slCreateEngine(&engine, 0, NULL, 0, NULL, NULL) != 0 || engine == NULL) goto done;
+	if ((*engine)->Realize(engine, 0) != 0 || (*engine)->GetInterface(engine, SL_IID_ENGINE, &engine_itf) != 0) goto done;
+	if ((*engine_itf)->CreateOutputMix(engine_itf, &mix, 0, NULL, NULL) != 0) goto done;
+	if ((*engine_itf)->CreateAudioPlayer(engine_itf, &player, &source, &sink, 0, NULL, NULL) != 0) goto done;
+	if ((*player)->Realize(player, 0) != 0 || (*player)->GetInterface(player, SL_IID_ANDROIDSIMPLEBUFFERQUEUE, &queue) != 0 ||
+	    (*player)->GetInterface(player, SL_IID_PLAY, &play) != 0) goto done;
+	if ((*queue)->RegisterCallback(queue, queue_ownership_test_callback, &state) != 0) goto done;
+	/* The third pre-play enqueue must be rejected. The baseline records that
+	 * it nevertheless allocated and copied before capacity was checked. */
+	if ((*queue)->Enqueue(queue, buffer, bytes) != 0) goto done;
+	memset(buffer, expected_playback_first[1], bytes);
+	if ((*queue)->Enqueue(queue, buffer, bytes) != 0 ||
+	    (*queue)->Enqueue(queue, buffer, bytes) != SL_RESULT_BUFFER_INSUFFICIENT) goto done;
+	if ((*play)->SetPlayState(play, SL_PLAYSTATE_PLAYING) != 0 ||
+	    !test_wait_count(&state.state, QUEUE_OWNERSHIP_CALLBACKS, 2000)) goto done;
+	pthread_mutex_lock(&state.state.mu);
+	int callback_ok = !state.reenqueue_failed && state.state.count == QUEUE_OWNERSHIP_CALLBACKS;
+	uint32_t callbacks = state.state.count;
+	pthread_mutex_unlock(&state.state.mu);
+	if (!callback_ok) goto done;
+	if ((*play)->SetPlayState(play, SL_PLAYSTATE_STOPPED) != 0 ||
+	    (*queue)->Enqueue(queue, buffer, bytes) != 0 || (*queue)->Enqueue(queue, buffer, bytes) != 0 ||
+	    (*queue)->Clear(queue) != 0) goto done;
+	SLBufferQueueState queue_state = {0, 0};
+	if ((*queue)->GetState(queue, &queue_state) != 0 || queue_state.count != 0 || queue_state.index != 0) goto done;
+	tipsy_sl_object *o = from_object(player);
+	pthread_mutex_lock(&o->mu);
+	queue_ownership_snapshot_locked(o, callbacks, out);
+	pthread_mutex_unlock(&o->mu);
+	pthread_mutex_lock(&fake_backend.mu);
+	out->caller_buffer_copies_preserved = fake_backend.expected_playback_index == QUEUE_OWNERSHIP_CALLBACKS &&
+	                                     !fake_backend.playback_copy_mismatch;
+	pthread_mutex_unlock(&fake_backend.mu);
+	ok = out->caller_buffer_copies_preserved;
+done:
+	if (player) (*player)->Destroy(player);
+	if (mix) (*mix)->Destroy(mix);
+	if (engine) (*engine)->Destroy(engine);
+	pthread_cond_destroy(&state.state.cond);
+	pthread_mutex_destroy(&state.state.mu);
+	free(buffer);
+	fake_disable();
+	return ok ? 0 : -1;
+}
+
+static int test_wait_retry_backoff(tipsy_sl_object *o, uint64_t waits, int timeout_ms)
+{
+	for (int elapsed = 0; elapsed < timeout_ms; elapsed++) {
+		pthread_mutex_lock(&o->mu);
+		uint64_t observed = o->retry_waits;
+		pthread_mutex_unlock(&o->mu);
+		if (observed >= waits)
+			return 1;
+		struct timespec pause = {.tv_sec = 0, .tv_nsec = 1000000L};
+		nanosleep(&pause, NULL);
+	}
+	return 0;
+}
+
+static int test_wait_retry_interruption(tipsy_sl_object *o, int timeout_ms)
+{
+	for (int elapsed = 0; elapsed < timeout_ms; elapsed++) {
+		pthread_mutex_lock(&o->mu);
+		uint64_t observed = o->retry_interruptions;
+		pthread_mutex_unlock(&o->mu);
+		if (observed > 0)
+			return 1;
+		struct timespec pause = {.tv_sec = 0, .tv_nsec = 1000000L};
+		nanosleep(&pause, NULL);
+	}
+	return 0;
+}
+
+/* Forces repeated fake writes to fail, then stops and clears while the second
+ * 100 ms retry deadline is live. This proves two things without a device or
+ * PCM output: Stop/Clear interrupts the deadline, and repeated failures emit
+ * at most one stream error per rate-limit interval. */
+int tipsy_audio_test_retry_backoff(tipsy_audio_retry_backoff_result *out)
+{
+	if (out == NULL)
+		return -1;
+	memset(out, 0, sizeof(*out));
+	fake_reset(0, 0);
+	fake_set_failures(3, 0);
+	SLObjectItf engine = NULL, mix = NULL, player = NULL;
+	SLEngineItf engine_itf = NULL;
+	SLBufferQueueItf queue = NULL;
+	SLPlayItf play = NULL;
+	const uint32_t bytes = 1920;
+	uint8_t *buffer = calloc(1, bytes);
+	TipsyPCMFormat pcm = {SL_DATAFORMAT_PCM, 2, 48000000u, 16, 16, 0, SL_BYTEORDER_LITTLEENDIAN, 0};
+	SLDataLocator_BufferQueue bq = {SL_DATALOCATOR_ANDROIDSIMPLEBUFFERQUEUE, 2};
+	SLuint32 output_locator[4] = {SL_DATALOCATOR_OUTPUTMIX, 0, 0, 0};
+	SLDataSource source = {&bq, &pcm};
+	SLDataSink sink = {output_locator, NULL};
+	test_callback_state state = {PTHREAD_MUTEX_INITIALIZER, PTHREAD_COND_INITIALIZER, 0};
+	int ok = 0;
+	if (buffer == NULL) goto done;
+	if (tipsy_slCreateEngine(&engine, 0, NULL, 0, NULL, NULL) != 0 || engine == NULL) goto done;
+	if ((*engine)->Realize(engine, 0) != 0 || (*engine)->GetInterface(engine, SL_IID_ENGINE, &engine_itf) != 0) goto done;
+	if ((*engine_itf)->CreateOutputMix(engine_itf, &mix, 0, NULL, NULL) != 0) goto done;
+	if ((*engine_itf)->CreateAudioPlayer(engine_itf, &player, &source, &sink, 0, NULL, NULL) != 0) goto done;
+	if ((*player)->Realize(player, 0) != 0 || (*player)->GetInterface(player, SL_IID_ANDROIDSIMPLEBUFFERQUEUE, &queue) != 0 ||
+	    (*player)->GetInterface(player, SL_IID_PLAY, &play) != 0) goto done;
+	if ((*queue)->RegisterCallback(queue, test_queue_callback, &state) != 0 ||
+	    (*play)->SetPlayState(play, SL_PLAYSTATE_PLAYING) != 0 || (*queue)->Enqueue(queue, buffer, bytes) != 0) goto done;
+	tipsy_sl_object *o = from_object(player);
+	if (!test_wait_retry_backoff(o, 2, 1000)) goto done;
+	if ((*play)->SetPlayState(play, SL_PLAYSTATE_STOPPED) != 0 || (*queue)->Clear(queue) != 0 ||
+	    !test_wait_retry_interruption(o, 500)) goto done;
+	pthread_mutex_lock(&state.mu);
+	out->callbacks = state.count;
+	pthread_mutex_unlock(&state.mu);
+	pthread_mutex_lock(&o->mu);
+	out->queued = o->queue_count;
+	out->inflight = o->inflight ? 1u : 0u;
+	out->retry_waits = o->retry_waits;
+	out->retry_interruptions = o->retry_interruptions;
+	out->error_log_emissions = o->error_log_emissions;
+	out->error_log_suppressions = o->error_log_suppressions;
+	pthread_mutex_unlock(&o->mu);
+	ok = out->callbacks == 0 && out->queued == 0 && out->inflight == 0 &&
+	     out->retry_waits >= 2 && out->retry_interruptions >= 1 &&
+	     out->error_log_emissions == 1 && out->error_log_suppressions >= 1;
+done:
+	if (player) (*player)->Destroy(player);
+	if (mix) (*mix)->Destroy(mix);
+	if (engine) (*engine)->Destroy(engine);
+	pthread_cond_destroy(&state.cond);
+	pthread_mutex_destroy(&state.mu);
+	free(buffer);
+	fake_disable();
+	return ok ? 0 : -1;
+}
+
 int tipsy_audio_test_capture(uint32_t rate, uint32_t channels, uint32_t bytes,
 	                         uint64_t *read_bytes, uint32_t *callbacks)
 {
@@ -1912,6 +2563,190 @@ int tipsy_audio_test_capture_muted(uint64_t *read_bytes, uint32_t *callbacks, in
 	if (had_nonzero)
 		*had_nonzero = nz;
 	return rc;
+}
+
+/* A bounded re-enqueue fixture for the exact muted recorder path. It never
+ * opens a real capture stream: the fake backend supplies silence only. The
+ * same fixture reported a zero scheduled interval before this pacing repair,
+ * so its raw output is a cadence comparison rather than a latency claim. */
+int tipsy_audio_test_muted_cadence(tipsy_audio_muted_cadence_result *out)
+{
+	if (out == NULL)
+		return -1;
+	memset(out, 0, sizeof(*out));
+	fake_reset(0, 0);
+	tipsy_audio_set_capture_muted(1);
+	SLObjectItf engine = NULL, mix = NULL, stream = NULL;
+	SLEngineItf engine_itf = NULL;
+	SLBufferQueueItf queue = NULL;
+	SLRecordItf record = NULL;
+	const uint32_t bytes = 960; /* 480 frames of 48 kHz mono S16LE: 10 ms. */
+	TipsyPCMFormat pcm = {SL_DATAFORMAT_PCM, 1, 48000000u, 16, 16, 0, SL_BYTEORDER_LITTLEENDIAN, 0};
+	SLDataLocator_BufferQueue bq = {SL_DATALOCATOR_ANDROIDSIMPLEBUFFERQUEUE, 2};
+	SLuint32 input_locator[4] = {SL_DATALOCATOR_IODEVICE, SL_IODEVICE_AUDIOINPUT, SL_DEFAULTDEVICEID_AUDIOINPUT, 0};
+	SLDataSource source = {input_locator, NULL};
+	SLDataSink sink = {&bq, &pcm};
+	muted_cadence_test_state state = {
+		.state = {PTHREAD_MUTEX_INITIALIZER, PTHREAD_COND_INITIALIZER, 0},
+	};
+	state.bytes = bytes;
+	state.buffer = calloc(1, bytes);
+	int ok = 0;
+	if (state.buffer == NULL) goto done;
+	if (tipsy_slCreateEngine(&engine, 0, NULL, 0, NULL, NULL) != 0 || engine == NULL) goto done;
+	if ((*engine)->Realize(engine, 0) != 0 || (*engine)->GetInterface(engine, SL_IID_ENGINE, &engine_itf) != 0) goto done;
+	if ((*engine_itf)->CreateOutputMix(engine_itf, &mix, 0, NULL, NULL) != 0) goto done;
+	if ((*engine_itf)->CreateAudioRecorder(engine_itf, &stream, &source, &sink, 0, NULL, NULL) != 0) goto done;
+	if ((*stream)->Realize(stream, 0) != 0 || (*stream)->GetInterface(stream, SL_IID_ANDROIDSIMPLEBUFFERQUEUE, &queue) != 0) goto done;
+	state.queue = queue;
+	if ((*queue)->RegisterCallback(queue, muted_cadence_test_callback, &state) != 0) goto done;
+	if ((*stream)->GetInterface(stream, SL_IID_RECORD, &record) != 0 || (*record)->SetRecordState(record, SL_RECORDSTATE_RECORDING) != 0) goto done;
+	if ((*queue)->Enqueue(queue, state.buffer, bytes) != 0 || !test_wait_count(&state.state, MUTED_CADENCE_CALLBACKS, 2000)) goto done;
+	pthread_mutex_lock(&state.state.mu);
+	if (state.enqueue_failed || state.state.count != MUTED_CADENCE_CALLBACKS) {
+		pthread_mutex_unlock(&state.state.mu);
+		goto done;
+	}
+	uint64_t intervals[MUTED_CADENCE_CALLBACKS - 1];
+	uint64_t requeues[MUTED_CADENCE_CALLBACKS - 1];
+	for (uint32_t i = 0; i + 1 < MUTED_CADENCE_CALLBACKS; i++) {
+		intervals[i] = state.callback_started_ns[i + 1] >= state.callback_started_ns[i]
+			? state.callback_started_ns[i + 1] - state.callback_started_ns[i] : 0;
+		requeues[i] = state.callback_to_requeue_ns[i];
+	}
+	pthread_mutex_unlock(&state.state.mu);
+	out->callbacks = MUTED_CADENCE_CALLBACKS;
+	out->callback_interval_p50_ns = percentile_ns(intervals, MUTED_CADENCE_CALLBACKS - 1, 50, 100);
+	out->callback_interval_p95_ns = percentile_ns(intervals, MUTED_CADENCE_CALLBACKS - 1, 95, 100);
+	out->callback_interval_p99_ns = percentile_ns(intervals, MUTED_CADENCE_CALLBACKS - 1, 99, 100);
+	out->callback_to_requeue_p50_ns = percentile_ns(requeues, MUTED_CADENCE_CALLBACKS - 1, 50, 100);
+	out->callback_to_requeue_p95_ns = percentile_ns(requeues, MUTED_CADENCE_CALLBACKS - 1, 95, 100);
+	out->callback_to_requeue_p99_ns = percentile_ns(requeues, MUTED_CADENCE_CALLBACKS - 1, 99, 100);
+	tipsy_sl_object *stream_object = from_object(stream);
+	pthread_mutex_lock(&stream_object->mu);
+	out->scheduled_interval_ns = stream_object->muted_scheduled_interval_ns;
+	out->deadline_waits = stream_object->muted_deadline_waits;
+	out->missed_deadline_clamps = stream_object->muted_missed_deadline_clamps;
+	pthread_mutex_unlock(&stream_object->mu);
+	ok = 1;
+done:
+	if (stream) (*stream)->Destroy(stream);
+	if (mix) (*mix)->Destroy(mix);
+	if (engine) (*engine)->Destroy(engine);
+	pthread_cond_destroy(&state.state.cond);
+	pthread_mutex_destroy(&state.state.mu);
+	free(state.buffer);
+	tipsy_audio_set_capture_muted(0);
+	fake_disable();
+	return ok ? 0 : -1;
+}
+
+static int test_wait_muted_deadline(tipsy_sl_object *o, uint32_t want, int timeout_ms)
+{
+	for (int elapsed = 0; elapsed < timeout_ms; elapsed++) {
+		pthread_mutex_lock(&o->mu);
+		uint32_t waits = o->muted_deadline_waits;
+		pthread_mutex_unlock(&o->mu);
+		if (waits >= want)
+			return 1;
+		struct timespec pause = {.tv_sec = 0, .tv_nsec = 1000000L};
+		nanosleep(&pause, NULL);
+	}
+	return 0;
+}
+
+enum muted_interrupt_action {
+	MUTED_INTERRUPT_CLEAR,
+	MUTED_INTERRUPT_STOP_CLEAR,
+	MUTED_INTERRUPT_DESTROY,
+	MUTED_INTERRUPT_UNMUTE,
+};
+
+/* Exercises a live deadline rather than merely a stopped queue. The second
+ * 100 ms buffer gives the test a wide, deterministic interruption window;
+ * no real capture is opened and only zero/nonzero test buffers are checked. */
+static int test_muted_capture_interrupt(enum muted_interrupt_action action)
+{
+	SLObjectItf engine = NULL, mix = NULL, stream = NULL;
+	SLEngineItf engine_itf = NULL;
+	SLBufferQueueItf queue = NULL;
+	SLRecordItf record = NULL;
+	const uint32_t bytes = 9600; /* 100 ms at 48 kHz mono S16LE. */
+	uint8_t *first = calloc(1, bytes);
+	uint8_t *second = calloc(1, bytes);
+	TipsyPCMFormat pcm = {SL_DATAFORMAT_PCM, 1, 48000000u, 16, 16, 0, SL_BYTEORDER_LITTLEENDIAN, 0};
+	SLDataLocator_BufferQueue bq = {SL_DATALOCATOR_ANDROIDSIMPLEBUFFERQUEUE, 2};
+	SLuint32 input_locator[4] = {SL_DATALOCATOR_IODEVICE, SL_IODEVICE_AUDIOINPUT, SL_DEFAULTDEVICEID_AUDIOINPUT, 0};
+	SLDataSource source = {input_locator, NULL};
+	SLDataSink sink = {&bq, &pcm};
+	test_callback_state state = {PTHREAD_MUTEX_INITIALIZER, PTHREAD_COND_INITIALIZER, 0};
+	int ok = 0;
+	if (first == NULL || second == NULL) goto done;
+	if (tipsy_slCreateEngine(&engine, 0, NULL, 0, NULL, NULL) != 0 || engine == NULL) goto done;
+	if ((*engine)->Realize(engine, 0) != 0 || (*engine)->GetInterface(engine, SL_IID_ENGINE, &engine_itf) != 0) goto done;
+	if ((*engine_itf)->CreateOutputMix(engine_itf, &mix, 0, NULL, NULL) != 0) goto done;
+	if ((*engine_itf)->CreateAudioRecorder(engine_itf, &stream, &source, &sink, 0, NULL, NULL) != 0) goto done;
+	if ((*stream)->Realize(stream, 0) != 0 || (*stream)->GetInterface(stream, SL_IID_ANDROIDSIMPLEBUFFERQUEUE, &queue) != 0) goto done;
+	if ((*queue)->RegisterCallback(queue, test_queue_callback, &state) != 0) goto done;
+	if ((*stream)->GetInterface(stream, SL_IID_RECORD, &record) != 0 || (*record)->SetRecordState(record, SL_RECORDSTATE_RECORDING) != 0) goto done;
+	if ((*queue)->Enqueue(queue, first, bytes) != 0 || !test_wait_count(&state, 1, 500)) goto done;
+	if ((*queue)->Enqueue(queue, second, bytes) != 0) goto done;
+	if (!test_wait_muted_deadline(from_object(stream), 1, 500)) goto done;
+
+	if (action == MUTED_INTERRUPT_UNMUTE) {
+		tipsy_audio_set_capture_muted(0);
+		if (!test_wait_count(&state, 2, 500) || !buffer_has_nonzero(second, bytes)) goto done;
+		ok = 1;
+		goto done;
+	}
+	if (action == MUTED_INTERRUPT_CLEAR) {
+		if ((*queue)->Clear(queue) != 0) goto done;
+	} else if (action == MUTED_INTERRUPT_STOP_CLEAR) {
+		if ((*record)->SetRecordState(record, SL_RECORDSTATE_STOPPED) != 0 || (*queue)->Clear(queue) != 0) goto done;
+	} else {
+		(*stream)->Destroy(stream);
+		stream = NULL;
+	}
+	if (action != MUTED_INTERRUPT_DESTROY) {
+		struct timespec settle = {.tv_sec = 0, .tv_nsec = 120000000L};
+		nanosleep(&settle, NULL);
+		pthread_mutex_lock(&state.mu);
+		uint32_t callbacks = state.count;
+		pthread_mutex_unlock(&state.mu);
+		SLBufferQueueState qs = {0, 0};
+		if (callbacks != 1 || (*queue)->GetState(queue, &qs) != 0 || qs.count != 0 || qs.index != 0) goto done;
+	} else {
+		pthread_mutex_lock(&state.mu);
+		uint32_t callbacks = state.count;
+		pthread_mutex_unlock(&state.mu);
+		if (callbacks != 1) goto done;
+	}
+	ok = 1;
+done:
+	if (stream) (*stream)->Destroy(stream);
+	if (mix) (*mix)->Destroy(mix);
+	if (engine) (*engine)->Destroy(engine);
+	pthread_cond_destroy(&state.cond);
+	pthread_mutex_destroy(&state.mu);
+	free(first);
+	free(second);
+	return ok ? 0 : -1;
+}
+
+int tipsy_audio_test_muted_capture_interrupts(uint32_t *failed)
+{
+	if (failed == NULL)
+		return -1;
+	*failed = 0;
+	fake_reset(0, 0);
+	for (int action = MUTED_INTERRUPT_CLEAR; action <= MUTED_INTERRUPT_UNMUTE; action++) {
+		tipsy_audio_set_capture_muted(1);
+		if (test_muted_capture_interrupt((enum muted_interrupt_action)action) != 0)
+			*failed |= 1u << action;
+		tipsy_audio_set_capture_muted(0);
+	}
+	fake_disable();
+	return *failed == 0 ? 0 : -1;
 }
 
 int tipsy_audio_test_capture_refused(void)

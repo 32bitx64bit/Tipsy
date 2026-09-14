@@ -349,6 +349,63 @@ int tipsy_audio_test_host_duplex(uint32_t rate, uint32_t channels, uint32_t byte
 int tipsy_audio_test_capture_muted(uint64_t *read_bytes, uint32_t *callbacks, int *had_nonzero);
 int tipsy_audio_test_capture_refused(void);
 int tipsy_audio_test_capture_midstream_disable(uint32_t *callbacks, uint32_t *reads);
+/* Content-free ownership/reclamation result from a fake OpenSL player queue.
+ * It has no PCM or device data. Allocation/copy fields describe this queue
+ * bridge only, not process RSS, CPU, audio latency, or FPS. */
+typedef struct {
+	uint32_t capacity;
+	uint32_t nodes_owned;
+	uint32_t nodes_free;
+	uint32_t queued;
+	uint32_t inflight;
+	uint32_t callbacks;
+	uint64_t node_allocations;
+	uint64_t payload_allocations;
+	uint64_t payload_bytes_allocated;
+	uint64_t copy_operations;
+	uint64_t copy_bytes;
+	uint64_t node_reclamations;
+	uint64_t payload_reclamations;
+	uint64_t capacity_rejections;
+	uint32_t caller_buffer_copies_preserved;
+} tipsy_audio_queue_ownership_result;
+int tipsy_audio_test_queue_ownership(tipsy_audio_queue_ownership_result *out);
+/* Content-free fake-backend retry result. It observes retry-wait state and
+ * rate-limited error metadata only; it is not a device, CPU, RSS, wakeup, or
+ * audio-latency measurement. */
+typedef struct {
+	uint32_t callbacks;
+	uint32_t queued;
+	uint32_t inflight;
+	uint64_t retry_waits;
+	uint64_t retry_interruptions;
+	uint64_t error_log_emissions;
+	uint64_t error_log_suppressions;
+} tipsy_audio_retry_backoff_result;
+int tipsy_audio_test_retry_backoff(tipsy_audio_retry_backoff_result *out);
+/* Test-only, content-free muted-recorder cadence sample. The fake host never
+ * opens or reads a microphone. `callback_interval_*` describes callback
+ * spacing, while `callback_to_requeue_*` is only the client callback's
+ * synchronous queue-enqueue duration. It is not end-to-end audio latency,
+ * host wakeups, native allocation, or RSS. */
+typedef struct {
+	uint32_t callbacks;
+	uint64_t callback_interval_p50_ns;
+	uint64_t callback_interval_p95_ns;
+	uint64_t callback_interval_p99_ns;
+	uint64_t callback_to_requeue_p50_ns;
+	uint64_t callback_to_requeue_p95_ns;
+	uint64_t callback_to_requeue_p99_ns;
+	uint64_t scheduled_interval_ns;
+	uint32_t deadline_waits;
+	uint32_t missed_deadline_clamps;
+} tipsy_audio_muted_cadence_result;
+int tipsy_audio_test_muted_cadence(tipsy_audio_muted_cadence_result *out);
+/* Pure test-only monotonic schedule check: no worker, no host I/O, no PCM. */
+int tipsy_audio_test_muted_deadline_math(uint64_t *interval_ns, uint32_t *missed_deadline_clamps);
+/* Exercises Clear, stop+Clear, destruction, and mute-to-unmute while a muted
+ * recorder deadline is pending. failed is a bit per case; fake host only. */
+int tipsy_audio_test_muted_capture_interrupts(uint32_t *failed);
 /* Exact WebRTC legacy Android ADM player+recorder sequence against the fake
  * host (see opensles.c). Reports callbacks per direction, whether the voice
  * stream type / recording preset were recorded, and the queue state after the

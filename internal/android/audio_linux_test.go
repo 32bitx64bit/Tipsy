@@ -56,6 +56,44 @@ func TestOpenSLReopensAfterHostFailure(t *testing.T) {
 	}
 }
 
+func TestOpenSLQueueOwnershipPool(t *testing.T) {
+	result, ok := OpenSLQueueOwnershipFixture()
+	if !ok {
+		t.Fatalf("queue ownership fixture failed: %+v", result)
+	}
+	if result.Capacity != 2 || result.Callbacks != 4 || result.Queued != 0 || result.Inflight != 0 {
+		t.Fatalf("queue state=%+v, want capacity=2 callbacks=4 queued/inflight=0", result)
+	}
+	// The pre-pool baseline made seven node/payload allocations and copies
+	// (including the full-queue rejection). The two resident slots below prove
+	// that capacity is checked before allocation/copy, callbacks can re-enter,
+	// and Clear returns both nodes to the stream-local pool.
+	if result.NodeAllocations != 2 || result.PayloadAllocations != 2 ||
+		result.PayloadBytesAllocated != 2*1920 || result.CopyOperations != 6 ||
+		result.CopyBytes != 6*1920 || result.CapacityRejections != 1 ||
+		result.NodeReclamations != 6 || result.PayloadReclamations != 6 ||
+		result.NodesOwned != 2 || result.NodesFree != 2 || !result.CallerBufferCopiesPreserved {
+		t.Fatalf("unexpected pooled queue ownership: %+v", result)
+	}
+	t.Logf("OpenSL fake queue pooled capacity=%d callbacks=%d allocations node=%d payload=%d payload_bytes=%d copies=%d copy_bytes=%d reclaim node=%d payload=%d capacity_rejections=%d caller_buffer_copies_preserved=%t queued=%d inflight=%d",
+		result.Capacity, result.Callbacks, result.NodeAllocations, result.PayloadAllocations,
+		result.PayloadBytesAllocated, result.CopyOperations, result.CopyBytes,
+		result.NodeReclamations, result.PayloadReclamations, result.CapacityRejections, result.CallerBufferCopiesPreserved,
+		result.Queued, result.Inflight)
+}
+
+func TestOpenSLRetryBackoffInterruptsAndRateLimits(t *testing.T) {
+	result, ok := openSLRetryBackoffFixture()
+	if !ok || result.Callbacks != 0 || result.Queued != 0 || result.Inflight != 0 ||
+		result.RetryWaits < 2 || result.RetryInterruptions < 1 ||
+		result.ErrorLogEmissions != 1 || result.ErrorLogSuppressions < 1 {
+		t.Fatalf("unexpected fake retry backoff result: ok=%t result=%+v", ok, result)
+	}
+	t.Logf("OpenSL fake retry backoff waits=%d interrupted=%d error_log_emissions=%d suppressions=%d callbacks=%d queued=%d inflight=%d",
+		result.RetryWaits, result.RetryInterruptions, result.ErrorLogEmissions,
+		result.ErrorLogSuppressions, result.Callbacks, result.Queued, result.Inflight)
+}
+
 func TestOpenSLCaptureReopensAfterHostFailure(t *testing.T) {
 	allowMicrophone(t)
 	opens, reads, callbacks, rc := audioTestCaptureRetry()
@@ -93,6 +131,60 @@ func TestOpenSLCaptureMuteSilencesBuffer(t *testing.T) {
 	}
 	if CaptureMuted() {
 		t.Fatal("mute probe left the process muted")
+	}
+}
+
+func TestOpenSLMutedCaptureCadence(t *testing.T) {
+	allowMicrophone(t)
+	result, ok := MutedCaptureCadenceFixture()
+	if !ok || result.Callbacks != 8 {
+		t.Fatalf("muted cadence ok=%t callbacks=%d", ok, result.Callbacks)
+	}
+	if result.CallbackIntervalP50NS < 5_000_000 || result.CallbackIntervalP99NS > 100_000_000 ||
+		result.CallbackToRequeueP99NS == 0 {
+		t.Fatalf("muted cadence did not collect timing: %+v", result)
+	}
+	if result.ScheduledIntervalNS != 10_000_000 || result.DeadlineWaits+result.MissedDeadlineClamps != 7 {
+		t.Fatalf("muted cadence schedule=%d waits=%d clamps=%d, want 10000000/7 opportunities",
+			result.ScheduledIntervalNS, result.DeadlineWaits, result.MissedDeadlineClamps)
+	}
+	t.Logf("muted cadence callbacks=%d callback_interval_ns p50=%d p95=%d p99=%d callback_to_requeue_ns p50=%d p95=%d p99=%d scheduled_interval_ns=%d deadline_waits=%d missed_deadline_clamps=%d",
+		result.Callbacks, result.CallbackIntervalP50NS, result.CallbackIntervalP95NS, result.CallbackIntervalP99NS,
+		result.CallbackToRequeueP50NS, result.CallbackToRequeueP95NS, result.CallbackToRequeueP99NS,
+		result.ScheduledIntervalNS, result.DeadlineWaits, result.MissedDeadlineClamps)
+}
+
+func TestOpenSLMutedDeadlineMath(t *testing.T) {
+	interval, clamps, rc := audioTestMutedDeadlineMath()
+	if rc != 0 || interval != 10_000_000 || clamps != 1 {
+		t.Fatalf("fake monotonic deadline rc=%d interval=%d clamps=%d, want 0/10000000/1", rc, interval, clamps)
+	}
+}
+
+func TestOpenSLMutedCaptureInterrupts(t *testing.T) {
+	allowMicrophone(t)
+	failed, rc := audioTestMutedCaptureInterrupts()
+	if rc != 0 || failed != 0 {
+		t.Fatalf("muted capture lifecycle interruptions rc=%d failed=%#x", rc, failed)
+	}
+}
+
+// BenchmarkOpenSLMutedCaptureCadence is deliberately serial: the fake host
+// and process-wide mute gate model one recorder. It provides internal/perf a
+// direct-test-binary workload for Go allocation and resource metadata. The
+// cadence result itself is not an end-to-end microphone latency measurement.
+func BenchmarkOpenSLMutedCaptureCadence(b *testing.B) {
+	if MicrophoneDisabled() {
+		b.Skip("microphone kill-switch changes the recorder contract")
+	}
+	SetCaptureMuted(false)
+	b.Cleanup(func() { SetCaptureMuted(false) })
+	b.ReportAllocs()
+	for i := 0; i < b.N; i++ {
+		result, ok := MutedCaptureCadenceFixture()
+		if !ok || result.Callbacks != 8 || result.ScheduledIntervalNS != 10_000_000 {
+			b.Fatalf("muted cadence fixture ok=%t result=%+v", ok, result)
+		}
 	}
 }
 
