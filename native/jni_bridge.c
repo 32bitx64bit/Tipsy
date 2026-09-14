@@ -9,6 +9,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <stdio.h>
+#include <time.h>
 
 #ifndef TIPSY_JNI_STUTTER_DIAG_RECORD
 #define TIPSY_JNI_STUTTER_DIAG_RECORD(family) ((void)(family))
@@ -46,11 +47,9 @@ extern void GoJNI_SetField(JNIEnv *env, jobject obj, jclass clazz, jfieldID fiel
 extern jstring GoJNI_NewString(JNIEnv *env, const jchar *unicode, jsize len);
 extern jsize GoJNI_GetStringLength(JNIEnv *env, jstring str);
 extern const jchar *GoJNI_GetStringChars(JNIEnv *env, jstring str, jboolean *isCopy);
-extern void GoJNI_ReleaseStringChars(JNIEnv *env, jstring str, const jchar *chars);
 extern jstring GoJNI_NewStringUTF(JNIEnv *env, char *utf);
 extern jsize GoJNI_GetStringUTFLength(JNIEnv *env, jstring str);
 extern const char *GoJNI_GetStringUTFChars(JNIEnv *env, jstring str, jboolean *isCopy);
-extern void GoJNI_ReleaseStringUTFChars(JNIEnv *env, jstring str, char *chars);
 extern void GoJNI_GetStringRegion(JNIEnv *env, jstring str, jsize start, jsize len, jchar *buf);
 extern void GoJNI_GetStringUTFRegion(JNIEnv *env, jstring str, jsize start, jsize len, char *buf);
 extern jsize GoJNI_GetArrayLength(JNIEnv *env, jarray array);
@@ -186,6 +185,36 @@ static const char *method_sig(jmethodID mid)
 		return m->sig;
 	}
 	return "()V";
+}
+
+// The string diagnostics header is included by internal/jni/bridge_include.c
+// immediately before this source. These helpers retain only a sampled
+// monotonic elapsed duration; their callers hold the one default-off gate.
+static uint64_t string_diag_monotonic_ns(void)
+{
+	struct timespec ts;
+
+	if (clock_gettime(CLOCK_MONOTONIC, &ts) != 0) {
+		return 0;
+	}
+	// Reserve zero for a failed clock read without changing valid elapsed
+	// subtraction: both endpoints carry the same +1 offset.
+	return (uint64_t)ts.tv_sec * UINT64_C(1000000000) + (uint64_t)ts.tv_nsec + 1;
+}
+
+static void string_diag_record_elapsed(int path, uint64_t started_ns)
+{
+	uint64_t ended_ns;
+
+	if (started_ns == 0) {
+		return;
+	}
+	ended_ns = string_diag_monotonic_ns();
+	if (ended_ns == 0) {
+		return;
+	}
+	tipsy_jni_string_diag_record_sample(path,
+		ended_ns >= started_ns ? ended_ns - started_ns : 0);
 }
 
 static jint JNICALL t_GetVersion(JNIEnv *env)
@@ -354,7 +383,26 @@ static jclass JNICALL t_GetObjectClass(JNIEnv *env, jobject obj)
 
 static jboolean JNICALL t_IsInstanceOf(JNIEnv *env, jobject obj, jclass clazz)
 {
-	return GoJNI_IsInstanceOf(env, obj, clazz);
+	int diag = tipsy_jni_string_diag_enabled();
+	int sampled = 0;
+	uint64_t started_ns = 0;
+	jboolean result;
+
+	if (diag) {
+		sampled = tipsy_jni_string_diag_record_call(TIPSY_JNI_STRING_IS_INSTANCE_OF);
+		tipsy_jni_string_diag_enter(TIPSY_JNI_STRING_IS_INSTANCE_OF);
+		if (sampled) {
+			started_ns = string_diag_monotonic_ns();
+		}
+	}
+	result = GoJNI_IsInstanceOf(env, obj, clazz);
+	if (diag) {
+		tipsy_jni_string_diag_leave();
+		if (sampled) {
+			string_diag_record_elapsed(TIPSY_JNI_STRING_IS_INSTANCE_OF, started_ns);
+		}
+	}
+	return result;
 }
 
 static jmethodID JNICALL t_GetMethodID(JNIEnv *env, jclass clazz, const char *name, const char *sig)
@@ -879,15 +927,73 @@ static jsize JNICALL t_GetStringLength(JNIEnv *env, jstring str)
 }
 static const jchar *JNICALL t_GetStringChars(JNIEnv *env, jstring str, jboolean *isCopy)
 {
-	return GoJNI_GetStringChars(env, str, isCopy);
+	int diag = tipsy_jni_string_diag_enabled();
+	int sampled = 0;
+	uint64_t started_ns = 0;
+	const jchar *result;
+
+	if (diag) {
+		sampled = tipsy_jni_string_diag_record_call(TIPSY_JNI_STRING_GET_CHARS);
+		tipsy_jni_string_diag_enter(TIPSY_JNI_STRING_GET_CHARS);
+		if (sampled) {
+			started_ns = string_diag_monotonic_ns();
+		}
+	}
+	result = GoJNI_GetStringChars(env, str, isCopy);
+	if (diag) {
+		tipsy_jni_string_diag_leave();
+		if (sampled) {
+			string_diag_record_elapsed(TIPSY_JNI_STRING_GET_CHARS, started_ns);
+		}
+	}
+	return result;
 }
 static void JNICALL t_ReleaseStringChars(JNIEnv *env, jstring str, const jchar *chars)
 {
-	GoJNI_ReleaseStringChars(env, str, chars);
+	int diag;
+	int sampled = 0;
+	uint64_t started_ns = 0;
+
+	(void)env;
+	(void)str;
+	diag = tipsy_jni_string_diag_enabled();
+	if (diag) {
+		sampled = tipsy_jni_string_diag_record_call(TIPSY_JNI_STRING_RELEASE_CHARS);
+		tipsy_jni_string_diag_enter(TIPSY_JNI_STRING_RELEASE_CHARS);
+		if (sampled) {
+			started_ns = string_diag_monotonic_ns();
+		}
+	}
+	free((void *)chars);
+	if (diag) {
+		tipsy_jni_string_diag_leave();
+		if (sampled) {
+			string_diag_record_elapsed(TIPSY_JNI_STRING_RELEASE_CHARS, started_ns);
+		}
+	}
 }
 static jstring JNICALL t_NewStringUTF(JNIEnv *env, const char *utf)
 {
-	return GoJNI_NewStringUTF(env, (char *)utf);
+	int diag = tipsy_jni_string_diag_enabled();
+	int sampled = 0;
+	uint64_t started_ns = 0;
+	jstring result;
+
+	if (diag) {
+		sampled = tipsy_jni_string_diag_record_call(TIPSY_JNI_STRING_NEW_UTF);
+		tipsy_jni_string_diag_enter(TIPSY_JNI_STRING_NEW_UTF);
+		if (sampled) {
+			started_ns = string_diag_monotonic_ns();
+		}
+	}
+	result = GoJNI_NewStringUTF(env, (char *)utf);
+	if (diag) {
+		tipsy_jni_string_diag_leave();
+		if (sampled) {
+			string_diag_record_elapsed(TIPSY_JNI_STRING_NEW_UTF, started_ns);
+		}
+	}
+	return result;
 }
 static jsize JNICALL t_GetStringUTFLength(JNIEnv *env, jstring str)
 {
@@ -895,11 +1001,50 @@ static jsize JNICALL t_GetStringUTFLength(JNIEnv *env, jstring str)
 }
 static const char *JNICALL t_GetStringUTFChars(JNIEnv *env, jstring str, jboolean *isCopy)
 {
-	return GoJNI_GetStringUTFChars(env, str, isCopy);
+	int diag = tipsy_jni_string_diag_enabled();
+	int sampled = 0;
+	uint64_t started_ns = 0;
+	const char *result;
+
+	if (diag) {
+		sampled = tipsy_jni_string_diag_record_call(TIPSY_JNI_STRING_GET_UTF_CHARS);
+		tipsy_jni_string_diag_enter(TIPSY_JNI_STRING_GET_UTF_CHARS);
+		if (sampled) {
+			started_ns = string_diag_monotonic_ns();
+		}
+	}
+	result = GoJNI_GetStringUTFChars(env, str, isCopy);
+	if (diag) {
+		tipsy_jni_string_diag_leave();
+		if (sampled) {
+			string_diag_record_elapsed(TIPSY_JNI_STRING_GET_UTF_CHARS, started_ns);
+		}
+	}
+	return result;
 }
 static void JNICALL t_ReleaseStringUTFChars(JNIEnv *env, jstring str, const char *chars)
 {
-	GoJNI_ReleaseStringUTFChars(env, str, (char *)chars);
+	int diag;
+	int sampled = 0;
+	uint64_t started_ns = 0;
+
+	(void)env;
+	(void)str;
+	diag = tipsy_jni_string_diag_enabled();
+	if (diag) {
+		sampled = tipsy_jni_string_diag_record_call(TIPSY_JNI_STRING_RELEASE_UTF_CHARS);
+		tipsy_jni_string_diag_enter(TIPSY_JNI_STRING_RELEASE_UTF_CHARS);
+		if (sampled) {
+			started_ns = string_diag_monotonic_ns();
+		}
+	}
+	free((void *)chars);
+	if (diag) {
+		tipsy_jni_string_diag_leave();
+		if (sampled) {
+			string_diag_record_elapsed(TIPSY_JNI_STRING_RELEASE_UTF_CHARS, started_ns);
+		}
+	}
 }
 
 static jsize JNICALL t_GetArrayLength(JNIEnv *env, jarray array)
@@ -1032,11 +1177,50 @@ static void JNICALL t_ReleasePrimitiveArrayCritical(JNIEnv *env, jarray array, v
 }
 static const jchar *JNICALL t_GetStringCritical(JNIEnv *env, jstring str, jboolean *isCopy)
 {
-	return GoJNI_GetStringChars(env, str, isCopy);
+	int diag = tipsy_jni_string_diag_enabled();
+	int sampled = 0;
+	uint64_t started_ns = 0;
+	const jchar *result;
+
+	if (diag) {
+		sampled = tipsy_jni_string_diag_record_call(TIPSY_JNI_STRING_GET_CRITICAL);
+		tipsy_jni_string_diag_enter(TIPSY_JNI_STRING_GET_CRITICAL);
+		if (sampled) {
+			started_ns = string_diag_monotonic_ns();
+		}
+	}
+	result = GoJNI_GetStringChars(env, str, isCopy);
+	if (diag) {
+		tipsy_jni_string_diag_leave();
+		if (sampled) {
+			string_diag_record_elapsed(TIPSY_JNI_STRING_GET_CRITICAL, started_ns);
+		}
+	}
+	return result;
 }
 static void JNICALL t_ReleaseStringCritical(JNIEnv *env, jstring str, const jchar *carray)
 {
-	GoJNI_ReleaseStringChars(env, str, carray);
+	int diag;
+	int sampled = 0;
+	uint64_t started_ns = 0;
+
+	(void)env;
+	(void)str;
+	diag = tipsy_jni_string_diag_enabled();
+	if (diag) {
+		sampled = tipsy_jni_string_diag_record_call(TIPSY_JNI_STRING_RELEASE_CRITICAL);
+		tipsy_jni_string_diag_enter(TIPSY_JNI_STRING_RELEASE_CRITICAL);
+		if (sampled) {
+			started_ns = string_diag_monotonic_ns();
+		}
+	}
+	free((void *)carray);
+	if (diag) {
+		tipsy_jni_string_diag_leave();
+		if (sampled) {
+			string_diag_record_elapsed(TIPSY_JNI_STRING_RELEASE_CRITICAL, started_ns);
+		}
+	}
 }
 static jweak JNICALL t_NewWeakGlobalRef(JNIEnv *env, jobject obj)
 {

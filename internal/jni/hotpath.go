@@ -8,6 +8,12 @@ package jni
 /*
 #cgo CFLAGS: -I${SRCDIR}/../../native
 #include "jni_bridge.h"
+
+static void tipsy_test_release_string_chars(JNIEnv *env, jstring str, const jchar *chars) {
+	if (env != NULL && env->functions != NULL && env->functions->ReleaseStringChars != NULL) {
+		env->functions->ReleaseStringChars(env, str, chars);
+	}
+}
 */
 import "C"
 
@@ -24,7 +30,11 @@ func testGetStringChars(envRaw unsafe.Pointer, strID int64) (ptr unsafe.Pointer,
 }
 
 func testReleaseStringChars(envRaw unsafe.Pointer, strID int64, chars unsafe.Pointer) {
-	GoJNI_ReleaseStringChars((*C.JNIEnv)(envRaw), jstringOf(idToJobject(strID)), (*C.jchar)(chars))
+	C.tipsy_test_release_string_chars((*C.JNIEnv)(envRaw), jstringOf(idToJobject(strID)), (*C.jchar)(chars))
+}
+
+func testIsInstanceOf(envRaw unsafe.Pointer, obj, clazz uintptr) bool {
+	return GoJNI_IsInstanceOf((*C.JNIEnv)(envRaw), C.jobject(unsafe.Pointer(obj)), C.jclass(unsafe.Pointer(clazz))) == C.JNI_TRUE
 }
 
 func testPrimitiveArrayCritical(envRaw unsafe.Pointer, arrID int64) (ptr unsafe.Pointer, isCopy bool) {

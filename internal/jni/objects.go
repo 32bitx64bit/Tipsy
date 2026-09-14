@@ -17,13 +17,18 @@ type Class struct {
 }
 
 type Object struct {
-	id          int64
-	class       *Class
-	str         string
+	id    int64
+	class *Class
+	str   string
+	// utf16 is present only when str cannot losslessly represent the Java
+	// String's UTF-16 code units (an unpaired surrogate). Ordinary strings
+	// continue to derive units when a JNI string operation needs them rather
+	// than retaining a second representation as a cache.
+	utf16       *rawUTF16
 	fields      map[string]any
 	elems       []int64
 	bytes       []byte
-	global      bool
+	globalRefs  int  // JNI global-reference multiplicity; VM.mu protects it.
 	immortal    bool // never reclaimed; class objects, interned caches, seeded enums
 	heapRefs    int  // Tipsy-heap edges (fields/elems), not JNI global refs
 	localRefs   atomic.Int32
@@ -38,7 +43,6 @@ func (o *Object) markImmortal() {
 	if o == nil {
 		return
 	}
-	o.global = true
 	o.immortal = true
 }
 
@@ -78,8 +82,12 @@ func (vm *VM) newObjectLocked(cls *Class) *Object {
 
 func (vm *VM) newStringOn(env unsafe.Pointer, s string) *Object {
 	cls := vm.classes["java/lang/String"]
-	o := vm.newObjectOn(env, cls)
-	o.str = s
+	// Strings have their immutable payload in str. Keep fields nil until an
+	// actual field write needs one rather than paying for an empty map per
+	// short-lived JNI string local.
+	o := &Object{id: vm.allocID(), class: cls, str: s}
+	vm.objects[o.id] = o
+	vm.addLocalOnLocked(env, o.id)
 	return o
 }
 

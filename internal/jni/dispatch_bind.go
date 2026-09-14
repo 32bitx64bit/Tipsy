@@ -94,7 +94,7 @@ func wrapDispatchFamilies(class, name, sig string) callHandler {
 			}
 		}
 		if o != nil {
-			if v, ok := vm.fieldGetter(o, name, sig); ok {
+			if v, ok := vm.fieldGetterOn(env, o, name, sig); ok {
 				return v, true
 			}
 		}
@@ -105,10 +105,9 @@ func wrapDispatchFamilies(class, name, sig string) callHandler {
 
 func wrapFieldGetter(name, sig string) callHandler {
 	return func(vm *VM, env unsafe.Pointer, obj C.jobject, args *C.jvalue, retKind rune) (C.jobject, bool) {
-		_ = env
 		_ = args
 		o := vm.get(jobjectToID(uintptr(obj)))
-		if v, ok := vm.fieldGetter(o, name, sig); ok {
+		if v, ok := vm.fieldGetterOn(env, o, name, sig); ok {
 			return v, true
 		}
 		return stubFallback(vm, oClassName(o), name, sig, args, retKind)
@@ -117,7 +116,6 @@ func wrapFieldGetter(name, sig string) callHandler {
 
 func wrapStub(class, name, sig string) callHandler {
 	return func(vm *VM, env unsafe.Pointer, obj C.jobject, args *C.jvalue, retKind rune) (C.jobject, bool) {
-		_ = env
 		o := vm.get(jobjectToID(uintptr(obj)))
 		if class == motionEventClass || class == keyEventClass {
 			if v, ok := vm.dispatchInput(o, class, name, sig, args); ok {
@@ -125,7 +123,7 @@ func wrapStub(class, name, sig string) callHandler {
 			}
 		}
 		if o != nil {
-			if v, ok := vm.fieldGetter(o, name, sig); ok {
+			if v, ok := vm.fieldGetterOn(env, o, name, sig); ok {
 				return v, true
 			}
 		}
@@ -169,7 +167,7 @@ func (vm *VM) resolveDispatch(env unsafe.Pointer, obj C.jobject, class, name, si
 		return v, ok, h
 	}
 	if o != nil {
-		if v, ok := vm.fieldGetter(o, name, sig); ok {
+		if v, ok := vm.fieldGetterOn(env, o, name, sig); ok {
 			return v, true, wrapFieldGetter(name, sig)
 		}
 	}

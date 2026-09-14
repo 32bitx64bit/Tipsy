@@ -226,6 +226,9 @@ func (vm *VM) storeFieldObjLocked(o *Object, key string, id int64) {
 	if o == nil {
 		return
 	}
+	if o.fields == nil {
+		o.fields = make(map[string]any)
+	}
 	old, _ := o.fields[key].(int64)
 	vm.replaceHeapEdgeLocked(o, old, id)
 	o.fields[key] = id
@@ -256,7 +259,7 @@ func (vm *VM) maybeReclaimLocked(id int64) {
 		return
 	}
 	o := vm.objects[id]
-	if o == nil || o.global || o.immortal {
+	if o == nil || o.globalRefs > 0 || o.immortal {
 		return
 	}
 	if o.localRefs.Load() > 0 || o.pendingRefs.Load() > 0 || o.heapRefs > 0 {
@@ -387,7 +390,7 @@ func (vm *VM) newGlobalRefLocked(id int64) {
 	if o == nil {
 		return
 	}
-	o.global = true
+	o.globalRefs++
 }
 
 func (vm *VM) deleteGlobalRefLocked(id int64) {
@@ -398,7 +401,13 @@ func (vm *VM) deleteGlobalRefLocked(id int64) {
 	if o == nil || o.immortal {
 		return
 	}
-	o.global = false
+	// A second DeleteGlobalRef for an already-deleted opaque handle is invalid
+	// JNI caller behavior. Keep that failure harmless here rather than
+	// underflowing another live reference's multiplicity.
+	if o.globalRefs <= 0 {
+		return
+	}
+	o.globalRefs--
 	vm.maybeReclaimLocked(id)
 }
 

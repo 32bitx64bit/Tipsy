@@ -39,6 +39,11 @@ func SetStutterDiagnostics(enabled bool) {
 		v = 1
 	}
 	C.tipsy_jni_stutter_diag_set_enabled(v)
+	// String-path correlation follows the same explicit, default-off runtime
+	// lifecycle. Its snapshot is intentionally separate so existing callers
+	// keep their fixed stutter aggregate schema until the runtime logger opts
+	// into the new content-free fields.
+	SetStringDiagnostics(enabled)
 }
 
 func StutterSnapshot(reset bool) JNIStutterStats {

@@ -13,6 +13,8 @@ package jni
 import "C"
 
 import (
+	"errors"
+	"unicode/utf16"
 	"unsafe"
 )
 
@@ -32,9 +34,16 @@ func (e *Env) NewStringUTF(s string) uintptr {
 	if e == nil {
 		return 0
 	}
-	cs := C.CString(s)
-	defer C.free(unsafe.Pointer(cs))
-	str := C.tipsy_jni_NewStringUTF((*C.JNIEnv)(e.raw), cs)
+	units := utf16.Encode([]rune(s))
+	n, ok := modifiedUTF8Length(units)
+	if !ok {
+		return 0
+	}
+	bytes := make([]byte, n+1)
+	encodeModifiedUTF8To(bytes[:n], units)
+	cs := C.CBytes(bytes)
+	defer C.free(cs)
+	str := C.tipsy_jni_NewStringUTF((*C.JNIEnv)(e.raw), (*C.char)(cs))
 	return uintptr(str)
 }
 
@@ -50,7 +59,9 @@ func (e *Env) NewString(s string) uintptr {
 	return uintptr(idToJobject(o.id))
 }
 
-// GetStringUTFChars returns the UTF-8 contents of a jstring created by this VM.
+// GetStringUTFChars returns the Go UTF-8 text for a jstring created by this
+// VM. JNI exposes Modified UTF-8 at this boundary, so decode it before handing
+// it to Go callers.
 func (e *Env) GetStringUTFChars(str uintptr) (string, error) {
 	if e == nil || str == 0 {
 		return "", nil
@@ -60,9 +71,12 @@ func (e *Env) GetStringUTFChars(str uintptr) (string, error) {
 	if p == nil {
 		return "", nil
 	}
-	s := C.GoString(p)
+	units, ok := decodeModifiedUTF8([]byte(C.GoString(p)))
 	C.tipsy_jni_ReleaseStringUTFChars((*C.JNIEnv)(e.raw), C.jstring(str), p)
-	return s, nil
+	if !ok {
+		return "", errors.New("invalid modified UTF-8 from JNI")
+	}
+	return string(utf16.Decode(units)), nil
 }
 
 // Raw returns the JNIEnv*.

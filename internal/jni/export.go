@@ -342,10 +342,34 @@ func GoJNI_GetObjectClass(env *C.JNIEnv, obj C.jobject) C.jclass {
 
 //export GoJNI_IsInstanceOf
 func GoJNI_IsInstanceOf(env *C.JNIEnv, obj C.jobject, clazz C.jclass) C.jboolean {
-	if jobjectToID(uintptr(obj)) == 0 {
+	vm := vmFromEnv(unsafe.Pointer(env))
+	if vm == nil {
 		return C.JNI_FALSE
 	}
-	return GoJNI_IsAssignableFrom(env, GoJNI_GetObjectClass(env, obj), clazz)
+	targetName := classNameOf(vm, clazz)
+	vm.mu.RLock()
+	target := vm.classes[targetName]
+	var source *Class
+	if id := jobjectToID(uintptr(obj)); id != 0 {
+		if o := vm.objects[id]; o != nil {
+			source = o.class
+		}
+	}
+	vm.mu.RUnlock()
+	if target == nil {
+		return C.JNI_FALSE
+	}
+	// JNI permits null to be cast to any valid target class. Resolve target
+	// first so an invalid class handle never becomes a successful result.
+	if jobjectToID(uintptr(obj)) == 0 {
+		stringDiagnosticsAddCurrent(1, 0, 0, 0, 0, 0, 0)
+		return C.JNI_TRUE
+	}
+	if source != nil && target.isAssignable(source) {
+		stringDiagnosticsAddCurrent(1, 0, 0, 0, 0, 0, 0)
+		return C.JNI_TRUE
+	}
+	return C.JNI_FALSE
 }
 
 //export GoJNI_GetMethodID
@@ -434,6 +458,13 @@ func jvalueIAt(args *C.jvalue, i int) int32 {
 }
 
 func (vm *VM) fieldGetter(o *Object, name, sig string) (C.jobject, bool) {
+	return vm.fieldGetterOn(nil, o, name, sig)
+}
+
+// fieldGetterOn resolves one synthetic Java getter. Callers on a JNI callback
+// path must pass that callback's environment so returned String locals stay
+// on the owning native thread; nil preserves the legacy current-env fallback.
+func (vm *VM) fieldGetterOn(env unsafe.Pointer, o *Object, name, sig string) (C.jobject, bool) {
 	if o == nil || !strings.HasPrefix(sig, "()") {
 		return jnull(), false
 	}
@@ -498,7 +529,7 @@ func (vm *VM) fieldGetter(o *Object, name, sig string) (C.jobject, bool) {
 			return idToJobject(t), true
 		case string:
 			vm.mu.Lock()
-			s := vm.newStringLocked(t)
+			s := vm.newStringOn(env, t)
 			vm.mu.Unlock()
 			return idToJobject(s.id), true
 		}
@@ -617,6 +648,10 @@ func GoJNI_GetFieldID(env *C.JNIEnv, clazz C.jclass, name, sig *C.char, isStatic
 
 //export GoJNI_GetField
 func GoJNI_GetField(env *C.JNIEnv, obj C.jobject, clazz C.jclass, fieldID C.jfieldID, isStatic C.jint, retKind C.jint, out *C.jvalue) {
+	var stringFieldDiag stringFieldDiagnosticToken
+	if retKind == 'L' {
+		stringFieldDiag = beginStringFieldDiagnostics()
+	}
 	jvalueZero(out)
 	vm := vmFromEnv(unsafe.Pointer(env))
 	if vm == nil {
@@ -661,6 +696,7 @@ func GoJNI_GetField(env *C.JNIEnv, obj C.jobject, clazz C.jclass, fieldID C.jfie
 			s := vm.newStringOn(unsafe.Pointer(env), t)
 			vm.mu.Unlock()
 			jvalueSetL(out, idToJobject(s.id))
+			stringFieldDiag.completeStringField(uint64(len(t)))
 		}
 	case 'I':
 		switch t := val.(type) {
@@ -751,7 +787,7 @@ const maxGuestStringUnits = 16 << 20
 //export GoJNI_NewString
 func GoJNI_NewString(env *C.JNIEnv, unicode *C.jchar, len C.jsize) C.jstring {
 	vm := vmFromEnv(unsafe.Pointer(env))
-	if vm == nil || len < 0 || len > maxGuestStringUnits {
+	if vm == nil || len < 0 || len > maxGuestStringUnits || (len > 0 && unicode == nil) {
 		return jstringOf(jnull())
 	}
 	n := int(len)
@@ -760,9 +796,8 @@ func GoJNI_NewString(env *C.JNIEnv, unicode *C.jchar, len C.jsize) C.jstring {
 		slice := unsafe.Slice((*uint16)(unsafe.Pointer(unicode)), n)
 		copy(runes, slice)
 	}
-	s := string(utf16.Decode(runes))
 	vm.mu.Lock()
-	o := vm.newStringOn(unsafe.Pointer(env), s)
+	o := vm.newStringUTF16On(unsafe.Pointer(env), runes)
 	vm.mu.Unlock()
 	return jstringOf(idToJobject(o.id))
 }
@@ -779,6 +814,25 @@ func utf16UnitCount(s string) int {
 	return n
 }
 
+// encodeUTF16To writes s directly into a caller-owned UTF-16 buffer. The
+// caller supplies exactly utf16UnitCount(s) units; malformed UTF-8 follows Go
+// range semantics and therefore matches utf16.Encode([]rune(s)).
+func encodeUTF16To(dst []uint16, s string) int {
+	n := 0
+	for _, r := range s {
+		if r < 0x10000 {
+			dst[n] = uint16(r)
+			n++
+			continue
+		}
+		high, low := utf16.EncodeRune(r)
+		dst[n] = uint16(high)
+		dst[n+1] = uint16(low)
+		n += 2
+	}
+	return n
+}
+
 //export GoJNI_GetStringLength
 func GoJNI_GetStringLength(env *C.JNIEnv, str C.jstring) C.jsize {
 	vm := vmFromEnv(unsafe.Pointer(env))
@@ -789,7 +843,7 @@ func GoJNI_GetStringLength(env *C.JNIEnv, str C.jstring) C.jsize {
 	if o == nil {
 		return 0
 	}
-	return C.jsize(utf16UnitCount(o.str))
+	return C.jsize(objectUTF16Length(o))
 }
 
 //export GoJNI_GetStringChars
@@ -805,43 +859,46 @@ func GoJNI_GetStringChars(env *C.JNIEnv, str C.jstring, isCopy *C.jboolean) *C.j
 	if o == nil {
 		return nil
 	}
-	u := utf16.Encode([]rune(o.str))
-	if len(u) == 0 {
-		u = []uint16{0}
-	} else {
-		u = append(u, 0)
+	units := objectUTF16Length(o)
+	const maxInt = int(^uint(0) >> 1)
+	unitBytes := int(unsafe.Sizeof(C.jchar(0)))
+	if units < 0 || units >= maxInt || units+1 > maxInt/unitBytes {
+		return nil
 	}
-	p := C.malloc(C.size_t(len(u) * 2))
+	// Preserve Tipsy's existing terminator-inclusive allocation convention;
+	// GetStringChars itself does not require a trailing zero.
+	count := units + 1
+	p := C.malloc(C.size_t(count * unitBytes))
 	if p == nil {
 		return nil
 	}
-	dst := unsafe.Slice((*uint16)(p), len(u))
-	copy(dst, u)
-	return (*C.jchar)(p)
-}
-
-//export GoJNI_ReleaseStringChars
-func GoJNI_ReleaseStringChars(env *C.JNIEnv, str C.jstring, chars *C.jchar) {
-	_ = env
-	_ = str
-	if chars != nil {
-		C.free(unsafe.Pointer(chars))
+	dst := unsafe.Slice((*uint16)(p), count)
+	if copy(dst[:units], objectUTF16Units(o)) != units {
+		C.free(p)
+		return nil
 	}
+	dst[units] = 0
+	stringDiagnosticsAddCurrent(1, 0, 0, uint64(units*unitBytes), uint64(count*unitBytes), uint64(units*unitBytes), 0)
+	return (*C.jchar)(p)
 }
 
 //export GoJNI_NewStringUTF
 func GoJNI_NewStringUTF(env *C.JNIEnv, utf *C.char) C.jstring {
 	vm := vmFromEnv(unsafe.Pointer(env))
-	if vm == nil {
+	if vm == nil || utf == nil {
 		return jstringOf(jnull())
 	}
-	s := ""
-	if utf != nil {
-		s = C.GoString(utf)
+	units, ok := decodeModifiedUTF8([]byte(C.GoString(utf)))
+	if !ok {
+		return jstringOf(jnull())
 	}
 	vm.mu.Lock()
-	o := vm.newStringOn(unsafe.Pointer(env), s)
+	o := vm.newStringUTF16On(unsafe.Pointer(env), units)
 	vm.mu.Unlock()
+	// NewStringUTF receives Modified UTF-8. Count only its byte boundary; no
+	// text crosses this diagnostic boundary.
+	inputBytes, _ := modifiedUTF8Length(units)
+	stringDiagnosticsAddCurrent(1, uint64(inputBytes), 0, 0, 0, uint64(inputBytes), 1)
 	return jstringOf(idToJobject(o.id))
 }
 
@@ -855,7 +912,11 @@ func GoJNI_GetStringUTFLength(env *C.JNIEnv, str C.jstring) C.jsize {
 	if o == nil {
 		return 0
 	}
-	return C.jsize(len(o.str))
+	n, ok := modifiedUTF8Length(objectUTF16Units(o))
+	if !ok {
+		return 0
+	}
+	return C.jsize(n)
 }
 
 //export GoJNI_GetStringUTFChars
@@ -871,16 +932,23 @@ func GoJNI_GetStringUTFChars(env *C.JNIEnv, str C.jstring, isCopy *C.jboolean) *
 	if o == nil {
 		return nil
 	}
-	return C.CString(o.str)
-}
-
-//export GoJNI_ReleaseStringUTFChars
-func GoJNI_ReleaseStringUTFChars(env *C.JNIEnv, str C.jstring, chars *C.char) {
-	_ = env
-	_ = str
-	if chars != nil {
-		C.free(unsafe.Pointer(chars))
+	units := objectUTF16Units(o)
+	n, ok := modifiedUTF8Length(units)
+	const maxInt = int(^uint(0) >> 1)
+	if !ok || n >= maxInt {
+		return nil
 	}
+	p := C.malloc(C.size_t(n + 1))
+	if p != nil {
+		dst := unsafe.Slice((*byte)(p), n+1)
+		if encodeModifiedUTF8To(dst[:n], units) != n {
+			C.free(p)
+			return nil
+		}
+		dst[n] = 0
+		stringDiagnosticsAddCurrent(1, 0, uint64(n), 0, uint64(n+1), uint64(n), 0)
+	}
+	return (*C.char)(p)
 }
 
 // unitRegion validates a JNI string-region request and returns its start and
@@ -922,7 +990,7 @@ func GoJNI_GetStringRegion(env *C.JNIEnv, str C.jstring, start, length C.jsize, 
 	if o == nil {
 		return
 	}
-	u := utf16.Encode([]rune(o.str))
+	u := objectUTF16Units(o)
 	s, n, ok := unitRegion(int(start), int(length), len(u))
 	if !ok {
 		return
@@ -941,13 +1009,17 @@ func GoJNI_GetStringUTFRegion(env *C.JNIEnv, str C.jstring, start, length C.jsiz
 	if o == nil {
 		return
 	}
-	b := []byte(o.str)
-	s, n, ok := unitRegion(int(start), int(length), len(b))
+	u := objectUTF16Units(o)
+	s, n, ok := unitRegion(int(start), int(length), len(u))
 	if !ok {
 		return
 	}
-	dst := unsafe.Slice((*byte)(unsafe.Pointer(buf)), n)
-	copy(dst, b[s:s+n])
+	encoded, ok := modifiedUTF8Length(u[s : s+n])
+	if !ok || encoded == 0 {
+		return
+	}
+	dst := unsafe.Slice((*byte)(unsafe.Pointer(buf)), encoded)
+	encodeModifiedUTF8To(dst, u[s:s+n])
 }
 
 //export GoJNI_GetArrayLength
@@ -1383,11 +1455,15 @@ func GoJNI_GetObjectRefType(env *C.JNIEnv, obj C.jobject) C.jobjectRefType {
 	if vm == nil || jobjectToID(uintptr(obj)) == 0 {
 		return C.JNIInvalidRefType
 	}
-	o := vm.get(jobjectToID(uintptr(obj)))
+	id := jobjectToID(uintptr(obj))
+	vm.mu.RLock()
+	o := vm.objects[id]
+	global := o != nil && o.globalRefs > 0
+	vm.mu.RUnlock()
 	if o == nil {
 		return C.JNIInvalidRefType
 	}
-	if o.global {
+	if global {
 		return C.JNIGlobalRefType
 	}
 	return C.JNILocalRefType

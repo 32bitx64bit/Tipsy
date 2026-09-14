@@ -6,6 +6,7 @@
 package jni
 
 import (
+	"math/rand"
 	"testing"
 	"unicode/utf16"
 	"unsafe"
@@ -45,6 +46,67 @@ func TestGetStringLengthAndChars(t *testing.T) {
 		t.Fatalf("GetStringChars text=%q want %q", got, want)
 	}
 	testReleaseStringChars(vm.envRaw, js, chars)
+}
+
+func checkStringCharsAgainstEncode(t *testing.T, vm *VM, value string) {
+	t.Helper()
+	js := testNewUTF16String(vm, value)
+	if js == 0 {
+		t.Fatal("NewString")
+	}
+	chars, isCopy := testGetStringChars(vm.envRaw, js)
+	if chars == nil || !isCopy {
+		t.Fatalf("GetStringChars(%q) = (%p, isCopy=%v)", value, chars, isCopy)
+	}
+	want := utf16.Encode([]rune(value))
+	got := unsafe.Slice((*uint16)(chars), len(want)+1)
+	for i, unit := range want {
+		if got[i] != unit {
+			t.Fatalf("GetStringChars(%q)[%d] = %#x, want %#x", value, i, got[i], unit)
+		}
+	}
+	if got[len(want)] != 0 {
+		t.Fatalf("GetStringChars(%q) missing trailing zero: %#x", value, got[len(want)])
+	}
+	testReleaseStringChars(vm.envRaw, js, chars)
+}
+
+func TestGetStringCharsDirectUTF16Encoding(t *testing.T) {
+	vm, err := NewVM()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, value := range []string{
+		"",
+		"plain ASCII",
+		"héllo 世界",
+		"a😀b𐐷",
+		"embedded\x00zero",
+		string([]byte{0xff, 'x', 0xc0, 0xaf, 0xe2, 0x28, 0xa1}),
+	} {
+		checkStringCharsAgainstEncode(t, vm, value)
+	}
+	if chars, isCopy := testGetStringChars(vm.envRaw, 1<<30); chars != nil || !isCopy {
+		t.Fatalf("invalid GetStringChars = (%p, isCopy=%v), want (nil, true)", chars, isCopy)
+	}
+}
+
+func TestGetStringCharsDirectUTF16EncodingRandomized(t *testing.T) {
+	vm, err := NewVM()
+	if err != nil {
+		t.Fatal(err)
+	}
+	rng := rand.New(rand.NewSource(0x5449505359))
+	for i := 0; i < 128; i++ {
+		data := make([]byte, rng.Intn(257))
+		for j := range data {
+			data[j] = byte(rng.Intn(256))
+		}
+		value := string(data)
+		for repeat := 0; repeat < 3; repeat++ {
+			checkStringCharsAgainstEncode(t, vm, value)
+		}
+	}
 }
 
 func TestPrimitiveArrayCriticalPins(t *testing.T) {
