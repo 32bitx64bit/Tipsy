@@ -15,9 +15,11 @@
 #include <EGL/eglext.h>
 #include <GLES2/gl2.h>
 #include <pthread.h>
+#include <errno.h>
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 #include <unistd.h>
 
 #ifndef EGL_PLATFORM_X11_KHR
@@ -308,27 +310,52 @@ int tipsy_egl_release_current(uintptr_t dpy) {
 }
 
 struct tipsy_swap {
-	uintptr_t xdpy; // Xlib Display* for observation-only content probes
+	uintptr_t xdpy; // Xlib Display* for bounded fallback content probes
 	unsigned long xid; // X11 Window being presented
 	uintptr_t dpy;
 	uintptr_t surf;
 	uintptr_t ctx;
 	uintptr_t go_handle; // cgo.Handle resolved by GoEGLHandoff on retirement
-	volatile int run;
-	volatile int fail;
-	volatile int retired; // 1 = client presenter detected; Tipsy stopped presenting
+	// Every mutable field below is protected by mu. In particular, run,
+	// retired, and guest_signal_available used to be volatile cross-thread
+	// flags. Volatile provides neither ordering nor prompt wakeup; the mutex
+	// and cond make stop, surface retirement, and fallback scheduling explicit.
+	pthread_mutex_t mu;
+	pthread_cond_t cond;
+	int run;
+	int fail;
+	int retired; // 1 = client presenter detected; Tipsy stopped presenting
+	int finished;
+	int source;
+	int guest_signal_available;
 	unsigned long probes;
 	unsigned long probes_failed;
 	pthread_t thr;
 };
+
+enum {
+	TIPSY_SWAP_SOURCE_NONE = 0,
+	TIPSY_SWAP_SOURCE_GUEST = 1,
+	TIPSY_SWAP_SOURCE_FALLBACK = 2,
+	TIPSY_SWAP_SOURCE_FALLBACK_EXHAUSTED = 3,
+};
+
+// The fallback is only for hosts where the Android EGL guest-swap callback is
+// unavailable. It is deliberately finite: at most one second of XGetImage
+// work, not an indefinite background reader after a surface lifecycle miss.
+#define TIPSY_SWAP_FALLBACK_INTERVAL_NS 125000000L
+#define TIPSY_SWAP_FALLBACK_MAX_PROBES 8UL
 
 // Sample small interior patches of the window through Xlib. The only frame
 // Tipsy ever presents is a pure-black sentinel, so any non-black pixel is
 // evidence that another presenter (the Roblox RenderJob) owns the window.
 // This is observation-only: no writes to any window but our own, and no
 // engine memory access.
-static int tipsy_swap_probe_foreign_frame(struct tipsy_swap *p) {
+static int tipsy_swap_probe_foreign_frame(const struct tipsy_swap *p,
+	unsigned long *out_failed) {
 	Display *d = (Display *)p->xdpy;
+	unsigned long failed = 0;
+	*out_failed = 0;
 	if (d == NULL || p->xid == 0) {
 		return 0;
 	}
@@ -336,7 +363,7 @@ static int tipsy_swap_probe_foreign_frame(struct tipsy_swap *p) {
 	int x, y;
 	unsigned int w, h, bw, depth;
 	if (!XGetGeometry(d, (Window)p->xid, &root, &x, &y, &w, &h, &bw, &depth)) {
-		p->probes_failed++;
+		*out_failed = 1;
 		return 0;
 	}
 	if (w < 8 || h < 8) {
@@ -354,7 +381,7 @@ static int tipsy_swap_probe_foreign_frame(struct tipsy_swap *p) {
 		}
 		XImage *img = XGetImage(d, (Window)p->xid, px, py, 8, 8, AllPlanes, ZPixmap);
 		if (img == NULL) {
-			p->probes_failed++;
+			failed++;
 			continue;
 		}
 		int foreign = 0;
@@ -369,10 +396,41 @@ static int tipsy_swap_probe_foreign_frame(struct tipsy_swap *p) {
 		}
 		XDestroyImage(img);
 		if (foreign) {
+			*out_failed = failed;
 			return 1;
 		}
 	}
+	*out_failed = failed;
 	return 0;
+}
+
+static void tipsy_swap_deadline(struct timespec *out) {
+	if (clock_gettime(CLOCK_MONOTONIC, out) != 0) {
+		out->tv_sec = 0;
+		out->tv_nsec = 0;
+		return;
+	}
+	out->tv_nsec += TIPSY_SWAP_FALLBACK_INTERVAL_NS;
+	if (out->tv_nsec >= 1000000000L) {
+		out->tv_sec++;
+		out->tv_nsec -= 1000000000L;
+	}
+}
+
+static void tipsy_swap_finish(struct tipsy_swap *p, int source) {
+	pthread_mutex_lock(&p->mu);
+	if (!p->finished) {
+		p->finished = 1;
+		if (source != TIPSY_SWAP_SOURCE_NONE) {
+			p->source = source;
+		}
+		pthread_cond_broadcast(&p->cond);
+	}
+	pthread_mutex_unlock(&p->mu);
+	// This is safe even for stop/failure: StopSwapThread joins this pthread
+	// before deleting its cgo.Handle, and the callback only sends one
+	// capacity-1 token without entering EGL state.
+	GoEGLHandoff(p->go_handle);
 }
 
 static void *tipsy_swap_main(void *arg) {
@@ -381,7 +439,10 @@ static void *tipsy_swap_main(void *arg) {
 	// instead of leaving it in "unnamed residual".
 	(void)pthread_setname_np(pthread_self(), "tip.eglswap");
 	if (!eglMakeCurrent((EGLDisplay)p->dpy, (EGLSurface)p->surf, (EGLSurface)p->surf, (EGLContext)p->ctx)) {
+		pthread_mutex_lock(&p->mu);
 		p->fail = eglGetError();
+		pthread_mutex_unlock(&p->mu);
+		tipsy_swap_finish(p, TIPSY_SWAP_SOURCE_NONE);
 		return NULL;
 	}
 	// Present exactly one sentinel frame so the boot window is a defined
@@ -389,31 +450,71 @@ static void *tipsy_swap_main(void *arg) {
 	// one XID (Tipsy + Roblox RenderJob) visibly flicker and can evict the
 	// client's frames, so after this single present Tipsy never presents
 	// again; the thread only watches for the client to take over.
-	eglSwapInterval((EGLDisplay)p->dpy, 0);
-	glClearColor(0.0f, 0.0f, 0.0f, 1.0f);
-	glClear(GL_COLOR_BUFFER_BIT);
-	if (!eglSwapBuffers((EGLDisplay)p->dpy, (EGLSurface)p->surf)) {
-		p->fail = eglGetError();
-		eglMakeCurrent((EGLDisplay)p->dpy, EGL_NO_SURFACE, EGL_NO_SURFACE, EGL_NO_CONTEXT);
-		return NULL;
+	pthread_mutex_lock(&p->mu);
+	int skip_sentinel = !p->run || p->retired;
+	pthread_mutex_unlock(&p->mu);
+	if (!skip_sentinel) {
+		eglSwapInterval((EGLDisplay)p->dpy, 0);
+		glClearColor(0.0f, 0.0f, 0.0f, 1.0f);
+		glClear(GL_COLOR_BUFFER_BIT);
+		if (!eglSwapBuffers((EGLDisplay)p->dpy, (EGLSurface)p->surf)) {
+			pthread_mutex_lock(&p->mu);
+			p->fail = eglGetError();
+			pthread_mutex_unlock(&p->mu);
+			eglMakeCurrent((EGLDisplay)p->dpy, EGL_NO_SURFACE, EGL_NO_SURFACE, EGL_NO_CONTEXT);
+			tipsy_swap_finish(p, TIPSY_SWAP_SOURCE_NONE);
+			return NULL;
+		}
 	}
-	while (p->run && !p->retired) {
-		p->probes++;
-		if (tipsy_swap_probe_foreign_frame(p)) {
-			p->retired = 1;
+	for (;;) {
+		int probe = 0;
+		pthread_mutex_lock(&p->mu);
+		if (!p->run || p->retired) {
+			pthread_mutex_unlock(&p->mu);
 			break;
 		}
-		usleep(125000);
+		if (p->guest_signal_available) {
+			// Once the exact Android surface is registered, a successful guest
+			// swap is authoritative. Do no X11 readback while waiting for it.
+			pthread_cond_wait(&p->cond, &p->mu);
+			pthread_mutex_unlock(&p->mu);
+			continue;
+		}
+		if (p->probes >= TIPSY_SWAP_FALLBACK_MAX_PROBES) {
+			p->source = TIPSY_SWAP_SOURCE_FALLBACK_EXHAUSTED;
+			pthread_mutex_unlock(&p->mu);
+			break;
+		}
+		struct timespec deadline;
+		tipsy_swap_deadline(&deadline);
+		int wait_rc = pthread_cond_timedwait(&p->cond, &p->mu, &deadline);
+		if (wait_rc == ETIMEDOUT && p->run && !p->retired && !p->guest_signal_available) {
+			p->probes++;
+			probe = 1;
+		}
+		pthread_mutex_unlock(&p->mu);
+		if (!probe) {
+			continue;
+		}
+		unsigned long failed = 0;
+		int foreign = tipsy_swap_probe_foreign_frame(p, &failed);
+		pthread_mutex_lock(&p->mu);
+		p->probes_failed += failed;
+		if (foreign && p->run && !p->retired && !p->guest_signal_available) {
+			p->retired = 1;
+			p->source = TIPSY_SWAP_SOURCE_FALLBACK;
+			pthread_cond_broadcast(&p->cond);
+		}
+		pthread_mutex_unlock(&p->mu);
 	}
 	eglMakeCurrent((EGLDisplay)p->dpy, EGL_NO_SURFACE, EGL_NO_SURFACE, EGL_NO_CONTEXT);
-	// One event-driven Go wake, and only when a client presenter retired the
-	// sentinel: the 125 ms probes, run=0 stops, and start/swap failures never
-	// call back. Go resolves go_handle to a capacity-1 channel, so this
-	// pthread never blocks on Go. StopSwapThread frees p and deletes the
-	// handle only after pthread_join, so no callback can race teardown.
-	if (p->retired) {
-		GoEGLHandoff(p->go_handle);
+	pthread_mutex_lock(&p->mu);
+	int source = p->source;
+	if (p->retired && source == TIPSY_SWAP_SOURCE_NONE) {
+		source = TIPSY_SWAP_SOURCE_GUEST;
 	}
+	pthread_mutex_unlock(&p->mu);
+	tipsy_swap_finish(p, source);
 	return NULL;
 }
 
@@ -429,8 +530,28 @@ uintptr_t tipsy_egl_swap_thread_start(uintptr_t xdpy, unsigned long xid,
 	p->surf = surf;
 	p->ctx = ctx;
 	p->go_handle = go_handle;
+	if (pthread_mutex_init(&p->mu, NULL) != 0) {
+		free(p);
+		return 0;
+	}
+	pthread_condattr_t attr;
+	if (pthread_condattr_init(&attr) != 0) {
+		pthread_mutex_destroy(&p->mu);
+		free(p);
+		return 0;
+	}
+	if (pthread_condattr_setclock(&attr, CLOCK_MONOTONIC) != 0 ||
+		pthread_cond_init(&p->cond, &attr) != 0) {
+		pthread_condattr_destroy(&attr);
+		pthread_mutex_destroy(&p->mu);
+		free(p);
+		return 0;
+	}
+	pthread_condattr_destroy(&attr);
 	p->run = 1;
 	if (pthread_create(&p->thr, NULL, tipsy_swap_main, p) != 0) {
+		pthread_cond_destroy(&p->cond);
+		pthread_mutex_destroy(&p->mu);
 		free(p);
 		return 0;
 	}
@@ -443,25 +564,71 @@ int tipsy_egl_swap_thread_stop(uintptr_t ptr) {
 	if (p == NULL) {
 		return 0;
 	}
+	pthread_mutex_lock(&p->mu);
 	p->run = 0;
+	pthread_cond_broadcast(&p->cond);
+	pthread_mutex_unlock(&p->mu);
 	pthread_join(p->thr, NULL);
+	pthread_mutex_lock(&p->mu);
 	fail = p->fail;
+	pthread_mutex_unlock(&p->mu);
+	pthread_cond_destroy(&p->cond);
+	pthread_mutex_destroy(&p->mu);
 	free(p);
 	return fail;
 }
 
-void tipsy_egl_swap_thread_state(uintptr_t ptr, int *out_retired,
-	unsigned long *out_probes, unsigned long *out_failed) {
+int tipsy_egl_swap_thread_set_guest_signal_available(uintptr_t ptr, int available) {
+	struct tipsy_swap *p = (struct tipsy_swap *)ptr;
+	int active = 0;
+	if (p == NULL) {
+		return 0;
+	}
+	pthread_mutex_lock(&p->mu);
+	if (p->run && !p->finished) {
+		p->guest_signal_available = available != 0;
+		pthread_cond_broadcast(&p->cond);
+		active = 1;
+	}
+	pthread_mutex_unlock(&p->mu);
+	return active;
+}
+
+int tipsy_egl_swap_thread_guest_swap(uintptr_t ptr) {
+	struct tipsy_swap *p = (struct tipsy_swap *)ptr;
+	int accepted = 0;
+	if (p == NULL) {
+		return 0;
+	}
+	pthread_mutex_lock(&p->mu);
+	if (p->run && !p->finished && p->guest_signal_available && !p->retired) {
+		p->retired = 1;
+		p->source = TIPSY_SWAP_SOURCE_GUEST;
+		pthread_cond_broadcast(&p->cond);
+		accepted = 1;
+	}
+	pthread_mutex_unlock(&p->mu);
+	return accepted;
+}
+
+void tipsy_egl_swap_thread_state(uintptr_t ptr, int *out_retired, int *out_finished,
+	int *out_source, unsigned long *out_probes, unsigned long *out_failed) {
 	struct tipsy_swap *p = (struct tipsy_swap *)ptr;
 	if (p == NULL) {
 		*out_retired = 0;
+		*out_finished = 0;
+		*out_source = TIPSY_SWAP_SOURCE_NONE;
 		*out_probes = 0;
 		*out_failed = 0;
 		return;
 	}
+	pthread_mutex_lock(&p->mu);
 	*out_retired = p->retired;
+	*out_finished = p->finished;
+	*out_source = p->source;
 	*out_probes = p->probes;
 	*out_failed = p->probes_failed;
+	pthread_mutex_unlock(&p->mu);
 }
 
 int tipsy_egl_close(uintptr_t dpy, uintptr_t surf, uintptr_t ctx) {

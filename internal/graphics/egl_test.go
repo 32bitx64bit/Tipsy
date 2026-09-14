@@ -19,7 +19,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/tipsy-linux/tipsy/internal/graphics/flickercap"
 	"github.com/tipsy-linux/tipsy/internal/x11"
 )
 
@@ -108,12 +107,11 @@ func TestSwapThread(t *testing.T) {
 	}
 }
 
-// TestSwapThreadRetiresOnSecondPresenter verifies the single-presenter
-// handoff: when another EGL client presents non-black frames on the same
-// window, the Tipsy swap thread must detect it and never present again. It
-// also pins the event-driven watcher contract: exactly one handoff log, and
-// the watcher goroutine exits after logging.
-func TestSwapThreadRetiresOnSecondPresenter(t *testing.T) {
+// TestSwapThreadRetiresOnVerifiedGuestSwap proves the normal handoff does not
+// inspect pixels. The Android EGL bridge supplies the exact XID, host display,
+// host surface, and generation only after its real eglSwapBuffers succeeds.
+// The C sentinel waits on a condition and exits promptly on that one event.
+func TestSwapThreadRetiresOnVerifiedGuestSwap(t *testing.T) {
 	captured := captureGraphicsLogs(t)
 	ensureDisplay(t)
 	w, err := x11.Open("Tipsy handoff test", 64, 64)
@@ -140,44 +138,82 @@ func TestSwapThreadRetiresOnSecondPresenter(t *testing.T) {
 	}
 	done := watcherDone(t, victim)
 
-	// Second presenter through its own X connection: painting white content
-	// on the same window is exactly what the probe must observe, the way the
-	// Roblox RenderJob's frames (via its own EGLDisplay/connection) appear.
-	client, err := flickercap.Attach(w.XID())
+	const guestDisplay = uintptr(0x1050)
+	const guestSurface = uintptr(0x2050)
+	generation := eglGuestSwaps.surfaceCreated(w.XID(), guestDisplay, guestSurface)
+	if generation == 0 {
+		t.Fatal("guest surface was not registered for active sentinel")
+	}
+	if !eglGuestSwaps.guestSwap(w.XID(), guestDisplay, guestSurface, generation) {
+		t.Fatal("verified guest swap was rejected")
+	}
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("watcher did not exit after verified guest swap")
+	}
+	victim.mu.Lock()
+	stats := victim.swapHandoffStatsLocked()
+	victim.mu.Unlock()
+	if !stats.Retired || stats.Source != swapHandoffGuestSwap {
+		t.Fatalf("guest-swap handoff stats = %+v", stats)
+	}
+	if stats.Probes != 0 {
+		t.Fatalf("verified guest swap performed fallback readback probes: %+v", stats)
+	}
+	t.Logf("guest-swap metadata: source=%s fallbackProbes=%d fallbackProbeFailures=%d fallbackInterval=125ms", stats.Source, stats.Probes, stats.Failed)
+	if n := captured.count(swapHandoffLogMessage); n != 1 {
+		t.Fatalf("handoff log count = %d; want exactly 1", n)
+	}
+	if err := victim.StopSwapThread(); err != nil {
+		t.Fatalf("StopSwapThread: %v", err)
+	}
+	if n := captured.count(swapHandoffLogMessage); n != 1 {
+		t.Fatalf("handoff log count after stop = %d; want exactly 1", n)
+	}
+}
+
+// TestSwapThreadFallbackIsStrictlyBounded records the compatibility-only
+// fallback without pretending it is a client rendering result. No guest
+// surface is registered, so exactly eight 125 ms readback opportunities are
+// permitted and the watcher is woken when the sentinel exits.
+func TestSwapThreadFallbackIsStrictlyBounded(t *testing.T) {
+	ensureDisplay(t)
+	w, err := x11.Open("Tipsy bounded EGL fallback", 64, 64)
 	if err != nil {
-		t.Skipf("second connection unusable: %v", err)
-	}
-	defer client.Close()
-	// A real presenter (the Roblox RenderJob) presents continuously; paint
-	// repeatedly so a present that races the sentinel cannot erase the
-	// foreign content before a probe observes it.
-	deadline := time.Now().Add(8 * time.Second)
-	for time.Now().Before(deadline) {
-		if err := client.PaintWhite(); err != nil {
-			t.Fatalf("client paint: %v", err)
+		if errors.Is(err, x11.ErrUnavailable) || errors.Is(err, x11.ErrNoDisplay) {
+			t.Skip(err)
 		}
-		if victim.SwapHandedOff() {
-			// The C thread wakes Go after it releases the context. Wait for
-			// the watcher to log and return instead of racing it with stop.
-			select {
-			case <-done:
-			case <-time.After(2 * time.Second):
-				t.Fatal("watcher did not exit after handoff")
-			}
-			if n := captured.count(swapHandoffLogMessage); n != 1 {
-				t.Fatalf("handoff log count = %d; want exactly 1", n)
-			}
-			if err := victim.StopSwapThread(); err != nil {
-				t.Fatalf("StopSwapThread: %v", err)
-			}
-			if n := captured.count(swapHandoffLogMessage); n != 1 {
-				t.Fatalf("handoff log count after stop = %d; want exactly 1", n)
-			}
-			return
-		}
-		time.Sleep(100 * time.Millisecond)
+		t.Fatalf("x11.Open: %v", err)
 	}
-	t.Fatal("swap thread did not retire within 8s of a second presenter")
+	defer w.Close()
+	e, err := BindEGL(w)
+	if err != nil {
+		if errors.Is(err, ErrUnavailable) {
+			t.Skip(err)
+		}
+		t.Skipf("EGL not usable on this display: %v", err)
+	}
+	defer e.Close()
+	if err := e.ReleaseCurrent(); err != nil {
+		t.Fatalf("ReleaseCurrent: %v", err)
+	}
+	if err := e.StartSwapThread(); err != nil {
+		t.Fatalf("StartSwapThread: %v", err)
+	}
+	done := watcherDone(t, e)
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("bounded fallback did not finish within two seconds")
+	}
+	e.mu.Lock()
+	stats := e.swapHandoffStatsLocked()
+	e.mu.Unlock()
+	if stats.Retired || !stats.Finished || stats.Source != swapHandoffFallbackExhausted || stats.Probes != 8 {
+		t.Fatalf("bounded fallback stats = %+v", stats)
+	}
+	t.Logf("fallback metadata: source=%s fallbackProbes=%d fallbackProbeFailures=%d fallbackInterval=125ms", stats.Source, stats.Probes, stats.Failed)
 }
 
 // TestSwapThreadWatcherExitsOnStop covers the no-handoff lifetime: a lone
@@ -267,6 +303,52 @@ func TestWatchSwapHandoffIgnoresSpuriousWake(t *testing.T) {
 	close(stop)
 	if n := captured.count(swapHandoffLogMessage); n != 0 {
 		t.Fatalf("handoff logged %d times without retirement; want 0", n)
+	}
+}
+
+// TestGuestSwapConcurrentStop keeps a registered guest surface racing the
+// real join path. Stop removes routing before it joins/frees C state, so a
+// signal that loses the race is rejected rather than touching stale memory.
+func TestGuestSwapConcurrentStop(t *testing.T) {
+	ensureDisplay(t)
+	w, err := x11.Open("Tipsy guest swap stop", 64, 64)
+	if err != nil {
+		if errors.Is(err, x11.ErrUnavailable) || errors.Is(err, x11.ErrNoDisplay) {
+			t.Skip(err)
+		}
+		t.Fatalf("x11.Open: %v", err)
+	}
+	defer w.Close()
+	e, err := BindEGL(w)
+	if err != nil {
+		if errors.Is(err, ErrUnavailable) {
+			t.Skip(err)
+		}
+		t.Skipf("EGL not usable on this display: %v", err)
+	}
+	defer e.Close()
+	if err := e.ReleaseCurrent(); err != nil {
+		t.Fatalf("ReleaseCurrent: %v", err)
+	}
+	if err := e.StartSwapThread(); err != nil {
+		t.Fatalf("StartSwapThread: %v", err)
+	}
+	const guestDisplay = uintptr(0x1070)
+	const guestSurface = uintptr(0x2070)
+	generation := eglGuestSwaps.surfaceCreated(w.XID(), guestDisplay, guestSurface)
+	if generation == 0 {
+		t.Fatal("guest surface was not registered")
+	}
+	signalDone := make(chan bool, 1)
+	go func() {
+		signalDone <- eglGuestSwaps.guestSwap(w.XID(), guestDisplay, guestSurface, generation)
+	}()
+	if err := e.StopSwapThread(); err != nil {
+		t.Fatalf("StopSwapThread: %v", err)
+	}
+	<-signalDone
+	if eglGuestSwaps.guestSwap(w.XID(), guestDisplay, guestSurface, generation) {
+		t.Fatal("guest swap reached sentinel after join/free")
 	}
 }
 

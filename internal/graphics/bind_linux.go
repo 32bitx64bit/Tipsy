@@ -161,6 +161,10 @@ func (e *EGL) StartSwapThread() error {
 		return fmt.Errorf("graphics: swap thread")
 	}
 	e.swap = uintptr(p)
+	// Register before releasing e.mu or starting the watcher. The Android EGL
+	// shim can therefore bind its created guest surface to this exact XID before
+	// its first successful swap, while Stop unregisters before C join/free.
+	e.swapGuest = eglGuestSwaps.register(e, e.x11XID)
 	e.swapWake = wake
 	e.swapHandle = uintptr(handle)
 	e.swapStop = make(chan struct{})
@@ -190,11 +194,20 @@ func (e *EGL) watchSwapHandoff(wake <-chan struct{}, stop <-chan struct{}, done 
 				e.mu.Unlock()
 				return
 			}
-			retired, probes, failed := e.swapHandoffStatsLocked()
+			stats := e.swapHandoffStatsLocked()
 			e.mu.Unlock()
-			if retired {
+			if stats.Retired {
 				logging.Logger(logging.CatGraphics).Info(swapHandoffLogMessage,
-					"probes", probes, "probeFailures", failed)
+					"source", stats.Source.String(), "fallbackProbes", stats.Probes,
+					"fallbackProbeFailures", stats.Failed,
+					"fallbackInterval", "125ms")
+				return
+			}
+			if stats.Finished {
+				logging.Logger(logging.CatGraphics).Info("EGL sentinel guest-swap handoff finished without client present",
+					"source", stats.Source.String(), "fallbackProbes", stats.Probes,
+					"fallbackProbeFailures", stats.Failed,
+					"fallbackInterval", "125ms")
 				return
 			}
 		case <-stop:
@@ -212,18 +225,67 @@ func (e *EGL) SwapHandedOff() bool {
 	}
 	e.mu.Lock()
 	defer e.mu.Unlock()
-	retired, _, _ := e.swapHandoffStatsLocked()
-	return retired
+	return e.swapHandoffStatsLocked().Retired
 }
 
-func (e *EGL) swapHandoffStatsLocked() (retired bool, probes uint64, failed uint64) {
+func (e *EGL) swapHandoffStatsLocked() swapHandoffStats {
 	if e.swap == 0 {
-		return false, 0, 0
+		return swapHandoffStats{}
 	}
-	var cRetired C.int
+	var cRetired, cFinished, cSource C.int
 	var cProbes, cFailed C.ulong
-	C.tipsy_egl_swap_thread_state(C.uintptr_t(e.swap), &cRetired, &cProbes, &cFailed)
-	return cRetired != 0, uint64(cProbes), uint64(cFailed)
+	C.tipsy_egl_swap_thread_state(C.uintptr_t(e.swap), &cRetired, &cFinished, &cSource, &cProbes, &cFailed)
+	return swapHandoffStats{
+		Retired:  cRetired != 0,
+		Finished: cFinished != 0,
+		Source:   swapHandoffSource(cSource),
+		Probes:   uint64(cProbes),
+		Failed:   uint64(cFailed),
+	}
+}
+
+// guestSwapSurfaceCreated is called only by the generation-checking router.
+// Holding e.mu through the C condition update establishes the required
+// join-before-free lifetime: Stop holds the same mutex, unregisters, then
+// joins before a matching callback can reach the C allocation.
+func (e *EGL) guestSwapSurfaceCreated(id guestSwapIdentity) bool {
+	if !id.valid() {
+		return false
+	}
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if e.swap == 0 || e.swapGuest == nil || e.swapGuest.window != id.window ||
+		e.swapGuest.generation != id.generation {
+		return false
+	}
+	if C.tipsy_egl_swap_thread_set_guest_signal_available(C.uintptr_t(e.swap), 1) == 0 {
+		return false
+	}
+	e.swapGuestSurface = id
+	return true
+}
+
+func (e *EGL) guestSwapSignaled(id guestSwapIdentity) bool {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if e.swap == 0 || e.swapGuest == nil || e.swapGuest.generation != id.generation ||
+		e.swapGuestSurface != id {
+		return false
+	}
+	return C.tipsy_egl_swap_thread_guest_swap(C.uintptr_t(e.swap)) != 0
+}
+
+func (e *EGL) guestSwapSurfaceDestroyed(id guestSwapIdentity) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if e.swap == 0 || e.swapGuest == nil || e.swapGuest.generation != id.generation ||
+		e.swapGuestSurface != id {
+		return
+	}
+	e.swapGuestSurface = guestSwapIdentity{}
+	// The next surface may be registered later. Until then the C fallback is
+	// still bounded by its fixed probe limit and can be interrupted by Stop.
+	_ = C.tipsy_egl_swap_thread_set_guest_signal_available(C.uintptr_t(e.swap), 0)
 }
 
 // StopSwapThread joins the C present thread and releases its current context.
@@ -240,6 +302,12 @@ func (e *EGL) stopSwapThreadLocked() error {
 	if e.swap == 0 {
 		return nil
 	}
+	// Remove callback reachability before asking C to stop. A callback that
+	// already obtained a router snapshot blocks on e.mu and sees swap cleared
+	// after join; a later callback has no registration to resolve at all.
+	eglGuestSwaps.unregister(e.swapGuest)
+	e.swapGuest = nil
+	e.swapGuestSurface = guestSwapIdentity{}
 	fail := C.tipsy_egl_swap_thread_stop(C.uintptr_t(e.swap))
 	e.swap = 0
 	// pthread_join above means the C thread can no longer call GoEGLHandoff,
