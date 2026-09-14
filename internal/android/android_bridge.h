@@ -195,6 +195,24 @@ uint32_t tipsy_vk_present_timing_snapshot(uint64_t after, uint64_t *out_ns,
 void tipsy_vk_present_stats(uint64_t *successful_presents, uint64_t *first_ns,
                             uint64_t *last_ns);
 void tipsy_vk_reset_present_stats(void);
+
+/* The last actual-surface present-mode probe. This is diagnostic capability
+ * state only: it deliberately retains no Vulkan handles, client create info,
+ * or application content. A non-verified status never authorizes a mode
+ * rewrite; vkCreateSwapchainKHR preserves the client request. */
+enum {
+	TIPSY_VK_PRESENT_MODE_PROBE_VERIFIED = 0,
+	TIPSY_VK_PRESENT_MODE_PROBE_UNAVAILABLE = 1,
+	TIPSY_VK_PRESENT_MODE_PROBE_MALFORMED = 2,
+	TIPSY_VK_PRESENT_MODE_PROBE_INCOMPLETE = 3,
+};
+typedef struct {
+	int32_t result;
+	uint32_t status;
+	uint32_t mode_count;
+} TipsyVkPresentModeProbe;
+void tipsy_vk_present_mode_probe_snapshot(TipsyVkPresentModeProbe *out);
+
 void tipsy_test_vk_record_present(uint64_t now_ns);
 void tipsy_test_vk_note_present_success(void);
 void tipsy_test_vk_note_present_result(int32_t result, uint64_t now_ns);
@@ -205,10 +223,11 @@ int tipsy_test_vk_rewrite_enabled_extensions(const char **in, uint32_t n, int ha
                                             int has_xlib, const char **out);
 int tipsy_test_vk_filter_present_modes(const uint32_t *in, uint32_t n, int vsync,
                                       uint32_t *out, uint32_t *out_n);
-int tipsy_test_vk_create_swapchain_policy(int vsync, uint32_t requested,
-                                         int32_t policy_result, int32_t fallback_result,
-                                         uint32_t *first_mode, uint32_t *second_mode,
-                                         int *calls, int32_t *final_result);
+int tipsy_test_vk_present_mode_capability(const uint32_t *host_modes, uint32_t host_mode_count,
+	int32_t count_result, int32_t list_result, uint32_t client_capacity, int vsync,
+	uint32_t requested, uint32_t *advertised, uint32_t *advertised_count,
+	uint32_t *first_mode, int *calls, int32_t *create_result,
+	TipsyVkPresentModeProbe *probe);
 int tipsy_vk_host_has_xcb_surface(void);
 int tipsy_vk_host_has_xlib_surface(void);
 

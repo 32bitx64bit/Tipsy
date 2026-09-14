@@ -83,9 +83,9 @@ func vulkanPresentModeName(mode int) string {
 	}
 }
 
-// SetVulkanVSync controls present-mode filtering and swapchain create rewrites
-// on the Android Vulkan adapter. Off forces IMMEDIATE when the host accepts it
-// (GLES interval-0 equivalent); on forces FIFO.
+// SetVulkanVSync controls only the order/filtering of actual-surface present
+// modes advertised by the Android Vulkan adapter. Swapchain creation preserves
+// the client's selected request and leaves host validation authoritative.
 func SetVulkanVSync(enabled bool) {
 	value := C.int(0)
 	if enabled {
@@ -436,25 +436,64 @@ func testVulkanRewriteEnabledExtensions(in []string, hasXcb, hasXlib bool) ([]st
 	return out, true
 }
 
-func testVulkanCreateSwapchainPolicy(vsync bool, requested uint32, policyOK, fallbackOK bool) (first, second uint32, calls int, result int32) {
+type vulkanPresentModeProbe struct {
+	result    int32
+	status    uint32
+	modeCount uint32
+}
+
+type vulkanPresentModeCapabilityResult struct {
+	enumerateResult int32
+	advertised      []uint32
+	firstMode       uint32
+	calls           int
+	createResult    int32
+	probe           vulkanPresentModeProbe
+}
+
+func testVulkanPresentModeCapability(hostModes []uint32, countResult, listResult int32,
+	clientCapacity uint32, vsync bool, requested uint32) vulkanPresentModeCapabilityResult {
 	cVSync := C.int(0)
 	if vsync {
 		cVSync = 1
 	}
-	policyResult := C.int32_t(0)
-	if !policyOK {
-		policyResult = -3
+	advertisedCapacity := int(clientCapacity)
+	if advertisedCapacity < len(hostModes) {
+		advertisedCapacity = len(hostModes)
 	}
-	fallbackResult := C.int32_t(0)
-	if !fallbackOK {
-		fallbackResult = -3
+	if advertisedCapacity == 0 {
+		advertisedCapacity = 1
 	}
-	var firstMode, secondMode C.uint32_t
+	advertised := make([]uint32, advertisedCapacity)
+	var host *C.uint32_t
+	if len(hostModes) > 0 {
+		host = (*C.uint32_t)(unsafe.Pointer(&hostModes[0]))
+	}
+	var advertisedCount C.uint32_t
+	var firstMode C.uint32_t
 	var nCalls C.int
-	var final C.int32_t
-	C.tipsy_test_vk_create_swapchain_policy(cVSync, C.uint32_t(requested), policyResult, fallbackResult,
-		&firstMode, &secondMode, &nCalls, &final)
-	return uint32(firstMode), uint32(secondMode), int(nCalls), int32(final)
+	var createResult C.int32_t
+	var probe C.TipsyVkPresentModeProbe
+	enumerateResult := C.tipsy_test_vk_present_mode_capability(host, C.uint32_t(len(hostModes)),
+		C.int32_t(countResult), C.int32_t(listResult), C.uint32_t(clientCapacity), cVSync,
+		C.uint32_t(requested), (*C.uint32_t)(unsafe.Pointer(&advertised[0])), &advertisedCount,
+		&firstMode, &nCalls, &createResult, &probe)
+	n := int(advertisedCount)
+	if n < 0 || n > len(advertised) {
+		n = 0
+	}
+	return vulkanPresentModeCapabilityResult{
+		enumerateResult: int32(enumerateResult),
+		advertised:      advertised[:n],
+		firstMode:       uint32(firstMode),
+		calls:           int(nCalls),
+		createResult:    int32(createResult),
+		probe: vulkanPresentModeProbe{
+			result:    int32(probe.result),
+			status:    uint32(probe.status),
+			modeCount: uint32(probe.mode_count),
+		},
+	}
 }
 
 func testVulkanFilterPresentModes(in []uint32, vsync bool) []uint32 {

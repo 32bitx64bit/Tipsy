@@ -6,6 +6,7 @@
 package android
 
 import (
+	"slices"
 	"sync"
 	"testing"
 	"time"
@@ -104,23 +105,77 @@ func TestVulkanPresentModeFilterFollowsVSync(t *testing.T) {
 	}
 }
 
-func TestVulkanCreateSwapchainForcesImmediateWhenVSyncOff(t *testing.T) {
-	const fifo = uint32(2)
-	first, second, calls, result := testVulkanCreateSwapchainPolicy(false, fifo, true, true)
-	if calls != 1 || first != 0 || second != 0 || result != 0 {
-		t.Fatalf("VSync-off FIFO request: first=%d second=%d calls=%d result=%d want IMMEDIATE once", first, second, calls, result)
+func TestVulkanCreateSwapchainPreservesActualSurfaceCapability(t *testing.T) {
+	const (
+		immediate       = uint32(0)
+		mailbox         = uint32(1)
+		fifo            = uint32(2)
+		success         = int32(0)
+		incomplete      = int32(5)
+		verified        = uint32(0)
+		unavailable     = uint32(1)
+		malformed       = uint32(2)
+		probeIncomplete = uint32(3)
+	)
+	assertCreate := func(t *testing.T, got vulkanPresentModeCapabilityResult, requested uint32) {
+		t.Helper()
+		if got.createResult != success || got.calls != 1 || got.firstMode != requested {
+			t.Fatalf("create=%d calls=%d first=%d want success and supplied request %d once", got.createResult, got.calls, got.firstMode, requested)
+		}
 	}
-	first, _, calls, result = testVulkanCreateSwapchainPolicy(false, 1, true, true)
-	if calls != 1 || first != 0 || result != 0 {
-		t.Fatalf("VSync-off MAILBOX request: first=%d calls=%d result=%d want IMMEDIATE once", first, calls, result)
+
+	for _, tc := range []struct {
+		name       string
+		host       []uint32
+		vsync      bool
+		requested  uint32
+		advertised []uint32
+	}{
+		{"fifo-only", []uint32{fifo}, false, fifo, []uint32{fifo}},
+		{"fifo-mailbox", []uint32{fifo, mailbox}, false, mailbox, []uint32{mailbox}},
+		{"fifo-immediate", []uint32{fifo, immediate}, false, immediate, []uint32{immediate}},
+		{"vsync-fifo", []uint32{fifo, mailbox, immediate}, true, fifo, []uint32{fifo}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got := testVulkanPresentModeCapability(tc.host, success, success, uint32(len(tc.host)), tc.vsync, tc.requested)
+			if got.enumerateResult != success || !slices.Equal(got.advertised, tc.advertised) || !slices.Contains(got.advertised, tc.requested) {
+				t.Fatalf("enumerate=%d advertised=%v want successful complete list %v containing %d", got.enumerateResult, got.advertised, tc.advertised, tc.requested)
+			}
+			if got.probe.status != verified || got.probe.result != success || got.probe.modeCount != uint32(len(tc.host)) {
+				t.Fatalf("probe=%+v want verified successful host list", got.probe)
+			}
+			assertCreate(t, got, tc.requested)
+		})
 	}
-	first, second, calls, result = testVulkanCreateSwapchainPolicy(false, fifo, false, true)
-	if calls != 2 || first != 0 || second != fifo || result != 0 {
-		t.Fatalf("VSync-off IMMEDIATE rejected: first=%d second=%d calls=%d result=%d want client FIFO fallback", first, second, calls, result)
-	}
-	first, second, calls, result = testVulkanCreateSwapchainPolicy(true, 0, true, true)
-	if calls != 1 || first != fifo || result != 0 {
-		t.Fatalf("VSync-on IMMEDIATE request: first=%d second=%d calls=%d result=%d want FIFO once", first, second, calls, result)
+
+	for _, tc := range []struct {
+		name, want  string
+		host        []uint32
+		count, list int32
+		capacity    uint32
+		requested   uint32
+		result      int32
+		status      uint32
+		countWant   uint32
+		advertised  []uint32
+	}{
+		{"unavailable", "unavailable", nil, -3, success, 0, fifo, -3, unavailable, 0, nil},
+		{"malformed-empty", "malformed", nil, success, success, 0, mailbox, success, malformed, 0, nil},
+		{"malformed-duplicate", "malformed", []uint32{fifo, mailbox, mailbox}, success, success, 3, mailbox, success, malformed, 3, []uint32{mailbox}},
+		{"malformed-unknown", "malformed", []uint32{fifo, 99}, success, success, 2, 99, success, malformed, 2, []uint32{fifo, 99}},
+		{"incomplete-host-list", "incomplete", []uint32{fifo, mailbox}, success, incomplete, 2, mailbox, incomplete, probeIncomplete, 2, []uint32{mailbox}},
+		{"incomplete-client-buffer", "incomplete", []uint32{fifo, mailbox}, success, success, 0, mailbox, incomplete, probeIncomplete, 2, nil},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got := testVulkanPresentModeCapability(tc.host, tc.count, tc.list, tc.capacity, false, tc.requested)
+			if got.enumerateResult != tc.result || !slices.Equal(got.advertised, tc.advertised) {
+				t.Fatalf("enumerate=%d advertised=%v want %d/%v", got.enumerateResult, got.advertised, tc.result, tc.advertised)
+			}
+			if got.probe.status != tc.status || got.probe.result != tc.result || got.probe.modeCount != tc.countWant {
+				t.Fatalf("probe=%+v want %s status=%d result=%d count=%d", got.probe, tc.want, tc.status, tc.result, tc.countWant)
+			}
+			assertCreate(t, got, tc.requested)
+		})
 	}
 }
 

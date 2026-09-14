@@ -3,8 +3,9 @@
  *
  * Android libvulkan.so adapter: identity-handle passthrough to the host
  * Khronos loader with VK_KHR_android_surface rewritten to XCB (Xlib fallback).
- * Draw-family entry points are never wrapped. WSI present-mode policy is
- * applied at vkCreateSwapchainKHR (IMMEDIATE off / FIFO on).
+ * Draw-family entry points are never wrapped. Present-mode preference is
+ * expressed only by filtering the modes advertised from the actual host
+ * surface; swapchain creation preserves the client's selected request.
  */
 #include "android_bridge.h"
 
@@ -22,8 +23,6 @@
 #include <xcb/xcb.h>
 
 extern void GoAndroid_LogMissing(char *name);
-extern void GoAndroid_LogVulkanPresentMode(int vsync, int requested, int effective,
-	int primaryOK, int primaryError, int fallbackOK, int fallbackError);
 extern void GoAndroid_LogVulkanDevice(char **names, uint32_t n, int host_present_wait,
 	int host_present_wait2, int host_present_id, int host_present_id2,
 	int host_present_timing, int host_support_probed);
@@ -203,6 +202,12 @@ static unsigned long wsi_xid;
 static xcb_connection_t *wsi_xcb;
 
 static _Atomic int vk_vsync_enabled;
+/* Capability-only record of the latest actual-surface mode query. It never
+ * retains a VkPhysicalDevice, VkSurfaceKHR, VkDevice, or client create info,
+ * and it never controls swapchain creation. */
+static _Atomic int32_t vk_present_mode_probe_result = TIPSY_VK_ERROR_INITIALIZATION_FAILED;
+static _Atomic uint32_t vk_present_mode_probe_status = TIPSY_VK_PRESENT_MODE_PROBE_UNAVAILABLE;
+static _Atomic uint32_t vk_present_mode_probe_count;
 /* Default off. Go enables this when the 2s graphics Info logger will emit. */
 static _Atomic int vk_present_stats_enabled;
 static _Atomic uint64_t vk_successful_presents;
@@ -632,6 +637,57 @@ static const char *rewrite_enabled_extension(const char *name, int has_xcb, int 
 	return NULL;
 }
 
+static void vk_present_mode_probe_note(uint32_t status, TipsyVkResult result, uint32_t mode_count)
+{
+	atomic_store_explicit(&vk_present_mode_probe_result, result, memory_order_relaxed);
+	atomic_store_explicit(&vk_present_mode_probe_count, mode_count, memory_order_relaxed);
+	atomic_store_explicit(&vk_present_mode_probe_status, status, memory_order_release);
+}
+
+void tipsy_vk_present_mode_probe_snapshot(TipsyVkPresentModeProbe *out)
+{
+	if (out == NULL) {
+		return;
+	}
+	out->status = atomic_load_explicit(&vk_present_mode_probe_status, memory_order_acquire);
+	out->result = atomic_load_explicit(&vk_present_mode_probe_result, memory_order_acquire);
+	out->mode_count = atomic_load_explicit(&vk_present_mode_probe_count, memory_order_acquire);
+}
+
+static int present_mode_known(uint32_t mode)
+{
+	return mode == TIPSY_VK_PRESENT_MODE_IMMEDIATE_KHR ||
+		mode == TIPSY_VK_PRESENT_MODE_MAILBOX_KHR ||
+		mode == TIPSY_VK_PRESENT_MODE_FIFO_KHR ||
+		mode == TIPSY_VK_PRESENT_MODE_FIFO_RELAXED_KHR;
+}
+
+static uint32_t present_mode_list_status(const uint32_t *in, uint32_t n)
+{
+	uint32_t i;
+	uint32_t j;
+	int has_fifo = 0;
+
+	if (in == NULL || n == 0) {
+		return TIPSY_VK_PRESENT_MODE_PROBE_MALFORMED;
+	}
+	for (i = 0; i < n; i++) {
+		if (!present_mode_known(in[i])) {
+			return TIPSY_VK_PRESENT_MODE_PROBE_MALFORMED;
+		}
+		if (in[i] == TIPSY_VK_PRESENT_MODE_FIFO_KHR) {
+			has_fifo = 1;
+		}
+		for (j = 0; j < i; j++) {
+			if (in[j] == in[i]) {
+				return TIPSY_VK_PRESENT_MODE_PROBE_MALFORMED;
+			}
+		}
+	}
+	return has_fifo ? TIPSY_VK_PRESENT_MODE_PROBE_VERIFIED :
+		TIPSY_VK_PRESENT_MODE_PROBE_MALFORMED;
+}
+
 static void present_mode_inventory(const uint32_t *in, uint32_t n, int *has_mailbox, int *has_immediate, int *has_fifo)
 {
 	uint32_t i;
@@ -664,14 +720,6 @@ static int present_mode_allowed(uint32_t mode, int vsync, int has_mailbox, int h
 	return 1;
 }
 
-static uint32_t policy_present_mode(int vsync)
-{
-	if (vsync) {
-		return TIPSY_VK_PRESENT_MODE_FIFO_KHR;
-	}
-	return TIPSY_VK_PRESENT_MODE_IMMEDIATE_KHR;
-}
-
 static uint32_t present_mode_rank(uint32_t mode, int vsync)
 {
 	if (!vsync) {
@@ -681,7 +729,7 @@ static uint32_t present_mode_rank(uint32_t mode, int vsync)
 		if (mode == TIPSY_VK_PRESENT_MODE_MAILBOX_KHR) {
 			return 1;
 		}
-		return 10 + mode;
+		return UINT32_MAX;
 	}
 	if (mode == TIPSY_VK_PRESENT_MODE_FIFO_KHR) {
 		return 0;
@@ -689,7 +737,7 @@ static uint32_t present_mode_rank(uint32_t mode, int vsync)
 	if (mode == TIPSY_VK_PRESENT_MODE_FIFO_RELAXED_KHR) {
 		return 1;
 	}
-	return 10 + mode;
+	return UINT32_MAX;
 }
 
 static uint32_t filter_present_modes(const uint32_t *in, uint32_t n, int vsync, uint32_t *out)
@@ -703,7 +751,14 @@ static uint32_t filter_present_modes(const uint32_t *in, uint32_t n, int vsync, 
 	}
 	present_mode_inventory(in, n, &has_mailbox, &has_immediate, &has_fifo);
 	for (i = 0; i < n; i++) {
-		if (present_mode_allowed(in[i], vsync, has_mailbox, has_immediate, has_fifo)) {
+		int duplicate = 0;
+		for (j = 0; j < m; j++) {
+			if (tmp[j] == in[i]) {
+				duplicate = 1;
+				break;
+			}
+		}
+		if (!duplicate && present_mode_allowed(in[i], vsync, has_mailbox, has_immediate, has_fifo)) {
 			tmp[m++] = in[i];
 		}
 	}
@@ -921,11 +976,7 @@ static tipsy_vkCreateSwapchain_fn resolve_create_swapchain(TipsyVkDevice device)
 static TipsyVkResult tipsy_vkCreateSwapchainKHR(TipsyVkDevice device, const TipsyVkSwapchainCreateInfoKHR *pCreateInfo, const void *pAllocator, uint64_t *pSwapchain)
 {
 	tipsy_vkCreateSwapchain_fn fn;
-	TipsyVkSwapchainCreateInfoKHR local;
 	TipsyVkResult result;
-	int vsync;
-	uint32_t desired;
-	uint32_t requested;
 
 	fn = resolve_create_swapchain(device);
 	if (fn == NULL) {
@@ -935,35 +986,14 @@ static TipsyVkResult tipsy_vkCreateSwapchainKHR(TipsyVkDevice device, const Tips
 	if (pCreateInfo == NULL) {
 		return TIPSY_VK_ERROR_UNKNOWN;
 	}
-	vsync = atomic_load_explicit(&vk_vsync_enabled, memory_order_acquire);
-	requested = pCreateInfo->presentMode;
-	desired = policy_present_mode(vsync);
-	if (requested == desired) {
-		result = fn(device, pCreateInfo, pAllocator, pSwapchain);
-		if (result == TIPSY_VK_SUCCESS) {
-			tipsy_vk_reset_present_stats();
-		}
-		GoAndroid_LogVulkanPresentMode(vsync, (int)requested, (int)desired,
-			result == TIPSY_VK_SUCCESS, result, 0, 0);
-		return result;
-	}
-	local = *pCreateInfo;
-	local.presentMode = desired;
-	result = fn(device, &local, pAllocator, pSwapchain);
+	/* The client selected this from the actual host surface list we advertised.
+	 * A probe that was unavailable, malformed, or incomplete cannot justify a
+	 * guessed replacement either, so the host receives this exact request once. */
+	result = fn(device, pCreateInfo, pAllocator, pSwapchain);
 	if (result == TIPSY_VK_SUCCESS) {
 		tipsy_vk_reset_present_stats();
-		GoAndroid_LogVulkanPresentMode(vsync, (int)requested, (int)desired, 1, 0, 0, 0);
-		return result;
 	}
-	{
-		TipsyVkResult fallback = fn(device, pCreateInfo, pAllocator, pSwapchain);
-		if (fallback == TIPSY_VK_SUCCESS) {
-			tipsy_vk_reset_present_stats();
-		}
-		GoAndroid_LogVulkanPresentMode(vsync, (int)requested, (int)desired, 0, result,
-			fallback == TIPSY_VK_SUCCESS, fallback);
-		return fallback;
-	}
+	return result;
 }
 
 static TipsyVkResult tipsy_vkGetPhysicalDeviceSurfacePresentModesKHR(TipsyVkPhysicalDevice physicalDevice,
@@ -982,6 +1012,8 @@ static TipsyVkResult tipsy_vkGetPhysicalDeviceSurfacePresentModesKHR(TipsyVkPhys
 			(tipsy_vkGetPresentModes_fn)host_vkGetInstanceProcAddr(NULL, "vkGetPhysicalDeviceSurfacePresentModesKHR");
 	}
 	if (host_vkGetPhysicalDeviceSurfacePresentModesKHR == NULL) {
+		vk_present_mode_probe_note(TIPSY_VK_PRESENT_MODE_PROBE_UNAVAILABLE,
+			TIPSY_VK_ERROR_INITIALIZATION_FAILED, 0);
 		GoAndroid_LogMissing("vkGetPhysicalDeviceSurfacePresentModesKHR");
 		return TIPSY_VK_ERROR_INITIALIZATION_FAILED;
 	}
@@ -990,25 +1022,36 @@ static TipsyVkResult tipsy_vkGetPhysicalDeviceSurfacePresentModesKHR(TipsyVkPhys
 	}
 	result = host_vkGetPhysicalDeviceSurfacePresentModesKHR(physicalDevice, surface, &host_n, NULL);
 	if (result != TIPSY_VK_SUCCESS) {
+		vk_present_mode_probe_note(result == TIPSY_VK_INCOMPLETE ?
+			TIPSY_VK_PRESENT_MODE_PROBE_INCOMPLETE : TIPSY_VK_PRESENT_MODE_PROBE_UNAVAILABLE,
+			result, host_n);
 		return result;
 	}
 	if (host_n > 0) {
 		host = (uint32_t *)calloc(host_n, sizeof(*host));
 		if (host == NULL) {
+			vk_present_mode_probe_note(TIPSY_VK_PRESENT_MODE_PROBE_UNAVAILABLE,
+				TIPSY_VK_ERROR_UNKNOWN, host_n);
 			return TIPSY_VK_ERROR_UNKNOWN;
 		}
 		result = host_vkGetPhysicalDeviceSurfacePresentModesKHR(physicalDevice, surface, &host_n, host);
 		if (result != TIPSY_VK_SUCCESS && result != TIPSY_VK_INCOMPLETE) {
+			vk_present_mode_probe_note(TIPSY_VK_PRESENT_MODE_PROBE_UNAVAILABLE, result, host_n);
 			free(host);
 			return result;
 		}
 	}
 	vsync = atomic_load_explicit(&vk_vsync_enabled, memory_order_acquire);
 	filtered = filter_present_modes(host, host_n, vsync, NULL);
+	if (result == TIPSY_VK_INCOMPLETE) {
+		vk_present_mode_probe_note(TIPSY_VK_PRESENT_MODE_PROBE_INCOMPLETE, result, host_n);
+	} else {
+		vk_present_mode_probe_note(present_mode_list_status(host, host_n), result, host_n);
+	}
 	if (pPresentModes == NULL) {
 		*pPresentModeCount = filtered;
 		free(host);
-		return TIPSY_VK_SUCCESS;
+		return result;
 	}
 	copy = *pPresentModeCount;
 	if (copy > filtered) {
@@ -1023,10 +1066,15 @@ static TipsyVkResult tipsy_vkGetPhysicalDeviceSurfacePresentModesKHR(TipsyVkPhys
 		memcpy(pPresentModes, tmp, copy * sizeof(uint32_t));
 	}
 	free(host);
+	*pPresentModeCount = copy;
+	if (result == TIPSY_VK_INCOMPLETE) {
+		return result;
+	}
 	if (filtered > *pPresentModeCount) {
+		vk_present_mode_probe_note(TIPSY_VK_PRESENT_MODE_PROBE_INCOMPLETE,
+			TIPSY_VK_INCOMPLETE, host_n);
 		return TIPSY_VK_INCOMPLETE;
 	}
-	*pPresentModeCount = filtered;
 	return TIPSY_VK_SUCCESS;
 }
 
@@ -1451,67 +1499,105 @@ int tipsy_test_vk_filter_present_modes(const uint32_t *in, uint32_t n, int vsync
 }
 
 static struct {
-	int calls;
-	uint32_t modes[4];
-	int32_t policy_result;
-	int32_t fallback_result;
-	uint32_t policy_mode;
-} vk_swapchain_policy_test;
+	const uint32_t *modes;
+	uint32_t mode_count;
+	TipsyVkResult count_result;
+	TipsyVkResult list_result;
+	int create_calls;
+	uint32_t first_create_mode;
+} vk_present_mode_capability_test;
 
-static TipsyVkResult test_vkCreateSwapchainKHR_stub(TipsyVkDevice device, const TipsyVkSwapchainCreateInfoKHR *info, const void *alloc, uint64_t *out)
+static TipsyVkResult test_vkGetPhysicalDeviceSurfacePresentModesKHR_stub(TipsyVkPhysicalDevice physicalDevice,
+	TipsyVkSurfaceKHR surface, uint32_t *count, uint32_t *modes)
+{
+	uint32_t copy;
+
+	(void)physicalDevice;
+	(void)surface;
+	if (count == NULL) {
+		return TIPSY_VK_ERROR_UNKNOWN;
+	}
+	if (modes == NULL) {
+		*count = vk_present_mode_capability_test.mode_count;
+		return vk_present_mode_capability_test.count_result;
+	}
+	copy = *count;
+	if (copy > vk_present_mode_capability_test.mode_count) {
+		copy = vk_present_mode_capability_test.mode_count;
+	}
+	if (copy > 0 && vk_present_mode_capability_test.modes != NULL) {
+		memcpy(modes, vk_present_mode_capability_test.modes, copy * sizeof(*modes));
+	}
+	*count = copy;
+	return vk_present_mode_capability_test.list_result;
+}
+
+static TipsyVkResult test_vkCreateSwapchainKHR_stub(TipsyVkDevice device,
+	const TipsyVkSwapchainCreateInfoKHR *info, const void *alloc, uint64_t *out)
 {
 	(void)device;
 	(void)alloc;
-	if (vk_swapchain_policy_test.calls < 4 && info != NULL) {
-		vk_swapchain_policy_test.modes[vk_swapchain_policy_test.calls] = info->presentMode;
+	if (vk_present_mode_capability_test.create_calls == 0 && info != NULL) {
+		vk_present_mode_capability_test.first_create_mode = info->presentMode;
 	}
-	vk_swapchain_policy_test.calls++;
+	vk_present_mode_capability_test.create_calls++;
 	if (out != NULL) {
 		*out = 1;
 	}
-	if (info != NULL && info->presentMode == vk_swapchain_policy_test.policy_mode) {
-		return vk_swapchain_policy_test.policy_result;
-	}
-	return vk_swapchain_policy_test.fallback_result;
+	return TIPSY_VK_SUCCESS;
 }
 
-int tipsy_test_vk_create_swapchain_policy(int vsync, uint32_t requested,
-	int32_t policy_result, int32_t fallback_result,
-	uint32_t *first_mode, uint32_t *second_mode, int *calls, int32_t *final_result)
+int tipsy_test_vk_present_mode_capability(const uint32_t *host_modes, uint32_t host_mode_count,
+	int32_t count_result, int32_t list_result, uint32_t client_capacity, int vsync,
+	uint32_t requested, uint32_t *advertised, uint32_t *advertised_count,
+	uint32_t *first_mode, int *calls, int32_t *create_result,
+	TipsyVkPresentModeProbe *probe)
 {
-	tipsy_vkCreateSwapchain_fn saved;
+	tipsy_vkGetPresentModes_fn saved_present_modes;
+	tipsy_vkCreateSwapchain_fn saved_create_swapchain;
 	int saved_vsync;
 	TipsyVkSwapchainCreateInfoKHR info;
 	uint64_t swapchain = 0;
+	uint32_t count = client_capacity;
 	TipsyVkResult result;
 
-	saved = test_vkCreateSwapchainKHR;
+	/* Initialize the host loader before substituting this focused fixture. */
+	ensure_vulkan();
+	saved_present_modes = host_vkGetPhysicalDeviceSurfacePresentModesKHR;
+	saved_create_swapchain = test_vkCreateSwapchainKHR;
 	saved_vsync = atomic_load_explicit(&vk_vsync_enabled, memory_order_acquire);
-	memset(&vk_swapchain_policy_test, 0, sizeof(vk_swapchain_policy_test));
-	vk_swapchain_policy_test.policy_result = policy_result;
-	vk_swapchain_policy_test.fallback_result = fallback_result;
-	vk_swapchain_policy_test.policy_mode = policy_present_mode(vsync);
+	memset(&vk_present_mode_capability_test, 0, sizeof(vk_present_mode_capability_test));
+	vk_present_mode_capability_test.modes = host_modes;
+	vk_present_mode_capability_test.mode_count = host_mode_count;
+	vk_present_mode_capability_test.count_result = count_result;
+	vk_present_mode_capability_test.list_result = list_result;
+	host_vkGetPhysicalDeviceSurfacePresentModesKHR = test_vkGetPhysicalDeviceSurfacePresentModesKHR_stub;
+	test_vkCreateSwapchainKHR = test_vkCreateSwapchainKHR_stub;
+	atomic_store_explicit(&vk_vsync_enabled, vsync ? 1 : 0, memory_order_release);
+	result = tipsy_vkGetPhysicalDeviceSurfacePresentModesKHR((TipsyVkPhysicalDevice)1, 1, &count, advertised);
 	memset(&info, 0, sizeof(info));
 	info.sType = TIPSY_VK_STRUCTURE_TYPE_SWAPCHAIN_CREATE_INFO_KHR;
 	info.minImageCount = 2;
 	info.presentMode = requested;
-	atomic_store_explicit(&vk_vsync_enabled, vsync ? 1 : 0, memory_order_release);
-	test_vkCreateSwapchainKHR = test_vkCreateSwapchainKHR_stub;
-	result = tipsy_vkCreateSwapchainKHR((TipsyVkDevice)1, &info, NULL, &swapchain);
-	test_vkCreateSwapchainKHR = saved;
-	atomic_store_explicit(&vk_vsync_enabled, saved_vsync, memory_order_release);
-	if (first_mode != NULL) {
-		*first_mode = vk_swapchain_policy_test.modes[0];
+	{
+		TipsyVkResult create = tipsy_vkCreateSwapchainKHR((TipsyVkDevice)1, &info, NULL, &swapchain);
+		if (create_result != NULL) {
+			*create_result = create;
+		}
 	}
-	if (second_mode != NULL) {
-		*second_mode = vk_swapchain_policy_test.modes[1];
+	if (advertised_count != NULL) {
+		*advertised_count = count;
+	}
+	if (first_mode != NULL) {
+		*first_mode = vk_present_mode_capability_test.first_create_mode;
 	}
 	if (calls != NULL) {
-		*calls = vk_swapchain_policy_test.calls;
+		*calls = vk_present_mode_capability_test.create_calls;
 	}
-	if (final_result != NULL) {
-		*final_result = result;
-	}
+	tipsy_vk_present_mode_probe_snapshot(probe);
+	test_vkCreateSwapchainKHR = saved_create_swapchain;
+	host_vkGetPhysicalDeviceSurfacePresentModesKHR = saved_present_modes;
+	atomic_store_explicit(&vk_vsync_enabled, saved_vsync, memory_order_release);
 	return result;
 }
 
