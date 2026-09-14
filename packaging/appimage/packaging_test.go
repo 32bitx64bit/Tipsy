@@ -129,6 +129,86 @@ func TestAppDirBuilderPinsAppImageVersionBeforeManifest(t *testing.T) {
 	}
 }
 
+func TestAppDirBuilderCopiesPackageLicenseNotices(t *testing.T) {
+	data, err := os.ReadFile(filepath.Join(repoRoot(t), "scripts", "build-appdir.sh"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(data)
+	for _, required := range []string{
+		`copy_package_license() {`,
+		`"/usr/share/licenses/$package"`,
+		`"/usr/share/doc/$package/copyright"`,
+		`find "$candidate" -maxdepth 1 \( -type f -o -type l \) -print0`,
+		`candidate="/usr/share/licenses/spdx/$license_id.txt"`,
+		`install -m 0644 "$candidate" "$destination/${license_id}.txt"`,
+		`if [[ "$mode" == developer ]]; then`,
+		`warning: no redistributable license notice found for dependency package:`,
+		`fail "no redistributable license notice found for dependency package: $package"`,
+		`if [[ "$package" == xz ]]; then`,
+		`/usr/share/doc/xz/COPYING.0BSD`,
+	} {
+		if !strings.Contains(text, required) {
+			t.Errorf("build-appdir.sh is missing license-copy contract %q", required)
+		}
+	}
+	if strings.Index(text, `"/usr/share/licenses/$package"`) > strings.Index(text, `candidate="/usr/share/licenses/spdx/$license_id.txt"`) {
+		t.Fatal("package-supplied notices must be copied before SPDX fallback")
+	}
+	devWarnAt := strings.Index(text, `if [[ "$mode" == developer ]]; then`)
+	failAt := strings.Index(text, `fail "no redistributable license notice found for dependency package: $package"`)
+	if devWarnAt < 0 || failAt < 0 || devWarnAt > failAt {
+		t.Fatal("developer mode must warn and continue before official/github-signed fail-closed")
+	}
+}
+
+func TestAppDirBuilderPinsExactPackageLicenseAliases(t *testing.T) {
+	data, err := os.ReadFile(filepath.Join(repoRoot(t), "scripts", "build-appdir.sh"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(data)
+	for _, required := range []string{
+		`if [[ "$package:$license_id" == "libasyncns:LGPL" ]]; then`,
+		"license_id=LGPL-2.1-or-later",
+		`if [[ "$package:$license_id" == "libidn2:GPL2" ]]; then`,
+		"license_id=GPL-2.0-or-later",
+		`if [[ "$package:$license_id" == "libidn2:LGPL3" ]]; then`,
+		"license_id=LGPL-3.0-or-later",
+		`if [[ "$package:$license_id" == "e2fsprogs:LGPL" ]]; then`,
+		"license_id=LGPL-2.0-only",
+		`if [[ "$package:$license_id" == "e2fsprogs:MIT" ]]; then`,
+		`install -m 0644 /usr/include/ss/ss.h "$destination/ss.h"`,
+	} {
+		if !strings.Contains(text, required) {
+			t.Errorf("build-appdir.sh is missing exact license alias %q", required)
+		}
+	}
+	if strings.Contains(text, `if [[ "$package:$license_id" == "e2fsprogs:GPL" ]]; then`) {
+		t.Fatal("e2fsprogs GPL metadata must not be guessed into an SPDX id")
+	}
+	for _, forbiddenAlias := range []string{
+		`if [[ "$package:$license_id" == "xz:GPL" ]]; then`,
+		`if [[ "$package:$license_id" == "xz:LGPL" ]]; then`,
+		`if [[ "$package:$license_id" == "xz:custom" ]]; then`,
+	} {
+		if strings.Contains(text, forbiddenAlias) {
+			t.Errorf("xz metadata must not be guessed into an SPDX id: %s", forbiddenAlias)
+		}
+	}
+	for _, forbidden := range []string{
+		`if [[ "$license_id" == "GPL2" ]]; then`,
+		`if [[ "$license_id" == "LGPL3" ]]; then`,
+		`if [[ "$license_id" == "LGPL" ]]; then`,
+		`if [[ "$license_id" == "GPL" ]]; then`,
+		`if [[ "$license_id" == "MIT" ]]; then`,
+	} {
+		if strings.Contains(text, forbidden) {
+			t.Errorf("build-appdir.sh must not guess SPDX from unscoped metadata %q", forbidden)
+		}
+	}
+}
+
 func TestAppDirBuilderRequiresFocusedTextNativeStack(t *testing.T) {
 	data, err := os.ReadFile(filepath.Join(repoRoot(t), "scripts", "build-appdir.sh"))
 	if err != nil {

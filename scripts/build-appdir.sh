@@ -282,18 +282,27 @@ copy_package_license() {
 		"/usr/share/doc/$package/copyright"; do
 		if [[ -d "$candidate" ]]; then
 			while IFS= read -r -d '' license_file; do
+				[[ -f "$license_file" ]] || continue
 				destination_name=${license_file##*/}
 				case "$destination_name" in
 					*.md) destination_name=${destination_name%.md}.txt ;;
 				esac
 				install -m 0644 "$license_file" "$destination/$destination_name"
 				copied=1
-			done < <(find "$candidate" -maxdepth 1 -type f -print0)
+			done < <(find "$candidate" -maxdepth 1 \( -type f -o -type l \) -print0)
 		elif [[ -f "$candidate" ]]; then
 			install -m 0644 "$candidate" "$destination/COPYRIGHT"
 			copied=1
 		fi
 	done
+	if [[ "$package" == xz ]]; then
+		for src in /usr/share/doc/xz/COPYING /usr/share/doc/xz/COPYING.0BSD /usr/share/doc/xz/COPYING.GPLv2; do
+			if [[ -f "$src" ]]; then
+				install -m 0644 "$src" "$destination/${src##*/}"
+				copied=1
+			fi
+		done
+	fi
 	if (( copied == 0 )) && command -v pacman >/dev/null 2>&1; then
 		while IFS= read -r license_id; do
 			license_id=${license_id%% WITH *}
@@ -304,6 +313,22 @@ copy_package_license() {
 			if [[ "$package:$license_id" == "libasyncns:LGPL" ]]; then
 				license_id=LGPL-2.1-or-later
 			fi
+			if [[ "$package:$license_id" == "libidn2:GPL2" ]]; then
+				license_id=GPL-2.0-or-later
+			fi
+			if [[ "$package:$license_id" == "libidn2:LGPL3" ]]; then
+				license_id=LGPL-3.0-or-later
+			fi
+			if [[ "$package:$license_id" == "e2fsprogs:LGPL" ]]; then
+				license_id=LGPL-2.0-only
+			fi
+			if [[ "$package:$license_id" == "e2fsprogs:MIT" ]]; then
+				if [[ -f /usr/include/ss/ss.h ]]; then
+					install -m 0644 /usr/include/ss/ss.h "$destination/ss.h"
+					copied=1
+				fi
+				continue
+			fi
 			candidate="/usr/share/licenses/spdx/$license_id.txt"
 			if [[ -f "$candidate" ]]; then
 				install -m 0644 "$candidate" "$destination/${license_id}.txt"
@@ -311,7 +336,13 @@ copy_package_license() {
 			fi
 		done < <(pacman -Qi "$package" 2>/dev/null | sed -n 's/^Licenses[[:space:]]*:[[:space:]]*//p' | tr ' ' '\n')
 	fi
-	(( copied == 1 )) || fail "no redistributable license notice found for dependency package: $package"
+	if (( copied == 0 )); then
+		if [[ "$mode" == developer ]]; then
+			printf 'build-appdir: warning: no redistributable license notice found for dependency package: %s\n' "$package" >&2
+		else
+			fail "no redistributable license notice found for dependency package: $package"
+		fi
+	fi
 	seen_packages[$package_path]=1
 }
 
