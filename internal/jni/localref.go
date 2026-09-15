@@ -266,6 +266,7 @@ func (vm *VM) maybeReclaimLocked(id int64) {
 		return
 	}
 	delete(vm.objects, id)
+	delete(vm.monitors, id)
 	vm.unpinOutgoingLocked(o)
 }
 
@@ -320,6 +321,7 @@ func (vm *VM) detachThreadState(env unsafe.Pointer) {
 	vm.mu.Lock()
 	state := vm.threadStates[uintptr(env)]
 	delete(vm.threadStates, uintptr(env))
+	vm.releaseThreadMonitorsLocked(uintptr(env))
 	vm.mu.Unlock()
 	if state == nil {
 		return

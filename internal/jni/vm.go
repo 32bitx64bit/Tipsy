@@ -42,7 +42,7 @@ type VM struct {
 	dispMmH    int32
 
 	natives  map[string]uintptr // class + "." + name + sig → fnPtr
-	monitors map[int64]*sync.Mutex
+	monitors map[int64]*jniMonitor
 
 	// Immortal JNI objects reused across calls for stable Android paths and
 	// identity strings. Cleared when SetDirs changes the matching path.
@@ -81,7 +81,7 @@ func NewVM() (*VM, error) {
 		dispW:        1280,
 		dispH:        720,
 		natives:      make(map[string]uintptr),
-		monitors:     make(map[int64]*sync.Mutex),
+		monitors:     make(map[int64]*jniMonitor),
 		threadStates: make(map[uintptr]*jniThreadState),
 	}
 	vm.seedClasses()

@@ -1344,23 +1344,9 @@ func testRegisterNativesCount(n int32) int {
 //export GoJNI_MonitorEnter
 func GoJNI_MonitorEnter(env *C.JNIEnv, obj C.jobject) C.jint {
 	vm := vmFromEnv(unsafe.Pointer(env))
-	if vm == nil {
+	if vm == nil || !vm.monitorEnter(unsafe.Pointer(env), jobjectToID(uintptr(obj))) {
 		return C.JNI_ERR
 	}
-	id := jobjectToID(uintptr(obj))
-	vm.mu.RLock()
-	m := vm.monitors[id]
-	vm.mu.RUnlock()
-	if m == nil {
-		vm.mu.Lock()
-		m = vm.monitors[id]
-		if m == nil {
-			m = &sync.Mutex{}
-			vm.monitors[id] = m
-		}
-		vm.mu.Unlock()
-	}
-	m.Lock()
 	return C.JNI_OK
 }
 
@@ -1370,14 +1356,16 @@ func GoJNI_MonitorExit(env *C.JNIEnv, obj C.jobject) C.jint {
 	if vm == nil {
 		return C.JNI_ERR
 	}
-	id := jobjectToID(uintptr(obj))
-	vm.mu.RLock()
-	m := vm.monitors[id]
-	vm.mu.RUnlock()
-	if m != nil {
-		m.Unlock()
+	if vm.monitorExit(unsafe.Pointer(env), jobjectToID(uintptr(obj))) {
+		return C.JNI_OK
 	}
-	return C.JNI_OK
+	vm.mu.Lock()
+	cls := vm.classes["java/lang/IllegalMonitorStateException"]
+	o := vm.newObjectOn(unsafe.Pointer(env), cls)
+	vm.mu.Unlock()
+	vm.setPending(unsafe.Pointer(env), o.id)
+	vm.deleteLocalRef(unsafe.Pointer(env), o.id)
+	return C.JNI_ERR
 }
 
 //export GoJNI_GetJavaVM

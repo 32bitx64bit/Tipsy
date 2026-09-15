@@ -11,6 +11,7 @@ func (vm *VM) seedClasses() {
 	vm.defineClass("java/lang/Class", object)
 	vm.defineClass("java/lang/Throwable", object)
 	vm.defineClass("java/lang/RuntimeException", vm.classes["java/lang/Throwable"])
+	vm.defineClass("java/lang/IllegalMonitorStateException", vm.classes["java/lang/RuntimeException"])
 	vm.defineClass("java/io/File", object)
 	vm.defineClass("java/lang/ClassLoader", object)
 
