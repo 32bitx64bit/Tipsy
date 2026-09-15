@@ -898,7 +898,8 @@ func GoJNI_NewStringUTF(env *C.JNIEnv, utf *C.char) C.jstring {
 	if vm == nil || utf == nil {
 		return jstringOf(jnull())
 	}
-	units, ok := decodeModifiedUTF8([]byte(C.GoString(utf)))
+	encoded := C.GoString(utf)
+	units, ok := decodeModifiedUTF8([]byte(encoded))
 	if !ok {
 		return jstringOf(jnull())
 	}
@@ -907,7 +908,7 @@ func GoJNI_NewStringUTF(env *C.JNIEnv, utf *C.char) C.jstring {
 	vm.mu.Unlock()
 	// NewStringUTF receives Modified UTF-8. Count only its byte boundary; no
 	// text crosses this diagnostic boundary.
-	inputBytes, _ := modifiedUTF8Length(units)
+	inputBytes := len(encoded)
 	stringDiagnosticsAddCurrent(1, uint64(inputBytes), 0, 0, 0, uint64(inputBytes), 1)
 	return jstringOf(idToJobject(o.id))
 }
@@ -922,7 +923,7 @@ func GoJNI_GetStringUTFLength(env *C.JNIEnv, str C.jstring) C.jsize {
 	if o == nil {
 		return 0
 	}
-	n, ok := modifiedUTF8Length(objectUTF16Units(o))
+	n, ok := objectModifiedUTF8Length(o)
 	if !ok {
 		return 0
 	}
@@ -942,8 +943,7 @@ func GoJNI_GetStringUTFChars(env *C.JNIEnv, str C.jstring, isCopy *C.jboolean) *
 	if o == nil {
 		return nil
 	}
-	units := objectUTF16Units(o)
-	n, ok := modifiedUTF8Length(units)
+	n, ok := objectModifiedUTF8Length(o)
 	const maxInt = int(^uint(0) >> 1)
 	if !ok || n >= maxInt {
 		return nil
@@ -951,7 +951,7 @@ func GoJNI_GetStringUTFChars(env *C.JNIEnv, str C.jstring, isCopy *C.jboolean) *
 	p := C.malloc(C.size_t(n + 1))
 	if p != nil {
 		dst := unsafe.Slice((*byte)(p), n+1)
-		if encodeModifiedUTF8To(dst[:n], units) != n {
+		if encodeObjectModifiedUTF8To(dst[:n], o) != n {
 			C.free(p)
 			return nil
 		}

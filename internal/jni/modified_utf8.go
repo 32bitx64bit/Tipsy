@@ -25,7 +25,7 @@ type rawUTF16 struct {
 func (vm *VM) newStringUTF16On(env unsafe.Pointer, units []uint16) *Object {
 	text := string(utf16.Decode(units))
 	o := vm.newStringOn(env, text)
-	if !sameUTF16(units, utf16.Encode([]rune(text))) {
+	if hasUnpairedSurrogate(units) {
 		o.utf16 = &rawUTF16{units: append([]uint16(nil), units...)}
 	}
 	return o
@@ -161,4 +161,24 @@ func encodeModifiedUTF8To(dst []byte, units []uint16) int {
 		}
 	}
 	return n
+}
+
+func objectModifiedUTF8Length(o *Object) (int, bool) {
+	if o == nil {
+		return 0, true
+	}
+	if o.utf16 != nil {
+		return modifiedUTF8Length(o.utf16.units)
+	}
+	return modifiedUTF8StringLength(o.str)
+}
+
+func encodeObjectModifiedUTF8To(dst []byte, o *Object) int {
+	if o == nil {
+		return 0
+	}
+	if o.utf16 != nil {
+		return encodeModifiedUTF8To(dst, o.utf16.units)
+	}
+	return encodeModifiedUTF8StringTo(dst, o.str)
 }
