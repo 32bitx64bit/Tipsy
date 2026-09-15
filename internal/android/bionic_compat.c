@@ -585,24 +585,26 @@ static char *tipsy_cacert_remap(const char *path, int check_dirfd, int dirfd)
 	return GoAndroid_CACertBundle();
 }
 
-/* Best-effort one-shot diagnostics (races only duplicate a line, never
- * change behavior). Loud on a missing bundle, quiet otherwise. */
-static int g_cacert_ok_logged = 0;
-static int g_cacert_miss_logged = 0;
+/* One-shot diagnostics are shared by native caller threads. */
+static _Atomic int g_cacert_ok_logged;
+static _Atomic int g_cacert_miss_logged;
 
 static void tipsy_cacert_log(int ok)
 {
 	if (ok) {
-		if (!g_cacert_ok_logged) {
-			g_cacert_ok_logged = 1;
-			fprintf(stderr, "tipsy: cacert shim: redirected %s to the FilesDir bundle\n",
+		if (atomic_exchange_explicit(&g_cacert_ok_logged, 1,
+					     memory_order_relaxed) == 0) {
+			fprintf(stderr,
+				"tipsy: cacert shim: redirected %s to the FilesDir bundle\n",
 				TIPSY_CACERT_REL);
 		}
 		return;
 	}
-	if (!g_cacert_miss_logged) {
-		g_cacert_miss_logged = 1;
-		fprintf(stderr, "tipsy: cacert shim: FilesDir bundle absent for %s (honest ENOENT, no host-CA fallback)\n",
+	if (atomic_exchange_explicit(&g_cacert_miss_logged, 1,
+				     memory_order_relaxed) == 0) {
+		fprintf(stderr,
+			"tipsy: cacert shim: FilesDir bundle absent for %s "
+			"(honest ENOENT, no host-CA fallback)\n",
 			TIPSY_CACERT_REL);
 	}
 }
