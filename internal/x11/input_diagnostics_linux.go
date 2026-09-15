@@ -70,6 +70,7 @@ func InputDrainSnapshot(reset bool) InputDrainStats {
 		PumpReady:         uint64(raw.pump_pending_ready),
 		PumpPipeWakes:     uint64(raw.pump_pipe_wakes),
 		PumpErrors:        uint64(raw.pump_errors),
+		RingDrops:         uint64(raw.ring_drops),
 		GoWindowLockWait:  windowLockWait,
 		GoDrain:           goDrain,
 	}

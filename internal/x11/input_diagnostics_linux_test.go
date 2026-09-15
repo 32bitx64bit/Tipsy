@@ -85,6 +85,24 @@ func TestInputDrainDiagnosticsCountsBatchesWithoutContent(t *testing.T) {
 	}
 }
 
+func TestInputDrainDiagnosticsCountsRingDrops(t *testing.T) {
+	resetInputDrainDiagnostics(t, true)
+	// The 256-slot ring holds 255 queued events; every push beyond that
+	// discards the oldest queued event. Button edges never coalesce, so the
+	// drop count is exact: pushes - 255.
+	const extra = 9
+	for i := 0; i < TIPSYInputRingLen+extra; i++ {
+		testPushPointer(PointerDown, 1, float32(i), 0)
+	}
+	got := InputDrainSnapshot(true)
+	if got.RingDrops != extra+1 {
+		t.Fatalf("ring drops = %d, want %d", got.RingDrops, extra+1)
+	}
+	if next := InputDrainSnapshot(false); next != (InputDrainStats{}) {
+		t.Fatalf("reset snapshot retained diagnostics %+v", next)
+	}
+}
+
 func TestInputDrainDiagnosticsResetRaceDoesNotLoseDrainCalls(t *testing.T) {
 	resetInputDrainDiagnostics(t, true)
 	const drains = 2000

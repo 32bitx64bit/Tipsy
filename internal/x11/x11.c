@@ -109,6 +109,12 @@ static struct tipsy_input_diag_duration tipsy_input_diag_pump_wait;
 static _Atomic uint64_t tipsy_input_diag_pump_pending_ready;
 static _Atomic uint64_t tipsy_input_diag_pump_pipe_wakes;
 static _Atomic uint64_t tipsy_input_diag_pump_errors;
+// Bounded-ring saturation telemetry: incremented each time the oldest queued
+// event is discarded to admit a newer one. Like the other exact counters it
+// is recorded only while the diagnostics observer is enabled, and it carries
+// no event payload. A dropped release/focus edge still needs an explicit
+// resynchronization protocol; this counter only makes saturation visible.
+static _Atomic uint64_t tipsy_input_diag_ring_drops;
 static __thread uint32_t tipsy_input_diag_drain_sample;
 static __thread uint32_t tipsy_input_diag_pump_sample;
 
@@ -254,6 +260,7 @@ void tipsy_x11_input_diagnostics_snapshot(tipsy_x11_input_drain_stats *out, int 
 	out->pump_pending_ready = INPUT_DIAG_STAT(pump_pending_ready);
 	out->pump_pipe_wakes = INPUT_DIAG_STAT(pump_pipe_wakes);
 	out->pump_errors = INPUT_DIAG_STAT(pump_errors);
+	out->ring_drops = INPUT_DIAG_STAT(ring_drops);
 #undef INPUT_DIAG_STAT
 	for (int i = 0; i < TIPSY_X11_INPUT_DRAIN_BATCH_BUCKETS; i++) {
 		out->batch_buckets[i] = reset ? atomic_exchange_explicit(
@@ -663,6 +670,9 @@ static void tipsy_input_drop_oldest_locked(void) {
 		memset(tipsy_input_text[tipsy_input_tail], 0, TIPSY_INPUT_TEXT_BYTES);
 	}
 	tipsy_input_tail = (tipsy_input_tail + 1) % TIPSY_INPUT_RING;
+	if (atomic_load_explicit(&tipsy_input_diag_enabled, memory_order_relaxed)) {
+		atomic_fetch_add_explicit(&tipsy_input_diag_ring_drops, 1, memory_order_relaxed);
+	}
 }
 
 static void tipsy_input_push_repeat(int kind, int a, long b, long c, float x, float y, int repeats) {

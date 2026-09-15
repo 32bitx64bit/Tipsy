@@ -52,6 +52,10 @@ type InputDrainStats struct {
 	PumpReady     uint64
 	PumpPipeWakes uint64
 	PumpErrors    uint64
+	// RingDrops counts oldest-queued events discarded on ring saturation
+	// during an enabled interval. It is the telemetry half of the overflow
+	// task; a resynchronization protocol for dropped edges is still open.
+	RingDrops uint64
 
 	// GoWindowLockWait covers waiting to enter Window.Pump's Window mutex.
 	GoWindowLockWait InputDrainDurationStats

@@ -94,6 +94,9 @@ typedef struct {
 	uint64_t pump_pending_ready;
 	uint64_t pump_pipe_wakes;
 	uint64_t pump_errors;
+	/* Appended field: number of oldest-queued events discarded on ring
+	 * saturation. Appended at the end so existing field offsets are stable. */
+	uint64_t ring_drops;
 } tipsy_x11_input_drain_stats;
 
 uint64_t tipsy_x11_refresh_version(void);
