@@ -8,6 +8,7 @@ package runtime
 import (
 	"fmt"
 	"os"
+	"sort"
 
 	"github.com/tipsy-linux/tipsy/internal/android"
 	"github.com/tipsy-linux/tipsy/internal/clientsettings"
@@ -27,17 +28,130 @@ func vulkanPresentTimingRequested(getenv func(string) string) bool {
 	return getenv != nil && (getenv("TIPSY_PRESENT_TIMING") == "1" || stutterDiagnosticsRequested(getenv))
 }
 
+// vulkanPresentGapStatistics is the privacy-minimized result of one bounded
+// vkQueuePresentKHR return-observer batch. It deliberately keeps no absolute
+// timestamp, sequence number, renderer content, or frame data. A gap ends at
+// the host wrapper's VK_SUCCESS return; it is not a scanout, displayed-frame,
+// or input-latency measurement.
+type vulkanPresentGapStatistics struct {
+	Eligible             bool
+	Unavailable          vulkanPresentGapUnavailableReason
+	Samples              uint64
+	Gaps                 uint64
+	P50NS                uint64
+	P95NS                uint64
+	P99NS                uint64
+	MaxNS                uint64
+	Over8MS              uint64
+	Over16MS             uint64
+	Over33MS             uint64
+	NonMonotonicAdjacent uint64
+	Overwritten          uint64
+}
+
+// vulkanPresentGapUnavailableReason is a fixed result label. It is not drawn
+// from client output and makes a short or overwritten batch explicitly
+// ineligible instead of allowing a partial interval to masquerade as an arm.
+type vulkanPresentGapUnavailableReason uint8
+
+const (
+	vulkanPresentGapAvailable vulkanPresentGapUnavailableReason = iota
+	vulkanPresentGapInsufficientSuccessfulReturns
+	vulkanPresentGapObserverOverwritten
+	vulkanPresentGapNoIncreasingAdjacentReturn
+)
+
+func (r vulkanPresentGapUnavailableReason) String() string {
+	switch r {
+	case vulkanPresentGapAvailable:
+		return "available"
+	case vulkanPresentGapInsufficientSuccessfulReturns:
+		return "insufficient_successful_returns"
+	case vulkanPresentGapObserverOverwritten:
+		return "observer_overwritten"
+	case vulkanPresentGapNoIncreasingAdjacentReturn:
+		return "no_increasing_adjacent_return"
+	default:
+		return "unknown"
+	}
+}
+
+// summarizeVulkanPresentGaps calculates nearest-rank gap percentiles only
+// between retained, increasing adjacent successful-return timestamps. An
+// overwritten or short batch is explicitly ineligible: callers must not
+// derive a partial result or bridge the missing interval.
+func summarizeVulkanPresentGaps(batch android.VulkanPresentTimingBatch) vulkanPresentGapStatistics {
+	stats := vulkanPresentGapStatistics{
+		Samples:     uint64(len(batch.Samples)),
+		Overwritten: batch.Overwritten,
+	}
+	if batch.Overwritten != 0 {
+		stats.Unavailable = vulkanPresentGapObserverOverwritten
+		return stats
+	}
+	if len(batch.Samples) < 2 {
+		stats.Unavailable = vulkanPresentGapInsufficientSuccessfulReturns
+		return stats
+	}
+
+	gaps := make([]uint64, 0, len(batch.Samples)-1)
+	for i := 1; i < len(batch.Samples); i++ {
+		previous, current := batch.Samples[i-1].MonotonicNS, batch.Samples[i].MonotonicNS
+		if current <= previous {
+			stats.NonMonotonicAdjacent++
+			continue
+		}
+		gap := current - previous
+		gaps = append(gaps, gap)
+		switch {
+		case gap > uint64(33_000_000):
+			stats.Over33MS++
+			fallthrough
+		case gap > uint64(16_000_000):
+			stats.Over16MS++
+			fallthrough
+		case gap > uint64(8_000_000):
+			stats.Over8MS++
+		}
+	}
+	if len(gaps) == 0 {
+		stats.Unavailable = vulkanPresentGapNoIncreasingAdjacentReturn
+		return stats
+	}
+	sort.Slice(gaps, func(i, j int) bool { return gaps[i] < gaps[j] })
+	nearestRank := func(percentile uint64) uint64 {
+		index := (percentile*uint64(len(gaps)) + 99) / 100
+		return gaps[index-1]
+	}
+	stats.Gaps = uint64(len(gaps))
+	stats.Eligible = true
+	stats.Unavailable = vulkanPresentGapAvailable
+	stats.P50NS = nearestRank(50)
+	stats.P95NS = nearestRank(95)
+	stats.P99NS = nearestRank(99)
+	stats.MaxNS = gaps[len(gaps)-1]
+	return stats
+}
+
 func logVulkanPresentTiming(batch android.VulkanPresentTimingBatch) {
 	if len(batch.Samples) == 0 && batch.Overwritten == 0 {
 		return
 	}
-	timestamps := make([]uint64, len(batch.Samples))
-	for i, sample := range batch.Samples {
-		timestamps[i] = sample.MonotonicNS
-	}
-	logging.Logger(logging.CatGraphics).Info("Vulkan present timing",
-		"cursor", batch.Cursor, "overwritten", batch.Overwritten,
-		"monotonicNS", timestamps)
+	stats := summarizeVulkanPresentGaps(batch)
+	logging.Logger(logging.CatGraphics).Info("Vulkan present return-boundary gap aggregate",
+		"eligible", stats.Eligible,
+		"unavailableReason", stats.Unavailable.String(),
+		"samples", stats.Samples,
+		"gaps", stats.Gaps,
+		"p50NS", stats.P50NS,
+		"p95NS", stats.P95NS,
+		"p99NS", stats.P99NS,
+		"maxNS", stats.MaxNS,
+		"over8MS", stats.Over8MS,
+		"over16MS", stats.Over16MS,
+		"over33MS", stats.Over33MS,
+		"nonMonotonicAdjacent", stats.NonMonotonicAdjacent,
+		"overwritten", stats.Overwritten)
 }
 
 // logVulkanPresentCallDurations reports the opt-in E2b host-call histogram.
