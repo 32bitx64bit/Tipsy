@@ -297,8 +297,7 @@ func (w *Window) Pump() error {
 		w.mu.Unlock()
 		return ErrClosed
 	}
-	C.tipsy_x11_wake_ack()
-	if C.tipsy_x11_io_error() != 0 {
+	if C.tipsy_x11_input_begin() != 0 {
 		w.closed = true
 		w.mu.Unlock()
 		return ErrClosed

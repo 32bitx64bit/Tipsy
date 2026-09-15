@@ -1492,6 +1492,13 @@ int tipsy_x11_io_error(void) {
 	return tipsy_x_io_error;
 }
 
+int tipsy_x11_input_begin(void) {
+	/* Ack BEFORE draining. A producer racing after this ack must be able to
+	 * publish a new wake. Moving the ack after the drain can lose that wake. */
+	tipsy_x11_wake_ack();
+	return tipsy_x11_io_error();
+}
+
 static void tipsy_x11_set_title(Display *dpy, Window win, const char *title) {
 	if (title == NULL) {
 		title = "";

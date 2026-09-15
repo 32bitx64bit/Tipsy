@@ -98,6 +98,7 @@ typedef struct {
 
 uint64_t tipsy_x11_refresh_version(void);
 void tipsy_x11_wake_ack(void);
+int tipsy_x11_input_begin(void);
 void tipsy_nudge_pump(void);
 int tipsy_x11_set_pointer_lock(uintptr_t dpy_ptr, unsigned long xid,
 	int locked, int center, int *out_x, int *out_y, int *out_status);
