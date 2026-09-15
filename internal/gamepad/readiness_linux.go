@@ -127,7 +127,92 @@ const (
 	readinessRecovery
 )
 
-const defaultControllerRecoveryRescan = time.Second
+const (
+	defaultControllerRecoveryRescan = time.Second
+	maxControllerRecoveryBackoff    = 30 * time.Second
+)
+
+// readinessRecoveryDeadline arms a single poll timeout after a failed
+// reconciliation. Each consecutive failure backs off to a bounded delay; a
+// successful reconciliation disarms it immediately so an otherwise healthy
+// inotify watch returns to an infinite poll.
+//
+// This is deliberately separate from an unavailable-watch retry. A working
+// watch does not prove that a Scan/Open race has resolved, and a failed Scan
+// or Open must therefore retain its own recovery deadline.
+type readinessRecoveryDeadline struct {
+	enabled  bool
+	initial  time.Duration
+	maximum  time.Duration
+	delay    time.Duration
+	deadline time.Time
+}
+
+func newReadinessRecoveryDeadline(interval time.Duration, enabled bool) readinessRecoveryDeadline {
+	maximum := maxControllerRecoveryBackoff
+	if interval > maximum {
+		maximum = interval
+	}
+	return readinessRecoveryDeadline{
+		enabled: enabled,
+		initial: interval,
+		maximum: maximum,
+	}
+}
+
+func (r *readinessRecoveryDeadline) failed(now time.Time) {
+	if !r.enabled {
+		return
+	}
+	if r.delay == 0 {
+		r.delay = r.initial
+	} else if r.delay < r.maximum {
+		if r.delay > r.maximum/2 {
+			r.delay = r.maximum
+		} else {
+			r.delay *= 2
+		}
+	}
+	r.deadline = now.Add(r.delay)
+}
+
+func (r *readinessRecoveryDeadline) succeeded() {
+	r.delay = 0
+	r.deadline = time.Time{}
+}
+
+func (r readinessRecoveryDeadline) due(now time.Time) bool {
+	return !r.deadline.IsZero() && !r.deadline.After(now)
+}
+
+func (r readinessRecoveryDeadline) pollTimeout(now time.Time) int {
+	if r.deadline.IsZero() {
+		return -1
+	}
+	remaining := r.deadline.Sub(now)
+	if remaining <= 0 {
+		return 0
+	}
+	return int((remaining + time.Millisecond - 1) / time.Millisecond)
+}
+
+func pollTimeoutAt(now, deadline time.Time) int {
+	if deadline.IsZero() {
+		return -1
+	}
+	remaining := deadline.Sub(now)
+	if remaining <= 0 {
+		return 0
+	}
+	return int((remaining + time.Millisecond - 1) / time.Millisecond)
+}
+
+func earlierPollTimeout(current, candidate int) int {
+	if candidate < 0 || (current >= 0 && current <= candidate) {
+		return current
+	}
+	return candidate
+}
 
 // ReadyPump owns one Manager's device reads, close/reopen transitions, and
 // inotify/recovery reconciliations for the lifetime of Run. No other
@@ -137,7 +222,8 @@ const defaultControllerRecoveryRescan = time.Second
 //
 // Run waits in poll(2) on the current evdev fd, the /dev/input inotify fd, and
 // an eventfd written on shutdown. It has no idle ticker. A one-shot timeout is
-// armed only while an inotify watch cannot be installed or must be recreated.
+// armed only while an inotify watch cannot be installed or a reconciliation
+// has failed; a successful reconciliation disarms it immediately.
 type ReadyPump struct {
 	Manager *Manager
 
@@ -150,9 +236,11 @@ type ReadyPump struct {
 	// Diagnostics is nil for clean acceptance. When non-nil it records only
 	// the aggregate defined by ControllerReadinessSnapshot.
 	Diagnostics *ControllerReadinessDiagnostics
-	// RecoveryRescan is used only while inotify is unavailable. Zero selects
-	// the documented one-second recovery cadence; a negative value disables
-	// timed recovery (shutdown still wakes immediately).
+	// RecoveryRescan is the initial one-shot recovery delay for unavailable
+	// inotify watches and failed Scan/Open reconciliations. Consecutive failed
+	// reconciliations back off to a bounded delay; any success disarms them.
+	// Zero selects one second; a negative value disables timed recovery
+	// (shutdown still wakes immediately).
 	RecoveryRescan time.Duration
 }
 
@@ -192,6 +280,9 @@ func (p *ReadyPump) Run(stop <-chan struct{}) error {
 	}
 	defer p.Manager.Close()
 
+	interval, recoveryEnabled := p.recoveryInterval()
+	recovery := newReadinessRecoveryDeadline(interval, recoveryEnabled)
+
 	watch, watchErr := openInputWatch(p.Manager.Dir)
 	if watchErr != nil {
 		p.reportRescanError(watchErr)
@@ -201,17 +292,43 @@ func (p *ReadyPump) Run(stop <-chan struct{}) error {
 			_ = watch.Close()
 		}
 	}()
-	p.rescan(readinessInitial)
+	// A failed opening attempt gets one immediate retry below. Later attempts
+	// are paced by watchRetry; its zero value means the immediate retry is
+	// pending, not a poll timeout.
+	watchRetryPending := watch == nil
+	var watchRetry time.Time
+	rescan := func(kind readinessRescanKind) {
+		if err := p.rescan(kind); err != nil {
+			recovery.failed(time.Now())
+			return
+		}
+		recovery.succeeded()
+	}
+	rescan(readinessInitial)
 
 	for {
-		if watch == nil {
+		now := time.Now()
+		if watch == nil && watchRetryPending && !watchRetry.After(now) {
+			retryingWatch := !watchRetry.IsZero()
 			if next, err := openInputWatch(p.Manager.Dir); err == nil {
 				watch = next
+				watchRetryPending = false
+				watchRetry = time.Time{}
 				// The watch is installed before this scan, closing the recovery
 				// race without an always-running rescan.
-				p.rescan(readinessRecovery)
+				rescan(readinessRecovery)
 			} else {
 				p.reportRescanError(err)
+				if retryingWatch {
+					// Keep the legacy unavailable-watch reconciliation alive,
+					// but only on its bounded retry deadline.
+					rescan(readinessRecovery)
+				}
+				if recoveryEnabled {
+					watchRetry = now.Add(interval)
+				} else {
+					watchRetryPending = false
+				}
 			}
 		}
 
@@ -232,11 +349,9 @@ func (p *ReadyPump) Run(stop <-chan struct{}) error {
 			deviceIndex = -1
 		}
 
-		timeout := -1
-		if watch == nil {
-			if interval, enabled := p.recoveryInterval(); enabled {
-				timeout = int((interval + time.Millisecond - 1) / time.Millisecond)
-			}
+		timeout := recovery.pollTimeout(now)
+		if watch == nil && watchRetryPending {
+			timeout = earlierPollTimeout(timeout, pollTimeoutAt(now, watchRetry))
 		}
 		n, pollErr := unix.Poll(pollFDs, timeout)
 		if pollErr != nil {
@@ -246,9 +361,16 @@ func (p *ReadyPump) Run(stop <-chan struct{}) error {
 			return fmt.Errorf("gamepad: readiness poll: %w", pollErr)
 		}
 		if n == 0 {
-			// This is the only periodic recovery path, and it exists only
-			// while a watch is unavailable.
-			p.rescan(readinessRecovery)
+			now = time.Now()
+			// Let the top of the loop recreate a due watch first so its
+			// reconciliation is protected from the watcher gap. If that is
+			// not due, this was a Scan/Open recovery deadline.
+			if watch == nil && watchRetryPending && !watchRetry.After(now) {
+				continue
+			}
+			if recovery.due(now) {
+				rescan(readinessRecovery)
+			}
 			continue
 		}
 		if pollFDs[0].Revents != 0 {
@@ -260,7 +382,7 @@ func (p *ReadyPump) Run(stop <-chan struct{}) error {
 			p.Diagnostics.inotifyReady()
 			changed, invalid, err := watch.Drain()
 			if changed {
-				p.rescan(readinessHotplug)
+				rescan(readinessHotplug)
 			}
 			if err != nil || invalid {
 				if err != nil {
@@ -268,13 +390,21 @@ func (p *ReadyPump) Run(stop <-chan struct{}) error {
 				}
 				_ = watch.Close()
 				watch = nil
+				watchRetryPending = true
+				watchRetry = time.Time{}
 			}
 		}
 		if deviceIndex >= 0 && pollFDs[deviceIndex].Revents != 0 {
 			// A hotplug rescan above may have closed/replaced this fd. Never
 			// read a stale descriptor.
 			if _, current, _, ok := p.Manager.Slot(singlePadID); ok && current == dev {
-				p.consumeReadyDevice(dev, pollFDs[deviceIndex].Revents)
+				if rescanned, err := p.consumeReadyDevice(dev, pollFDs[deviceIndex].Revents); rescanned {
+					if err != nil {
+						recovery.failed(time.Now())
+					} else {
+						recovery.succeeded()
+					}
+				}
 			}
 		}
 	}
@@ -306,14 +436,16 @@ func (p *ReadyPump) reportRescanError(err error) {
 	}
 }
 
-func (p *ReadyPump) rescan(kind readinessRescanKind) {
+func (p *ReadyPump) rescan(kind readinessRescanKind) error {
 	p.Diagnostics.rescan(kind)
 	if _, err := p.Manager.Rescan(); err != nil {
 		p.reportRescanError(err)
+		return err
 	}
+	return nil
 }
 
-func (p *ReadyPump) consumeReadyDevice(dev *Device, revents int16) {
+func (p *ReadyPump) consumeReadyDevice(dev *Device, revents int16) (rescanned bool, rescanErr error) {
 	if revents&unix.POLLIN != 0 {
 		p.Diagnostics.evdevReady()
 	}
@@ -323,7 +455,7 @@ func (p *ReadyPump) consumeReadyDevice(dev *Device, revents int16) {
 	}
 	pad, current, reader, ok := p.Manager.Slot(singlePadID)
 	if !ok || current != dev || reader == nil {
-		return
+		return false, nil
 	}
 	events, err := dev.ReadAvailable()
 	if err == nil {
@@ -342,8 +474,9 @@ func (p *ReadyPump) consumeReadyDevice(dev *Device, revents int16) {
 		// The same readiness owner drops, closes, synthesizes disconnect, and
 		// rescans. No separate watch goroutine can race the read above.
 		p.Manager.dropCurrent()
-		p.rescan(readinessHotplug)
+		return true, p.rescan(readinessHotplug)
 	}
+	return false, nil
 }
 
 // ControllerIdleReadinessFixture is a bounded, content-free owner seam for

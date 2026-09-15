@@ -6,6 +6,7 @@
 package gamepad
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"sync/atomic"
@@ -111,6 +112,91 @@ func TestReadyPumpRetainsRecoveryOnlyWhenWatchUnavailable(t *testing.T) {
 	}
 }
 
+func TestReadinessRecoveryDeadlineBacksOffAndDisarms(t *testing.T) {
+	now := time.Unix(100, 0)
+	recovery := readinessRecoveryDeadline{
+		enabled: true,
+		initial: 10 * time.Millisecond,
+		maximum: 40 * time.Millisecond,
+	}
+	recovery.failed(now)
+	if got, want := recovery.deadline, now.Add(10*time.Millisecond); !got.Equal(want) {
+		t.Fatalf("first recovery deadline = %s, want %s", got, want)
+	}
+	recovery.failed(recovery.deadline)
+	if got, want := recovery.deadline, now.Add(30*time.Millisecond); !got.Equal(want) {
+		t.Fatalf("second recovery deadline = %s, want %s", got, want)
+	}
+	recovery.failed(recovery.deadline)
+	if got, want := recovery.deadline, now.Add(70*time.Millisecond); !got.Equal(want) {
+		t.Fatalf("third recovery deadline = %s, want %s", got, want)
+	}
+	recovery.failed(recovery.deadline)
+	if got, want := recovery.deadline, now.Add(110*time.Millisecond); !got.Equal(want) {
+		t.Fatalf("capped recovery deadline = %s, want %s", got, want)
+	}
+	if !recovery.due(recovery.deadline) {
+		t.Fatal("recovery deadline must be due at its deadline")
+	}
+	recovery.succeeded()
+	if !recovery.deadline.IsZero() || recovery.delay != 0 || recovery.pollTimeout(now) != -1 {
+		t.Fatalf("successful reconciliation must disarm recovery: %+v", recovery)
+	}
+}
+
+func TestReadyPumpRecoversTransientScanFailureWithHealthyWatch(t *testing.T) {
+	dir := t.TempDir()
+	m := NewManager(dir, nil)
+	var scans atomic.Uint64
+	m.ScanFn = func(string) (ScanResult, error) {
+		if scans.Add(1) == 1 {
+			return ScanResult{}, errors.New("transient scan failure")
+		}
+		return ScanResult{}, nil
+	}
+	diag := &ControllerReadinessDiagnostics{}
+	pump := NewReadyPump(m)
+	pump.Diagnostics = diag
+	pump.RecoveryRescan = 10 * time.Millisecond
+	stop, done := runReadyPump(t, pump)
+	t.Cleanup(func() { stopReadyPump(t, stop, done) })
+
+	awaitReadiness(t, diag, func(s ControllerReadinessSnapshot) bool {
+		return s.InitialRescans == 1 && s.RecoveryRescans == 1 && scans.Load() == 2
+	})
+	assertNoLaterRecoveryPoll(t, diag, scans.Load)
+}
+
+func TestReadyPumpRecoversTransientOpenFailureWithHealthyWatch(t *testing.T) {
+	dir := t.TempDir()
+	info := virtualPadInfo("/virtual/event0", "ready-recovery-pad")
+	m := NewManager(dir, nil)
+	var scans atomic.Uint64
+	m.ScanFn = func(string) (ScanResult, error) {
+		scans.Add(1)
+		return ScanResult{Pads: []DeviceInfo{info}}, nil
+	}
+	var opens atomic.Uint64
+	m.OpenFn = func(string) (*Device, error) {
+		if opens.Add(1) == 1 {
+			return nil, errors.New("transient open failure")
+		}
+		return &Device{path: info.Path, fd: -1, info: info}, nil
+	}
+	diag := &ControllerReadinessDiagnostics{}
+	pump := NewReadyPump(m)
+	pump.Diagnostics = diag
+	pump.RecoveryRescan = 10 * time.Millisecond
+	stop, done := runReadyPump(t, pump)
+	t.Cleanup(func() { stopReadyPump(t, stop, done) })
+
+	awaitReadiness(t, diag, func(s ControllerReadinessSnapshot) bool {
+		return s.InitialRescans == 1 && s.RecoveryRescans == 1 &&
+			scans.Load() == 2 && opens.Load() == 2 && m.Current() != nil
+	})
+	assertNoLaterRecoveryPoll(t, diag, scans.Load)
+}
+
 func TestReadyPumpKeepsSynReportOrderAndDisconnectsOnHUP(t *testing.T) {
 	var fds [2]int
 	if err := unix.Pipe2(fds[:], unix.O_CLOEXEC|unix.O_NONBLOCK); err != nil {
@@ -201,4 +287,43 @@ func awaitReadiness(t *testing.T, diagnostics *ControllerReadinessDiagnostics, w
 		time.Sleep(5 * time.Millisecond)
 	}
 	t.Fatalf("readiness condition was not observed")
+}
+
+func runReadyPump(t *testing.T, pump *ReadyPump) (chan struct{}, chan error) {
+	t.Helper()
+	stop := make(chan struct{})
+	done := make(chan error, 1)
+	go func() { done <- pump.Run(stop) }()
+	return stop, done
+}
+
+func stopReadyPump(t *testing.T, stop chan struct{}, done chan error) {
+	t.Helper()
+	select {
+	case <-stop:
+	default:
+		close(stop)
+	}
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Errorf("ready pump: %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Error("ready pump did not stop")
+	}
+}
+
+func assertNoLaterRecoveryPoll(t *testing.T, diagnostics *ControllerReadinessDiagnostics, scanCount func() uint64) {
+	t.Helper()
+	before := diagnostics.Snapshot()
+	beforeScans := scanCount()
+	time.Sleep(75 * time.Millisecond)
+	after := diagnostics.Snapshot()
+	if got := scanCount(); got != beforeScans {
+		t.Fatalf("successful healthy-watch recovery kept rescanning: before=%d after=%d", beforeScans, got)
+	}
+	if after.RecoveryRescans != before.RecoveryRescans {
+		t.Fatalf("successful healthy-watch recovery kept polling: before=%+v after=%+v", before, after)
+	}
 }
