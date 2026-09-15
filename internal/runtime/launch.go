@@ -274,6 +274,16 @@ func Launch(ctx context.Context, opt LaunchOptions) error {
 			logging.Logger(logging.CatRuntime).Info("client module close failed", "err", err)
 		}
 	}()
+	// This exact, default-off arm subscribes only to payload-free JNI Home
+	// milestones. Its defer runs before the earlier module-close defer, so all
+	// observers are cancelled and the one bounded aggregate is complete before
+	// Runtime releases a module on an early lifecycle return. It adds no loop
+	// wake, input action, renderer work, or normal-launch observer.
+	startupMeasurement := newStartupMeasurementArm(os.Getenv, time.Now, logging.Logger(logging.CatRuntime).Info)
+	defer startupMeasurement.teardown()
+	if startupMeasurement != nil {
+		startupMeasurement.attachX11(win)
+	}
 	android.Register("libroblox.so", func(sym string) (uintptr, error) { return mod.Lookup(sym) })
 	android.RegisterImage(mod.Base, mod.Path)
 	if err := mod.Init(); err != nil {
