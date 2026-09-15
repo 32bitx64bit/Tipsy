@@ -57,6 +57,133 @@ func (s *progressService) Launch(_ context.Context, request guimodel.LaunchReque
 	return s.launchError
 }
 
+// launchOrderingService holds a launch at each model boundary without running
+// Qt events. That lets the test prove the owner event observes only the final,
+// already-committed state rather than relying on a periodic refresh race.
+type launchOrderingService struct {
+	visualService
+	entered, release, acknowledged, finish chan struct{}
+	started                                bool
+	err                                    error
+}
+
+func newLaunchOrderingService(started bool, err error) *launchOrderingService {
+	return &launchOrderingService{
+		entered:      make(chan struct{}),
+		release:      make(chan struct{}),
+		acknowledged: make(chan struct{}),
+		finish:       make(chan struct{}),
+		started:      started,
+		err:          err,
+	}
+}
+
+func (s *launchOrderingService) Launch(_ context.Context, _ guimodel.LaunchRequest, acknowledge func()) error {
+	close(s.entered)
+	<-s.release
+	if s.started {
+		acknowledge()
+		close(s.acknowledged)
+		<-s.finish
+	}
+	return s.err
+}
+
+func TestLauncherOwnerNotificationObservesCommittedTerminalState(t *testing.T) {
+	t.Setenv("QT_QPA_PLATFORM", "offscreen")
+	root := t.TempDir()
+	for _, dir := range []string{"CONFIG", "DATA", "CACHE", "STATE"} {
+		t.Setenv("XDG_"+dir+"_HOME", filepath.Join(root, dir))
+	}
+	t.Setenv("TIPSY_ICON_PATH", filepath.Join("..", "..", "tipsy.png"))
+	app := qt.NewQApplication([]string{"tipsy-launch-ordering-test"})
+	defer app.Delete()
+	qt.QApplication_SetStyleWithStyle("Fusion")
+
+	for _, tc := range []struct {
+		name          string
+		started       bool
+		err           error
+		want          guimodel.LaunchView
+		wantCoalesced uint64
+		wantFailure   bool
+		wantQuit      int32
+	}{
+		{
+			name:          "clean exit",
+			started:       true,
+			want:          guimodel.LaunchView{State: guimodel.LaunchExited, Started: true},
+			wantCoalesced: 2, // starting, running, exited: one owner wake plus two edges.
+			wantQuit:      1,
+		},
+		{
+			name:          "service failure",
+			err:           errors.New("synthetic launch failure"),
+			want:          guimodel.LaunchView{State: guimodel.LaunchFailed, Error: "synthetic launch failure"},
+			wantCoalesced: 1, // starting then failed.
+			wantFailure:   true,
+		},
+		{
+			name:          "cancellation",
+			err:           context.Canceled,
+			want:          guimodel.LaunchView{State: guimodel.LaunchIdle},
+			wantCoalesced: 1, // starting then returned-to-idle.
+		},
+	} {
+		// Qt objects are thread-affine; keep every case on the QApplication's
+		// owner test goroutine instead of using t.Run's separate goroutine.
+		func() {
+			service := newLaunchOrderingService(tc.started, tc.err)
+			win := newMainWindow(service, brandIcon())
+			defer win.win.Delete()
+			defer win.ownerNotifier.close()
+			var quits atomic.Int32
+			win.quit = func() { quits.Add(1) }
+
+			if err := win.launch.Start(context.Background()); err != nil {
+				t.Fatal(err)
+			}
+			select {
+			case <-service.entered:
+			case <-time.After(time.Second):
+				t.Fatal("synthetic service did not enter Launch")
+			}
+			close(service.release)
+			if tc.started {
+				select {
+				case <-service.acknowledged:
+				case <-time.After(time.Second):
+					t.Fatal("synthetic service did not acknowledge Launch")
+				}
+				close(service.finish)
+			}
+			ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+			defer cancel()
+			if err := win.launch.Wait(ctx); err != nil {
+				t.Fatal(err)
+			}
+
+			// Deliberately do not process Qt events until the worker has returned.
+			// A duplicate wrapper notification or pre-commit terminal notification
+			// changes these exact counts; a timer cannot make this assertion pass.
+			if got := win.launch.View(); got != tc.want {
+				t.Fatalf("terminal view=%+v, want %+v", got, tc.want)
+			}
+			if got := win.metrics.snapshot(); got.OwnerQueued != 1 || got.OwnerCoalesced != tc.wantCoalesced || got.OwnerDispatched != 0 {
+				t.Fatalf("pre-dispatch owner notifications=%+v, want queued=1 coalesced=%d dispatched=0", got, tc.wantCoalesced)
+			}
+
+			waitGUI(t, func() bool { return win.metrics.snapshot().OwnerDispatched == 1 })
+			if got := win.metrics.snapshot(); got.OwnerQueued != 1 || got.OwnerCoalesced != tc.wantCoalesced || got.OwnerDispatched != 1 {
+				t.Fatalf("owner notifications=%+v, want queued=1 coalesced=%d dispatched=1", got, tc.wantCoalesced)
+			}
+			if win.launchFailure != tc.wantFailure || quits.Load() != tc.wantQuit {
+				t.Fatalf("terminal presentation failure=%t quits=%d, want failure=%t quits=%d", win.launchFailure, quits.Load(), tc.wantFailure, tc.wantQuit)
+			}
+		}()
+	}
+}
+
 // All displayed strings and captures are synthetic; opaque URI sentinels are
 // asserted by equality only and never included in test errors or screenshots.
 func TestExternalLaunchProgress(t *testing.T) {

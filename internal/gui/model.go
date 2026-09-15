@@ -766,10 +766,22 @@ type LaunchModel struct {
 	service Service
 	view    LaunchView
 	done    chan struct{}
+	notify  func()
 }
 
 func NewLaunchModel(service Service) *LaunchModel {
 	return &LaunchModel{service: service, view: LaunchView{State: LaunchIdle}}
+}
+
+// SetStateNotifier installs the coalescible owner-thread wakeup for future
+// launch state transitions. The notifier runs only after the new state has
+// been committed and LaunchModel has released its mutex, so it may safely read
+// View. It is deliberately not called for the current state; callers install
+// it before beginning a launch and re-read View when woken.
+func (m *LaunchModel) SetStateNotifier(notify func()) {
+	m.mu.Lock()
+	m.notify = notify
+	m.mu.Unlock()
 }
 
 func (m *LaunchModel) Start(ctx context.Context) error {
@@ -789,15 +801,24 @@ func (m *LaunchModel) StartRequest(ctx context.Context, req LaunchRequest) error
 	done := make(chan struct{})
 	m.done = done
 	m.view = LaunchView{State: LaunchStarting}
+	notify := m.notify
 	m.mu.Unlock()
+	if notify != nil {
+		notify()
+	}
 	go func() {
 		started := func() {
 			m.mu.Lock()
-			defer m.mu.Unlock()
 			if m.done != done || m.view.State != LaunchStarting {
+				m.mu.Unlock()
 				return
 			}
 			m.view = LaunchView{State: LaunchRunning, Started: true}
+			notify := m.notify
+			m.mu.Unlock()
+			if notify != nil {
+				notify()
+			}
 		}
 		err := m.service.Launch(ctx, req, started)
 		m.mu.Lock()
@@ -814,7 +835,11 @@ func (m *LaunchModel) StartRequest(ctx context.Context, req LaunchRequest) error
 			m.view = LaunchView{State: LaunchFailed, Error: "Roblox exited before startup completed"}
 		}
 		close(done)
+		notify := m.notify
 		m.mu.Unlock()
+		if notify != nil {
+			notify()
+		}
 	}()
 	return nil
 }

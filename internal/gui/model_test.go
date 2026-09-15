@@ -647,6 +647,99 @@ func TestLaunchModelCancellationRespectsStartBoundary(t *testing.T) {
 	}
 }
 
+func TestLaunchModelStateNotificationsFollowCommittedTransitions(t *testing.T) {
+	launchFailure := errors.New("client failed")
+	for _, tc := range []struct {
+		name    string
+		started bool
+		err     error
+		want    []LaunchView
+		final   LaunchView
+	}{
+		{
+			name:    "clean exit",
+			started: true,
+			want: []LaunchView{
+				{State: LaunchStarting},
+				{State: LaunchRunning, Started: true},
+				{State: LaunchExited, Started: true},
+			},
+			final: LaunchView{State: LaunchExited, Started: true},
+		},
+		{
+			name:    "failure after acknowledgement",
+			started: true,
+			err:     launchFailure,
+			want: []LaunchView{
+				{State: LaunchStarting},
+				{State: LaunchRunning, Started: true},
+				{State: LaunchFailed, Error: "client failed", Started: true},
+			},
+			final: LaunchView{State: LaunchFailed, Error: "client failed", Started: true},
+		},
+		{
+			name: "cancellation before acknowledgement",
+			err:  context.Canceled,
+			want: []LaunchView{
+				{State: LaunchStarting},
+				{State: LaunchIdle},
+			},
+			final: LaunchView{State: LaunchIdle},
+		},
+		{
+			name:    "cancellation after acknowledgement",
+			started: true,
+			err:     context.Canceled,
+			want: []LaunchView{
+				{State: LaunchStarting},
+				{State: LaunchRunning, Started: true},
+				{State: LaunchExited, Started: true},
+			},
+			final: LaunchView{State: LaunchExited, Started: true},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			model := NewLaunchModel(&fakeService{
+				settings:      DefaultSettings(),
+				launchStarted: tc.started,
+				launchErr:     tc.err,
+			})
+			// The callback reads the model synchronously. That makes a notifier
+			// invoked while LaunchModel holds its mutex fail deterministically,
+			// rather than relying on scheduler timing to observe the ordering.
+			notifications := make(chan LaunchView, len(tc.want))
+			model.SetStateNotifier(func() { notifications <- model.View() })
+
+			if err := model.Start(context.Background()); err != nil {
+				t.Fatal(err)
+			}
+			ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+			defer cancel()
+			if err := model.Wait(ctx); err != nil {
+				t.Fatal(err)
+			}
+			for index, want := range tc.want {
+				select {
+				case got := <-notifications:
+					if got != want {
+						t.Fatalf("notification[%d]=%+v, want %+v", index, got, want)
+					}
+				case <-ctx.Done():
+					t.Fatalf("notification[%d] was not delivered: %v", index, ctx.Err())
+				}
+			}
+			select {
+			case got := <-notifications:
+				t.Fatalf("unexpected notification: %+v", got)
+			default:
+			}
+			if got := model.View(); got != tc.final {
+				t.Fatalf("final view=%+v, want %+v", got, tc.final)
+			}
+		})
+	}
+}
+
 func waitForModel(t *testing.T, model *SetupModel) {
 	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)

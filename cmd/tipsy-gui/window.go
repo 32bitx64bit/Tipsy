@@ -164,10 +164,11 @@ func newWindowBase(service guimodel.Service, icon *qt.QIcon) *mainWindow {
 		panic("Tipsy GUI could not create its owner-thread state notifier: " + err.Error())
 	}
 	w.ownerNotifier = notifier
-	w.service = ownerNotifyingService{Service: service, notify: w.queueOwnerState}
+	w.service = ownerNotifyingService{Service: service}
 	w.setup = guimodel.NewSetupModel(w.service)
 	w.settings = guimodel.NewSettingsModel(w.service)
 	w.launch = guimodel.NewLaunchModel(w.service)
+	w.launch.SetStateNotifier(w.queueOwnerState)
 	w.initAppearance()
 
 	w.status = qt.NewQStatusBar2()

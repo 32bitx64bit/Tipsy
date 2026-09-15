@@ -59,28 +59,39 @@ func (n *ownerThreadNotifier) notify() {
 		return
 	}
 	n.mu.Lock()
+	defer n.mu.Unlock()
 	if n.closed {
-		n.mu.Unlock()
 		return
 	}
 	if n.queued {
-		n.mu.Unlock()
 		if n.metrics != nil {
 			n.metrics.ownerCoalesced.Add(1)
 		}
 		return
 	}
-	n.queued = true
-	n.mu.Unlock()
-
-	if _, err := unix.Write(n.writeFD, []byte{1}); err != nil {
-		n.mu.Lock()
-		n.queued = false
-		n.mu.Unlock()
+	// Keep the lock through the nonblocking one-byte write. Closing the pipe
+	// after releasing it could otherwise race an in-flight notifier write.
+	for {
+		written, err := unix.Write(n.writeFD, []byte{1})
+		if err == nil && written == 1 {
+			n.queued = true
+			if n.metrics != nil {
+				n.metrics.ownerQueued.Add(1)
+			}
+			return
+		}
+		if errors.Is(err, unix.EINTR) {
+			continue
+		}
+		if errors.Is(err, unix.EAGAIN) || errors.Is(err, unix.EWOULDBLOCK) {
+			// An unread byte is already sufficient to dispatch the latest model
+			// state. Keep the coalescing token even if the kernel pipe is full.
+			n.queued = true
+			if n.metrics != nil {
+				n.metrics.ownerCoalesced.Add(1)
+			}
+		}
 		return
-	}
-	if n.metrics != nil {
-		n.metrics.ownerQueued.Add(1)
 	}
 }
 
@@ -89,11 +100,28 @@ func (n *ownerThreadNotifier) drain() {
 		return
 	}
 	var byteBuf [32]byte
+	terminal := false
 	for {
-		_, err := unix.Read(n.readFD, byteBuf[:])
-		if err != nil {
-			break // EAGAIN is the normal drained state; close is terminal.
+		read, err := unix.Read(n.readFD, byteBuf[:])
+		if read > 0 {
+			continue
 		}
+		if err == nil {
+			// A readable pipe with no bytes is EOF. Do not spin or dispatch a
+			// stale callback after its writer has gone away.
+			terminal = true
+			break
+		}
+		if errors.Is(err, unix.EINTR) {
+			continue
+		}
+		if errors.Is(err, unix.EAGAIN) || errors.Is(err, unix.EWOULDBLOCK) {
+			break
+		}
+		// A descriptor failure is terminal too. Concurrent normal close sets
+		// closed below and therefore remains a no-op here.
+		terminal = true
+		break
 	}
 	n.mu.Lock()
 	if n.closed {
@@ -102,6 +130,10 @@ func (n *ownerThreadNotifier) drain() {
 	}
 	n.queued = false
 	n.mu.Unlock()
+	if terminal {
+		n.close()
+		return
+	}
 	if n.metrics != nil {
 		n.metrics.ownerDispatched.Add(1)
 	}

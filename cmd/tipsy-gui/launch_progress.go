@@ -15,19 +15,14 @@ const (
 	launchFromExternal
 )
 
-// ownerNotifyingService reports only state boundaries. Its methods never touch
-// Qt; the notifier schedules presentation on the main Qt owner thread.
+// ownerNotifyingService preserves the service boundary used by the GUI models.
+// LaunchModel owns launch-state notifications, after each transition commits.
 type ownerNotifyingService struct {
 	guimodel.Service
-	notify func()
 }
 
 func (s ownerNotifyingService) Launch(ctx context.Context, request guimodel.LaunchRequest, started func()) error {
-	defer s.notify()
-	return s.Service.Launch(ctx, request, func() {
-		started()
-		s.notify()
-	})
+	return s.Service.Launch(ctx, request, started)
 }
 
 type launchPreparation struct {
