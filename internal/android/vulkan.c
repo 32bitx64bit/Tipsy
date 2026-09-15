@@ -61,6 +61,12 @@ typedef uint32_t TipsyVkFlags;
 #define TIPSY_VK_PRESENT_MODE_MAILBOX_KHR 1u
 #define TIPSY_VK_PRESENT_MODE_FIFO_KHR 2u
 #define TIPSY_VK_PRESENT_MODE_FIFO_RELAXED_KHR 3u
+/* These extensions add legal VkPresentModeKHR values. They are capability
+ * diagnostics only: neither filtering nor swapchain creation is permitted to
+ * rewrite a client request merely because it uses one. */
+#define TIPSY_VK_PRESENT_MODE_SHARED_DEMAND_REFRESH_KHR 1000111000u
+#define TIPSY_VK_PRESENT_MODE_SHARED_CONTINUOUS_REFRESH_KHR 1000111001u
+#define TIPSY_VK_PRESENT_MODE_FIFO_LATEST_READY_KHR 1000361000u
 
 typedef struct {
 	char extensionName[TIPSY_VK_EXT_NAME_SIZE];
@@ -659,7 +665,10 @@ static int present_mode_known(uint32_t mode)
 	return mode == TIPSY_VK_PRESENT_MODE_IMMEDIATE_KHR ||
 		mode == TIPSY_VK_PRESENT_MODE_MAILBOX_KHR ||
 		mode == TIPSY_VK_PRESENT_MODE_FIFO_KHR ||
-		mode == TIPSY_VK_PRESENT_MODE_FIFO_RELAXED_KHR;
+		mode == TIPSY_VK_PRESENT_MODE_FIFO_RELAXED_KHR ||
+		mode == TIPSY_VK_PRESENT_MODE_SHARED_DEMAND_REFRESH_KHR ||
+		mode == TIPSY_VK_PRESENT_MODE_SHARED_CONTINUOUS_REFRESH_KHR ||
+		mode == TIPSY_VK_PRESENT_MODE_FIFO_LATEST_READY_KHR;
 }
 
 static uint32_t present_mode_list_status(const uint32_t *in, uint32_t n)

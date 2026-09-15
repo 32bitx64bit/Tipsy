@@ -107,15 +107,18 @@ func TestVulkanPresentModeFilterFollowsVSync(t *testing.T) {
 
 func TestVulkanCreateSwapchainPreservesActualSurfaceCapability(t *testing.T) {
 	const (
-		immediate       = uint32(0)
-		mailbox         = uint32(1)
-		fifo            = uint32(2)
-		success         = int32(0)
-		incomplete      = int32(5)
-		verified        = uint32(0)
-		unavailable     = uint32(1)
-		malformed       = uint32(2)
-		probeIncomplete = uint32(3)
+		immediate        = uint32(0)
+		mailbox          = uint32(1)
+		fifo             = uint32(2)
+		sharedDemand     = uint32(1000111000)
+		sharedContinuous = uint32(1000111001)
+		fifoLatestReady  = uint32(1000361000)
+		success          = int32(0)
+		incomplete       = int32(5)
+		verified         = uint32(0)
+		unavailable      = uint32(1)
+		malformed        = uint32(2)
+		probeIncomplete  = uint32(3)
 	)
 	assertCreate := func(t *testing.T, got vulkanPresentModeCapabilityResult, requested uint32) {
 		t.Helper()
@@ -146,6 +149,18 @@ func TestVulkanCreateSwapchainPreservesActualSurfaceCapability(t *testing.T) {
 			}
 			assertCreate(t, got, tc.requested)
 		})
+	}
+
+	// Extended KHR present modes are valid capability observations. The adapter
+	// keeps the client request unchanged; this only prevents diagnostics from
+	// falsely calling an otherwise valid host list malformed.
+	for _, requested := range []uint32{sharedDemand, sharedContinuous, fifoLatestReady} {
+		got := testVulkanPresentModeCapability([]uint32{fifo, requested}, success, success, 2, false, requested)
+		if got.probe.status != verified || got.probe.result != success || got.probe.modeCount != 2 ||
+			!slices.Contains(got.advertised, requested) {
+			t.Fatalf("extended mode %d diagnostic=%+v advertised=%v", requested, got.probe, got.advertised)
+		}
+		assertCreate(t, got, requested)
 	}
 
 	for _, tc := range []struct {
