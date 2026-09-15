@@ -580,6 +580,7 @@ static void vk_init_once(void)
 	host_vkGetPhysicalDeviceSurfacePresentModesKHR =
 		(tipsy_vkGetPresentModes_fn)dlsym(lib_vulkan, "vkGetPhysicalDeviceSurfacePresentModesKHR");
 	host_vkQueuePresentKHR = (tipsy_vkQueuePresent_fn)dlsym(lib_vulkan, "vkQueuePresentKHR");
+	host_vkCreateSwapchainKHR = (tipsy_vkCreateSwapchain_fn)dlsym(lib_vulkan, "vkCreateSwapchainKHR");
 	vk_scan_host_wsi();
 }
 
@@ -970,11 +971,8 @@ static tipsy_vkCreateSwapchain_fn resolve_create_swapchain(TipsyVkDevice device)
 	if (host_vkCreateSwapchainKHR != NULL) {
 		return host_vkCreateSwapchainKHR;
 	}
-	// Prefer the loader trampoline, exactly like the present path: it is not
-	// bound to a VkDevice and cannot be poisoned by a device from another ICD.
-	if (lib_vulkan != NULL) {
-		host_vkCreateSwapchainKHR = (tipsy_vkCreateSwapchain_fn)dlsym(lib_vulkan, "vkCreateSwapchainKHR");
-	}
+	// The process-wide loader trampoline was resolved by vk_init_once.
+	// Never publish a device-specific fallback into this global slot.
 	if (host_vkCreateSwapchainKHR == NULL && host_vkGetDeviceProcAddr != NULL && device != NULL) {
 		// Non-cached fallback: the pointer is device-dispatch specific.
 		return (tipsy_vkCreateSwapchain_fn)host_vkGetDeviceProcAddr(device, "vkCreateSwapchainKHR");
@@ -1096,10 +1094,6 @@ static TipsyVkResult tipsy_vkQueuePresentKHR(TipsyVkQueue queue, const void *pPr
 	uint64_t duration_ns = 0;
 
 	ensure_vulkan();
-	if (host_vkQueuePresentKHR == NULL && host_vkGetDeviceProcAddr != NULL && queue != NULL) {
-		/* Loader trampoline is preferred; device GIPA is a last resort. */
-		host_vkQueuePresentKHR = (tipsy_vkQueuePresent_fn)dlsym(lib_vulkan, "vkQueuePresentKHR");
-	}
 	if (host_vkQueuePresentKHR == NULL) {
 		GoAndroid_LogMissing("vkQueuePresentKHR");
 		return TIPSY_VK_ERROR_INITIALIZATION_FAILED;
@@ -1378,7 +1372,7 @@ void *tipsy_test_vk_host_loader_symbol(const char *name)
 void *tipsy_test_vk_resolve_create_swapchain(void)
 {
 	ensure_vulkan();
-	host_vkCreateSwapchainKHR = NULL;
+	// Do not mutate a once-published production dispatch pointer in this test.
 	if (lib_vulkan == NULL || dlsym(lib_vulkan, "vkCreateSwapchainKHR") == NULL) {
 		return NULL;
 	}
