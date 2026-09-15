@@ -15,7 +15,6 @@ import "C"
 import (
 	"fmt"
 	"math"
-	"runtime"
 	"strings"
 	"sync"
 	"unicode/utf16"
@@ -1219,13 +1218,6 @@ func GoJNI_ReleaseArrayElements(env *C.JNIEnv, array C.jarray, elems unsafe.Poin
 	}
 }
 
-type criticalPin struct {
-	pinner runtime.Pinner
-	obj    *Object
-}
-
-var criticalPins sync.Map // uintptr -> *criticalPin
-
 //export GoJNI_GetPrimitiveArrayCritical
 func GoJNI_GetPrimitiveArrayCritical(env *C.JNIEnv, array C.jarray, isCopy *C.jboolean) unsafe.Pointer {
 	vm := vmFromEnv(unsafe.Pointer(env))
@@ -1237,30 +1229,28 @@ func GoJNI_GetPrimitiveArrayCritical(env *C.JNIEnv, array C.jarray, isCopy *C.jb
 		return nil
 	}
 	if len(o.bytes) == 0 {
-		return GoJNI_GetArrayElements(env, array, isCopy, 'B')
+		// A zero-length array still needs a releasable, distinct C pointer.
+		p := C.malloc(1)
+		criticalArrays.registerCopy(o, p)
+		if isCopy != nil {
+			*isCopy = C.JNI_TRUE
+		}
+		return p
 	}
-	pin := &criticalPin{obj: o}
-	pin.pinner.Pin(o)
-	pin.pinner.Pin(unsafe.SliceData(o.bytes))
-	ptr := unsafe.Pointer(unsafe.SliceData(o.bytes))
-	criticalPins.Store(uintptr(ptr), pin)
+	p := criticalArrays.pin(o)
 	if isCopy != nil {
 		*isCopy = C.JNI_FALSE
 	}
-	return ptr
+	return p
 }
 
 //export GoJNI_ReleasePrimitiveArrayCritical
 func GoJNI_ReleasePrimitiveArrayCritical(env *C.JNIEnv, array C.jarray, carray unsafe.Pointer, mode C.jint) {
-	if carray == nil {
-		return
+	_ = env
+	p := criticalArrays.release(jobjectToID(uintptr(array)), carray, mode == C.JNI_COMMIT)
+	if p != nil {
+		C.free(p)
 	}
-	if v, ok := criticalPins.LoadAndDelete(uintptr(carray)); ok {
-		_ = mode
-		v.(*criticalPin).pinner.Unpin()
-		return
-	}
-	GoJNI_ReleaseArrayElements(env, array, carray, mode, 'B')
 }
 
 //export GoJNI_GetArrayRegion
