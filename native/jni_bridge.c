@@ -1841,6 +1841,44 @@ static enum env_call_mode env_owner_call_mode(JNIEnv *env)
 	return ENV_CALL_INVALID;
 }
 
+struct tipsy_owned_call {
+	JNIEnv *env;
+	TipsyJNIOwnedCall fn;
+	void *data;
+};
+
+static int64_t owner_run_call(void *raw, void *a1, void *a2, void *a3,
+	void *a4, void *a5, void *a6, void *a7)
+{
+	struct tipsy_owned_call *call = raw;
+	(void)a1; (void)a2; (void)a3; (void)a4; (void)a5; (void)a6; (void)a7;
+	/* Fail closed if the Main executor fell back to a different thread. */
+	if (tipsy_jni_current_env() != call->env) {
+		return JNI_ERR;
+	}
+	return call->fn(call->env, call->data);
+}
+
+int tipsy_jni_run_owned(JNIEnv *env, TipsyJNIOwnedCall fn, void *data)
+{
+	struct tipsy_owned_call call = { env, fn, data };
+	enum env_call_mode mode;
+	if (env == NULL || fn == NULL) {
+		return JNI_ERR;
+	}
+	mode = env_owner_call_mode(env);
+	if (mode == ENV_CALL_DIRECT) {
+		return fn(env, data);
+	}
+	if (mode == ENV_CALL_NATIVE_MAIN) {
+		/* submit is synchronous, so this C stack record and borrowed data
+		 * remain live until Main has finished. Re-entry on Main runs inline. */
+		return (int)tipsy_call_p8((void *)owner_run_call, &call,
+			NULL, NULL, NULL, NULL, NULL, NULL, NULL);
+	}
+	return JNI_ERR;
+}
+
 static int64_t owner_FindClass(void *env, void *name, void *a2, void *a3,
 	void *a4, void *a5, void *a6, void *a7)
 {

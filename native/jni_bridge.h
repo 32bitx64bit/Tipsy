@@ -109,6 +109,11 @@ struct JavaVM_ {
 #define TIPSY_METHOD_MAGIC 0x544D4944u /* TMID */
 #define TIPSY_FIELD_MAGIC 0x54464944u  /* TFID */
 
+/* Synchronous owner-thread execution. data is borrowed for the duration of
+ * this call only; the callback may invoke Go through the guest's JNI table. */
+typedef int (*TipsyJNIOwnedCall)(JNIEnv *env, void *data);
+int tipsy_jni_run_owned(JNIEnv *env, TipsyJNIOwnedCall fn, void *data);
+
 typedef struct TipsyMethod {
 	uint32_t magic;
 	uint32_t slot;
