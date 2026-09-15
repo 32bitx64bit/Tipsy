@@ -7,6 +7,7 @@ import (
 
 	qt "github.com/mappu/miqt/qt6"
 
+	"github.com/tipsy-linux/tipsy/internal/gamepad"
 	guimodel "github.com/tipsy-linux/tipsy/internal/gui"
 	"github.com/tipsy-linux/tipsy/internal/setupsvc"
 	"github.com/tipsy-linux/tipsy/internal/version"
@@ -56,9 +57,11 @@ type mainWindow struct {
 	settingsDisplayKeys                              []string
 	settingsSyncing                                  bool
 	controllerSettings                               guimodel.ControllerSettings
+	controllerFaceButtonLayout                       gamepad.FaceButtonLayout
 	controllerLoadErr                                error
 	controllerSyncing                                bool
 	controllerEnable                                 *qt.QCheckBox
+	controllerFaceLayout                             *qt.QComboBox
 	controllerStateNote                              *qt.QLabel
 	controllerPadRows                                *qt.QVBoxLayout
 	controllerPadNote                                *qt.QLabel
@@ -183,7 +186,7 @@ func newMainWindow(service guimodel.Service, icon *qt.QIcon) *mainWindow {
 	w := newWindowBase(service, icon)
 	w.setupLoadErr = w.setup.Load(context.Background())
 	w.settingsErr = w.settings.Load(context.Background())
-	w.controllerSettings, w.controllerLoadErr = loadControllerSettings()
+	w.controllerSettings, w.controllerFaceButtonLayout, w.controllerLoadErr = loadControllerSettingsAndFaceButtonLayout()
 	w.microphoneSettings, w.microphoneLoadErr = loadMicrophoneSettings()
 	w.finishShell()
 	return w

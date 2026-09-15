@@ -167,6 +167,42 @@ func TestPositionalDiamondMapping(t *testing.T) {
 	}
 }
 
+func TestSwitchFaceButtonLayoutSwapsOnlyTheDiamond(t *testing.T) {
+	info, m := xboxDevice()
+	f := &Frame{
+		Buttons: map[uint16]bool{
+			BtnSouth: true,
+			BtnEast:  true,
+			BtnWest:  true,
+			BtnNorth: true,
+			BtnTL:    true,
+		},
+		FaceButtonLayout: FaceButtonLayoutSwitch,
+	}
+	af := MapFrame(f, 1, m, info.Abs)
+	for _, key := range []int{AndroidButtonA, AndroidButtonB, AndroidButtonX, AndroidButtonY, AndroidButtonL1} {
+		if !af.Buttons[key] {
+			t.Fatalf("switch layout omitted Android key %d: %+v", key, af.Buttons)
+		}
+	}
+
+	for _, tc := range []struct {
+		code uint16
+		want int
+	}{
+		{BtnSouth, AndroidButtonB},
+		{BtnEast, AndroidButtonA},
+		{BtnWest, AndroidButtonY},
+		{BtnNorth, AndroidButtonX},
+		{BtnTL, AndroidButtonL1},
+	} {
+		got, ok := MapEvdevButtonWithFaceButtonLayout(tc.code, false, FaceButtonLayoutSwitch)
+		if !ok || got != tc.want {
+			t.Fatalf("switch evdev %#x: want Android %d, got %d,%v", tc.code, tc.want, got, ok)
+		}
+	}
+}
+
 func TestKeySourcesAreTruthful(t *testing.T) {
 	if KeySource(AndroidDpadUp) != AndroidSourceDpad {
 		t.Fatal("DPAD keys must use SOURCE_DPAD")

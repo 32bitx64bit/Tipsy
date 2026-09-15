@@ -201,6 +201,19 @@ func TestApplyCalibrationZeroFloorIsBaseline(t *testing.T) {
 			t.Fatalf("zero calibration must not move axis %d: %v → %v", c, v, f.Axes[c])
 		}
 	}
+	if f.FaceButtonLayout != FaceButtonLayoutXbox {
+		t.Fatalf("default config must stamp Xbox layout, got %q", f.FaceButtonLayout)
+	}
+}
+
+func TestApplyCalibrationStampsSwitchFaceButtonLayout(t *testing.T) {
+	f, m := xpadFrame()
+	cfg := DefaultGamepadConfig()
+	cfg.SetFaceButtonLayout(FaceButtonLayoutSwitch)
+	ApplyCalibration(f, m, cfg)
+	if f.FaceButtonLayout != FaceButtonLayoutSwitch {
+		t.Fatalf("frame layout=%q want Switch", f.FaceButtonLayout)
+	}
 }
 
 // TestApplyCalibrationAbsentStaysAbsent pins no zero-fill: codes missing from

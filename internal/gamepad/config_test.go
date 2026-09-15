@@ -17,6 +17,31 @@ func TestDefaultGamepadConfig(t *testing.T) {
 	if c.Deadzone != 0 {
 		t.Fatalf("default global deadzone = %v, want 0 (device flat + small fallback baseline)", c.Deadzone)
 	}
+	if c.FaceButtonLayout != FaceButtonLayoutXbox {
+		t.Fatalf("default face-button layout = %q, want Xbox", c.FaceButtonLayout)
+	}
+}
+
+func TestFaceButtonLayoutConfigDefaultsAndNormalizes(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		body string
+		want FaceButtonLayout
+	}{
+		{"missing", `{"gamepad":{"enabled":true}}`, FaceButtonLayoutXbox},
+		{"switch", `{"gamepad":{"faceButtonLayout":"switch"}}`, FaceButtonLayoutSwitch},
+		{"unknown", `{"gamepad":{"faceButtonLayout":"arcade"}}`, FaceButtonLayoutXbox},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg, err := ParseGamepadSection([]byte(tc.body))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if cfg.FaceButtonLayout != tc.want {
+				t.Fatalf("layout=%q want %q", cfg.FaceButtonLayout, tc.want)
+			}
+		})
+	}
 }
 
 func TestParseGamepadSectionMissingIsDefaults(t *testing.T) {

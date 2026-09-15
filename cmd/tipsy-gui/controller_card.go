@@ -11,7 +11,8 @@ package main
 // gamepad-simplify-2026-09-12.md): per-stick deadzone sliders (one global
 // slider), Y-invert checkboxes, the disabled rumble checkbox, and the local
 // test-input readout (start/stop, stick bars, button lamps). The card shows
-// the connected-pad enumeration and two controls: enable + deadzone.
+// the connected-pad enumeration and three controls: enable, face-button
+// layout, and deadzone.
 
 import (
 	"context"
@@ -20,6 +21,7 @@ import (
 
 	qt "github.com/mappu/miqt/qt6"
 
+	"github.com/tipsy-linux/tipsy/internal/gamepad"
 	guimodel "github.com/tipsy-linux/tipsy/internal/gui"
 )
 
@@ -79,12 +81,23 @@ func (w *mainWindow) buildControllerCard() *qt.QFrame {
 	form.SetRowWrapPolicy(qt.QFormLayout__WrapLongRows)
 	form.SetFieldGrowthPolicy(qt.QFormLayout__AllNonFixedFieldsGrow)
 
+	w.controllerFaceLayout = qt.NewQComboBox2()
+	w.controllerFaceLayout.AddItems([]string{
+		"Xbox (A bottom, X left)",
+		"Switch (B bottom, Y left)",
+	})
+	w.controllerFaceLayout.SetAccessibleName("Controller face button layout")
+	w.controllerFaceLayout.SetAccessibleDescription("Choose Xbox or Switch face-button labels. Xbox is the default. Switch swaps A/B and X/Y so Switch-labelled controllers match their printed buttons.")
+	w.controllerFaceLayout.SetToolTip("Xbox is the default. Switch swaps A/B and X/Y.")
+	w.controllerFaceLayout.OnCurrentIndexChanged(func(int) { w.persistControllerSettings() })
+	form.AddRow3("Face button layout", w.controllerFaceLayout.QWidget)
+
 	w.controllerDeadL, w.controllerDeadLValue = w.newDeadzoneRow("Stick deadzone")
 	form.AddRow3("Deadzone", w.controllerDeadL.QWidget)
 	form.AddRow3("", w.controllerDeadLValue.QWidget)
 	cardLayout.AddLayout(form.QLayout)
 
-	w.controllerHint = qt.NewQLabel3("Deadzone applies to both sticks (0.00–0.50, default 0.00 = device flat). Changes save immediately and never touch the graphics settings above.")
+	w.controllerHint = qt.NewQLabel3("Xbox is the default face-button layout. Choose Switch if A/B or X/Y feel reversed on a Switch-labelled controller. Deadzone applies to both sticks (0.00–0.50, default 0.00 = device flat). Changes save immediately and apply the next time Roblox starts; they never touch the graphics settings above.")
 	w.controllerHint.SetWordWrap(true)
 	setObjectName(w.controllerHint.QObject, "noticeInfo")
 	cardLayout.AddWidget(w.controllerHint.QWidget)
@@ -138,7 +151,24 @@ func (w *mainWindow) bindControllerSettings(settings guimodel.ControllerSettings
 	if w.controllerDeadLValue != nil {
 		w.controllerDeadLValue.SetText(fmt.Sprintf("%.2f", settings.Deadzone))
 	}
+	if w.controllerFaceLayout != nil {
+		w.setComboIndex(w.controllerFaceLayout, controllerFaceButtonLayoutIndex(w.controllerFaceButtonLayout))
+	}
 	w.updateControllerStateNote()
+}
+
+func controllerFaceButtonLayoutIndex(layout gamepad.FaceButtonLayout) int {
+	if gamepad.NormalizeFaceButtonLayout(layout) == gamepad.FaceButtonLayoutSwitch {
+		return 1
+	}
+	return 0
+}
+
+func (w *mainWindow) readControllerFaceButtonLayout() gamepad.FaceButtonLayout {
+	if w.controllerFaceLayout != nil && w.controllerFaceLayout.CurrentIndex() == 1 {
+		return gamepad.FaceButtonLayoutSwitch
+	}
+	return gamepad.FaceButtonLayoutXbox
 }
 
 func deadzoneSliderValue(deadzone float64) int {
@@ -170,15 +200,17 @@ func (w *mainWindow) persistControllerSettings() {
 		return
 	}
 	settings := w.readControllerWidgets()
-	if err := saveControllerSettings(settings); err != nil {
+	layout := w.readControllerFaceButtonLayout()
+	if err := saveControllerSettingsWithFaceButtonLayout(settings, layout); err != nil {
 		w.controllerHint.SetText("Could not save controller settings: " + err.Error())
 		setObjectName(w.controllerHint.QObject, "noticeError")
 		refreshStyle(w.controllerHint.QWidget)
 		return
 	}
 	w.controllerSettings = settings
+	w.controllerFaceButtonLayout = layout
 	w.controllerEnable.SetText(controllerToggleText(settings.Enabled))
-	w.controllerHint.SetText("Controller settings saved.")
+	w.controllerHint.SetText("Controller settings saved. Restart Roblox to apply controller changes.")
 	setObjectName(w.controllerHint.QObject, "noticeSuccess")
 	refreshStyle(w.controllerHint.QWidget)
 	w.updateControllerStateNote()
@@ -200,15 +232,16 @@ func (w *mainWindow) updateControllerStateNote() {
 
 func (w *mainWindow) resetControllerSettings() {
 	settings := guimodel.DefaultControllerSettings()
-	if err := saveControllerSettings(settings); err != nil {
+	if err := saveControllerSettingsWithFaceButtonLayout(settings, gamepad.FaceButtonLayoutXbox); err != nil {
 		w.controllerHint.SetText("Could not reset controller settings: " + err.Error())
 		setObjectName(w.controllerHint.QObject, "noticeError")
 		refreshStyle(w.controllerHint.QWidget)
 		return
 	}
 	w.controllerSettings = settings
+	w.controllerFaceButtonLayout = gamepad.FaceButtonLayoutXbox
 	w.bindControllerSettings(settings)
-	w.controllerHint.SetText("Controller settings reset to defaults (on, device-flat deadzone).")
+	w.controllerHint.SetText("Controller settings reset to defaults (on, Xbox face buttons, device-flat deadzone).")
 	setObjectName(w.controllerHint.QObject, "noticeSuccess")
 	refreshStyle(w.controllerHint.QWidget)
 }

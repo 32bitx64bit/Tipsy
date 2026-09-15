@@ -30,9 +30,10 @@ type Config struct {
 	// its shape/defaults/merge rules (see internal/gamepad GamepadConfig
 	// under the "gamepad" key); this package only preserves the bytes
 	// across atomic read-modify-write cycles. Missing or null means
-	// defaults (on, device-flat deadzone baseline, rumble
-	// on-if-supported). Never edited by hand for engine behavior: it
-	// shapes host stick calibration only, never GlobalBasicSettings_13.xml.
+	// defaults (on, device-flat deadzone baseline, Xbox face-button layout).
+	// Never edited by hand for engine behavior: it shapes host stick
+	// calibration and labelled face-button translation only, never
+	// GlobalBasicSettings_13.xml.
 	Gamepad json.RawMessage `json:"gamepad,omitempty"`
 	// Microphone carries the persisted capture-door section verbatim.
 	// CLI/mic owns its shape/defaults/merge rules (see internal/mic

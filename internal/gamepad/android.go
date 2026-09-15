@@ -135,6 +135,30 @@ func MapEvdevButton(code uint16, hidLinear bool) (int, bool) {
 	return 0, false
 }
 
+// MapEvdevButtonWithFaceButtonLayout maps the positional evdev code and then
+// applies the selected labelled diamond. Switch-labelled pads place B/A at
+// south/east and Y/X at west/north, the inverse of Android's Xbox-positioned
+// BUTTON_A/B/X/Y semantics. Shoulders, sticks, system, and D-pad controls are
+// deliberately unchanged.
+func MapEvdevButtonWithFaceButtonLayout(code uint16, hidLinear bool, layout FaceButtonLayout) (int, bool) {
+	key, ok := MapEvdevButton(code, hidLinear)
+	if !ok || NormalizeFaceButtonLayout(layout) != FaceButtonLayoutSwitch {
+		return key, ok
+	}
+	switch key {
+	case AndroidButtonA:
+		return AndroidButtonB, true
+	case AndroidButtonB:
+		return AndroidButtonA, true
+	case AndroidButtonX:
+		return AndroidButtonY, true
+	case AndroidButtonY:
+		return AndroidButtonX, true
+	default:
+		return key, true
+	}
+}
+
 // MotionRange is the honest per-axis range served for
 // InputDevice.getMotionRange(axis): device min/max/flat, never zeros for
 // unreported axes (unreported axes are simply absent from the map).
@@ -172,6 +196,8 @@ type AndroidFrame struct {
 //   - HAT0X/Y or DPAD buttons → both HAT_X/Y axes and DPAD_* keys
 //     (duality, matching real Android drivers).
 //   - BTN_TL2/TR2 edges → BUTTON_L2/R2 keys alongside the analog axes.
+//   - Face buttons use f.FaceButtonLayout (Xbox by default; Switch swaps
+//     only A/B and X/Y).
 func MapFrame(f *Frame, deviceID int, m Mapping, infos map[uint16]AbsInfo) AndroidFrame {
 	buttonCap, axisCap := 0, 0
 	if f != nil {
@@ -198,7 +224,7 @@ func MapFrame(f *Frame, deviceID int, m Mapping, infos map[uint16]AbsInfo) Andro
 	out.Disconnect = f.Disconnect
 
 	for code := range f.Buttons {
-		if key, ok := MapEvdevButton(code, m.HIDLinearButtons); ok {
+		if key, ok := MapEvdevButtonWithFaceButtonLayout(code, m.HIDLinearButtons, f.FaceButtonLayout); ok {
 			out.Buttons[key] = true
 		}
 	}

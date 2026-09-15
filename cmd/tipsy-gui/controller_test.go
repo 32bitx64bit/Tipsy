@@ -58,6 +58,26 @@ func TestControllerSettingsRoundTrip(t *testing.T) {
 	}
 }
 
+func TestControllerFaceButtonLayoutRoundTrip(t *testing.T) {
+	t.Parallel()
+	path := controllerTestPath(t)
+	settings := guimodel.ControllerSettings{Enabled: true, Deadzone: 0.25}
+	merged, err := mergeControllerSettingsWithFaceButtonLayout(nil, settings, gamepad.FaceButtonLayoutSwitch)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, merged, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	got, layout, err := loadControllerSettingsAndFaceButtonLayoutAt(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != settings || layout != gamepad.FaceButtonLayoutSwitch {
+		t.Fatalf("settings/layout=%+v/%q want %+v/%q", got, layout, settings, gamepad.FaceButtonLayoutSwitch)
+	}
+}
+
 func TestControllerSettingsPartialSectionKeepsDefaults(t *testing.T) {
 	t.Parallel()
 	path := controllerTestPath(t)
@@ -258,7 +278,7 @@ func TestControllerCardBuildsBindsAndPersistsOffscreen(t *testing.T) {
 
 	// Lean card: enable + one global deadzone slider, no per-stick
 	// sliders, no invert toggles, no rumble box, no test readout.
-	if win.controllerEnable == nil || win.controllerDeadL == nil || win.controllerDeadLValue == nil {
+	if win.controllerEnable == nil || win.controllerFaceLayout == nil || win.controllerDeadL == nil || win.controllerDeadLValue == nil {
 		t.Fatal("lean controller card widgets are incomplete")
 	}
 	if !win.controllerEnable.IsChecked() {
@@ -269,6 +289,9 @@ func TestControllerCardBuildsBindsAndPersistsOffscreen(t *testing.T) {
 	}
 	if win.controllerDeadLValue.Text() != "0.00" {
 		t.Fatalf("deadzone label=%q", win.controllerDeadLValue.Text())
+	}
+	if win.controllerFaceLayout.CurrentIndex() != 0 || !strings.Contains(win.controllerFaceLayout.ItemText(0), "Xbox") {
+		t.Fatalf("default face layout=%d/%q, want Xbox", win.controllerFaceLayout.CurrentIndex(), win.controllerFaceLayout.ItemText(0))
 	}
 	// Other cards untouched: graphics controls still standing.
 	if win.settingsFPS == nil || win.settingsApply == nil || win.settingsRenderer == nil {
@@ -308,6 +331,15 @@ func TestControllerCardBuildsBindsAndPersistsOffscreen(t *testing.T) {
 	}
 	if win.controllerDeadLValue.Text() != "0.20" {
 		t.Fatalf("slider label=%q", win.controllerDeadLValue.Text())
+	}
+	win.controllerFaceLayout.SetCurrentIndex(1)
+	qt.QCoreApplication_ProcessEvents()
+	_, layout, err := loadControllerSettingsAndFaceButtonLayout()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if layout != gamepad.FaceButtonLayoutSwitch {
+		t.Fatalf("face layout did not persist: %q", layout)
 	}
 	win.selectPage(0)
 	win.win.Close()

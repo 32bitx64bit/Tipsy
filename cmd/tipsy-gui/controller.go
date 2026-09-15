@@ -12,9 +12,10 @@ package main
 //
 // The canonical home is the existing settings file
 // ($XDG_CONFIG_HOME/tipsy/config.json) under the "gamepad" section shaped
-// exactly as gamepad.GamepadConfig: {enabled, deadzone}. Input owns that
-// shape and its merge/defaults/env semantics; this file is a thin adapter.
-// Missing file/key = gamepad defaults (on, device-flat baseline).
+// exactly as gamepad.GamepadConfig: {enabled, deadzone, faceButtonLayout}.
+// Input owns that shape and its merge/defaults/env semantics; this file is a
+// thin adapter. Missing file/key = gamepad defaults (on, device-flat
+// baseline, Xbox face buttons).
 //
 // Deleted vs controller v1 (honest list, see
 // gamepad-simplify-2026-09-12.md): the legacy controller.json import, the
@@ -34,7 +35,8 @@ import (
 )
 
 // controllerSettingsFromGamepad renders the effective calibration as widget
-// state: the single global floor both sticks share.
+// state: the single global floor both sticks share. Face-button layout stays
+// separate because it has no presentation-neutral field in ControllerSettings.
 func controllerSettingsFromGamepad(cfg gamepad.GamepadConfig) guimodel.ControllerSettings {
 	return guimodel.ControllerSettings{
 		Enabled:  cfg.Enabled,
@@ -42,11 +44,13 @@ func controllerSettingsFromGamepad(cfg gamepad.GamepadConfig) guimodel.Controlle
 	}
 }
 
-// gamepadConfigFromController bakes widget state into calibration.
-func gamepadConfigFromController(settings guimodel.ControllerSettings) gamepad.GamepadConfig {
+// gamepadConfigFromController bakes widget state and the selected labelled
+// diamond into the Input-owned config.
+func gamepadConfigFromController(settings guimodel.ControllerSettings, layout gamepad.FaceButtonLayout) gamepad.GamepadConfig {
 	cfg := gamepad.DefaultGamepadConfig()
 	cfg.Enabled = settings.Enabled
 	cfg.Deadzone = settings.Deadzone
+	cfg.FaceButtonLayout = layout
 	cfg.Normalize()
 	return cfg
 }
@@ -59,28 +63,45 @@ func loadControllerSettings() (guimodel.ControllerSettings, error) {
 	return loadControllerSettingsAt(canonicalControllerPath())
 }
 
+// loadControllerSettingsAndFaceButtonLayout reads both controller widget
+// surfaces from one shared config-file snapshot.
+func loadControllerSettingsAndFaceButtonLayout() (guimodel.ControllerSettings, gamepad.FaceButtonLayout, error) {
+	return loadControllerSettingsAndFaceButtonLayoutAt(canonicalControllerPath())
+}
+
 // loadControllerSettingsAt reads the canonical section from path; a missing
 // file means defaults. A malformed section (or a malformed file) yields
 // defaults plus an honest error and leaves the file untouched.
 func loadControllerSettingsAt(path string) (guimodel.ControllerSettings, error) {
+	settings, _, err := loadControllerSettingsAndFaceButtonLayoutAt(path)
+	return settings, err
+}
+
+func loadControllerSettingsAndFaceButtonLayoutAt(path string) (guimodel.ControllerSettings, gamepad.FaceButtonLayout, error) {
 	defaults := controllerSettingsFromGamepad(gamepad.DefaultGamepadConfig())
 	data, err := os.ReadFile(path)
 	if err != nil {
 		if os.IsNotExist(err) {
-			return defaults, nil
+			return defaults, gamepad.FaceButtonLayoutXbox, nil
 		}
-		return defaults, err
+		return defaults, gamepad.FaceButtonLayoutXbox, err
 	}
 	cfg, parseErr := gamepad.ParseGamepadSection(data)
 	if parseErr != nil {
-		return defaults, fmt.Errorf("controller settings are invalid (%v); using defaults, file left untouched", parseErr)
+		return defaults, gamepad.FaceButtonLayoutXbox, fmt.Errorf("controller settings are invalid (%v); using defaults, file left untouched", parseErr)
 	}
-	return controllerSettingsFromGamepad(cfg), nil
+	return controllerSettingsFromGamepad(cfg), cfg.FaceButtonLayout, nil
 }
 
 func saveControllerSettings(settings guimodel.ControllerSettings) error {
 	return config.UpdateJSON(func(data []byte) ([]byte, error) {
 		return mergeControllerSettings(data, settings)
+	})
+}
+
+func saveControllerSettingsWithFaceButtonLayout(settings guimodel.ControllerSettings, layout gamepad.FaceButtonLayout) error {
+	return config.UpdateJSON(func(data []byte) ([]byte, error) {
+		return mergeControllerSettingsWithFaceButtonLayout(data, settings, layout)
 	})
 }
 
@@ -100,10 +121,20 @@ func saveControllerSettingsAt(path string, settings guimodel.ControllerSettings)
 // config document. The canonical caller runs it under config.UpdateJSON's
 // cross-process lock; the path helper keeps isolated-file tests simple.
 func mergeControllerSettings(data []byte, settings guimodel.ControllerSettings) ([]byte, error) {
+	// This compatibility helper preserves an already selected layout when a
+	// caller only changes the pre-existing enable/deadzone controls.
+	cfg, err := gamepad.ParseGamepadSection(data)
+	if err != nil {
+		return nil, fmt.Errorf("controller settings not saved: existing settings file is invalid (%v)", err)
+	}
+	return mergeControllerSettingsWithFaceButtonLayout(data, settings, cfg.FaceButtonLayout)
+}
+
+func mergeControllerSettingsWithFaceButtonLayout(data []byte, settings guimodel.ControllerSettings, layout gamepad.FaceButtonLayout) ([]byte, error) {
 	if err := guimodel.ValidateControllerSettings(settings); err != nil {
 		return nil, err
 	}
-	merged, err := gamepad.UpsertGamepadSection(data, gamepadConfigFromController(settings))
+	merged, err := gamepad.UpsertGamepadSection(data, gamepadConfigFromController(settings, layout))
 	if err != nil {
 		return nil, fmt.Errorf("controller settings not saved: existing settings file is invalid (%v)", err)
 	}

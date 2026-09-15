@@ -224,6 +224,10 @@ func (r *Reader) SetMapping(m Mapping) {
 type Frame struct {
 	// Buttons holds pressed evdev BTN_* codes.
 	Buttons map[uint16]bool
+	// FaceButtonLayout selects the semantic A/B/X/Y mapping used by MapFrame.
+	// The zero value is Xbox for direct tests and callers that do not apply a
+	// persisted GamepadConfig first.
+	FaceButtonLayout FaceButtonLayout
 	// Axes holds normalized values per ABS code: sticks/hats in -1..1,
 	// trigger-shaped axes in 0..1.
 	Axes map[uint16]float64

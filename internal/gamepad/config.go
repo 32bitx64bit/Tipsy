@@ -37,22 +37,49 @@ const (
 	GamepadConfigSectionKey = "gamepad"
 )
 
-// GamepadConfig is the persisted gamepad section: enable switch plus one
-// global stick floor. Defaults (missing JSON = these): enabled, zero user
-// floor (the small 0.08 reader fallback still applies when a device reports
-// flat=0, so the default effective feel is unchanged from v1).
+// FaceButtonLayout identifies which labelled face-button arrangement a pad
+// presents. Android's BUTTON_A/B/X/Y keycodes use Xbox positions, so Xbox is
+// the safe compatibility default. Switch swaps A/B and X/Y at the physical
+// diamond before the Android translation.
+type FaceButtonLayout string
+
+const (
+	FaceButtonLayoutXbox   FaceButtonLayout = "xbox"
+	FaceButtonLayoutSwitch FaceButtonLayout = "switch"
+)
+
+// NormalizeFaceButtonLayout rejects unknown persisted values by falling back
+// to the compatible Xbox layout. That includes an omitted field from older
+// config files.
+func NormalizeFaceButtonLayout(layout FaceButtonLayout) FaceButtonLayout {
+	if layout == FaceButtonLayoutSwitch {
+		return FaceButtonLayoutSwitch
+	}
+	return FaceButtonLayoutXbox
+}
+
+// GamepadConfig is the persisted gamepad section: enable switch, one global
+// stick floor, and the labelled face-button arrangement. Defaults (missing
+// JSON = these): enabled, zero user floor (the small 0.08 reader fallback
+// still applies when a device reports flat=0, so the default effective feel
+// is unchanged from v1), and Xbox face-button positions.
 type GamepadConfig struct {
-	Enabled  bool    `json:"enabled"`
-	Deadzone float64 `json:"deadzone"`
+	Enabled          bool             `json:"enabled"`
+	Deadzone         float64          `json:"deadzone"`
+	FaceButtonLayout FaceButtonLayout `json:"faceButtonLayout"`
 }
 
 // DefaultGamepadConfig returns the missing-JSON defaults.
 func DefaultGamepadConfig() GamepadConfig {
-	return GamepadConfig{Enabled: true}
+	return GamepadConfig{Enabled: true, FaceButtonLayout: FaceButtonLayoutXbox}
 }
 
-// Normalize clamps the floor into its honest domain 0..MaxUserDeadzone.
-func (c *GamepadConfig) Normalize() { c.Deadzone = clampDeadzone(c.Deadzone) }
+// Normalize clamps the floor into its honest domain 0..MaxUserDeadzone and
+// keeps the face-button choice to its two supported layouts.
+func (c *GamepadConfig) Normalize() {
+	c.Deadzone = clampDeadzone(c.Deadzone)
+	c.FaceButtonLayout = NormalizeFaceButtonLayout(c.FaceButtonLayout)
+}
 
 func clampDeadzone(v float64) float64 {
 	if v < 0 {
@@ -69,6 +96,12 @@ func (c *GamepadConfig) SetDeadzone(v float64) { c.Deadzone = clampDeadzone(v) }
 
 // SetEnabled sets the whole-subsystem switch (default on).
 func (c *GamepadConfig) SetEnabled(v bool) { c.Enabled = v }
+
+// SetFaceButtonLayout changes the labelled face-button arrangement. Unknown
+// values resolve to Xbox so callers never create an unmapped third layout.
+func (c *GamepadConfig) SetFaceButtonLayout(layout FaceButtonLayout) {
+	c.FaceButtonLayout = NormalizeFaceButtonLayout(layout)
+}
 
 // EffectiveDeadzone resolves the user floor both sticks share.
 func (c GamepadConfig) EffectiveDeadzone() float64 { return clampDeadzone(c.Deadzone) }
@@ -176,16 +209,21 @@ func (c GamepadConfig) WithEnv(lookup func(string) (string, bool)) GamepadConfig
 
 // ApplyCalibration shapes a normalized reader Frame in place with the single
 // user stick floor: |v| <= floor → 0, else passthrough unrescaled (matching
-// the engine's own |v|<=flat gate). Only the four stick codes move: ABS_X/Y
-// (left) and m.RightX/m.RightY (right, skipped when NoAxis); both sticks
-// share the floor (uniform, no per-stick override, Y never inverted).
-// Trigger-shaped axes and hats are untouched (honest device flat only).
-// Codes absent from f.Axes stay absent (never zero-filled). A nil frame or a
-// zero floor is a no-op. Callers apply this between Reader.Feed and MapFrame;
+// the engine's own |v|<=flat gate). It also stamps the configured face-button
+// layout for the following MapFrame translation. Only the four stick codes
+// move: ABS_X/Y (left) and m.RightX/m.RightY (right, skipped when NoAxis);
+// both sticks share the floor (uniform, no per-stick override, Y never
+// inverted). Trigger-shaped axes and hats are untouched (honest device flat
+// only). Codes absent from f.Axes stay absent (never zero-filled). A nil
+// frame is a no-op. Callers apply this between Reader.Feed and MapFrame;
 // MapFrame itself stays pure translation so golden tests pin each layer once.
 func ApplyCalibration(f *Frame, m Mapping, cfg GamepadConfig) {
+	if f == nil {
+		return
+	}
+	f.FaceButtonLayout = NormalizeFaceButtonLayout(cfg.FaceButtonLayout)
 	floor := clampDeadzone(cfg.Deadzone)
-	if f == nil || len(f.Axes) == 0 || floor <= 0 {
+	if len(f.Axes) == 0 || floor <= 0 {
 		return
 	}
 	seen := make(map[uint16]bool, 4)
