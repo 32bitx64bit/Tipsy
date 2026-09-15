@@ -219,7 +219,8 @@ static void string_diag_record_elapsed(int path, uint64_t started_ns)
 
 static jint JNICALL t_GetVersion(JNIEnv *env)
 {
-	return GoJNI_GetVersion(env);
+	(void)env;
+	return JNI_VERSION_1_6;
 }
 
 static jclass JNICALL t_DefineClass(JNIEnv *env, const char *name, jobject loader, const jbyte *buf, jsize len)
@@ -335,7 +336,10 @@ static void JNICALL t_DeleteLocalRef(JNIEnv *env, jobject obj)
 
 static jboolean JNICALL t_IsSameObject(JNIEnv *env, jobject obj1, jobject obj2)
 {
-	return GoJNI_IsSameObject(env, obj1, obj2);
+	(void)env;
+	/* Tipsy handles currently encode object identity, not distinct reference
+	 * slots. Revisit this if local/global/weak handle representation changes. */
+	return obj1 == obj2 ? JNI_TRUE : JNI_FALSE;
 }
 
 static jobject JNICALL t_NewLocalRef(JNIEnv *env, jobject ref)
@@ -1157,7 +1161,13 @@ static jint JNICALL t_MonitorExit(JNIEnv *env, jobject obj)
 }
 static jint JNICALL t_GetJavaVM(JNIEnv *env, JavaVM **vm)
 {
-	return GoJNI_GetJavaVM(env, vm);
+	(void)env;
+	/* The vtable is reachable only after bridge initialization. Preserve the
+	 * existing Go implementation's NULL-output behavior. */
+	if (vm != NULL) {
+		*vm = &g_vm;
+	}
+	return JNI_OK;
 }
 static void JNICALL t_GetStringRegion(JNIEnv *env, jstring str, jsize start, jsize len, jchar *buf)
 {
