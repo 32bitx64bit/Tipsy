@@ -109,6 +109,14 @@ func (vm *VM) dispatchNativeHelper(o *Object, class, name, sig string, args *C.j
 		appReadyLastStep = step
 		appReadyLastMu.Unlock()
 		logging.Logger(logging.CatJNI).Info("[jni] onAppReady", "step", step)
+		// The current APK's named `Home` transition is the only AppReady
+		// value established as the Home route. HomeContainer and
+		// RootSwitchNavigator also appear after a Games return, so neither can
+		// stand in for it. The subscription receives only a fixed enum; this
+		// engine string is never forwarded or retained by the startup seam.
+		if step == "Home" {
+			noteStartupHomeReady()
+		}
 	case name == "gameActivity_onScreenOrientationChanged" && sig == "(IZ)V":
 		// jvalueIAt treats nil args as zero registers (CallVoidMethod always
 		// passes the full register array for this 2-arg signature).
