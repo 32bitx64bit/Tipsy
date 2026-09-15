@@ -134,6 +134,16 @@ func TestOpenSLCaptureMuteSilencesBuffer(t *testing.T) {
 	}
 }
 
+func TestOpenSLCaptureUnmuteAfterSilentDecisionDoesNotReadUnopenedBackend(t *testing.T) {
+	allowMicrophone(t)
+	if rc := audioTestCaptureUnmuteRace(); rc != 0 {
+		t.Fatalf("mute-to-unmute buffer decision race rc=%d", rc)
+	}
+	if CaptureMuted() {
+		t.Fatal("unmute race fixture left capture muted")
+	}
+}
+
 func TestOpenSLMutedCaptureCadence(t *testing.T) {
 	allowMicrophone(t)
 	result, ok := MutedCaptureCadenceFixture()

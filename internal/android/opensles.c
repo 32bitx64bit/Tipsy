@@ -381,6 +381,10 @@ typedef struct {
 	uint32_t expected_playback_count;
 	uint32_t expected_playback_index;
 	int playback_copy_mismatch;
+	/* Test-only boundary hook: turns mute off after one recorder has committed
+	 * a silent-buffer decision. It proves that the buffer cannot re-sample the
+	 * gate and dereference an unopened backend. */
+	int unmute_after_capture_decision;
 } fake_backend_state;
 
 static fake_backend_state fake_backend = {
@@ -752,18 +756,44 @@ static void backend_close(tipsy_sl_object *o)
 	o->stream = NULL;
 }
 
+/* A recorder chooses mute versus real capture once in stream_worker for each
+ * dequeued buffer. Keep the silence completion separate from backend_transfer
+ * so an unmute between two gate reads can never turn a deliberately unopened
+ * silent buffer into pa_simple_read(NULL, ...). */
+static int complete_muted_capture(tipsy_sl_object *o, void *buffer, size_t bytes)
+{
+	memset(buffer, 0, bytes);
+	if (o->backend_fake) {
+		pthread_mutex_lock(&fake_backend.mu);
+		fake_backend.reads++;
+		fake_backend.read_bytes += bytes;
+		pthread_mutex_unlock(&fake_backend.mu);
+	}
+	capture_error_cleared();
+	return 0;
+}
+
+static void fake_after_capture_decision(int muted)
+{
+	int unmute = 0;
+	if (!muted)
+		return;
+	pthread_mutex_lock(&fake_backend.mu);
+	if (fake_backend.enabled && fake_backend.unmute_after_capture_decision) {
+		fake_backend.unmute_after_capture_decision = 0;
+		unmute = 1;
+	}
+	pthread_mutex_unlock(&fake_backend.mu);
+	if (unmute)
+		tipsy_audio_set_capture_muted(0);
+}
+
 static int backend_transfer(tipsy_sl_object *o, void *buffer, size_t bytes)
 {
-	if (o->kind == OBJ_RECORDER && capture_is_muted()) {
-		memset(buffer, 0, bytes);
-		if (o->backend_fake) {
-			pthread_mutex_lock(&fake_backend.mu);
-			fake_backend.reads++;
-			fake_backend.read_bytes += bytes;
-			pthread_mutex_unlock(&fake_backend.mu);
-		}
-		capture_error_cleared();
-		return 0;
+	if (o->stream == NULL) {
+		stream_error_log(o, o->kind == OBJ_RECORDER ? "capture stream error" : "playback stream error",
+			"backend unavailable after open");
+		return -1;
 	}
 	if (o->backend_fake) {
 		int fail = 0;
@@ -1043,14 +1073,26 @@ static void *stream_worker(void *arg)
 			backend_close(o);
 			rc = -1;
 		} else {
-			/* Muted buffers are clocked locally and zero-filled below. Do not
-			 * open (and therefore never read) a physical microphone merely to
-			 * pace silence; an unmute opens it at that later buffer boundary. */
+			/* Make exactly one gate decision for this buffer. A muted completion
+			 * is locally paced/silent and never opens or reads a physical device;
+			 * unmute takes effect at the next decision boundary and must first
+			 * produce a successful non-NULL backend. */
 			int muted = o->kind == OBJ_RECORDER && capture_is_muted();
-			if (o->stream == NULL && !muted)
-				rc = backend_open(o);
-			if (rc == 0)
-				rc = backend_transfer(o, n->io_buffer, n->size);
+			if (o->kind == OBJ_RECORDER)
+				fake_after_capture_decision(muted);
+			if (muted) {
+				rc = complete_muted_capture(o, n->io_buffer, n->size);
+			} else {
+				if (o->stream == NULL)
+					rc = backend_open(o);
+				if (rc == 0 && o->stream == NULL) {
+					stream_error_log(o, o->kind == OBJ_RECORDER ? "capture stream error" : "playback stream error",
+						"backend open returned no stream");
+					rc = -1;
+				}
+				if (rc == 0)
+					rc = backend_transfer(o, n->io_buffer, n->size);
+			}
 		}
 		if (rc < 0)
 			backend_close(o);
@@ -2062,6 +2104,7 @@ static void fake_reset(int fail_first_write, int fail_first_read)
 	fake_backend.expected_playback_count = 0;
 	fake_backend.expected_playback_index = 0;
 	fake_backend.playback_copy_mismatch = 0;
+	fake_backend.unmute_after_capture_decision = 0;
 	pthread_mutex_unlock(&fake_backend.mu);
 }
 
@@ -2070,6 +2113,13 @@ static void fake_set_failures(uint32_t writes, uint32_t reads)
 	pthread_mutex_lock(&fake_backend.mu);
 	fake_backend.fail_writes_remaining = writes;
 	fake_backend.fail_reads_remaining = reads;
+	pthread_mutex_unlock(&fake_backend.mu);
+}
+
+static void fake_unmute_after_capture_decision(void)
+{
+	pthread_mutex_lock(&fake_backend.mu);
+	fake_backend.unmute_after_capture_decision = 1;
 	pthread_mutex_unlock(&fake_backend.mu);
 }
 
@@ -2563,6 +2613,29 @@ int tipsy_audio_test_capture_muted(uint64_t *read_bytes, uint32_t *callbacks, in
 	if (had_nonzero)
 		*had_nonzero = nz;
 	return rc;
+}
+
+/* Forces the historical mute->unmute race exactly between this buffer's
+ * decision and the old backend_transfer gate re-read. The committed buffer
+ * must remain silent, complete normally, and open nothing; the following
+ * buffer (outside this fixture) observes unmute and opens before reading. */
+int tipsy_audio_test_capture_unmute_race(void)
+{
+	uint64_t transferred = 0;
+	uint32_t callbacks = 0;
+	uint32_t opens = 0;
+	int had_nonzero = 1;
+
+	fake_reset(0, 0);
+	tipsy_audio_set_capture_muted(1);
+	fake_unmute_after_capture_decision();
+	int rc = test_stream(1, 48000, 1, 960, &transferred, &callbacks, &had_nonzero, 2000);
+	pthread_mutex_lock(&fake_backend.mu);
+	opens = fake_backend.opens;
+	pthread_mutex_unlock(&fake_backend.mu);
+	tipsy_audio_set_capture_muted(0);
+	fake_disable();
+	return rc == 0 && transferred == 960 && callbacks == 1 && !had_nonzero && opens == 0 ? 0 : -1;
 }
 
 /* A bounded re-enqueue fixture for the exact muted recorder path. It never

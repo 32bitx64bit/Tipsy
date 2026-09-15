@@ -401,6 +401,7 @@ int tipsy_audio_test_host_duplex(uint32_t rate, uint32_t channels, uint32_t byte
                                  uint64_t *written, uint32_t *play_callbacks,
                                  uint64_t *read_bytes, uint32_t *capture_callbacks);
 int tipsy_audio_test_capture_muted(uint64_t *read_bytes, uint32_t *callbacks, int *had_nonzero);
+int tipsy_audio_test_capture_unmute_race(void);
 int tipsy_audio_test_capture_refused(void);
 int tipsy_audio_test_capture_midstream_disable(uint32_t *callbacks, uint32_t *reads);
 /* Content-free ownership/reclamation result from a fake OpenSL player queue.

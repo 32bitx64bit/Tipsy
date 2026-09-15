@@ -133,3 +133,10 @@ func audioTestMutedCaptureInterrupts() (uint32, int) {
 	rc := C.tipsy_audio_test_muted_capture_interrupts(&failed)
 	return uint32(failed), int(rc)
 }
+
+// audioTestCaptureUnmuteRace deterministically flips mute after a recorder
+// committed a silent-buffer decision. It is a fake-host safety seam: the
+// buffer must stay silent and no unopened backend may be read.
+func audioTestCaptureUnmuteRace() int {
+	return int(C.tipsy_audio_test_capture_unmute_race())
+}
