@@ -607,10 +607,18 @@ static void tipsy_cacert_log(int ok)
 	}
 }
 
+/* O_TMPFILE contains O_DIRECTORY. Testing any shared bit consumes a
+ * nonexistent variadic mode argument on an ordinary open(..., O_DIRECTORY).
+ * This mirrors the host libc's full-mask test for the composite flag. */
+static int tipsy_open_needs_mode(int flags)
+{
+	return (flags & O_CREAT) != 0 || (flags & O_TMPFILE) == O_TMPFILE;
+}
+
 int tipsy_open(const char *path, int flags, ...)
 {
 	char *remap = tipsy_cacert_remap(path, 0, 0);
-	int need_mode = (flags & (O_CREAT | O_TMPFILE)) != 0;
+	int need_mode = tipsy_open_needs_mode(flags);
 	mode_t mode = 0;
 
 	if (need_mode) {
@@ -644,7 +652,7 @@ int tipsy_open_2(const char *path, int flags)
 int tipsy_openat(int dirfd, const char *path, int flags, ...)
 {
 	char *remap;
-	int need_mode = (flags & (O_CREAT | O_TMPFILE)) != 0;
+	int need_mode = tipsy_open_needs_mode(flags);
 	mode_t mode = 0;
 
 	if (need_mode) {
