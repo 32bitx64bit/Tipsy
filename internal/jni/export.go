@@ -873,7 +873,18 @@ func GoJNI_GetStringChars(env *C.JNIEnv, str C.jstring, isCopy *C.jboolean) *C.j
 		return nil
 	}
 	dst := unsafe.Slice((*uint16)(p), count)
-	if copy(dst[:units], objectUTF16Units(o)) != units {
+	// An ordinary Go string has no retained UTF-16 representation. Encode it
+	// straight into the native buffer that this JNI call returns instead of
+	// materializing a temporary full UTF-16 slice. rawUTF16 is intentionally
+	// different: it exists exactly for a Java String whose unpaired surrogates
+	// cannot be recovered from o.str, so copy those retained code units.
+	written := 0
+	if o.utf16 != nil {
+		written = copy(dst[:units], o.utf16.units)
+	} else {
+		written = encodeUTF16To(dst[:units], o.str)
+	}
+	if written != units {
 		C.free(p)
 		return nil
 	}

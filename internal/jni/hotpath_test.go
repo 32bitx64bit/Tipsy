@@ -109,6 +109,86 @@ func TestGetStringCharsDirectUTF16EncodingRandomized(t *testing.T) {
 	}
 }
 
+func TestGetStringCharsUsesOnlyItsFinalUTF16Buffer(t *testing.T) {
+	vm, err := NewVM()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	tests := []struct {
+		name       string
+		value      string
+		units      []uint16
+		wantRaw    bool
+		wantAllocs float64
+	}{
+		{
+			name:       "ordinary Unicode string",
+			value:      "normal \x00 text \U0001f600 \u4e16\u754c",
+			wantAllocs: 0,
+		},
+		{
+			name:       "retained unpaired surrogates",
+			units:      []uint16{0x0041, 0x0000, 0xd800, 0x0042, 0xdc00},
+			wantRaw:    true,
+			wantAllocs: 0,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			var id int64
+			if tc.units == nil {
+				id = testNewUTF16String(vm, tc.value)
+			} else {
+				vm.mu.Lock()
+				id = vm.newStringUTF16On(vm.envRaw, tc.units).id
+				vm.mu.Unlock()
+			}
+			o := vm.get(id)
+			if o == nil {
+				t.Fatal("string object")
+			}
+			if got := o.utf16 != nil; got != tc.wantRaw {
+				t.Fatalf("retained raw UTF-16 = %v, want %v", got, tc.wantRaw)
+			}
+			want := tc.units
+			if want == nil {
+				want = utf16.Encode([]rune(tc.value))
+			}
+
+			// C.malloc owns the returned JNI buffer and is intentionally outside
+			// Go's allocation count. A nonzero count here would mean the normal
+			// path rebuilt a transient UTF-16 slice instead of using that buffer.
+			allocs := testing.AllocsPerRun(100, func() {
+				chars, isCopy := testGetStringChars(vm.envRaw, id)
+				if chars == nil || !isCopy {
+					t.Fatal("GetStringChars")
+				}
+				testReleaseStringChars(vm.envRaw, id, chars)
+			})
+			if allocs != tc.wantAllocs {
+				t.Fatalf("GetStringChars allocations/run = %v, want %v", allocs, tc.wantAllocs)
+			}
+
+			chars, isCopy := testGetStringChars(vm.envRaw, id)
+			if chars == nil || !isCopy {
+				t.Fatal("GetStringChars final check")
+			}
+			got := unsafe.Slice((*uint16)(chars), len(want)+1)
+			for i, unit := range want {
+				if got[i] != unit {
+					t.Fatalf("unit[%d] = %#x, want %#x", i, got[i], unit)
+				}
+			}
+			if got[len(want)] != 0 {
+				t.Fatalf("terminator = %#x, want 0", got[len(want)])
+			}
+			testReleaseStringChars(vm.envRaw, id, chars)
+		})
+	}
+}
+
 func TestPrimitiveArrayCriticalPins(t *testing.T) {
 	vm, err := NewVM()
 	if err != nil {
