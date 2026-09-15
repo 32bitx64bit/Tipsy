@@ -792,6 +792,151 @@ func TestClientLockAllowsSettingsDocumentOnlyApply(t *testing.T) {
 	}
 }
 
+func TestCustomFastFlagsPersistAndEnterOfficialClientSettingsOverrides(t *testing.T) {
+	s := testService(t)
+	flags := []FastFlag{
+		{Name: flagGameBasicSettingsFramerateCap, Value: "False"},
+		{Name: flagRenderUseTextureManager2, Value: "True"},
+		{Name: "DFIntExampleCustomLimit", Value: "77"},
+		{Name: "FStringExampleCustomName", Value: "custom value"},
+	}
+	if err := s.SaveFastFlags(context.Background(), flags); err != nil {
+		t.Fatalf("save custom Fast Flags: %v", err)
+	}
+
+	raw, err := os.ReadFile(s.Path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var persisted struct {
+		FastFlags []FastFlag `json:"fastFlags"`
+	}
+	if err := json.Unmarshal(raw, &persisted); err != nil {
+		t.Fatal(err)
+	}
+	if !equalFastFlags(persisted.FastFlags, flags) {
+		t.Fatalf("persisted Fast Flags=%+v want %+v", persisted.FastFlags, flags)
+	}
+
+	loaded, err := s.LoadFastFlags(context.Background())
+	if err != nil || !equalFastFlags(loaded, flags) {
+		t.Fatalf("loaded Fast Flags=%+v err=%v", loaded, err)
+	}
+	// LoadOverrides is the exact map Runtime merges into AndroidApp's
+	// ClientAppSettings JSON before official nativeInitClientSettings. These
+	// assertions pin both persistence and the next-launch application surface.
+	overrides, err := s.LoadOverrides(context.Background())
+	if err != nil {
+		t.Fatalf("load official client-settings overrides: %v", err)
+	}
+	if overrides[flagGameBasicSettingsFramerateCap] != "False" ||
+		overrides[flagRenderUseTextureManager2] != "True" ||
+		overrides["DFIntExampleCustomLimit"] != "77" ||
+		overrides["FStringExampleCustomName"] != "custom value" {
+		t.Fatalf("custom Fast Flags did not enter ClientAppSettings overrides: %v", overrides)
+	}
+}
+
+func TestCustomFastFlagsRemainAcrossNormalSettingsApplyAndPreserveUnknownData(t *testing.T) {
+	s := testService(t)
+	if err := os.MkdirAll(filepath.Dir(s.Path), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	original := []byte(`{"renderer":"auto","frameRate":{"mode":"auto"},"futureOwner":{"enabled":true,"keep":"yes"}}`)
+	if err := os.WriteFile(s.Path, original, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	flags := []FastFlag{{Name: "FFlagCustomPersisted", Value: "True"}}
+	if err := s.SaveFastFlags(context.Background(), flags); err != nil {
+		t.Fatal(err)
+	}
+	writeXML(t, s, "-1")
+	settings, err := s.Load(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	settings.StartFullscreen = true
+	if _, err := s.Apply(context.Background(), settings); err != nil {
+		t.Fatalf("normal settings apply: %v", err)
+	}
+
+	raw, err := os.ReadFile(s.Path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var document map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &document); err != nil {
+		t.Fatal(err)
+	}
+	var future struct {
+		Enabled bool   `json:"enabled"`
+		Keep    string `json:"keep"`
+	}
+	if err := json.Unmarshal(document["futureOwner"], &future); err != nil || !future.Enabled || future.Keep != "yes" {
+		t.Fatalf("unknown data was not preserved: %+v err=%v", future, err)
+	}
+	var gotFlags []FastFlag
+	if err := json.Unmarshal(document["fastFlags"], &gotFlags); err != nil || !equalFastFlags(gotFlags, flags) {
+		t.Fatalf("Fast Flags after normal settings apply=%+v err=%v", gotFlags, err)
+	}
+}
+
+func TestCustomFastFlagValidation(t *testing.T) {
+	valid := []FastFlag{
+		{Name: "FFlagExample", Value: "True"},
+		{Name: "DFFlagExample", Value: "False"},
+		{Name: "FIntExample", Value: "-2147483648"},
+		{Name: "DFIntExample", Value: "2147483647"},
+		{Name: "FStringExample", Value: "a printable value"},
+		{Name: "DFStringExample", Value: "another value"},
+	}
+	if err := ValidateFastFlags(valid); err != nil {
+		t.Fatalf("valid Fast Flags rejected: %v", err)
+	}
+	for _, flags := range [][]FastFlag{
+		{{Name: "FFlag", Value: "True"}},
+		{{Name: "FFlagBad-Name", Value: "True"}},
+		{{Name: "FFlagExample", Value: "true"}},
+		{{Name: "FIntExample", Value: "2147483648"}},
+		{{Name: "FStringExample", Value: "line\nbreak"}},
+		{{Name: "FFlagDuplicate", Value: "True"}, {Name: "FFlagDuplicate", Value: "False"}},
+	} {
+		if err := ValidateFastFlags(flags); err == nil {
+			t.Fatalf("invalid Fast Flags accepted: %+v", flags)
+		}
+	}
+}
+
+func TestCustomFastFlagsOverrideSettingsAndReportConflicts(t *testing.T) {
+	flags := []FastFlag{
+		{Name: flagRenderUseTextureManager2, Value: "True"},
+		{Name: flagGameBasicSettingsFramerateCap, Value: "False"},
+		{Name: "FFlagIndependentCustom", Value: "True"},
+		{Name: flagPreferOpenGL, Value: "False"},
+	}
+	overrides, err := OverridesWithFastFlags(Default(), flags)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if overrides[flagRenderUseTextureManager2] != "True" || overrides[flagGameBasicSettingsFramerateCap] != "False" {
+		t.Fatalf("custom Fast Flags must win over generated Settings values: %v", overrides)
+	}
+	conflicts := FastFlagConflicts(flags)
+	want := []FastFlagConflict{
+		{Name: flagRenderUseTextureManager2, Setting: "Texture quality"},
+		{Name: flagGameBasicSettingsFramerateCap, Setting: "Frame rate"},
+		{Name: flagPreferOpenGL, Setting: "Renderer"},
+	}
+	if len(conflicts) != len(want) {
+		t.Fatalf("conflicts=%+v want %+v", conflicts, want)
+	}
+	for i := range want {
+		if conflicts[i] != want[i] {
+			t.Fatalf("conflict[%d]=%+v want %+v", i, conflicts[i], want[i])
+		}
+	}
+}
+
 func assertHighTextureOverrides(t *testing.T, got map[string]any) {
 	t.Helper()
 	want := map[string]any{

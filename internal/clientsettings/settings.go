@@ -1,8 +1,9 @@
 // Copyright 2026 The Tipsy Authors
 // SPDX-License-Identifier: GPL-3.0-or-later
 
-// Package clientsettings owns the small, validated Roblox settings surface
-// exposed by Tipsy. It deliberately does not expose arbitrary fast flags.
+// Package clientsettings owns the validated Roblox settings surface exposed by
+// Tipsy, including user-owned custom Fast Flags that are supplied to the
+// official Android client-settings initialization on its next launch.
 package clientsettings
 
 import (
@@ -18,6 +19,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode"
+	"unicode/utf8"
 
 	"github.com/tipsy-linux/tipsy/internal/config"
 	"github.com/tipsy-linux/tipsy/internal/graphics"
@@ -79,9 +82,13 @@ const (
 	videoMemoryHighBytes = "1073741824"
 	videoMemoryLowBytes  = "67108864"
 
-	maxSettingsBytes  = 64 << 10
-	maxRobloxXMLBytes = 4 << 20
-	unlimitedFPSValue = "9999"
+	maxSettingsBytes    = 64 << 10
+	maxRobloxXMLBytes   = 4 << 20
+	maxFastFlags        = 128
+	maxFastFlagNameLen  = 128
+	maxFastFlagValueLen = 4 << 10
+	maxFastFlagBytes    = 32 << 10
+	unlimitedFPSValue   = "9999"
 	// engineDefaultFramerateCap is Roblox's stored "no Tipsy override"
 	// value (Auto / client-owned). Used when Tipsy must write a working
 	// UserGameSettings document without having observed a prior cap.
@@ -162,6 +169,132 @@ type Settings struct {
 	DiscordJoinButton   bool `json:"discordJoinButton"`
 }
 
+// FastFlag is one user-owned Roblox Fast Flag override. Name identifies a
+// supported Fast Flag type and Value is its serialized client-settings value.
+// Values are intentionally strings because that is the representation used by
+// Roblox's applicationSettings JSON surface.
+type FastFlag struct {
+	Name  string `json:"name"`
+	Value string `json:"value"`
+}
+
+// FastFlagConflict identifies a custom Fast Flag that takes precedence over a
+// normal Tipsy Settings control. It is informational: custom Fast Flags remain
+// valid so an informed user can intentionally override a Settings choice.
+type FastFlagConflict struct {
+	Name    string
+	Setting string
+}
+
+var fastFlagPrefixes = []string{"FFlag", "DFFlag", "FInt", "DFInt", "FString", "DFString"}
+
+var fastFlagControlLabels = map[string]string{
+	flagPreferOpenGL:                      "Renderer",
+	flagPreferVulkan:                      "Renderer",
+	flagGameBasicSettingsFramerateCap:     "Frame rate",
+	flagTaskSchedulerLimitFPS240:          "Frame rate",
+	intTaskSchedulerTargetFPS:             "Frame rate",
+	flagTextureQualityOverrideEnabled:     "Texture quality",
+	intTextureQualityOverride:             "Texture quality",
+	flagUITextureCompressionDesktop:       "Texture quality",
+	flagTCTextureCompressionDesktop:       "Texture quality",
+	intRenderTextureTotalBudgetMB:         "Texture quality",
+	intRenderTextureMipBias:               "Texture quality",
+	intDebugTc1MaxAllowedMemoryBudget:     "Texture quality",
+	intRenderForceVideoMemorySize:         "Texture quality",
+	flagTM2RuntimeTextureDisableStreaming: "Texture quality",
+	flagTM2SkipMipsForUnstreamable2:       "Texture quality",
+	flagUseTM1LegacyMipPackForDecal:       "Texture quality",
+	flagRenderUseTextureManager2:          "Texture quality",
+	flagNewRenderUseTextureManager2:       "Texture quality",
+}
+
+// ValidateFastFlags checks the bounded, typed custom-Fast-Flag surface.
+// It permits the flag classes accepted by the Android client-settings JSON:
+// boolean FFlag/DFFlag, signed 32-bit FInt/DFInt, and printable FString/
+// DFString values. Duplicate names are rejected so the persisted list always
+// has one unambiguous final value for each flag.
+func ValidateFastFlags(flags []FastFlag) error {
+	if len(flags) > maxFastFlags {
+		return fmt.Errorf("at most %d custom Fast Flags are allowed", maxFastFlags)
+	}
+	seen := make(map[string]struct{}, len(flags))
+	total := 0
+	for _, flag := range flags {
+		kind, ok := fastFlagKind(flag.Name)
+		if !ok {
+			return fmt.Errorf("custom Fast Flag name is invalid")
+		}
+		if _, duplicate := seen[flag.Name]; duplicate {
+			return fmt.Errorf("custom Fast Flag names must be unique")
+		}
+		seen[flag.Name] = struct{}{}
+		if err := validateFastFlagValue(kind, flag.Value); err != nil {
+			return err
+		}
+		total += len(flag.Name) + len(flag.Value)
+		if total > maxFastFlagBytes {
+			return fmt.Errorf("custom Fast Flag data exceeds %d bytes", maxFastFlagBytes)
+		}
+	}
+	return nil
+}
+
+func fastFlagKind(name string) (string, bool) {
+	if name == "" || len(name) > maxFastFlagNameLen {
+		return "", false
+	}
+	for _, prefix := range fastFlagPrefixes {
+		if suffix, found := strings.CutPrefix(name, prefix); found {
+			if suffix == "" {
+				return "", false
+			}
+			for _, r := range suffix {
+				if !(r >= 'A' && r <= 'Z' || r >= 'a' && r <= 'z' || r >= '0' && r <= '9' || r == '_') {
+					return "", false
+				}
+			}
+			return prefix, true
+		}
+	}
+	return "", false
+}
+
+func validateFastFlagValue(kind, value string) error {
+	if value == "" || len(value) > maxFastFlagValueLen || !utf8.ValidString(value) {
+		return fmt.Errorf("custom Fast Flag value is invalid")
+	}
+	for _, r := range value {
+		if unicode.IsControl(r) {
+			return fmt.Errorf("custom Fast Flag value contains a control character")
+		}
+	}
+	switch kind {
+	case "FFlag", "DFFlag":
+		if value != "True" && value != "False" {
+			return fmt.Errorf("boolean Fast Flags require True or False")
+		}
+	case "FInt", "DFInt":
+		if _, err := strconv.ParseInt(value, 10, 32); err != nil {
+			return fmt.Errorf("integer Fast Flags require a signed 32-bit integer")
+		}
+	}
+	return nil
+}
+
+// FastFlagConflicts returns the custom entries that will override one of
+// Tipsy's regular Settings controls at launch. The result retains the input
+// order for direct display in an editor.
+func FastFlagConflicts(flags []FastFlag) []FastFlagConflict {
+	var conflicts []FastFlagConflict
+	for _, flag := range flags {
+		if setting, ok := fastFlagControlLabels[flag.Name]; ok {
+			conflicts = append(conflicts, FastFlagConflict{Name: flag.Name, Setting: setting})
+		}
+	}
+	return conflicts
+}
+
 // NeedsUnthrottledPresentation reports the inverse of the user's independent
 // VSync choice. VSync defaults off, so a missing field in an older persisted
 // config requests unthrottled presentation without changing its FPS target.
@@ -178,9 +311,38 @@ type ApplyResult struct {
 
 type persistedSettings struct {
 	Settings
-	FPSOwned    bool   `json:"fpsOwned,omitempty"`
-	FPSOriginal string `json:"fpsOriginal,omitempty"`
-	FPSApplied  string `json:"fpsApplied,omitempty"`
+	FastFlags   []FastFlag `json:"fastFlags,omitempty"`
+	FPSOwned    bool       `json:"fpsOwned,omitempty"`
+	FPSOriginal string     `json:"fpsOriginal,omitempty"`
+	FPSApplied  string     `json:"fpsApplied,omitempty"`
+	unknown     map[string]json.RawMessage
+}
+
+func equalFastFlags(a, b []FastFlag) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
+}
+
+func cloneFastFlags(flags []FastFlag) []FastFlag {
+	if flags == nil {
+		return nil
+	}
+	return append([]FastFlag(nil), flags...)
+}
+
+func samePersistedSettings(a, b persistedSettings) bool {
+	return a.Settings == b.Settings &&
+		equalFastFlags(a.FastFlags, b.FastFlags) &&
+		a.FPSOwned == b.FPSOwned &&
+		a.FPSOriginal == b.FPSOriginal &&
+		a.FPSApplied == b.FPSApplied
 }
 
 type Service struct {
@@ -289,6 +451,11 @@ func normalized(s Settings) Settings {
 }
 
 func (s *Service) Load(ctx context.Context) (Settings, error) {
+	release, err := AcquireSettingsDocumentLock()
+	if err != nil {
+		return Settings{}, err
+	}
+	defer release()
 	doc, err := s.loadDocument(ctx)
 	return doc.Settings, err
 }
@@ -303,6 +470,11 @@ func (s *Service) Apply(ctx context.Context, wanted Settings) (ApplyResult, erro
 		return ApplyResult{}, err
 	}
 	if settingsDocumentOnlyChange(wanted, oldDoc.Settings) {
+		release, err := AcquireSettingsDocumentLock()
+		if err != nil {
+			return ApplyResult{}, err
+		}
+		defer release()
 		return s.applyLocked(ctx, wanted)
 	}
 	release, err := AcquireClientLock()
@@ -310,6 +482,11 @@ func (s *Service) Apply(ctx context.Context, wanted Settings) (ApplyResult, erro
 		return ApplyResult{}, err
 	}
 	defer release()
+	releaseDocument, err := AcquireSettingsDocumentLock()
+	if err != nil {
+		return ApplyResult{}, err
+	}
+	defer releaseDocument()
 	return s.applyLocked(ctx, wanted)
 }
 
@@ -409,7 +586,7 @@ func (s *Service) applyLocked(ctx context.Context, wanted Settings) (ApplyResult
 	placementChanged := oldDoc.Display != wanted.Display
 	fullscreenChanged := oldDoc.StartFullscreen != wanted.StartFullscreen
 	discordChanged := oldDoc.DiscordRichPresence != wanted.DiscordRichPresence || oldDoc.DiscordJoinButton != wanted.DiscordJoinButton
-	docChanged := oldDoc != newDoc
+	docChanged := !samePersistedSettings(oldDoc, newDoc)
 	if xmlChanged {
 		if err := config.AtomicWriteFile(xmlPath, newXML, 0o600); err != nil {
 			return ApplyResult{}, fmt.Errorf("write Roblox frame-rate setting: %w", err)
@@ -446,6 +623,11 @@ func (s *Service) applyLocked(ctx context.Context, wanted Settings) (ApplyResult
 // frame-rate choice. Auto still leaves a healthy document's cap under
 // client ownership. The caller must hold the client lock for the full launch.
 func (s *Service) ReconcileWhileClientLocked(ctx context.Context) error {
+	release, err := AcquireSettingsDocumentLock()
+	if err != nil {
+		return err
+	}
+	defer release()
 	doc, err := s.loadDocument(ctx)
 	if err != nil {
 		return err
@@ -508,6 +690,24 @@ func Overrides(s Settings) (map[string]any, error) {
 	return out, nil
 }
 
+// OverridesWithFastFlags returns the official ClientAppSettings overrides for
+// normal Tipsy Settings plus validated user Fast Flags. User entries are added
+// last by design, so an explicitly confirmed custom value wins over a normal
+// Settings control for the next Roblox launch.
+func OverridesWithFastFlags(s Settings, flags []FastFlag) (map[string]any, error) {
+	out, err := Overrides(s)
+	if err != nil {
+		return nil, err
+	}
+	if err := ValidateFastFlags(flags); err != nil {
+		return nil, err
+	}
+	for _, flag := range flags {
+		out[flag.Name] = flag.Value
+	}
+	return out, nil
+}
+
 // applyTextureQualityOverrides writes Tipsy's named LowTextureMode mapping.
 // Desktop compression, legacy-decal, video-memory, and compositor-budget keys
 // are explicit so a previous high launch cannot linger in the engine flag
@@ -554,11 +754,60 @@ func applyTextureQualityOverrides(out map[string]any, low bool) {
 }
 
 func (s *Service) LoadOverrides(ctx context.Context) (map[string]any, error) {
-	settings, err := s.Load(ctx)
+	release, err := AcquireSettingsDocumentLock()
 	if err != nil {
 		return nil, err
 	}
-	return Overrides(settings)
+	defer release()
+	doc, err := s.loadDocument(ctx)
+	if err != nil {
+		return nil, err
+	}
+	return OverridesWithFastFlags(doc.Settings, doc.FastFlags)
+}
+
+// LoadFastFlags returns a copy of the persisted custom Fast Flag list. The
+// list is independent of Settings so an ordinary renderer/FPS save cannot
+// erase it.
+func (s *Service) LoadFastFlags(ctx context.Context) ([]FastFlag, error) {
+	release, err := AcquireSettingsDocumentLock()
+	if err != nil {
+		return nil, err
+	}
+	defer release()
+	doc, err := s.loadDocument(ctx)
+	if err != nil {
+		return nil, err
+	}
+	return cloneFastFlags(doc.FastFlags), nil
+}
+
+// SaveFastFlags atomically replaces the custom Fast Flag list. It refuses to
+// change a list while Roblox is running because its values are passed into the
+// official Android client-settings initialization only at launch.
+func (s *Service) SaveFastFlags(ctx context.Context, flags []FastFlag) error {
+	if err := ValidateFastFlags(flags); err != nil {
+		return err
+	}
+	releaseClient, err := AcquireClientLock()
+	if err != nil {
+		return err
+	}
+	defer releaseClient()
+	releaseDocument, err := AcquireSettingsDocumentLock()
+	if err != nil {
+		return err
+	}
+	defer releaseDocument()
+	doc, err := s.loadDocument(ctx)
+	if err != nil {
+		return err
+	}
+	if equalFastFlags(doc.FastFlags, flags) {
+		return nil
+	}
+	doc.FastFlags = cloneFastFlags(flags)
+	return s.writeDocument(doc)
 }
 
 func fpsValue(f FrameRate) string {
@@ -662,30 +911,69 @@ func (s *Service) loadDocument(ctx context.Context) (persistedSettings, error) {
 	if got.FPSOwned && (got.FPSOriginal == "" || got.FPSApplied == "") {
 		return s.recoverMalformed(ctx, path)
 	}
+	if err := ValidateFastFlags(got.FastFlags); err != nil {
+		return s.recoverMalformed(ctx, path)
+	}
 	return got, nil
 }
 
 type persistedWire struct {
-	Renderer            Renderer  `json:"renderer"`
-	FrameRate           FrameRate `json:"frameRate"`
-	VSync               bool      `json:"vsync"`
-	LowTextureMode      bool      `json:"lowTextureMode"`
-	Display             string    `json:"display,omitempty"`
-	StartFullscreen     bool      `json:"startFullscreen"`
-	DiscordRichPresence *bool     `json:"discordRichPresence"`
-	DiscordJoinButton   bool      `json:"discordJoinButton"`
-	FPSOwned            bool      `json:"fpsOwned,omitempty"`
-	FPSOriginal         string    `json:"fpsOriginal,omitempty"`
-	FPSApplied          string    `json:"fpsApplied,omitempty"`
+	Renderer            Renderer   `json:"renderer"`
+	FrameRate           FrameRate  `json:"frameRate"`
+	VSync               bool       `json:"vsync"`
+	LowTextureMode      bool       `json:"lowTextureMode"`
+	Display             string     `json:"display,omitempty"`
+	StartFullscreen     bool       `json:"startFullscreen"`
+	DiscordRichPresence *bool      `json:"discordRichPresence"`
+	DiscordJoinButton   bool       `json:"discordJoinButton"`
+	FastFlags           []FastFlag `json:"fastFlags"`
+	FPSOwned            bool       `json:"fpsOwned,omitempty"`
+	FPSOriginal         string     `json:"fpsOriginal,omitempty"`
+	FPSApplied          string     `json:"fpsApplied,omitempty"`
+}
+
+type persistedWriteWire struct {
+	Renderer            Renderer   `json:"renderer"`
+	FrameRate           FrameRate  `json:"frameRate"`
+	VSync               bool       `json:"vsync"`
+	LowTextureMode      bool       `json:"lowTextureMode"`
+	Display             string     `json:"display,omitempty"`
+	StartFullscreen     bool       `json:"startFullscreen"`
+	DiscordRichPresence bool       `json:"discordRichPresence"`
+	DiscordJoinButton   bool       `json:"discordJoinButton"`
+	FastFlags           []FastFlag `json:"fastFlags,omitempty"`
+	FPSOwned            bool       `json:"fpsOwned,omitempty"`
+	FPSOriginal         string     `json:"fpsOriginal,omitempty"`
+	FPSApplied          string     `json:"fpsApplied,omitempty"`
+}
+
+var persistedSettingKeys = map[string]struct{}{
+	"renderer": {}, "frameRate": {}, "vsync": {}, "lowTextureMode": {},
+	"display": {}, "startFullscreen": {}, "discordRichPresence": {},
+	"discordJoinButton": {}, "fastFlags": {}, "fpsOwned": {},
+	"fpsOriginal": {}, "fpsApplied": {},
 }
 
 func decodePersisted(data []byte, got *persistedSettings) error {
 	if got == nil {
 		return fmt.Errorf("persisted settings destination is nil")
 	}
+	var raw map[string]json.RawMessage
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return err
+	}
+	if raw == nil {
+		return fmt.Errorf("persisted settings must be a JSON object")
+	}
 	var wire persistedWire
 	if err := json.Unmarshal(data, &wire); err != nil {
 		return err
+	}
+	unknown := make(map[string]json.RawMessage)
+	for key, value := range raw {
+		if _, known := persistedSettingKeys[key]; !known {
+			unknown[key] = append(json.RawMessage(nil), value...)
+		}
 	}
 	presence := false
 	if wire.DiscordRichPresence != nil {
@@ -702,11 +990,50 @@ func decodePersisted(data []byte, got *persistedSettings) error {
 			DiscordRichPresence: presence,
 			DiscordJoinButton:   wire.DiscordJoinButton,
 		},
+		FastFlags:   cloneFastFlags(wire.FastFlags),
 		FPSOwned:    wire.FPSOwned,
 		FPSOriginal: wire.FPSOriginal,
 		FPSApplied:  wire.FPSApplied,
+		unknown:     unknown,
 	}
 	return nil
+}
+
+// MarshalJSON preserves top-level fields that this version does not model so
+// a narrow settings or Fast Flag save does not discard a future owner's data.
+func (doc persistedSettings) MarshalJSON() ([]byte, error) {
+	known, err := json.Marshal(persistedWriteWire{
+		Renderer:            doc.Renderer,
+		FrameRate:           doc.FrameRate,
+		VSync:               doc.VSync,
+		LowTextureMode:      doc.LowTextureMode,
+		Display:             doc.Display,
+		StartFullscreen:     doc.StartFullscreen,
+		DiscordRichPresence: doc.DiscordRichPresence,
+		DiscordJoinButton:   doc.DiscordJoinButton,
+		FastFlags:           doc.FastFlags,
+		FPSOwned:            doc.FPSOwned,
+		FPSOriginal:         doc.FPSOriginal,
+		FPSApplied:          doc.FPSApplied,
+	})
+	if err != nil {
+		return nil, err
+	}
+	var encoded map[string]json.RawMessage
+	if err := json.Unmarshal(known, &encoded); err != nil {
+		return nil, err
+	}
+	result := make(map[string]json.RawMessage, len(doc.unknown)+len(encoded))
+	for key, value := range doc.unknown {
+		result[key] = append(json.RawMessage(nil), value...)
+	}
+	for key := range persistedSettingKeys {
+		delete(result, key)
+	}
+	for key, value := range encoded {
+		result[key] = value
+	}
+	return json.Marshal(result)
 }
 
 func (s *Service) writeDocument(doc persistedSettings) error {

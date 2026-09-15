@@ -54,6 +54,7 @@ type mainWindow struct {
 	settingsDiscordJoin                              *qt.QCheckBox
 	settingsDisplay                                  *qt.QComboBox
 	settingsStartFullscreen                          *qt.QCheckBox
+	settingsFastFlags                                *qt.QPushButton
 	settingsDisplayKeys                              []string
 	settingsSyncing                                  bool
 	controllerSettings                               guimodel.ControllerSettings

@@ -313,6 +313,14 @@ func (w *mainWindow) buildSettingsPage() *qt.QWidget {
 	w.settingsStartFullscreen.SetAccessibleDescription("When enabled, Tipsy asks the desktop to fullscreen each new Roblox window. This is a Tipsy host startup preference; it does not mirror or change Roblox's in-app fullscreen toggle.")
 	w.settingsStartFullscreen.SetToolTip("Off by default. Applies to the next Roblox window and does not mirror Roblox's in-app fullscreen toggle.")
 	form.AddRow3("Start Roblox fullscreen", w.settingsStartFullscreen.QWidget)
+
+	w.settingsFastFlags = qt.NewQPushButton3("Edit Fast Flags…")
+	setObjectName(w.settingsFastFlags.QObject, "secondaryButton")
+	w.settingsFastFlags.SetAccessibleName("Edit custom Fast Flags")
+	w.settingsFastFlags.SetAccessibleDescription("Open the custom Fast Flag editor. Each flag and value is saved only after confirmation and applies when Roblox is restarted.")
+	w.settingsFastFlags.SetToolTip("Add, edit, or remove custom Fast Flag overrides. Restart Roblox after saving.")
+	w.settingsFastFlags.OnClicked(w.showFastFlagEditor)
+	form.AddRow3("Custom Fast Flags", w.settingsFastFlags.QWidget)
 	cardLayout.AddLayout(form.QLayout)
 
 	w.settingsHint = qt.NewQLabel3("Roblox must be restarted before renderer, frame-rate, VSync, or texture quality changes take effect. Discord Rich Presence applies while Roblox is running. The default monitor applies to the next Tipsy or Roblox window; Start Roblox fullscreen applies to the next Roblox window.")

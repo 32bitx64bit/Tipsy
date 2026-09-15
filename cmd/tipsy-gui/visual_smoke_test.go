@@ -126,6 +126,9 @@ func TestOffscreenVisualProof(t *testing.T) {
 	if win.settingsStartFullscreen == nil || win.settingsStartFullscreen.IsChecked() || win.settingsStartFullscreen.AccessibleName() != "Start Roblox fullscreen" {
 		t.Fatalf("start fullscreen control did not render unchecked and accessible: %#v", win.settingsStartFullscreen)
 	}
+	if win.settingsFastFlags == nil || win.settingsFastFlags.Text() != "Edit Fast Flags…" || win.settingsFastFlags.AccessibleName() != "Edit custom Fast Flags" {
+		t.Fatalf("custom Fast Flag editor control did not render accessibly: %#v", win.settingsFastFlags)
+	}
 	if description := win.settingsStartFullscreen.AccessibleDescription(); !strings.Contains(description, "Tipsy host startup preference") || !strings.Contains(description, "does not mirror") {
 		t.Fatalf("start fullscreen accessibility copy is not honest: %q", description)
 	}
