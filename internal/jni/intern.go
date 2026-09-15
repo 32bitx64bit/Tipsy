@@ -74,33 +74,15 @@ var (
 )
 
 func publishMethod(info *internedMethod) uint32 {
-	old := methodTab.Load()
-	n := 1
-	if old != nil {
-		n = len(*old)
-	}
-	next := make([]*internedMethod, n+1)
-	if old != nil {
-		copy(next, *old)
-	}
-	next[n] = info
-	methodTab.Store(&next)
-	return uint32(n)
+	next, slot := appendInternedSnapshot(methodTab.Load(), info)
+	methodTab.Store(next)
+	return slot
 }
 
 func publishField(info *internedField) uint32 {
-	old := fieldTab.Load()
-	n := 1
-	if old != nil {
-		n = len(*old)
-	}
-	next := make([]*internedField, n+1)
-	if old != nil {
-		copy(next, *old)
-	}
-	next[n] = info
-	fieldTab.Store(&next)
-	return uint32(n)
+	next, slot := appendInternedSnapshot(fieldTab.Load(), info)
+	fieldTab.Store(next)
+	return slot
 }
 
 func internMethod(class, name, sig string, static bool) (id C.jmethodID, first bool) {
