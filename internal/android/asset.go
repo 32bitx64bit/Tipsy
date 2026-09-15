@@ -7,6 +7,7 @@ package android
 
 import (
 	"archive/zip"
+	"container/list"
 	"errors"
 	"io"
 	"os"
@@ -56,15 +57,40 @@ type assetLoad struct {
 	done chan struct{}
 	data []byte
 	err  error
+
+	// blobKey is held out of the inactive LRU while this one loader may be
+	// publishing aliases. It replaces the former generation-wide eviction
+	// deferral: unrelated inactive blobs remain eligible.
+	blobKey uintptr
 }
 
 // assetBlob is one unique backing slice retained by an asset source
 // generation. Name/path/ZIP maps may all reference it, but bytes are counted
 // once. It deliberately carries no asset identity beyond the private map key.
 type assetBlob struct {
-	bytes   int64
-	lastUse uint64
-	order   uint64
+	bytes int64
+
+	// aliases make eviction proportional to this one blob rather than every
+	// cache map. lru is non-nil only when no native lease or in-flight load
+	// protects the blob, so closing the final native lease can select the LRU
+	// front without a full-cache scan.
+	aliases       map[assetBlobAlias]struct{}
+	inFlight      uint32
+	nativeHandles uint32
+	lru           *list.Element
+}
+
+type assetBlobAliasKind uint8
+
+const (
+	assetBlobAliasName assetBlobAliasKind = iota
+	assetBlobAliasPath
+	assetBlobAliasZIP
+)
+
+type assetBlobAlias struct {
+	kind assetBlobAliasKind
+	key  string
 }
 
 type assetCachePolicy struct {
@@ -88,14 +114,28 @@ type assetCache struct {
 	assetsDir  string
 	apkPath    string
 
-	nameCache    map[string]nameEntry
-	pathOK       map[string][]byte
-	zipBlobCache map[string][]byte
-	blobs        map[uintptr]assetBlob
-	loads        map[string]*assetLoad
-	nextUse      uint64
-	nextBlob     uint64
-	nextNegative uint64
+	nameCache     map[string]nameEntry
+	pathOK        map[string][]byte
+	zipBlobCache  map[string][]byte
+	blobs         map[uintptr]assetBlob
+	loads         map[string]*assetLoad
+	nextNegative  uint64
+	negativeNames map[string]struct{}
+	// nextNegativeExpiry skips negative-index maintenance until an entry could
+	// expire. A stale earlier value is safe; it can only trigger an early scan
+	// of the bounded negative index, never leave an expired result reusable.
+	nextNegativeExpiry time.Time
+
+	// All eviction/accounting fields below are maintained with each map or
+	// lease transition. The normal final AAsset_close path therefore does not
+	// walk the cache just to rediscover its byte total or oldest candidate.
+	inactiveBlobs      list.List // uintptr keys, least-recently-used first
+	positiveEntries    int
+	negativeEntries    int
+	negativeCandidates int
+	negativeOther      int
+	cachedBytes        int64
+	borrowedCacheBytes int64
 
 	apkArch    *apkArchive
 	apkOpening *archiveOpen
@@ -114,6 +154,9 @@ type assetPin struct {
 	pinner        *runtime.Pinner
 	bytes         int64
 	activeHandles uint64
+	cache         *assetCache
+	cacheKey      uintptr
+	tracksCache   bool
 }
 
 // assetCacheSnapshot is intentionally content-free. It is package-private so
@@ -150,9 +193,14 @@ var (
 	assetGeneration uint64 = 1
 	currentAssets   atomic.Pointer[assetCache]
 
-	assetPinsMu sync.RWMutex
-	assetPins   = make(map[uintptr]assetPin)
-	emptyAsset  byte
+	assetPinsMu    sync.RWMutex
+	assetPins      = make(map[uintptr]assetPin)
+	assetPinTotals struct {
+		activeHandles uint64
+		pinnedBlobs   int
+		pinnedBytes   int64
+	}
+	emptyAsset byte
 
 	assetCachePolicyState = struct {
 		sync.RWMutex
@@ -176,15 +224,16 @@ func init() {
 
 func newAssetCache(generation uint64, dir, apk string) *assetCache {
 	return &assetCache{
-		generation:   generation,
-		assetsDir:    dir,
-		apkPath:      apk,
-		nameCache:    make(map[string]nameEntry),
-		pathOK:       make(map[string][]byte),
-		zipBlobCache: make(map[string][]byte),
-		blobs:        make(map[uintptr]assetBlob),
-		loads:        make(map[string]*assetLoad),
-		inflateSlots: make(chan struct{}, maxConcurrentAssetInflations),
+		generation:    generation,
+		assetsDir:     dir,
+		apkPath:       apk,
+		nameCache:     make(map[string]nameEntry),
+		pathOK:        make(map[string][]byte),
+		zipBlobCache:  make(map[string][]byte),
+		blobs:         make(map[uintptr]assetBlob),
+		loads:         make(map[string]*assetLoad),
+		negativeNames: make(map[string]struct{}),
+		inflateSlots:  make(chan struct{}, maxConcurrentAssetInflations),
 	}
 }
 
@@ -278,9 +327,9 @@ func (c *assetCache) retire() {
 }
 
 // dropRetiredCachesLocked returns an archive that is safe to close. The caller
-// must hold c.mu. Pins are intentionally not part of this cache lifecycle: C
-// AAsset_close has no Go callback, so it cannot prove that native code has
-// stopped borrowing a pinned Go blob.
+// must hold c.mu. Native pins retain their Go slices independently, while this
+// source generation remains alive only until its in-flight reads finish; an
+// AAsset close cannot extend an APK reader's source lifetime.
 func (c *assetCache) dropRetiredCachesLocked() *zip.ReadCloser {
 	if !c.retired || c.activeLoads != 0 {
 		return nil
@@ -289,6 +338,15 @@ func (c *assetCache) dropRetiredCachesLocked() *zip.ReadCloser {
 	clear(c.pathOK)
 	clear(c.zipBlobCache)
 	clear(c.blobs)
+	clear(c.negativeNames)
+	c.inactiveBlobs = list.List{}
+	c.positiveEntries = 0
+	c.negativeEntries = 0
+	c.negativeCandidates = 0
+	c.negativeOther = 0
+	c.cachedBytes = 0
+	c.borrowedCacheBytes = 0
+	c.nextNegativeExpiry = time.Time{}
 	if c.apkArch == nil {
 		return nil
 	}
@@ -360,7 +418,7 @@ func (c *assetCache) cachedNameLocked(name string, now time.Time) (nameEntry, bo
 		return nameEntry{}, false
 	}
 	if errors.Is(entry.err, os.ErrNotExist) && !entry.negativeExpiresAt.After(now) {
-		delete(c.nameCache, name)
+		c.deleteNameLocked(name)
 		return nameEntry{}, false
 	}
 	if entry.err == nil {
@@ -396,8 +454,8 @@ func (c *assetCache) finishLoad(name string, load *assetLoad, data []byte, err e
 		if _, cached := c.nameCache[name]; !cached {
 			switch {
 			case err == nil:
-				c.nameCache[name] = nameEntry{data: data}
-				c.recordBlobLocked(data)
+				c.protectLoadBlobLocked(load, data)
+				c.setNamePositiveLocked(name, data)
 			case errors.Is(err, os.ErrNotExist):
 				c.cacheNegativeLocked(name, err, assetCacheNow())
 			}
@@ -408,6 +466,7 @@ func (c *assetCache) finishLoad(name string, load *assetLoad, data []byte, err e
 	load.err = err
 	close(load.done)
 	c.activeLoads--
+	c.releaseLoadBlobLocked(load)
 	if !c.retired {
 		c.enforceAssetCachePolicyLocked(assetCacheNow())
 	}
@@ -421,40 +480,66 @@ func (c *assetCache) cacheNegativeLocked(name string, err error, now time.Time) 
 	if policy.negativeCap == 0 || policy.negativeTTL == 0 {
 		return
 	}
+	c.deleteNameLocked(name)
 	c.nextNegative++
+	expiresAt := now.Add(policy.negativeTTL)
 	c.nameCache[name] = nameEntry{
 		err:               err,
-		negativeExpiresAt: now.Add(policy.negativeTTL),
+		negativeExpiresAt: expiresAt,
 		negativeOrder:     c.nextNegative,
+	}
+	c.negativeNames[name] = struct{}{}
+	if c.nextNegativeExpiry.IsZero() || expiresAt.Before(c.nextNegativeExpiry) {
+		c.nextNegativeExpiry = expiresAt
+	}
+	c.negativeEntries++
+	if errors.Is(err, os.ErrNotExist) {
+		c.negativeCandidates++
+	} else {
+		c.negativeOther++
 	}
 }
 
 func (c *assetCache) pruneExpiredNegativeLocked(now time.Time) {
-	for name, entry := range c.nameCache {
-		if errors.Is(entry.err, os.ErrNotExist) && !entry.negativeExpiresAt.After(now) {
-			delete(c.nameCache, name)
+	if len(c.negativeNames) == 0 || c.nextNegativeExpiry.After(now) {
+		return
+	}
+
+	var next time.Time
+	for name := range c.negativeNames {
+		entry, found := c.nameCache[name]
+		if !found || !errors.Is(entry.err, os.ErrNotExist) {
+			// The normal mutation helpers prevent this. Repair defensively so a
+			// malformed private cache cannot keep maintenance permanently armed.
+			delete(c.negativeNames, name)
+			continue
+		}
+		if !entry.negativeExpiresAt.After(now) {
+			c.deleteNameLocked(name)
+			continue
+		}
+		if next.IsZero() || entry.negativeExpiresAt.Before(next) {
+			next = entry.negativeExpiresAt
 		}
 	}
+	c.nextNegativeExpiry = next
 }
 
 func (c *assetCache) enforceAssetCachePolicyLocked(now time.Time) {
 	policy := currentAssetCachePolicy()
 	c.pruneExpiredNegativeLocked(now)
-	for negativeEntries := c.negativeEntryCountLocked(); negativeEntries > policy.negativeCap; negativeEntries-- {
+	for c.negativeEntryCountLocked() > policy.negativeCap {
 		name, found := c.oldestNegativeLocked()
 		if !found {
 			break
 		}
-		delete(c.nameCache, name)
+		c.deleteNameLocked(name)
 	}
 
-	// Loading may publish aliases and a backing blob in separate maps. Until
-	// the final in-flight loader completes, keep that publication intact rather
-	// than selecting a partially published blob.
-	if c.activeLoads != 0 || c.retired {
+	if c.retired {
 		return
 	}
-	for c.cachedBytesLocked() > policy.byteBudget {
+	for c.cachedBytes > policy.byteBudget {
 		key, found := c.oldestInactiveBlobLocked()
 		if !found {
 			return
@@ -464,13 +549,7 @@ func (c *assetCache) enforceAssetCachePolicyLocked(now time.Time) {
 }
 
 func (c *assetCache) negativeEntryCountLocked() int {
-	count := 0
-	for _, entry := range c.nameCache {
-		if errors.Is(entry.err, os.ErrNotExist) {
-			count++
-		}
-	}
-	return count
+	return len(c.negativeNames)
 }
 
 func (c *assetCache) oldestNegativeLocked() (string, bool) {
@@ -479,8 +558,9 @@ func (c *assetCache) oldestNegativeLocked() (string, bool) {
 		oldestOrder uint64
 		found       bool
 	)
-	for name, entry := range c.nameCache {
-		if !errors.Is(entry.err, os.ErrNotExist) {
+	for name := range c.negativeNames {
+		entry, ok := c.nameCache[name]
+		if !ok || !errors.Is(entry.err, os.ErrNotExist) {
 			continue
 		}
 		if !found || entry.negativeOrder < oldestOrder || (entry.negativeOrder == oldestOrder && name < oldestName) {
@@ -493,55 +573,174 @@ func (c *assetCache) oldestNegativeLocked() (string, bool) {
 }
 
 func (c *assetCache) cachedBytesLocked() int64 {
-	var bytes int64
-	for _, blob := range c.blobs {
-		bytes += blob.bytes
-	}
-	return bytes
+	return c.cachedBytes
 }
 
 func (c *assetCache) oldestInactiveBlobLocked() (uintptr, bool) {
-	assetPinsMu.RLock()
-	defer assetPinsMu.RUnlock()
-
-	var (
-		oldestKey  uintptr
-		oldestBlob assetBlob
-		found      bool
-	)
-	for key, blob := range c.blobs {
-		if pin, active := assetPins[key]; active && pin.activeHandles != 0 {
-			continue
-		}
-		if !found || blob.lastUse < oldestBlob.lastUse || (blob.lastUse == oldestBlob.lastUse && blob.order < oldestBlob.order) {
-			oldestKey = key
-			oldestBlob = blob
-			found = true
-		}
+	node := c.inactiveBlobs.Front()
+	if node == nil {
+		return 0, false
 	}
-	return oldestKey, found
+	return node.Value.(uintptr), true
 }
 
-// removeBlobAliasesLocked removes every map reference to one blob while
-// holding the cache mutex. It never unpins the slice: native AAsset ownership
-// belongs solely to the close-token release path.
+// removeBlobAliasesLocked removes exactly this blob's tracked aliases while
+// holding c.mu. It never unpins the slice: native AAsset ownership belongs
+// solely to the close-token release path.
 func (c *assetCache) removeBlobAliasesLocked(key uintptr) {
-	for name, entry := range c.nameCache {
-		if entry.err == nil && assetBlobKey(entry.data) == key {
-			delete(c.nameCache, name)
+	blob, found := c.blobs[key]
+	if !found {
+		return
+	}
+	for alias := range blob.aliases {
+		switch alias.kind {
+		case assetBlobAliasName:
+			if entry, ok := c.nameCache[alias.key]; ok && entry.err == nil && assetBlobKey(entry.data) == key {
+				delete(c.nameCache, alias.key)
+				c.positiveEntries--
+			}
+		case assetBlobAliasPath:
+			if data, ok := c.pathOK[alias.key]; ok && assetBlobKey(data) == key {
+				delete(c.pathOK, alias.key)
+			}
+		case assetBlobAliasZIP:
+			if data, ok := c.zipBlobCache[alias.key]; ok && assetBlobKey(data) == key {
+				delete(c.zipBlobCache, alias.key)
+			}
 		}
 	}
-	for path, data := range c.pathOK {
-		if assetBlobKey(data) == key {
-			delete(c.pathOK, path)
-		}
+	c.removeBlobLocked(key, blob)
+}
+
+func (c *assetCache) deleteNameLocked(name string) {
+	entry, found := c.nameCache[name]
+	if !found {
+		return
 	}
-	for name, data := range c.zipBlobCache {
-		if assetBlobKey(data) == key {
-			delete(c.zipBlobCache, name)
-		}
+	delete(c.nameCache, name)
+	if entry.err == nil {
+		c.positiveEntries--
+		c.unlinkBlobAliasLocked(assetBlobKey(entry.data), assetBlobAlias{kind: assetBlobAliasName, key: name})
+		return
+	}
+	c.negativeEntries--
+	if errors.Is(entry.err, os.ErrNotExist) {
+		delete(c.negativeNames, name)
+		c.negativeCandidates--
+	} else {
+		c.negativeOther--
+	}
+	if len(c.negativeNames) == 0 {
+		c.nextNegativeExpiry = time.Time{}
+	}
+}
+
+func (c *assetCache) setNamePositiveLocked(name string, data []byte) {
+	if old, found := c.nameCache[name]; found && old.err == nil && assetBlobKey(old.data) == assetBlobKey(data) {
+		c.touchBlobLocked(data)
+		return
+	}
+	c.deleteNameLocked(name)
+	c.nameCache[name] = nameEntry{data: data}
+	c.positiveEntries++
+	c.linkBlobAliasLocked(data, assetBlobAlias{kind: assetBlobAliasName, key: name})
+}
+
+func (c *assetCache) setPathLocked(path string, data []byte) []byte {
+	if existing, found := c.pathOK[path]; found {
+		return existing
+	}
+	c.pathOK[path] = data
+	c.linkBlobAliasLocked(data, assetBlobAlias{kind: assetBlobAliasPath, key: path})
+	return data
+}
+
+func (c *assetCache) setZIPLocked(name string, data []byte) []byte {
+	if existing, found := c.zipBlobCache[name]; found {
+		return existing
+	}
+	c.zipBlobCache[name] = data
+	c.linkBlobAliasLocked(data, assetBlobAlias{kind: assetBlobAliasZIP, key: name})
+	return data
+}
+
+func (c *assetCache) linkBlobAliasLocked(data []byte, alias assetBlobAlias) {
+	key := c.recordBlobLocked(data)
+	if key == 0 {
+		return
+	}
+	blob := c.blobs[key]
+	blob.aliases[alias] = struct{}{}
+	c.blobs[key] = blob
+}
+
+func (c *assetCache) unlinkBlobAliasLocked(key uintptr, alias assetBlobAlias) {
+	if key == 0 {
+		return
+	}
+	blob, found := c.blobs[key]
+	if !found {
+		return
+	}
+	delete(blob.aliases, alias)
+	if len(blob.aliases) == 0 {
+		c.removeBlobLocked(key, blob)
+		return
+	}
+	c.blobs[key] = blob
+}
+
+func (c *assetCache) removeBlobLocked(key uintptr, blob assetBlob) {
+	if blob.lru != nil {
+		c.inactiveBlobs.Remove(blob.lru)
+	}
+	c.cachedBytes -= blob.bytes
+	if blob.nativeHandles != 0 {
+		c.borrowedCacheBytes -= blob.bytes
 	}
 	delete(c.blobs, key)
+}
+
+func (c *assetCache) makeBlobEvictableLocked(key uintptr) {
+	blob, found := c.blobs[key]
+	if !found || blob.inFlight != 0 || blob.nativeHandles != 0 || blob.lru != nil {
+		return
+	}
+	blob.lru = c.inactiveBlobs.PushBack(key)
+	c.blobs[key] = blob
+}
+
+func (c *assetCache) protectLoadBlobLocked(load *assetLoad, data []byte) {
+	if load == nil || load.blobKey != 0 {
+		return
+	}
+	key := c.recordBlobLocked(data)
+	if key == 0 {
+		return
+	}
+	blob := c.blobs[key]
+	if blob.lru != nil {
+		c.inactiveBlobs.Remove(blob.lru)
+		blob.lru = nil
+	}
+	blob.inFlight++
+	c.blobs[key] = blob
+	load.blobKey = key
+}
+
+func (c *assetCache) releaseLoadBlobLocked(load *assetLoad) {
+	if load == nil || load.blobKey == 0 {
+		return
+	}
+	key := load.blobKey
+	load.blobKey = 0
+	blob, found := c.blobs[key]
+	if !found || blob.inFlight == 0 {
+		return
+	}
+	blob.inFlight--
+	c.blobs[key] = blob
+	c.makeBlobEvictableLocked(key)
 }
 
 func (c *assetCache) ensureAPK() (*apkArchive, error) {
@@ -602,41 +801,41 @@ func (c *assetCache) cachedPath(path string) (data []byte, found bool) {
 	return data, found
 }
 
-func (c *assetCache) publishPath(path string, data []byte) []byte {
+func (c *assetCache) publishPath(path string, data []byte, load *assetLoad) []byte {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if existing, ok := c.pathOK[path]; ok {
+		c.protectLoadBlobLocked(load, existing)
 		return existing
 	}
 	if !c.retired {
-		c.pathOK[path] = data
-		c.recordBlobLocked(data)
+		c.protectLoadBlobLocked(load, data)
+		return c.setPathLocked(path, data)
 	}
 	return data
 }
 
-func (c *assetCache) cacheSuccessAliases(requested, usedRelSlash string, data []byte) {
+func (c *assetCache) cacheSuccessAliases(requested, usedRelSlash string, data []byte, load *assetLoad) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if c.retired {
 		return
 	}
-	c.nameCache[requested] = nameEntry{data: data}
-	c.recordBlobLocked(data)
+	c.protectLoadBlobLocked(load, data)
+	c.setNamePositiveLocked(requested, data)
 	if usedRelSlash != "" && usedRelSlash != requested {
 		if _, ok := c.nameCache[usedRelSlash]; !ok {
-			c.nameCache[usedRelSlash] = nameEntry{data: data}
-			c.recordBlobLocked(data)
+			c.setNamePositiveLocked(usedRelSlash, data)
 		}
 	}
 }
 
-func (c *assetCache) readDirAsset(name string) ([]byte, bool, error) {
+func (c *assetCache) readDirAsset(name string, load *assetLoad) ([]byte, bool, error) {
 	for _, path := range dirCandidates(c.assetsDir, name) {
 		if data, found := c.cachedPath(path); found {
 			rel, err := filepath.Rel(c.assetsDir, path)
 			if err == nil {
-				c.cacheSuccessAliases(name, filepath.ToSlash(rel), data)
+				c.cacheSuccessAliases(name, filepath.ToSlash(rel), data, load)
 			}
 			return data, true, nil
 		}
@@ -649,10 +848,10 @@ func (c *assetCache) readDirAsset(name string) ([]byte, bool, error) {
 			}
 			continue
 		}
-		data = c.publishPath(path, data)
+		data = c.publishPath(path, data, load)
 		rel, err := filepath.Rel(c.assetsDir, path)
 		if err == nil {
-			c.cacheSuccessAliases(name, filepath.ToSlash(rel), data)
+			c.cacheSuccessAliases(name, filepath.ToSlash(rel), data, load)
 		}
 		return data, true, nil
 	}
@@ -669,8 +868,11 @@ func (c *assetCache) cachedZip(name string) ([]byte, bool) {
 	return data, ok
 }
 
-func (c *assetCache) inflateZip(f *zip.File) ([]byte, error) {
+func (c *assetCache) inflateZip(f *zip.File, load *assetLoad) ([]byte, error) {
 	if data, ok := c.cachedZip(f.Name); ok {
+		c.mu.Lock()
+		c.protectLoadBlobLocked(load, data)
+		c.mu.Unlock()
 		return data, nil
 	}
 
@@ -705,12 +907,13 @@ func (c *assetCache) inflateZip(f *zip.File) ([]byte, error) {
 
 	c.mu.Lock()
 	if existing, ok := c.zipBlobCache[f.Name]; ok {
+		c.protectLoadBlobLocked(load, existing)
 		c.mu.Unlock()
 		return existing, nil
 	}
 	if !c.retired {
-		c.zipBlobCache[f.Name] = data
-		c.recordBlobLocked(data)
+		c.protectLoadBlobLocked(load, data)
+		data = c.setZIPLocked(f.Name, data)
 	}
 	c.mu.Unlock()
 	return data, nil
@@ -719,18 +922,20 @@ func (c *assetCache) inflateZip(f *zip.File) ([]byte, error) {
 // recordBlobLocked records an exact unique backing allocation for this source
 // generation. Empty data has no retained bytes and does not participate in a
 // byte budget, so it has no blob record. The caller holds c.mu.
-func (c *assetCache) recordBlobLocked(data []byte) {
+func (c *assetCache) recordBlobLocked(data []byte) uintptr {
 	key := assetBlobKey(data)
 	if key == 0 {
-		return
+		return 0
 	}
 	if _, exists := c.blobs[key]; exists {
 		c.touchBlobLocked(data)
-		return
+		return key
 	}
-	c.nextUse++
-	c.nextBlob++
-	c.blobs[key] = assetBlob{bytes: int64(len(data)), lastUse: c.nextUse, order: c.nextBlob}
+	blob := assetBlob{bytes: int64(len(data)), aliases: make(map[assetBlobAlias]struct{})}
+	c.blobs[key] = blob
+	c.cachedBytes += blob.bytes
+	c.makeBlobEvictableLocked(key)
+	return key
 }
 
 func assetBlobKey(data []byte) uintptr {
@@ -749,12 +954,13 @@ func (c *assetCache) touchBlobLocked(data []byte) {
 	if !exists {
 		return
 	}
-	c.nextUse++
-	blob.lastUse = c.nextUse
+	if blob.lru != nil {
+		c.inactiveBlobs.MoveToBack(blob.lru)
+	}
 	c.blobs[key] = blob
 }
 
-func (c *assetCache) readAPKAsset(name string) ([]byte, error) {
+func (c *assetCache) readAPKAsset(name string, load *assetLoad) ([]byte, error) {
 	archive, err := c.ensureAPK()
 	if err != nil {
 		return nil, err
@@ -767,28 +973,28 @@ func (c *assetCache) readAPKAsset(name string) ([]byte, error) {
 		if f == nil {
 			continue
 		}
-		data, err := c.inflateZip(f)
+		data, err := c.inflateZip(f, load)
 		if err != nil {
 			return nil, err
 		}
 		alias := strings.TrimPrefix(f.Name, "/")
 		alias = strings.TrimPrefix(alias, "assets/")
-		c.cacheSuccessAliases(name, alias, data)
+		c.cacheSuccessAliases(name, alias, data, load)
 		return data, nil
 	}
 	return nil, os.ErrNotExist
 }
 
-func (c *assetCache) loadAsset(name string) ([]byte, error) {
+func (c *assetCache) loadAsset(name string, load *assetLoad) ([]byte, error) {
 	if c.assetsDir != "" {
-		if data, ok, err := c.readDirAsset(name); err != nil {
+		if data, ok, err := c.readDirAsset(name, load); err != nil {
 			return nil, err
 		} else if ok {
 			return data, nil
 		}
 	}
 	if c.apkPath != "" {
-		return c.readAPKAsset(name)
+		return c.readAPKAsset(name, load)
 	}
 	return nil, os.ErrNotExist
 }
@@ -811,7 +1017,7 @@ func openAssetBytes(name string) ([]byte, error) {
 			<-load.done
 			return load.data, load.err
 		}
-		data, err := cache.loadAsset(name)
+		data, err := cache.loadAsset(name, load)
 		cache.finishLoad(name, load, data, err)
 		return data, err
 	}
@@ -832,16 +1038,37 @@ func acquireAssetBorrow(data []byte) (unsafe.Pointer, int64, func()) {
 
 	assetPinsMu.Lock()
 	pin, exists := assetPins[key]
+	first := !exists
 	if !exists {
 		pin.bytes = int64(len(data))
 		if len(data) != 0 {
 			pin.pinner = new(runtime.Pinner)
 			pin.pinner.Pin(pointer)
+			assetPinTotals.pinnedBlobs++
+			assetPinTotals.pinnedBytes += pin.bytes
 		}
 	}
 	pin.activeHandles++
+	assetPinTotals.activeHandles++
 	assetPins[key] = pin
 	assetPinsMu.Unlock()
+
+	// Exactly one shared pin may protect one current-cache blob. Do this after
+	// publishing the pin record so duplicate handles cannot each claim the
+	// cache entry; no C close token exists until this function returns.
+	if first {
+		cache := assetsForOpen()
+		if cache.beginNativeBorrow(key) {
+			assetPinsMu.Lock()
+			if current, ok := assetPins[key]; ok {
+				current.cache = cache
+				current.cacheKey = key
+				current.tracksCache = true
+				assetPins[key] = current
+			}
+			assetPinsMu.Unlock()
+		}
+	}
 
 	return pointer, int64(len(data)), func() { releaseAssetBorrowedPin(key) }
 }
@@ -854,6 +1081,7 @@ func releaseAssetBorrowedPin(key uintptr) {
 		return
 	}
 	pin.activeHandles--
+	assetPinTotals.activeHandles--
 	if pin.activeHandles != 0 {
 		assetPins[key] = pin
 		assetPinsMu.Unlock()
@@ -861,20 +1089,61 @@ func releaseAssetBorrowedPin(key uintptr) {
 	}
 	delete(assetPins, key)
 	pinner := pin.pinner
+	if pinner != nil {
+		assetPinTotals.pinnedBlobs--
+		assetPinTotals.pinnedBytes -= pin.bytes
+	}
 	assetPinsMu.Unlock()
 
 	if pinner != nil {
 		pinner.Unpin()
 	}
-	// C has completed descriptor teardown and this was the final borrower. A
-	// pending budget may now select the cache blob, but only after the pin map
-	// no longer advertises a live native handle.
-	cache := assetsForOpen()
-	cache.mu.Lock()
-	if !cache.retired {
-		cache.enforceAssetCachePolicyLocked(assetCacheNow())
+	// C has completed descriptor teardown and this was the final borrower. The
+	// tracked cache entry returns directly to its inactive LRU; enforcement is
+	// O(number evicted), not a scan over names, blobs, or global pins.
+	if pin.tracksCache && pin.cache != nil {
+		pin.cache.endNativeBorrow(pin.cacheKey)
 	}
-	cache.mu.Unlock()
+}
+
+func (c *assetCache) beginNativeBorrow(key uintptr) bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.retired {
+		return false
+	}
+	blob, found := c.blobs[key]
+	if !found {
+		return false
+	}
+	if blob.nativeHandles == 0 {
+		if blob.lru != nil {
+			c.inactiveBlobs.Remove(blob.lru)
+			blob.lru = nil
+		}
+		c.borrowedCacheBytes += blob.bytes
+	}
+	blob.nativeHandles++
+	c.blobs[key] = blob
+	return true
+}
+
+func (c *assetCache) endNativeBorrow(key uintptr) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	blob, found := c.blobs[key]
+	if !found || blob.nativeHandles == 0 {
+		return
+	}
+	blob.nativeHandles--
+	if blob.nativeHandles == 0 {
+		c.borrowedCacheBytes -= blob.bytes
+	}
+	c.blobs[key] = blob
+	c.makeBlobEvictableLocked(key)
+	if !c.retired {
+		c.enforceAssetCachePolicyLocked(assetCacheNow())
+	}
 }
 
 func assetFromBytes(data []byte) unsafe.Pointer {
@@ -889,49 +1158,31 @@ func (c *assetCache) snapshot() assetCacheSnapshot {
 	policy := currentAssetCachePolicy()
 	c.mu.RLock()
 	snapshot := assetCacheSnapshot{
-		Generation:         c.generation,
-		NameEntries:        len(c.nameCache),
-		PathEntries:        len(c.pathOK),
-		BlobCount:          len(c.blobs),
-		ZipEntries:         len(c.zipBlobCache),
-		InFlightLoads:      c.activeLoads,
-		Inflating:          c.inflating,
-		Retired:            c.retired,
-		ArchiveOpen:        c.apkArch != nil,
-		ArchiveCloseCount:  c.archiveCloseCount,
-		CacheByteBudget:    policy.byteBudget,
-		NegativeCacheLimit: policy.negativeCap,
+		Generation:          c.generation,
+		NameEntries:         len(c.nameCache),
+		PositiveEntries:     c.positiveEntries,
+		NegativeEntries:     c.negativeEntries,
+		NegativeCandidates:  c.negativeCandidates,
+		NegativeOther:       c.negativeOther,
+		PathEntries:         len(c.pathOK),
+		CachedBytes:         c.cachedBytes,
+		BlobCount:           len(c.blobs),
+		BorrowedCacheBytes:  c.borrowedCacheBytes,
+		EvictableCacheBytes: c.cachedBytes - c.borrowedCacheBytes,
+		ZipEntries:          len(c.zipBlobCache),
+		InFlightLoads:       c.activeLoads,
+		Inflating:           c.inflating,
+		Retired:             c.retired,
+		ArchiveOpen:         c.apkArch != nil,
+		ArchiveCloseCount:   c.archiveCloseCount,
+		CacheByteBudget:     policy.byteBudget,
+		NegativeCacheLimit:  policy.negativeCap,
 	}
-	for _, entry := range c.nameCache {
-		if entry.err != nil {
-			snapshot.NegativeEntries++
-			if errors.Is(entry.err, os.ErrNotExist) {
-				snapshot.NegativeCandidates++
-			} else {
-				snapshot.NegativeOther++
-			}
-		} else {
-			snapshot.PositiveEntries++
-		}
-	}
-
 	assetPinsMu.RLock()
-	for key, blob := range c.blobs {
-		snapshot.CachedBytes += blob.bytes
-		if pin, borrowed := assetPins[key]; borrowed && pin.activeHandles != 0 {
-			snapshot.BorrowedCacheBytes += blob.bytes
-		} else {
-			snapshot.EvictableCacheBytes += blob.bytes
-		}
-	}
-	for _, pin := range assetPins {
-		snapshot.ActiveHandles += pin.activeHandles
-		if pin.pinner != nil {
-			snapshot.PinnedBlobs++
-			snapshot.PinnedBytes += pin.bytes
-			snapshot.LiveWorkingSetBytes += pin.bytes
-		}
-	}
+	snapshot.ActiveHandles = assetPinTotals.activeHandles
+	snapshot.PinnedBlobs = assetPinTotals.pinnedBlobs
+	snapshot.PinnedBytes = assetPinTotals.pinnedBytes
+	snapshot.LiveWorkingSetBytes = assetPinTotals.pinnedBytes
 	assetPinsMu.RUnlock()
 	c.mu.RUnlock()
 	return snapshot

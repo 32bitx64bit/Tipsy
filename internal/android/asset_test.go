@@ -455,7 +455,7 @@ func TestAssetCacheBudgetEvictsAliasesAtomically(t *testing.T) {
 	}
 }
 
-func TestAssetCacheBudgetDefersEvictionUntilColdLoadFinishes(t *testing.T) {
+func TestAssetCacheBudgetEvictsInactiveBlobWhileUnrelatedColdLoadRuns(t *testing.T) {
 	borrowedData := []byte("borrow")
 	restoreHighPolicy := setAssetCachePolicyForTest(assetCachePolicy{
 		byteBudget:  int64(len(borrowedData)),
@@ -533,10 +533,10 @@ func TestAssetCacheBudgetDefersEvictionUntilColdLoadFinishes(t *testing.T) {
 	closed = true
 	duringCold := assetCacheSnapshotForTest()
 	assertAssetCacheAccounting(t, duringCold)
-	if duringCold.InFlightLoads != 1 || duringCold.CachedBytes != int64(len(borrowedData)) || duringCold.BorrowedCacheBytes != 0 || duringCold.EvictableCacheBytes != int64(len(borrowedData)) || duringCold.ActiveHandles != baseline.ActiveHandles || duringCold.PinnedBytes != baseline.PinnedBytes {
-		t.Fatalf("close during cold load must defer candidate selection: baseline=%+v during=%+v", baseline, duringCold)
+	if duringCold.InFlightLoads != 1 || duringCold.CachedBytes != 0 || duringCold.BorrowedCacheBytes != 0 || duringCold.EvictableCacheBytes != 0 || duringCold.ActiveHandles != baseline.ActiveHandles || duringCold.PinnedBytes != baseline.PinnedBytes {
+		t.Fatalf("close during unrelated cold load must evict the now-inactive blob: baseline=%+v during=%+v", baseline, duringCold)
 	}
-	t.Logf("asset cache borrow after-close-while-cold generation=%d cached_bytes=%d borrowed_cache_bytes=%d evictable_cache_bytes=%d active_handles=%d pinned_bytes=%d in_flight=%d byte_budget=%d", duringCold.Generation, duringCold.CachedBytes, duringCold.BorrowedCacheBytes, duringCold.EvictableCacheBytes, duringCold.ActiveHandles, duringCold.PinnedBytes, duringCold.InFlightLoads, duringCold.CacheByteBudget)
+	t.Logf("asset cache borrow after-close-during-unrelated-cold generation=%d cached_bytes=%d borrowed_cache_bytes=%d evictable_cache_bytes=%d active_handles=%d pinned_bytes=%d in_flight=%d byte_budget=%d", duringCold.Generation, duringCold.CachedBytes, duringCold.BorrowedCacheBytes, duringCold.EvictableCacheBytes, duringCold.ActiveHandles, duringCold.PinnedBytes, duringCold.InFlightLoads, duringCold.CacheByteBudget)
 
 	close(release)
 	if err := <-coldDone; err != nil {
@@ -548,6 +548,35 @@ func TestAssetCacheBudgetDefersEvictionUntilColdLoadFinishes(t *testing.T) {
 		t.Fatalf("cold completion must trim the now-inactive older blob: baseline=%+v after=%+v", baseline, after)
 	}
 	t.Logf("asset cache borrow after-cold-complete generation=%d cached_bytes=%d borrowed_cache_bytes=%d evictable_cache_bytes=%d active_handles=%d pinned_bytes=%d in_flight=%d byte_budget=%d", after.Generation, after.CachedBytes, after.BorrowedCacheBytes, after.EvictableCacheBytes, after.ActiveHandles, after.PinnedBytes, after.InFlightLoads, after.CacheByteBudget)
+}
+
+func TestAssetCachePolicyProtectsOnlyPublishingBlob(t *testing.T) {
+	restore := setAssetCachePolicyForTest(assetCachePolicy{byteBudget: 0, negativeCap: 2, negativeTTL: time.Minute})
+	t.Cleanup(restore)
+
+	cache := newAssetCache(999, "", "")
+	load := &assetLoad{done: make(chan struct{})}
+	data := []byte("publishing")
+
+	cache.mu.Lock()
+	cache.protectLoadBlobLocked(load, data)
+	cache.setNamePositiveLocked("publishing", data)
+	cache.enforceAssetCachePolicyLocked(assetCacheNow())
+	cache.mu.Unlock()
+	protected := cache.snapshot()
+
+	cache.mu.Lock()
+	cache.releaseLoadBlobLocked(load)
+	cache.enforceAssetCachePolicyLocked(assetCacheNow())
+	cache.mu.Unlock()
+	released := cache.snapshot()
+
+	if protected.CachedBytes != int64(len(data)) || protected.BlobCount != 1 || protected.PositiveEntries != 1 {
+		t.Fatalf("in-flight publication was evicted: %+v", protected)
+	}
+	if released.CachedBytes != 0 || released.BlobCount != 0 || released.PositiveEntries != 0 {
+		t.Fatalf("completed publication remained protected: %+v", released)
+	}
 }
 
 func TestAssetNegativeCachePolicyCapsExpiresAndInvalidatesSource(t *testing.T) {
