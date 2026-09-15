@@ -144,8 +144,11 @@ func TestSwapThreadRetiresOnVerifiedGuestSwap(t *testing.T) {
 	if generation == 0 {
 		t.Fatal("guest surface was not registered for active sentinel")
 	}
-	if !eglGuestSwaps.guestSwap(w.XID(), guestDisplay, guestSurface, generation) {
+	if eglGuestSwaps.guestSwap(w.XID(), guestDisplay, guestSurface, generation) != guestSwapAccepted {
 		t.Fatal("verified guest swap was rejected")
+	}
+	if eglGuestSwaps.guestSwap(w.XID(), guestDisplay, guestSurface, generation) != guestSwapNoPending {
+		t.Fatal("verified handoff accepted a recurring Go swap callback")
 	}
 	select {
 	case <-done:
@@ -341,14 +344,65 @@ func TestGuestSwapConcurrentStop(t *testing.T) {
 	}
 	signalDone := make(chan bool, 1)
 	go func() {
-		signalDone <- eglGuestSwaps.guestSwap(w.XID(), guestDisplay, guestSurface, generation)
+		signalDone <- eglGuestSwaps.guestSwap(w.XID(), guestDisplay, guestSurface, generation) == guestSwapAccepted
 	}()
 	if err := e.StopSwapThread(); err != nil {
 		t.Fatalf("StopSwapThread: %v", err)
 	}
 	<-signalDone
-	if eglGuestSwaps.guestSwap(w.XID(), guestDisplay, guestSurface, generation) {
+	if eglGuestSwaps.guestSwap(w.XID(), guestDisplay, guestSurface, generation) != guestSwapRejected {
 		t.Fatal("guest swap reached sentinel after join/free")
+	}
+}
+
+// TestSwapThreadGuestSurfaceReuseRejectsStaleGeneration exercises the real C
+// sentinel with a guest EGL handle reused under one target registration. The
+// old token must neither clear the replacement nor retire the sentinel.
+func TestSwapThreadGuestSurfaceReuseRejectsStaleGeneration(t *testing.T) {
+	ensureDisplay(t)
+	w, err := x11.Open("Tipsy guest surface reuse", 64, 64)
+	if err != nil {
+		if errors.Is(err, x11.ErrUnavailable) || errors.Is(err, x11.ErrNoDisplay) {
+			t.Skip(err)
+		}
+		t.Fatalf("x11.Open: %v", err)
+	}
+	defer w.Close()
+	e, err := BindEGL(w)
+	if err != nil {
+		if errors.Is(err, ErrUnavailable) {
+			t.Skip(err)
+		}
+		t.Skipf("EGL not usable on this display: %v", err)
+	}
+	defer e.Close()
+	if err := e.ReleaseCurrent(); err != nil {
+		t.Fatalf("ReleaseCurrent: %v", err)
+	}
+	if err := e.StartSwapThread(); err != nil {
+		t.Fatalf("StartSwapThread: %v", err)
+	}
+
+	const guestDisplay = uintptr(0x1090)
+	const guestSurface = uintptr(0x2090)
+	first := eglGuestSwaps.surfaceCreated(w.XID(), guestDisplay, guestSurface)
+	if first == 0 {
+		t.Fatal("first guest surface was not registered")
+	}
+	eglGuestSwaps.surfaceDestroyed(w.XID(), guestDisplay, guestSurface, first)
+	second := eglGuestSwaps.surfaceCreated(w.XID(), guestDisplay, guestSurface)
+	if second == 0 || second == first {
+		t.Fatalf("same-registration reused surface generation = %d, first = %d", second, first)
+	}
+	if eglGuestSwaps.guestSwap(w.XID(), guestDisplay, guestSurface, first) != guestSwapRejected {
+		t.Fatal("stale guest swap token retired the sentinel")
+	}
+	eglGuestSwaps.surfaceDestroyed(w.XID(), guestDisplay, guestSurface, first)
+	if eglGuestSwaps.guestSwap(w.XID(), guestDisplay, guestSurface, second) != guestSwapAccepted {
+		t.Fatal("replacement guest surface was rejected")
+	}
+	if !e.SwapHandedOff() {
+		t.Fatal("replacement guest surface did not retire the sentinel")
 	}
 }
 

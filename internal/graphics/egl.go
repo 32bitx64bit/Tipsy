@@ -26,13 +26,15 @@ type EGL struct {
 	x11Display uintptr // Xlib Display* (bounded fallback probes only)
 	x11XID     uintptr // X11 Window
 	swap       uintptr // C tipsy_swap* background thread, or 0
-	// swapGuest identifies this sentinel's one accepted Android EGL surface.
+	// swapGuest identifies this sentinel's target-registration lifetime.
+	// swapGuestSurface is separately generationed for every Android EGLSurface
+	// lifetime, even when a driver reuses the same numeric handle.
 	// It is registered before the C thread can expose a sentinel and removed
 	// before that thread is joined and freed. The Android ABI bridge carries
-	// its generation back on every guest-swap signal, so a recycled XID or EGL
-	// handle cannot retire a later surface.
+	// the surface generation back on every guest-swap signal, so a recycled
+	// XID or EGL handle cannot retire a later surface.
 	swapGuest        *guestSwapRegistration
-	swapGuestSurface guestSwapIdentity
+	swapGuestSurface guestSwapDelivery
 	// Handoff wake plumbing (linux+cgo; see bind_linux.go, notify_linux.go).
 	// swapWake is the capacity-1 coalesced channel the C thread resolves via
 	// swapHandle; swapStop is closed after the C thread is joined; swapDone is

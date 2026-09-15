@@ -52,14 +52,22 @@ func GoEGLGuestSurfaceCreated(window, display, surface C.uintptr_t) C.uint64_t {
 // GoEGLGuestSwap accepts only a successful Android EGL swap whose complete
 // window/surface/generation identity belongs to the active sentinel. It wakes
 // the C thread through its mutex/condition, rather than sampling window pixels
-// or accessing Roblox memory.
+// or accessing Roblox memory. It returns 1 exactly once per accepted surface,
+// 0 for an unknown/stale or temporarily rejected surface, and -1 when that
+// exact live surface remains tracked but its target handoff is already done.
+// The Android bridge retains lifecycle tracking in the latter case while
+// stopping its recurring C-to-Go swap callbacks.
 //
 //export GoEGLGuestSwap
 func GoEGLGuestSwap(window, display, surface C.uintptr_t, generation C.uint64_t) C.int {
-	if eglGuestSwaps.guestSwap(uintptr(window), uintptr(display), uintptr(surface), uint64(generation)) {
+	switch eglGuestSwaps.guestSwap(uintptr(window), uintptr(display), uintptr(surface), uint64(generation)) {
+	case guestSwapAccepted:
 		return 1
+	case guestSwapNoPending:
+		return -1
+	default:
+		return 0
 	}
-	return 0
 }
 
 // GoEGLGuestSurfaceDestroyed invalidates a surface mapping before the Android

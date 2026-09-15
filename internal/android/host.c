@@ -72,11 +72,26 @@ struct tipsy_egl_guest_surface {
 	uintptr_t display;
 	uintptr_t surface;
 	uint64_t generation;
+	/* A retained entry has two independent duties: a one-shot boot handoff and
+	 * its eventual lifecycle destroy.  Do not discard the entry after graphics
+	 * accepts the handoff, or numeric EGL handle reuse could lose the destroy
+	 * generation. */
+	int handoff_state;
 	struct tipsy_egl_guest_surface *next;
+};
+
+enum {
+	TIPSY_EGL_GUEST_HANDOFF_PENDING = 0,
+	TIPSY_EGL_GUEST_HANDOFF_INFLIGHT = 1,
+	TIPSY_EGL_GUEST_HANDOFF_COMPLETE = 2,
 };
 
 static pthread_mutex_t egl_guest_surfaces_mu = PTHREAD_MUTEX_INITIALIZER;
 static struct tipsy_egl_guest_surface *egl_guest_surfaces;
+/* The common post-boot path has no pending guest handoff.  This count lets a
+ * successful host swap avoid taking the registry mutex or crossing C-to-Go
+ * merely to rediscover that completed state. */
+static _Atomic uint64_t egl_guest_pending_handoffs;
 
 static uint64_t tipsy_egl_guest_surface_created(uintptr_t window, uintptr_t display,
 	uintptr_t surface)
@@ -127,6 +142,10 @@ static struct tipsy_egl_guest_surface *tipsy_egl_guest_surface_take(uintptr_t di
 			found = *cursor;
 			*cursor = found->next;
 			found->next = NULL;
+			if (found->handoff_state == TIPSY_EGL_GUEST_HANDOFF_PENDING) {
+				atomic_fetch_sub_explicit(&egl_guest_pending_handoffs, 1,
+					memory_order_release);
+			}
 			break;
 		}
 	}
@@ -149,6 +168,10 @@ static void tipsy_egl_guest_surface_discard_window(uintptr_t window)
 		*cursor = entry->next;
 		entry->next = discarded;
 		discarded = entry;
+		if (entry->handoff_state == TIPSY_EGL_GUEST_HANDOFF_PENDING) {
+			atomic_fetch_sub_explicit(&egl_guest_pending_handoffs, 1,
+				memory_order_release);
+		}
 	}
 	pthread_mutex_unlock(&egl_guest_surfaces_mu);
 	while (discarded != NULL) {
@@ -179,9 +202,17 @@ static void tipsy_egl_guest_surface_store(struct tipsy_egl_guest_surface *entry)
 		*cursor = candidate->next;
 		candidate->next = old;
 		old = candidate;
+		if (candidate->handoff_state == TIPSY_EGL_GUEST_HANDOFF_PENDING) {
+			atomic_fetch_sub_explicit(&egl_guest_pending_handoffs, 1,
+				memory_order_release);
+		}
 	}
 	entry->next = egl_guest_surfaces;
 	egl_guest_surfaces = entry;
+	if (entry->handoff_state == TIPSY_EGL_GUEST_HANDOFF_PENDING) {
+		atomic_fetch_add_explicit(&egl_guest_pending_handoffs, 1,
+			memory_order_release);
+	}
 	pthread_mutex_unlock(&egl_guest_surfaces_mu);
 	while (old != NULL) {
 		struct tipsy_egl_guest_surface *next = old->next;
@@ -190,7 +221,10 @@ static void tipsy_egl_guest_surface_store(struct tipsy_egl_guest_surface *entry)
 	}
 }
 
-static int tipsy_egl_guest_surface_snapshot(uintptr_t display, uintptr_t surface,
+/* Claim at most one pending signal before entering Go.  The in-flight state
+ * suppresses a concurrent successful swap; if graphics rejects the signal,
+ * finish below restores this exact still-live surface to pending. */
+static int tipsy_egl_guest_surface_claim(uintptr_t display, uintptr_t surface,
 	struct tipsy_egl_guest_surface *out)
 {
 	struct tipsy_egl_guest_surface *entry;
@@ -201,7 +235,11 @@ static int tipsy_egl_guest_surface_snapshot(uintptr_t display, uintptr_t surface
 	}
 	pthread_mutex_lock(&egl_guest_surfaces_mu);
 	for (entry = egl_guest_surfaces; entry != NULL; entry = entry->next) {
-		if (entry->display == display && entry->surface == surface) {
+		if (entry->display == display && entry->surface == surface &&
+		    entry->handoff_state == TIPSY_EGL_GUEST_HANDOFF_PENDING) {
+			entry->handoff_state = TIPSY_EGL_GUEST_HANDOFF_INFLIGHT;
+			atomic_fetch_sub_explicit(&egl_guest_pending_handoffs, 1,
+				memory_order_release);
 			*out = *entry;
 			out->next = NULL;
 			found = 1;
@@ -212,6 +250,30 @@ static int tipsy_egl_guest_surface_snapshot(uintptr_t display, uintptr_t surface
 	return found;
 }
 
+static void tipsy_egl_guest_surface_finish(uintptr_t display, uintptr_t surface,
+	uint64_t generation, int accepted)
+{
+	struct tipsy_egl_guest_surface *entry;
+
+	pthread_mutex_lock(&egl_guest_surfaces_mu);
+	for (entry = egl_guest_surfaces; entry != NULL; entry = entry->next) {
+		if (entry->display != display || entry->surface != surface ||
+		    entry->generation != generation ||
+		    entry->handoff_state != TIPSY_EGL_GUEST_HANDOFF_INFLIGHT) {
+			continue;
+		}
+		if (accepted) {
+			entry->handoff_state = TIPSY_EGL_GUEST_HANDOFF_COMPLETE;
+		} else {
+			entry->handoff_state = TIPSY_EGL_GUEST_HANDOFF_PENDING;
+			atomic_fetch_add_explicit(&egl_guest_pending_handoffs, 1,
+				memory_order_release);
+		}
+		break;
+	}
+	pthread_mutex_unlock(&egl_guest_surfaces_mu);
+}
+
 static void tipsy_egl_guest_surface_clear_all(void)
 {
 	struct tipsy_egl_guest_surface *entry;
@@ -219,6 +281,7 @@ static void tipsy_egl_guest_surface_clear_all(void)
 	pthread_mutex_lock(&egl_guest_surfaces_mu);
 	entry = egl_guest_surfaces;
 	egl_guest_surfaces = NULL;
+	atomic_store_explicit(&egl_guest_pending_handoffs, 0, memory_order_release);
 	pthread_mutex_unlock(&egl_guest_surfaces_mu);
 	while (entry != NULL) {
 		struct tipsy_egl_guest_surface *next = entry->next;
@@ -482,11 +545,16 @@ EGLBoolean tipsy_eglSwapBuffers(EGLDisplay dpy, EGLSurface surface)
 	ok = host_eglSwapBuffers(dpy, surface);
 	if (ok == TIPSY_EGL_TRUE) {
 		tipsy_egl_note_successful_swap();
-		if (tipsy_egl_guest_surface_snapshot((uintptr_t)dpy, (uintptr_t)surface, &guest)) {
+		if (atomic_load_explicit(&egl_guest_pending_handoffs, memory_order_acquire) != 0 &&
+		    tipsy_egl_guest_surface_claim((uintptr_t)dpy, (uintptr_t)surface, &guest)) {
 			/* The bridge is deliberately after the host return: a failed client
-			 * present never reaches the graphics sentinel. */
-			(void)egl_guest_swap_fn(guest.window, guest.display, guest.surface,
+			 * present never reaches the graphics sentinel. A nonzero response is
+			 * one accepted boot handoff; retain the local identity only for the
+			 * later generation-checked destroy/replacement lifecycle. */
+			int accepted = egl_guest_swap_fn(guest.window, guest.display, guest.surface,
 				guest.generation);
+			tipsy_egl_guest_surface_finish(guest.display, guest.surface,
+				guest.generation, accepted != 0);
 		}
 	}
 	return ok;
@@ -532,6 +600,7 @@ EGLSurface tipsy_eglCreateWindowSurface(EGLDisplay dpy, EGLConfig config, void *
 	guest->display = (uintptr_t)dpy;
 	guest->surface = (uintptr_t)surface;
 	guest->generation = generation;
+	guest->handoff_state = TIPSY_EGL_GUEST_HANDOFF_PENDING;
 	tipsy_egl_guest_surface_store(guest);
 	return surface;
 }
@@ -759,6 +828,7 @@ struct tipsy_egl_guest_handoff_test {
 	EGLSurface next_surface;
 	EGLBoolean swap_result;
 	EGLBoolean destroy_result;
+	int guest_swap_result;
 	uint64_t next_generation;
 	int reenter_created;
 	int reenter_destroyed;
@@ -862,9 +932,10 @@ static uint64_t tipsy_test_egl_guest_handoff_created(uintptr_t window, uintptr_t
 static int tipsy_test_egl_guest_handoff_swap_callback(uintptr_t window, uintptr_t display,
 	uintptr_t surface, uint64_t generation)
 {
+	struct tipsy_egl_guest_handoff_test *t = active_egl_guest_handoff_test;
 	tipsy_test_egl_guest_handoff_record(TIPSY_EGL_GUEST_HANDOFF_SWAP, window,
 		display, surface, generation);
-	return 1;
+	return t != NULL ? t->guest_swap_result : 0;
 }
 
 static void tipsy_test_egl_guest_handoff_destroyed(uintptr_t window, uintptr_t display,
@@ -942,11 +1013,18 @@ int tipsy_test_egl_guest_handoff_fixture(TipsyEGLGuestHandoffFixture *out)
 	t.next_surface = (EGLSurface)surface;
 	t.next_generation = first_generation;
 	t.swap_result = TIPSY_EGL_TRUE;
+	t.guest_swap_result = 1;
 	t.reenter_created = 1;
 	if (tipsy_test_egl_guest_handoff_create_window(display, xid) != (EGLSurface)surface) {
 		passed = 0;
 	}
 	if (tipsy_eglSwapBuffers((EGLDisplay)display, (EGLSurface)surface) != TIPSY_EGL_TRUE) {
+		passed = 0;
+	}
+	/* The first accepted boot handoff remains retained for destroy, but a
+	 * second successful guest swap must stay entirely in C. */
+	if (tipsy_eglSwapBuffers((EGLDisplay)display, (EGLSurface)surface) != TIPSY_EGL_TRUE ||
+		t.callback_count != 2) {
 		passed = 0;
 	}
 	/* A failed host swap, a different surface, and a different display never
@@ -984,9 +1062,17 @@ int tipsy_test_egl_guest_handoff_fixture(TipsyEGLGuestHandoffFixture *out)
 	 * callback is required before the host call even when that host call fails. */
 	t.next_surface = (EGLSurface)surface;
 	t.next_generation = second_generation;
+	/* Graphics reports -1 when this exact surface was already retired. The C
+	 * gate treats every nonzero reply as handoff-complete, retaining only the
+	 * generation for the later destroy callback. */
+	t.guest_swap_result = -1;
 	t.reenter_created = 1;
 	if (tipsy_test_egl_guest_handoff_create_window(display, xid) != (EGLSurface)surface ||
 		tipsy_eglSwapBuffers((EGLDisplay)display, (EGLSurface)surface) != TIPSY_EGL_TRUE) {
+		passed = 0;
+	}
+	if (tipsy_eglSwapBuffers((EGLDisplay)display, (EGLSurface)surface) != TIPSY_EGL_TRUE ||
+		t.callback_count != 5) {
 		passed = 0;
 	}
 	t.destroy_result = TIPSY_EGL_FALSE;
