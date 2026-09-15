@@ -497,12 +497,13 @@ func packGamepadAxis(axis int32, axes map[int]float32) (axisSample, bool) {
 // Lock order is always gamepadState.mu → directGamepadTarget.mu (via the
 // dispatchers); the dispatchers alone never take gamepadState.mu.
 var gamepadState struct {
-	mu        sync.Mutex
-	focused   bool
-	announced bool
-	deviceID  int32
-	buttons   map[int]bool
-	axes      map[int32]axisSample
+	mu         sync.Mutex
+	focused    bool
+	announced  bool
+	deviceID   int32
+	buttons    map[int]bool
+	axes       map[int32]axisSample
+	keyScratch []int // reusable per-frame union, protected by mu
 }
 
 func init() {
@@ -666,20 +667,8 @@ func handleGamepadFrame(af gamepad.AndroidFrame) {
 	}
 	// Buttons first (edges), deterministic order over the union of held
 	// and pressed so releases are never missed.
-	keySet := make(map[int]bool, len(af.Buttons)+len(gamepadState.buttons))
-	for k := range gamepadState.buttons {
-		keySet[k] = true
-	}
-	for k, pressed := range af.Buttons {
-		if pressed {
-			keySet[k] = true
-		}
-	}
-	var allKeys []int
-	for k := range keySet {
-		allKeys = append(allKeys, k)
-	}
-	sort.Ints(allKeys)
+	allKeys := collectGamepadKeys(gamepadState.keyScratch, gamepadState.buttons, af.Buttons)
+	gamepadState.keyScratch = allKeys
 	for _, k := range allKeys {
 		was := gamepadState.buttons[k]
 		now := af.Buttons[k]
