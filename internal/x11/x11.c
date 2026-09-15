@@ -9,6 +9,7 @@
 #include <X11/Xutil.h>
 #include <X11/XKBlib.h>
 #include <X11/extensions/XInput2.h>
+#include <X11/extensions/Xdamage.h>
 #include <X11/extensions/Xrandr.h>
 #include <errno.h>
 #include <fcntl.h>
@@ -66,6 +67,24 @@ static atomic_int tipsy_go_wake_pending;
 // Like the input ring, invalidation is process-wide: Tipsy owns one Roblox
 // window. A second test window can only cause a conservative extra query.
 static _Atomic uint64_t tipsy_refresh_version = 1;
+
+/* Startup measurement is deliberately a per-owned-window, opt-in observer.
+ * It retains neither X event payload nor a timestamp. MapNotify is latched so
+ * a subscriber installed just after Open can learn that the exact event was
+ * already observed; drawable updates require an explicit arm and consume one
+ * XDamage notification. */
+static _Atomic uintptr_t tipsy_startup_map_dpy;
+static _Atomic unsigned long tipsy_startup_map_window;
+static _Atomic uintptr_t tipsy_startup_map_observer_dpy;
+static _Atomic unsigned long tipsy_startup_map_observer_window;
+static Display *tipsy_startup_drawable_dpy;
+static Window tipsy_startup_drawable_window;
+static Damage tipsy_startup_drawable_damage;
+static int tipsy_startup_drawable_event_base;
+static int tipsy_startup_drawable_enabled;
+static int tipsy_startup_drawable_armed;
+static _Atomic uintptr_t tipsy_startup_drawable_ready_dpy;
+static _Atomic unsigned long tipsy_startup_drawable_ready_window;
 
 /* Default-off, content-free input-drain observer. It owns only aggregate
  * counters and fixed histograms; event payloads, input identity, coordinates,
@@ -250,6 +269,205 @@ uint64_t tipsy_x11_refresh_version(void) {
 	return atomic_load_explicit(&tipsy_refresh_version, memory_order_relaxed);
 }
 
+void tipsy_x11_startup_measurement_set_map_observer(uintptr_t dpy_ptr,
+	unsigned long xid, int enabled) {
+	/* This is an ownership selector, not a process-wide callback registry. */
+	pthread_mutex_lock(&tipsy_event_mu);
+	if (enabled && dpy_ptr != 0 && xid != 0) {
+		atomic_store_explicit(&tipsy_startup_map_observer_dpy, dpy_ptr,
+			memory_order_relaxed);
+		atomic_store_explicit(&tipsy_startup_map_observer_window, xid,
+			memory_order_relaxed);
+		pthread_mutex_unlock(&tipsy_event_mu);
+		return;
+	}
+	if (atomic_load_explicit(&tipsy_startup_map_observer_dpy,
+		memory_order_relaxed) == dpy_ptr &&
+		atomic_load_explicit(&tipsy_startup_map_observer_window,
+		memory_order_relaxed) == xid) {
+		atomic_store_explicit(&tipsy_startup_map_observer_dpy, 0,
+			memory_order_relaxed);
+		atomic_store_explicit(&tipsy_startup_map_observer_window, 0,
+			memory_order_relaxed);
+	}
+	pthread_mutex_unlock(&tipsy_event_mu);
+}
+
+int tipsy_x11_startup_measurement_map_observed(uintptr_t dpy_ptr,
+	unsigned long xid) {
+	/* A MapNotify for a different display or XID is never evidence for this
+	 * Window, even if another client happens to reuse the same numeric XID. */
+	return dpy_ptr != 0 && xid != 0 &&
+		atomic_load_explicit(&tipsy_startup_map_dpy, memory_order_relaxed) == dpy_ptr &&
+		atomic_load_explicit(&tipsy_startup_map_window, memory_order_relaxed) == xid;
+}
+
+static void tipsy_x11_startup_measurement_disable_drawable_locked(Display *dpy,
+	Window win) {
+	if (!tipsy_startup_drawable_enabled || tipsy_startup_drawable_dpy != dpy ||
+		tipsy_startup_drawable_window != win) {
+		return;
+	}
+	if (tipsy_startup_drawable_damage != None && !tipsy_x_io_error) {
+		XDamageDestroy(dpy, tipsy_startup_drawable_damage);
+	}
+	tipsy_startup_drawable_dpy = NULL;
+	tipsy_startup_drawable_window = None;
+	tipsy_startup_drawable_damage = None;
+	tipsy_startup_drawable_event_base = 0;
+	tipsy_startup_drawable_enabled = 0;
+	tipsy_startup_drawable_armed = 0;
+	atomic_store_explicit(&tipsy_startup_drawable_ready_dpy, 0, memory_order_relaxed);
+	atomic_store_explicit(&tipsy_startup_drawable_ready_window, 0, memory_order_relaxed);
+}
+
+struct tipsy_startup_damage_match {
+	int event_type;
+	Damage damage;
+	Window window;
+};
+
+static Bool tipsy_startup_damage_matches(Display *dpy, XEvent *event,
+	XPointer arg) {
+	(void)dpy;
+	struct tipsy_startup_damage_match *match =
+		(struct tipsy_startup_damage_match *)arg;
+	if (event->type != match->event_type) {
+		return False;
+	}
+	XDamageNotifyEvent *damage = (XDamageNotifyEvent *)event;
+	return damage->damage == match->damage && damage->drawable == match->window;
+}
+
+int tipsy_x11_startup_measurement_enable_drawable_observation(uintptr_t dpy_ptr,
+	unsigned long xid) {
+	Display *dpy = (Display *)dpy_ptr;
+	Window win = (Window)xid;
+	if (dpy == NULL || win == None || tipsy_x_io_error) {
+		return 0;
+	}
+	pthread_mutex_lock(&tipsy_event_mu);
+	if (tipsy_startup_drawable_enabled) {
+		int same = tipsy_startup_drawable_dpy == dpy &&
+			tipsy_startup_drawable_window == win;
+		pthread_mutex_unlock(&tipsy_event_mu);
+		return same;
+	}
+	int event_base = 0;
+	int error_base = 0;
+	if (!XDamageQueryExtension(dpy, &event_base, &error_base)) {
+		pthread_mutex_unlock(&tipsy_event_mu);
+		return 0;
+	}
+	Damage damage = XDamageCreate(dpy, win, XDamageReportNonEmpty);
+	if (damage == None) {
+		pthread_mutex_unlock(&tipsy_event_mu);
+		return 0;
+	}
+	tipsy_startup_drawable_dpy = dpy;
+	tipsy_startup_drawable_window = win;
+	tipsy_startup_drawable_damage = damage;
+	tipsy_startup_drawable_event_base = event_base;
+	tipsy_startup_drawable_enabled = 1;
+	tipsy_startup_drawable_armed = 0;
+	atomic_store_explicit(&tipsy_startup_drawable_ready_dpy, 0, memory_order_relaxed);
+	atomic_store_explicit(&tipsy_startup_drawable_ready_window, 0, memory_order_relaxed);
+	XFlush(dpy);
+	pthread_mutex_unlock(&tipsy_event_mu);
+	return 1;
+}
+
+void tipsy_x11_startup_measurement_disable_drawable_observation(uintptr_t dpy_ptr,
+	unsigned long xid) {
+	Display *dpy = (Display *)dpy_ptr;
+	Window win = (Window)xid;
+	if (dpy == NULL || win == None) {
+		return;
+	}
+	pthread_mutex_lock(&tipsy_event_mu);
+	tipsy_x11_startup_measurement_disable_drawable_locked(dpy, win);
+	if (!tipsy_x_io_error) {
+		XFlush(dpy);
+	}
+	pthread_mutex_unlock(&tipsy_event_mu);
+}
+
+int tipsy_x11_startup_measurement_arm_drawable_observation(uintptr_t dpy_ptr,
+	unsigned long xid) {
+	Display *dpy = (Display *)dpy_ptr;
+	Window win = (Window)xid;
+	if (dpy == NULL || win == None || tipsy_x_io_error) {
+		return 0;
+	}
+	pthread_mutex_lock(&tipsy_event_mu);
+	if (!tipsy_startup_drawable_enabled || tipsy_startup_drawable_dpy != dpy ||
+		tipsy_startup_drawable_window != win || tipsy_startup_drawable_damage == None ||
+		tipsy_startup_drawable_armed) {
+		pthread_mutex_unlock(&tipsy_event_mu);
+		return 0;
+	}
+	/* Drop the old non-empty region before the caller's declared boundary.
+	 * XDamageReportNonEmpty then emits exactly one new notification for a
+	 * later drawable update; no prior or unbounded damage is attributed. */
+	XDamageSubtract(dpy, tipsy_startup_drawable_damage, None, None);
+	struct tipsy_startup_damage_match stale_match = {
+		.event_type = tipsy_startup_drawable_event_base + XDamageNotify,
+		.damage = tipsy_startup_drawable_damage,
+		.window = win,
+	};
+	XEvent stale;
+	while (XCheckIfEvent(dpy, &stale, tipsy_startup_damage_matches,
+		(XPointer)&stale_match)) {
+		XDamageSubtract(dpy, tipsy_startup_drawable_damage, None, None);
+	}
+	atomic_store_explicit(&tipsy_startup_drawable_ready_dpy, 0, memory_order_relaxed);
+	atomic_store_explicit(&tipsy_startup_drawable_ready_window, 0, memory_order_relaxed);
+	tipsy_startup_drawable_armed = 1;
+	XFlush(dpy);
+	pthread_mutex_unlock(&tipsy_event_mu);
+	return 1;
+}
+
+int tipsy_x11_startup_measurement_take_drawable_observation(uintptr_t dpy_ptr,
+	unsigned long xid) {
+	if (dpy_ptr == 0 || xid == 0 ||
+		atomic_load_explicit(&tipsy_startup_drawable_ready_dpy,
+			memory_order_relaxed) != dpy_ptr ||
+		atomic_load_explicit(&tipsy_startup_drawable_ready_window,
+			memory_order_relaxed) != xid) {
+		return 0;
+	}
+	atomic_store_explicit(&tipsy_startup_drawable_ready_dpy, 0, memory_order_relaxed);
+	atomic_store_explicit(&tipsy_startup_drawable_ready_window, 0, memory_order_relaxed);
+	return 1;
+}
+
+/* Unit hooks exercise the ownership and ordering boundary without a display.
+ * They set only the same content-free private facts that the MapNotify and
+ * XDamage paths set; production never calls them. */
+void tipsy_x11_startup_measurement_test_clear(void) {
+	atomic_store_explicit(&tipsy_startup_map_dpy, 0, memory_order_relaxed);
+	atomic_store_explicit(&tipsy_startup_map_window, 0, memory_order_relaxed);
+	atomic_store_explicit(&tipsy_startup_map_observer_dpy, 0, memory_order_relaxed);
+	atomic_store_explicit(&tipsy_startup_map_observer_window, 0, memory_order_relaxed);
+	atomic_store_explicit(&tipsy_startup_drawable_ready_dpy, 0, memory_order_relaxed);
+	atomic_store_explicit(&tipsy_startup_drawable_ready_window, 0, memory_order_relaxed);
+}
+
+void tipsy_x11_startup_measurement_test_observe_map(uintptr_t dpy_ptr,
+	unsigned long xid) {
+	atomic_store_explicit(&tipsy_startup_map_dpy, dpy_ptr, memory_order_relaxed);
+	atomic_store_explicit(&tipsy_startup_map_window, xid, memory_order_relaxed);
+}
+
+void tipsy_x11_startup_measurement_test_observe_drawable(uintptr_t dpy_ptr,
+	unsigned long xid) {
+	atomic_store_explicit(&tipsy_startup_drawable_ready_dpy, dpy_ptr,
+		memory_order_relaxed);
+	atomic_store_explicit(&tipsy_startup_drawable_ready_window, xid,
+		memory_order_relaxed);
+}
+
 // Write end of the background pump's wakeup pipe, or -1. Other Xlib
 // callers nudge it so poll() cannot miss events already read into Xlib's
 // queue as a side effect of a reply (grab, unmap, fullscreen).
@@ -390,6 +608,54 @@ static Atom tipsy_atom_net_active_window;
 // atoms without a synchronous Xlib round trip while holding tipsy_event_mu.
 static Atom tipsy_atom_wm_protocols;
 static Atom tipsy_atom_wm_take_focus;
+
+/* Send exactly one fixed non-text vertical wheel detent for the sealed
+ * startup-measurement test driver. This uses the same core X11 ButtonPress
+ * route that the owned client event pump decodes; it is not a Go callback or
+ * an XTest/global-pointer injection. The caller has already checked its
+ * private Window identity, while this native side repeats the live focus and
+ * pointer-capture checks under the Xlib event lock. */
+int tipsy_x11_startup_measurement_dispatch_vertical_scroll(uintptr_t dpy_ptr,
+	unsigned long xid) {
+	Display *dpy = (Display *)dpy_ptr;
+	Window win = (Window)xid;
+	if (dpy == NULL || win == None || tipsy_x_io_error) {
+		return 0;
+	}
+	int dispatched = 0;
+	pthread_mutex_lock(&tipsy_event_mu);
+	if (!tipsy_x_io_error && tipsy_have_keyboard_focus && !tipsy_capture.active) {
+		XWindowAttributes attr;
+		if (XGetWindowAttributes(dpy, win, &attr) != 0 &&
+			attr.map_state == IsViewable && attr.width > 0 && attr.height > 0) {
+			XEvent event;
+			memset(&event, 0, sizeof(event));
+			event.xbutton.type = ButtonPress;
+			event.xbutton.display = dpy;
+			event.xbutton.window = win;
+			event.xbutton.root = RootWindow(dpy, DefaultScreen(dpy));
+			event.xbutton.subwindow = None;
+			event.xbutton.time = CurrentTime;
+			/* Fixed center coordinates prevent a caller-directed target. */
+			event.xbutton.x = attr.width / 2;
+			event.xbutton.y = attr.height / 2;
+			event.xbutton.x_root = event.xbutton.x;
+			event.xbutton.y_root = event.xbutton.y;
+			event.xbutton.state = 0;
+			event.xbutton.button = Button5; /* one downward vertical detent */
+			event.xbutton.same_screen = True;
+			if (XSendEvent(dpy, win, False, ButtonPressMask, &event) != 0) {
+				/* Synchronize the request before reporting a dispatch. The wheel
+				 * remains queued for the normal event reader; callers immediately
+				 * arm XDamage before that reader can hand it to Roblox. */
+				XSync(dpy, False);
+				dispatched = !tipsy_x_io_error;
+			}
+		}
+	}
+	pthread_mutex_unlock(&tipsy_event_mu);
+	return dispatched;
+}
 
 static void tipsy_input_drop_oldest_locked(void) {
 	if (tipsy_input_ring[tipsy_input_tail].kind == TIPSY_INPUT_TEXT &&
@@ -1422,6 +1688,10 @@ int tipsy_x11_open(const char *title, int width, int height,
 	memset(tipsy_keys, 0, sizeof(tipsy_keys));
 	memset(&tipsy_capture, 0, sizeof(tipsy_capture));
 	tipsy_have_keyboard_focus = 0;
+	atomic_store_explicit(&tipsy_startup_map_dpy, 0, memory_order_relaxed);
+	atomic_store_explicit(&tipsy_startup_map_window, 0, memory_order_relaxed);
+	atomic_store_explicit(&tipsy_startup_map_observer_dpy, 0, memory_order_relaxed);
+	atomic_store_explicit(&tipsy_startup_map_observer_window, 0, memory_order_relaxed);
 
 	Display *dpy = XOpenDisplay(NULL);
 	if (dpy == NULL) {
@@ -1548,6 +1818,12 @@ int tipsy_x11_open(const char *title, int width, int height,
 		memset(&mapped, 0, sizeof(mapped));
 		for (int i = 0; i < 50; i++) {
 			if (XCheckTypedWindowEvent(dpy, win, MapNotify, &mapped)) {
+				/* The placement loop owns this exact MapNotify rather than the
+				 * normal pump, so retain the same ownership-checked fact. */
+				atomic_store_explicit(&tipsy_startup_map_dpy, (uintptr_t)dpy,
+					memory_order_relaxed);
+				atomic_store_explicit(&tipsy_startup_map_window, (unsigned long)win,
+					memory_order_relaxed);
 				break;
 			}
 			XSync(dpy, False);
@@ -1638,6 +1914,28 @@ int tipsy_x11_pump(uintptr_t dpy_ptr, unsigned long xid, unsigned long wm_delete
 			tipsy_bump_refresh_version();
 			tipsy_wake_go();
 			continue;
+		}
+		if (tipsy_startup_drawable_enabled &&
+			ev.type == tipsy_startup_drawable_event_base + XDamageNotify) {
+			XDamageNotifyEvent *damage = (XDamageNotifyEvent *)&ev;
+			if (tipsy_startup_drawable_dpy == dpy &&
+				tipsy_startup_drawable_window == win &&
+				damage->damage == tipsy_startup_drawable_damage &&
+				damage->drawable == win) {
+				/* This is an actual X Damage extension notification for the
+				 * owned client drawable. Clear the region for the next explicit
+				 * arm whether or not this notification was armed. */
+				XDamageSubtract(dpy, tipsy_startup_drawable_damage, None, None);
+				if (tipsy_startup_drawable_armed) {
+					tipsy_startup_drawable_armed = 0;
+					atomic_store_explicit(&tipsy_startup_drawable_ready_dpy,
+						(uintptr_t)dpy, memory_order_relaxed);
+					atomic_store_explicit(&tipsy_startup_drawable_ready_window,
+						(unsigned long)win, memory_order_relaxed);
+					tipsy_wake_go();
+				}
+				continue;
+			}
 		}
 		// Legacy X11 autorepeat emits an adjacent release/press with identical
 		// keycode and server timestamp. Consume only the synthetic release,
@@ -1946,8 +2244,22 @@ int tipsy_x11_pump(uintptr_t dpy_ptr, unsigned long xid, unsigned long wm_delete
 			}
 			break;
 		case MapNotify:
+			if (ev.xmap.window == win) {
+				atomic_store_explicit(&tipsy_startup_map_dpy, (uintptr_t)dpy,
+					memory_order_relaxed);
+				atomic_store_explicit(&tipsy_startup_map_window, (unsigned long)win,
+					memory_order_relaxed);
+				if (atomic_load_explicit(&tipsy_startup_map_observer_dpy,
+					memory_order_relaxed) == (uintptr_t)dpy &&
+					atomic_load_explicit(&tipsy_startup_map_observer_window,
+					memory_order_relaxed) == (unsigned long)win) {
+					tipsy_wake_go();
+				}
+				tipsy_bump_refresh_version();
+			}
+			break;
 		case ReparentNotify:
-			if (ev.xany.window == win) {
+			if (ev.xreparent.window == win) {
 				tipsy_bump_refresh_version();
 				tipsy_wake_go();
 			}
@@ -2141,6 +2453,17 @@ void tipsy_x11_close(uintptr_t dpy_ptr, unsigned long xid) {
 	}
 	pthread_mutex_lock(&tipsy_event_mu);
 	tipsy_pointer_unlock(dpy, (Window)xid, 0, 0);
+	tipsy_x11_startup_measurement_disable_drawable_locked(dpy, (Window)xid);
+	if (atomic_load_explicit(&tipsy_startup_map_dpy, memory_order_relaxed) == dpy_ptr &&
+		atomic_load_explicit(&tipsy_startup_map_window, memory_order_relaxed) == xid) {
+		atomic_store_explicit(&tipsy_startup_map_dpy, 0, memory_order_relaxed);
+		atomic_store_explicit(&tipsy_startup_map_window, 0, memory_order_relaxed);
+	}
+	if (atomic_load_explicit(&tipsy_startup_map_observer_dpy, memory_order_relaxed) == dpy_ptr &&
+		atomic_load_explicit(&tipsy_startup_map_observer_window, memory_order_relaxed) == xid) {
+		atomic_store_explicit(&tipsy_startup_map_observer_dpy, 0, memory_order_relaxed);
+		atomic_store_explicit(&tipsy_startup_map_observer_window, 0, memory_order_relaxed);
+	}
 	if (tipsy_xic != NULL) {
 		XDestroyIC(tipsy_xic);
 		tipsy_xic = NULL;

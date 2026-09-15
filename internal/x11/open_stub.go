@@ -98,6 +98,7 @@ func (w *Window) Close() error {
 	clearActiveWindow(w)
 	w.mu.Lock()
 	defer w.mu.Unlock()
+	w.clearStartupMeasurementEdgesLocked()
 	w.closed = true
 	w.display = 0
 	w.xid = 0

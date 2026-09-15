@@ -67,6 +67,20 @@ type Window struct {
 	// drainInputLocked callers must finish with the slice before draining
 	// again.
 	inputEvents []InputEvent
+	// startupMeasurementObservers are opt-in, per-window callbacks for the
+	// two fixed startup-measurement edges. They carry no X event payload,
+	// timestamp, title, text, coordinate, or window ID to callers.
+	startupMeasurementObservers       map[uint64]*startupMeasurementObserver
+	startupMeasurementNext            uint64
+	startupMeasurementMapEnabled      bool
+	startupMeasurementDrawableEnabled bool
+	startupMeasurementDrawableArmed   bool
+	// startupMeasurementScrollTestDriver is a single, test-only capability.
+	// It is deliberately distinct from ordinary input subscriptions: no normal
+	// launch creates it, and it permits one fixed wheel dispatch at most.
+	startupMeasurementScrollTestDriverGeneration uint64
+	startupMeasurementScrollTestDriverActive     bool
+	startupMeasurementScrollTestDriverDispatched bool
 }
 
 // InputKind classifies a captured window input event.

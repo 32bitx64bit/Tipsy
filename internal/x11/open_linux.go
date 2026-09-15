@@ -6,7 +6,7 @@
 package x11
 
 /*
-#cgo pkg-config: x11 xrandr xi
+#cgo pkg-config: x11 xrandr xi xdamage
 #cgo LDFLAGS: -lX11 -pthread
 #cgo CFLAGS: -D_GNU_SOURCE
 #include "x11.h"
@@ -318,17 +318,20 @@ func (w *Window) Pump() error {
 		}
 	}
 	evs, closeRequested := w.drainInputLockedWithDiagnostics(diagnostics)
+	startupMeasurementCallbacks := w.collectStartupMeasurementEdgesLocked()
 	if closed != 0 || closeRequested {
 		w.closed = true
 		_ = dismissLocked(w)
 		w.mu.Unlock()
 		notifyInput(evs)
 		clear(evs)
+		notifyStartupMeasurementEdges(startupMeasurementCallbacks)
 		return ErrClosed
 	}
 	w.mu.Unlock()
 	notifyInput(evs)
 	clear(evs)
+	notifyStartupMeasurementEdges(startupMeasurementCallbacks)
 	return nil
 }
 
@@ -505,9 +508,11 @@ func (w *Window) Close() error {
 	_ = w.stopBackgroundPumpLocked()
 	if w.display == 0 {
 		w.closed = true
+		w.clearStartupMeasurementEdgesLocked()
 		wipeInputScratch(w)
 		return nil
 	}
+	w.clearStartupMeasurementEdgesLocked()
 	if w.cursor != 0 {
 		C.tipsy_x11_restore_cursor(C.uintptr_t(w.display), C.ulong(w.xid), C.ulong(w.cursor))
 		w.cursor = 0
