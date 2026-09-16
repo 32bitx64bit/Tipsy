@@ -59,7 +59,6 @@ type FocusedTextOverlayDiagnostics struct {
 	PaintedPixels     uint64
 	BrightGlyphPixels uint64
 	AntialiasedPixels uint64
-	BackgroundPixels  uint64
 }
 
 type focusedTextPaint struct {
@@ -88,8 +87,9 @@ type focusedTextPaint struct {
 }
 
 // prepareFocusedTextPaint validates geometry against the current client
-// bounds, masks password-class input before it crosses into Xlib, and converts
-// Java's UTF-16 cursor unit to a byte boundary in the visual UTF-8 string.
+// bounds, masks password-class input before it crosses into the native
+// rasterizer, and converts Java's UTF-16 cursor unit to a byte boundary in the
+// visual UTF-8 string.
 func prepareFocusedTextPaint(s FocusedTextSnapshot, clientWidth, clientHeight int) focusedTextPaint {
 	if !s.Active || !s.Configured || clientWidth <= 0 || clientHeight <= 0 ||
 		!finitePositive(s.Width) || !finitePositive(s.Height) ||

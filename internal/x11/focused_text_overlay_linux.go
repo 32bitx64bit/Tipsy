@@ -6,9 +6,10 @@
 package x11
 
 /*
-#cgo pkg-config: x11 xext pangocairo pangoft2 cairo-xlib
+#cgo pkg-config: pangocairo pangoft2 cairo
 #cgo LDFLAGS: -lm
 #include "focused_overlay.h"
+#include "focused_text_foreground.h"
 #include <stdlib.h>
 #include <string.h>
 */
@@ -22,7 +23,8 @@ import (
 )
 
 // FocusedTextOverlay is the platform View-equivalent for the APK's focused
-// transparent RbxKeyboard EditText. It retains X11 pixmaps, never text.
+// RbxKeyboard EditText. It retains only a text/caret alpha foreground for the
+// host's pre-present compositor, never text or X11/root background pixels.
 type FocusedTextOverlay struct {
 	mu     sync.Mutex
 	window *Window
@@ -30,27 +32,27 @@ type FocusedTextOverlay struct {
 	closed bool
 }
 
-// NewFocusedTextOverlay binds a transient text surface to w. The child is
-// created lazily after genuine focused geometry arrives.
+// NewFocusedTextOverlay binds a transient foreground rasterizer to w. It has
+// no X11 child/window and works with desktop compositing disabled.
 func NewFocusedTextOverlay(w *Window) (*FocusedTextOverlay, error) {
 	if w == nil {
 		return nil, ErrClosed
 	}
 	w.mu.Lock()
 	defer w.mu.Unlock()
-	if w.closed || w.display == 0 || w.xid == 0 {
+	if w.closed {
 		return nil, ErrClosed
 	}
-	ptr := uintptr(C.tipsy_focused_overlay_new(
-		C.uintptr_t(w.display), C.ulong(w.xid)))
+	ptr := uintptr(C.tipsy_focused_overlay_new())
 	if ptr == 0 {
 		return nil, fmt.Errorf("x11: focused text surface allocation")
 	}
 	return &FocusedTextOverlay{window: w, native: ptr}, nil
 }
 
-// Update composes s over a captured copy of the Roblox surface. Text crosses
-// into one zeroed C allocation for this call and is never logged or retained.
+// Update replaces s's dirty text-only premultiplied-alpha foreground. Text
+// crosses into one zeroed C allocation for this call and is never logged or
+// retained; graphics consumes the leased foreground before its next update.
 func (o *FocusedTextOverlay) Update(s FocusedTextSnapshot) error {
 	if o == nil {
 		return ErrUnavailable
@@ -62,13 +64,13 @@ func (o *FocusedTextOverlay) Update(s FocusedTextSnapshot) error {
 	}
 	o.window.mu.Lock()
 	defer o.window.mu.Unlock()
-	if o.window.closed || o.window.display == 0 {
+	if o.window.closed {
 		return ErrClosed
 	}
 	paint := prepareFocusedTextPaint(s, o.window.width, o.window.height)
 	if !paint.visible {
 		if C.tipsy_focused_overlay_update(C.uintptr_t(o.native), 0,
-			0, C.int(o.window.width), C.int(o.window.height),
+			0,
 			0, 0, 0, 0, 0, 0, nil, 0, 0, 0, 0, 0, 0, 0,
 			0, 0, 0, 0, 0, 0, nil, 0, 0) != 0 {
 			return fmt.Errorf("x11: hide focused text surface")
@@ -95,7 +97,7 @@ func (o *FocusedTextOverlay) Update(s FocusedTextSnapshot) error {
 	fontFile := C.CString(paint.fontFile)
 	defer C.free(unsafe.Pointer(fontFile))
 	rc := C.tipsy_focused_overlay_update(C.uintptr_t(o.native), 1,
-		C.uint64_t(paint.version), C.int(o.window.width), C.int(o.window.height),
+		C.uint64_t(paint.version),
 		C.int(paint.x), C.int(paint.y), C.int(paint.width), C.int(paint.height),
 		C.double(paint.fontSize), C.int(paint.font), fontFile,
 		C.uint32_t(paint.argb), C.double(paint.letterSpacing),
@@ -125,7 +127,8 @@ func boolCInt(v bool) C.int {
 	return 0
 }
 
-// Close wipes and destroys captured surfaces before the parent closes.
+// Close unpublishes, wipes, and destroys the foreground before the parent
+// closes.
 func (o *FocusedTextOverlay) Close() error {
 	if o == nil {
 		return nil
@@ -137,7 +140,7 @@ func (o *FocusedTextOverlay) Close() error {
 	}
 	if o.window != nil {
 		o.window.mu.Lock()
-		if o.native != 0 && o.window.display != 0 {
+		if o.native != 0 {
 			C.tipsy_focused_overlay_free(C.uintptr_t(o.native))
 		}
 		o.window.mu.Unlock()
@@ -150,30 +153,24 @@ func (o *FocusedTextOverlay) Close() error {
 type focusedTextOverlayTestState struct {
 	FocusedTextOverlayDiagnostics
 	x, y, width, height int
-	backgroundPreserved bool
-	antialiasedPixels   uint64
-	backgroundPixels    uint64
-	inputShapePixels    uint64
 	textOriginX         int
 	lineBoxTop          int
 	lineBoxHeight       int
 	baselineY           int
 }
 
-// queryForTest returns aggregate render health, measuring pixels on demand
-// so existing focused-text tests pass without TIPSY_OVERLAY_PIXEL_DIAG.
+// queryForTest returns content-free aggregate render health.
 func (o *FocusedTextOverlay) queryForTest() focusedTextOverlayTestState {
-	return o.queryOverlayState(true)
+	return o.queryOverlayState()
 }
 
-// Diagnostics exposes content-free surface health for live validation.
-// Pixel counts are populated only when paint ran with TIPSY_OVERLAY_PIXEL_DIAG=1;
-// this path does not perform XGetImage readbacks.
+// Diagnostics measures content-free aggregate foreground health on demand. It
+// reads only the owned CPU alpha foreground and performs no X11 operation.
 func (o *FocusedTextOverlay) Diagnostics() FocusedTextOverlayDiagnostics {
-	return o.queryOverlayState(false).FocusedTextOverlayDiagnostics
+	return o.queryOverlayState().FocusedTextOverlayDiagnostics
 }
 
-func (o *FocusedTextOverlay) queryOverlayState(measure bool) focusedTextOverlayTestState {
+func (o *FocusedTextOverlay) queryOverlayState() focusedTextOverlayTestState {
 	var state focusedTextOverlayTestState
 	if o == nil {
 		return state
@@ -185,110 +182,69 @@ func (o *FocusedTextOverlay) queryOverlayState(measure bool) focusedTextOverlayT
 	}
 	o.window.mu.Lock()
 	defer o.window.mu.Unlock()
-	if o.window.closed || o.window.display == 0 {
+	if o.window.closed {
 		return state
 	}
-	if measure {
-		_ = C.tipsy_focused_overlay_measure_for_test(C.uintptr_t(o.native))
-	}
-	var cx, cy, cw, ch, origin, top, boxHeight, baseline C.int
-	var painted, glyphs, caret, antialiased, bright, background, inputShape C.ulong
-	var preserved C.int
-	var requested C.uint32_t
-	shown := C.tipsy_focused_overlay_query(C.uintptr_t(o.native),
-		&cx, &cy, &cw, &ch, &painted, &preserved, &requested,
-		&glyphs, &caret, &antialiased, &bright, &background,
-		&origin, &top, &boxHeight, &baseline, &inputShape)
-	state.x, state.y = int(cx), int(cy)
-	state.width, state.height = int(cw), int(ch)
-	state.backgroundPreserved = preserved != 0
-	state.antialiasedPixels = uint64(antialiased)
-	state.backgroundPixels = uint64(background)
-	state.inputShapePixels = uint64(inputShape)
-	state.textOriginX = int(origin)
-	state.lineBoxTop = int(top)
-	state.lineBoxHeight = int(boxHeight)
-	state.baselineY = int(baseline)
+	var metrics C.struct_tipsy_focused_overlay_metrics
+	shown := C.tipsy_focused_overlay_query(C.uintptr_t(o.native), &metrics)
+	state.x, state.y = int(metrics.x), int(metrics.y)
+	state.width, state.height = int(metrics.width), int(metrics.height)
+	state.textOriginX = int(metrics.text_origin_x)
+	state.lineBoxTop = int(metrics.line_box_top)
+	state.lineBoxHeight = int(metrics.line_box_height)
+	state.baselineY = int(metrics.baseline_y)
+	painted := uint64(metrics.glyph_pixels) + uint64(metrics.caret_pixels)
+	requested := uint32(metrics.requested_argb)
 	state.FocusedTextOverlayDiagnostics = FocusedTextOverlayDiagnostics{
 		Mapped:            shown != 0,
-		TextColorARGB:     uint32(requested),
-		TextAlpha:         uint8(uint32(requested) >> 24),
-		GlyphMaskPixels:   uint64(glyphs),
-		CaretMaskPixels:   uint64(caret),
-		PaintedPixels:     uint64(painted),
-		BrightGlyphPixels: uint64(bright),
-		AntialiasedPixels: uint64(antialiased),
-		BackgroundPixels:  uint64(background),
+		UsesARGB:          true,
+		TextColorARGB:     requested,
+		TextAlpha:         uint8(requested >> 24),
+		GlyphMaskPixels:   uint64(metrics.glyph_pixels),
+		CaretMaskPixels:   uint64(metrics.caret_pixels),
+		PaintedPixels:     painted,
+		BrightGlyphPixels: uint64(metrics.bright_pixels),
+		AntialiasedPixels: uint64(metrics.antialias_pixels),
 	}
 	return state
 }
 
-func (o *FocusedTextOverlay) fillParentAndSampleForTest(x, y, width, height int) (uint64, bool) {
+func (o *FocusedTextOverlay) foregroundAlphaForTest(x, y int) (uint64, bool) {
 	if o == nil || o.native == 0 {
 		return 0, false
 	}
-	var pixel C.ulong
-	rc := C.tipsy_focused_overlay_test_fill_parent(C.uintptr_t(o.native),
-		C.int(x), C.int(y), C.int(width), C.int(height), &pixel)
-	return uint64(pixel), rc == 0
+	var alpha C.ulong
+	rc := C.tipsy_focused_overlay_test_foreground_alpha(C.uintptr_t(o.native),
+		C.int(x), C.int(y), &alpha)
+	return uint64(alpha), rc == 0
 }
 
-func (o *FocusedTextOverlay) addVisibleUnderlayForTest(x, y, width, height int) (uint64, bool) {
-	if o == nil || o.native == 0 {
-		return 0, false
-	}
-	var pixel C.ulong
-	rc := C.tipsy_focused_overlay_test_add_visible_underlay(C.uintptr_t(o.native),
-		C.int(x), C.int(y), C.int(width), C.int(height), &pixel)
-	return uint64(pixel), rc == 0
+// focusedTextForegroundLeaseForTest exercises the exact C lease consumed by
+// the host compositor without exposing pixels, text, or a general renderer.
+type focusedTextForegroundLeaseForTest struct {
+	x, y, width, height, stride int
+	generation                  uint64
+	lease                       uintptr
 }
 
-func (o *FocusedTextOverlay) changeVisibleUnderlayForTest() (uint64, bool) {
-	if o == nil || o.native == 0 {
-		return 0, false
+func acquireFocusedTextForegroundForTest() (focusedTextForegroundLeaseForTest, bool) {
+	var frame C.struct_tipsy_focused_text_frame
+	if C.tipsy_focused_text_frame_acquire(&frame) == 0 {
+		return focusedTextForegroundLeaseForTest{}, false
 	}
-	var pixel C.ulong
-	rc := C.tipsy_focused_overlay_test_change_visible_underlay(
-		C.uintptr_t(o.native), &pixel)
-	return uint64(pixel), rc == 0
+	return focusedTextForegroundLeaseForTest{
+		x:          int(frame.x),
+		y:          int(frame.y),
+		width:      int(frame.width),
+		height:     int(frame.height),
+		stride:     int(frame.stride),
+		generation: uint64(frame.generation),
+		lease:      uintptr(frame.lease),
+	}, true
 }
 
-func (o *FocusedTextOverlay) sampleRootForTest(parentX, parentY int) (uint64, bool) {
-	if o == nil || o.native == 0 {
-		return 0, false
+func (f focusedTextForegroundLeaseForTest) release() {
+	if f.lease != 0 {
+		C.tipsy_focused_text_frame_release(C.uintptr_t(f.lease))
 	}
-	var pixel C.ulong
-	rc := C.tipsy_focused_overlay_test_root_pixel(C.uintptr_t(o.native),
-		C.int(parentX), C.int(parentY), &pixel)
-	return uint64(pixel), rc == 0
-}
-
-func (o *FocusedTextOverlay) exposeForTest() bool {
-	return o != nil && o.native != 0 &&
-		C.tipsy_focused_overlay_test_expose(C.uintptr_t(o.native)) == 0
-}
-
-func newUnfocusedWindowForFocusedOverlayTest(width, height int) (*Window, uintptr, func(), error) {
-	var display C.uintptr_t
-	var xid, focus C.ulong
-	if C.tipsy_focused_overlay_test_window_open(C.int(width), C.int(height),
-		&display, &xid, &focus) != 0 {
-		return nil, 0, nil, ErrNoDisplay
-	}
-	w := &Window{display: uintptr(display), xid: uintptr(xid), width: width, height: height}
-	cleanup := func() {
-		w.mu.Lock()
-		C.tipsy_focused_overlay_test_window_close(
-			C.uintptr_t(w.display), C.ulong(w.xid))
-		w.display, w.xid, w.closed = 0, 0, true
-		w.mu.Unlock()
-	}
-	return w, uintptr(focus), cleanup, nil
-}
-
-func focusedOverlayTestFocus(w *Window) uintptr {
-	if w == nil || w.display == 0 {
-		return 0
-	}
-	return uintptr(C.tipsy_focused_overlay_test_focus(C.uintptr_t(w.display)))
 }
