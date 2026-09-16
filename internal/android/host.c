@@ -5,6 +5,7 @@
  */
 #include "android_bridge.h"
 #include "../graphics/guest_swap.h"
+#include "../x11/focused_text_foreground.h"
 
 #include <dlfcn.h>
 #include <link.h>
@@ -29,22 +30,49 @@ static pthread_once_t host_egl_once = PTHREAD_ONCE_INIT;
 typedef void *EGLDisplay;
 typedef void *EGLConfig;
 typedef void *EGLSurface;
+typedef void *EGLContext;
 typedef int32_t EGLint;
 typedef uint32_t EGLBoolean;
+typedef uint32_t EGLenum;
+typedef intptr_t EGLAttrib;
 
+typedef EGLDisplay (*egl_get_platform_display_fn)(EGLenum, void *, const EGLAttrib *);
+typedef EGLDisplay (*egl_get_platform_display_ext_fn)(EGLenum, void *, const EGLint *);
+typedef EGLDisplay (*egl_get_display_fn)(void *);
+typedef EGLBoolean (*egl_initialize_fn)(EGLDisplay, EGLint *, EGLint *);
+typedef EGLBoolean (*egl_choose_config_fn)(EGLDisplay, const EGLint *, EGLConfig *, EGLint, EGLint *);
+typedef EGLContext (*egl_create_context_fn)(EGLDisplay, EGLConfig, EGLContext, const EGLint *);
 typedef EGLSurface (*egl_create_window_surface_fn)(EGLDisplay, EGLConfig, void *, const EGLint *);
+typedef EGLBoolean (*egl_make_current_fn)(EGLDisplay, EGLSurface, EGLSurface, EGLContext);
 typedef void *(*egl_get_proc_address_fn)(const char *);
 typedef EGLBoolean (*egl_swap_interval_fn)(EGLDisplay, EGLint);
 typedef EGLBoolean (*egl_swap_buffers_fn)(EGLDisplay, EGLSurface);
 typedef EGLBoolean (*egl_destroy_surface_fn)(EGLDisplay, EGLSurface);
+typedef EGLBoolean (*egl_destroy_context_fn)(EGLDisplay, void *);
 typedef EGLint (*egl_get_error_fn)(void);
+typedef EGLDisplay (*egl_get_current_display_fn)(void);
+typedef EGLSurface (*egl_get_current_surface_fn)(EGLint);
+typedef void *(*egl_get_current_context_fn)(void);
+typedef EGLBoolean (*egl_query_surface_fn)(EGLDisplay, EGLSurface, EGLint, EGLint *);
 
+static egl_get_platform_display_fn host_eglGetPlatformDisplay;
+static egl_get_platform_display_ext_fn host_eglGetPlatformDisplayEXT;
+static egl_get_display_fn host_eglGetDisplay;
+static egl_initialize_fn host_eglInitialize;
+static egl_choose_config_fn host_eglChooseConfig;
+static egl_create_context_fn host_eglCreateContext;
 static egl_create_window_surface_fn host_eglCreateWindowSurface;
+static egl_make_current_fn host_eglMakeCurrent;
 static egl_get_proc_address_fn host_eglGetProcAddress;
 static egl_swap_interval_fn host_eglSwapInterval;
 static egl_swap_buffers_fn host_eglSwapBuffers;
 static egl_destroy_surface_fn host_eglDestroySurface;
+static egl_destroy_context_fn host_eglDestroyContext;
 static egl_get_error_fn host_eglGetError;
+static egl_get_current_display_fn host_eglGetCurrentDisplay;
+static egl_get_current_surface_fn host_eglGetCurrentSurface;
+static egl_get_current_context_fn host_eglGetCurrentContext;
+static egl_query_surface_fn host_eglQuerySurface;
 static _Atomic int egl_vsync_enabled;
 /* Default off. Go enables this when the 2s graphics Info logger will emit. */
 static _Atomic int egl_present_stats_enabled;
@@ -55,6 +83,375 @@ static _Atomic uint64_t egl_last_swap_ns;
 #define TIPSY_EGL_FALSE ((EGLBoolean)0)
 #define TIPSY_EGL_TRUE ((EGLBoolean)1)
 #define TIPSY_EGL_SUCCESS ((EGLint)0x3000)
+#define TIPSY_EGL_DRAW ((EGLint)0x3059)
+#define TIPSY_EGL_WIDTH ((EGLint)0x3057)
+#define TIPSY_EGL_HEIGHT ((EGLint)0x3056)
+#define TIPSY_EGL_SWAP_BEHAVIOR ((EGLint)0x3093)
+#define TIPSY_EGL_BUFFER_PRESERVED ((EGLint)0x3094)
+#define TIPSY_EGL_BUFFER_DESTROYED ((EGLint)0x3095)
+
+/* Exact-opt-in, content-free setup tracing. All emitted text is selected from
+ * the fixed labels below; no EGL handles, addresses, attributes, dimensions,
+ * errors, or client content are inspected or printed. */
+#define TIPSY_EGL_SETUP_TRACE_ENV "TIPSY_TEST_EGL_SETUP_TRACE"
+typedef void (*tipsy_egl_setup_test_sink_fn)(uint32_t, uint32_t);
+
+static pthread_once_t egl_setup_trace_once = PTHREAD_ONCE_INIT;
+static int egl_setup_trace_enabled;
+static _Atomic uint64_t egl_setup_trace_seen;
+static _Atomic int egl_setup_first_swap_seen;
+static tipsy_egl_setup_test_sink_fn egl_setup_test_sink;
+static int egl_setup_fixture_suppress_missing;
+
+static void tipsy_egl_setup_log_missing(char *name)
+{
+	if (!egl_setup_fixture_suppress_missing) GoAndroid_LogMissing(name);
+}
+
+static int tipsy_egl_setup_trace_value_enabled(const char *value)
+{
+	return value != NULL && strcmp(value, "1") == 0;
+}
+
+static void tipsy_egl_setup_trace_init(void)
+{
+	egl_setup_trace_enabled =
+		tipsy_egl_setup_trace_value_enabled(getenv(TIPSY_EGL_SETUP_TRACE_ENV));
+}
+
+static int tipsy_egl_setup_trace_is_enabled(void)
+{
+	(void)pthread_once(&egl_setup_trace_once, tipsy_egl_setup_trace_init);
+	return egl_setup_trace_enabled;
+}
+
+static const char *tipsy_egl_setup_marker(uint32_t stage, uint32_t outcome)
+{
+#define TIPSY_EGL_SETUP_MARKERS(stage_name, label) \
+	case stage_name: \
+		switch (outcome) { \
+		case TIPSY_EGL_SETUP_SUCCESS: return label "=success"; \
+		case TIPSY_EGL_SETUP_FAILURE: return label "=failure"; \
+		case TIPSY_EGL_SETUP_ABSENCE: return label "=absence"; \
+		default: return NULL; \
+		}
+	switch (stage) {
+	TIPSY_EGL_SETUP_MARKERS(TIPSY_EGL_SETUP_PLATFORM_DISPLAY, "platform_display");
+	TIPSY_EGL_SETUP_MARKERS(TIPSY_EGL_SETUP_PLATFORM_DISPLAY_EXT, "platform_display_ext");
+	TIPSY_EGL_SETUP_MARKERS(TIPSY_EGL_SETUP_DISPLAY, "display");
+	TIPSY_EGL_SETUP_MARKERS(TIPSY_EGL_SETUP_INITIALIZE, "initialize");
+	TIPSY_EGL_SETUP_MARKERS(TIPSY_EGL_SETUP_CHOOSE_CONFIG, "choose_config");
+	TIPSY_EGL_SETUP_MARKERS(TIPSY_EGL_SETUP_CREATE_CONTEXT, "create_context");
+	TIPSY_EGL_SETUP_MARKERS(TIPSY_EGL_SETUP_CREATE_WINDOW_SURFACE, "create_window_surface");
+	TIPSY_EGL_SETUP_MARKERS(TIPSY_EGL_SETUP_MAKE_CURRENT, "make_current");
+	TIPSY_EGL_SETUP_MARKERS(TIPSY_EGL_SETUP_FIRST_SWAP, "first_swap");
+	default: return NULL;
+	}
+#undef TIPSY_EGL_SETUP_MARKERS
+}
+
+static void tipsy_egl_setup_trace_result(uint32_t stage, uint32_t outcome)
+{
+	const char *marker;
+	uint64_t bit;
+
+	if (egl_setup_test_sink != NULL) {
+		egl_setup_test_sink(stage, outcome);
+	}
+	if (stage == TIPSY_EGL_SETUP_FIRST_SWAP) {
+		if (atomic_load_explicit(&egl_setup_first_swap_seen,
+			memory_order_relaxed) != 0) return;
+		if (!tipsy_egl_setup_trace_is_enabled()) {
+			atomic_store_explicit(&egl_setup_first_swap_seen, 1,
+				memory_order_relaxed);
+			return;
+		}
+		if (atomic_exchange_explicit(&egl_setup_first_swap_seen, 1,
+			memory_order_relaxed) != 0) return;
+	} else if (!tipsy_egl_setup_trace_is_enabled()) {
+		return;
+	}
+	if (stage < TIPSY_EGL_SETUP_PLATFORM_DISPLAY ||
+		stage > TIPSY_EGL_SETUP_FIRST_SWAP ||
+		outcome < TIPSY_EGL_SETUP_SUCCESS ||
+		outcome > TIPSY_EGL_SETUP_ABSENCE) return;
+	bit = 1ull << (((uint64_t)stage - 1ull) * 3ull +
+		((uint64_t)outcome - 1ull));
+	if ((atomic_fetch_or_explicit(&egl_setup_trace_seen, bit,
+		memory_order_relaxed) & bit) != 0) return;
+	marker = tipsy_egl_setup_marker(stage, outcome);
+	if (marker != NULL) {
+		fprintf(stderr, "tipsy-egl-setup: %s\n", marker);
+	}
+}
+
+/* Called only from the EGL-owned resolver paths. The comparisons select fixed
+ * output labels and never echo the supplied string. */
+static void tipsy_egl_trace_resolver_name(const char *name)
+{
+	uint32_t bit = 0;
+	const char *marker = NULL;
+
+	if (name == NULL || !tipsy_egl_setup_trace_is_enabled()) return;
+#define TIPSY_EGL_RESOLVER_NAME(symbol, index) \
+	if (strcmp(name, symbol) == 0) { bit = (index); marker = "resolver_" symbol "=success"; }
+	TIPSY_EGL_RESOLVER_NAME("eglGetProcAddress", 0u)
+	else TIPSY_EGL_RESOLVER_NAME("eglGetPlatformDisplay", 1u)
+	else TIPSY_EGL_RESOLVER_NAME("eglGetPlatformDisplayEXT", 2u)
+	else TIPSY_EGL_RESOLVER_NAME("eglGetDisplay", 3u)
+	else TIPSY_EGL_RESOLVER_NAME("eglInitialize", 4u)
+	else TIPSY_EGL_RESOLVER_NAME("eglChooseConfig", 5u)
+	else TIPSY_EGL_RESOLVER_NAME("eglCreateContext", 6u)
+	else TIPSY_EGL_RESOLVER_NAME("eglCreateWindowSurface", 7u)
+	else TIPSY_EGL_RESOLVER_NAME("eglMakeCurrent", 8u)
+	else TIPSY_EGL_RESOLVER_NAME("eglSwapBuffers", 9u)
+#undef TIPSY_EGL_RESOLVER_NAME
+	if (marker == NULL) return;
+	bit += 32u;
+	if ((atomic_fetch_or_explicit(&egl_setup_trace_seen, 1ull << bit,
+		memory_order_relaxed) & (1ull << bit)) == 0) {
+		fprintf(stderr, "tipsy-egl-setup: %s\n", marker);
+	}
+}
+
+static void tipsy_egl_trace_platform_display_ext_resolver_absence(void)
+{
+	uint64_t bit = 1ull << 42;
+
+	if (!tipsy_egl_setup_trace_is_enabled()) return;
+	if ((atomic_fetch_or_explicit(&egl_setup_trace_seen, bit,
+		memory_order_relaxed) & bit) == 0) {
+		fprintf(stderr,
+			"tipsy-egl-setup: resolver_eglGetPlatformDisplayEXT=absence\n");
+	}
+}
+
+/* The foreground provider lives in the X11 package. It is deliberately a
+ * weak dependency: Android ABI tests and non-X11 builds retain ordinary EGL
+ * behavior, while a linked X11 foreground provider offers only a short
+ * premultiplied-alpha lease. No X11 drawable, root pixel, compositor, or
+ * source text crosses this boundary. */
+#pragma weak tipsy_focused_text_frame_acquire
+#pragma weak tipsy_focused_text_frame_release
+
+typedef int (*tipsy_egl_text_frame_acquire_fn)(struct tipsy_focused_text_frame *);
+typedef void (*tipsy_egl_text_frame_release_fn)(uintptr_t);
+
+static int tipsy_egl_text_frame_acquire(struct tipsy_focused_text_frame *frame)
+{
+	if (tipsy_focused_text_frame_acquire == NULL) return 0;
+	return tipsy_focused_text_frame_acquire(frame);
+}
+
+static void tipsy_egl_text_frame_release(uintptr_t lease)
+{
+	if (tipsy_focused_text_frame_release != NULL) tipsy_focused_text_frame_release(lease);
+}
+
+static tipsy_egl_text_frame_acquire_fn egl_text_frame_acquire_fn =
+	tipsy_egl_text_frame_acquire;
+static tipsy_egl_text_frame_release_fn egl_text_frame_release_fn =
+	tipsy_egl_text_frame_release;
+
+typedef unsigned int TipsyGLenum;
+typedef unsigned char TipsyGLboolean;
+typedef int TipsyGLint;
+typedef int TipsyGLsizei;
+typedef unsigned int TipsyGLuint;
+typedef float TipsyGLfloat;
+typedef ptrdiff_t TipsyGLsizeiptr;
+
+#define TIPSY_GL_FALSE 0u
+#define TIPSY_GL_TRUE 1u
+#define TIPSY_GL_VERSION 0x1F02u
+#define TIPSY_GL_EXTENSIONS 0x1F03u
+#define TIPSY_GL_NUM_EXTENSIONS 0x821Du
+#define TIPSY_GL_MAX_TEXTURE_SIZE 0x0D33u
+#define TIPSY_GL_VIEWPORT 0x0BA2u
+#define TIPSY_GL_SCISSOR_TEST 0x0C11u
+#define TIPSY_GL_BLEND 0x0BE2u
+#define TIPSY_GL_BLEND_SRC_RGB 0x80C9u
+#define TIPSY_GL_BLEND_DST_RGB 0x80C8u
+#define TIPSY_GL_BLEND_SRC_ALPHA 0x80CBu
+#define TIPSY_GL_BLEND_DST_ALPHA 0x80CAu
+#define TIPSY_GL_BLEND_EQUATION_RGB 0x8009u
+#define TIPSY_GL_BLEND_EQUATION_ALPHA 0x883Du
+#define TIPSY_GL_FUNC_ADD 0x8006u
+#define TIPSY_GL_ONE 1u
+#define TIPSY_GL_ONE_MINUS_SRC_ALPHA 0x0303u
+#define TIPSY_GL_COLOR_WRITEMASK 0x0C23u
+#define TIPSY_GL_DEPTH_TEST 0x0B71u
+#define TIPSY_GL_DEPTH_WRITEMASK 0x0B72u
+#define TIPSY_GL_STENCIL_TEST 0x0B90u
+#define TIPSY_GL_CULL_FACE 0x0B44u
+#define TIPSY_GL_FRAMEBUFFER 0x8D40u
+#define TIPSY_GL_FRAMEBUFFER_BINDING 0x8CA6u
+#define TIPSY_GL_READ_FRAMEBUFFER 0x8CA8u
+#define TIPSY_GL_DRAW_FRAMEBUFFER 0x8CA9u
+#define TIPSY_GL_READ_FRAMEBUFFER_BINDING 0x8CAAu
+#define TIPSY_GL_DRAW_FRAMEBUFFER_BINDING 0x8CA6u
+#define TIPSY_GL_CURRENT_PROGRAM 0x8B8Du
+#define TIPSY_GL_ACTIVE_TEXTURE 0x84E0u
+#define TIPSY_GL_TEXTURE0 0x84C0u
+#define TIPSY_GL_TEXTURE_2D 0x0DE1u
+#define TIPSY_GL_TEXTURE_BINDING_2D 0x8069u
+#define TIPSY_GL_TEXTURE_MIN_FILTER 0x2801u
+#define TIPSY_GL_TEXTURE_MAG_FILTER 0x2800u
+#define TIPSY_GL_TEXTURE_WRAP_S 0x2802u
+#define TIPSY_GL_TEXTURE_WRAP_T 0x2803u
+#define TIPSY_GL_LINEAR 0x2601u
+#define TIPSY_GL_CLAMP_TO_EDGE 0x812Fu
+#define TIPSY_GL_UNPACK_ALIGNMENT 0x0CF5u
+#define TIPSY_GL_UNPACK_ROW_LENGTH 0x0CF2u
+#define TIPSY_GL_UNPACK_SKIP_ROWS 0x0CF3u
+#define TIPSY_GL_UNPACK_SKIP_PIXELS 0x0CF4u
+#define TIPSY_GL_UNPACK_SKIP_IMAGES 0x806Du
+#define TIPSY_GL_UNPACK_IMAGE_HEIGHT 0x806Eu
+#define TIPSY_GL_RGBA 0x1908u
+#define TIPSY_GL_UNSIGNED_BYTE 0x1401u
+#define TIPSY_GL_ARRAY_BUFFER 0x8892u
+#define TIPSY_GL_ARRAY_BUFFER_BINDING 0x8894u
+#define TIPSY_GL_PIXEL_UNPACK_BUFFER 0x88ECu
+#define TIPSY_GL_PIXEL_UNPACK_BUFFER_BINDING 0x88EFu
+#define TIPSY_GL_STATIC_DRAW 0x88E4u
+#define TIPSY_GL_FLOAT 0x1406u
+#define TIPSY_GL_TRIANGLE_STRIP 0x0005u
+#define TIPSY_GL_VERTEX_SHADER 0x8B31u
+#define TIPSY_GL_FRAGMENT_SHADER 0x8B30u
+#define TIPSY_GL_COMPILE_STATUS 0x8B81u
+#define TIPSY_GL_LINK_STATUS 0x8B82u
+#define TIPSY_GL_VERTEX_ATTRIB_ARRAY_ENABLED 0x8622u
+#define TIPSY_GL_VERTEX_ATTRIB_ARRAY_SIZE 0x8623u
+#define TIPSY_GL_VERTEX_ATTRIB_ARRAY_STRIDE 0x8624u
+#define TIPSY_GL_VERTEX_ATTRIB_ARRAY_TYPE 0x8625u
+#define TIPSY_GL_VERTEX_ATTRIB_ARRAY_NORMALIZED 0x886Au
+#define TIPSY_GL_VERTEX_ATTRIB_ARRAY_POINTER 0x8645u
+#define TIPSY_GL_VERTEX_ATTRIB_ARRAY_BUFFER_BINDING 0x889Fu
+#define TIPSY_GL_VERTEX_ARRAY_BINDING 0x85B5u
+#define TIPSY_GL_RASTERIZER_DISCARD 0x8C89u
+#define TIPSY_GL_FRAMEBUFFER_SRGB 0x8DB9u
+#define TIPSY_GL_SAMPLER_BINDING 0x8919u
+#define TIPSY_GL_SAMPLE_ALPHA_TO_COVERAGE 0x809Eu
+#define TIPSY_GL_SAMPLE_COVERAGE 0x80A0u
+#define TIPSY_GL_SAMPLE_MASK 0x8E51u
+#define TIPSY_GL_TRANSFORM_FEEDBACK_ACTIVE 0x8E24u
+
+struct tipsy_gl_api {
+	const unsigned char *(*GetString)(TipsyGLenum);
+	const unsigned char *(*GetStringi)(TipsyGLenum, TipsyGLuint);
+	void (*GetIntegerv)(TipsyGLenum, TipsyGLint *);
+	void (*GetBooleanv)(TipsyGLenum, TipsyGLboolean *);
+	TipsyGLboolean (*IsEnabled)(TipsyGLenum);
+	void (*Enable)(TipsyGLenum);
+	void (*Disable)(TipsyGLenum);
+	void (*Viewport)(TipsyGLint, TipsyGLint, TipsyGLsizei, TipsyGLsizei);
+	void (*ColorMask)(TipsyGLboolean, TipsyGLboolean, TipsyGLboolean, TipsyGLboolean);
+	void (*BlendFuncSeparate)(TipsyGLenum, TipsyGLenum, TipsyGLenum, TipsyGLenum);
+	void (*BlendEquationSeparate)(TipsyGLenum, TipsyGLenum);
+	void (*DepthMask)(TipsyGLboolean);
+	void (*BindFramebuffer)(TipsyGLenum, TipsyGLuint);
+	void (*ActiveTexture)(TipsyGLenum);
+	void (*BindTexture)(TipsyGLenum, TipsyGLuint);
+	void (*TexParameteri)(TipsyGLenum, TipsyGLenum, TipsyGLint);
+	void (*PixelStorei)(TipsyGLenum, TipsyGLint);
+	void (*GenTextures)(TipsyGLsizei, TipsyGLuint *);
+	void (*DeleteTextures)(TipsyGLsizei, const TipsyGLuint *);
+	void (*TexImage2D)(TipsyGLenum, TipsyGLint, TipsyGLint, TipsyGLsizei,
+		TipsyGLsizei, TipsyGLint, TipsyGLenum, TipsyGLenum, const void *);
+	void (*TexSubImage2D)(TipsyGLenum, TipsyGLint, TipsyGLint, TipsyGLint,
+		TipsyGLsizei, TipsyGLsizei, TipsyGLenum, TipsyGLenum, const void *);
+	TipsyGLuint (*CreateShader)(TipsyGLenum);
+	void (*ShaderSource)(TipsyGLuint, TipsyGLsizei, const char *const *, const TipsyGLint *);
+	void (*CompileShader)(TipsyGLuint);
+	void (*GetShaderiv)(TipsyGLuint, TipsyGLenum, TipsyGLint *);
+	void (*DeleteShader)(TipsyGLuint);
+	TipsyGLuint (*CreateProgram)(void);
+	void (*AttachShader)(TipsyGLuint, TipsyGLuint);
+	void (*BindAttribLocation)(TipsyGLuint, TipsyGLuint, const char *);
+	void (*LinkProgram)(TipsyGLuint);
+	void (*GetProgramiv)(TipsyGLuint, TipsyGLenum, TipsyGLint *);
+	void (*DeleteProgram)(TipsyGLuint);
+	void (*UseProgram)(TipsyGLuint);
+	TipsyGLint (*GetUniformLocation)(TipsyGLuint, const char *);
+	void (*Uniform1i)(TipsyGLint, TipsyGLint);
+	void (*GenBuffers)(TipsyGLsizei, TipsyGLuint *);
+	void (*DeleteBuffers)(TipsyGLsizei, const TipsyGLuint *);
+	void (*BindBuffer)(TipsyGLenum, TipsyGLuint);
+	void (*BufferData)(TipsyGLenum, TipsyGLsizeiptr, const void *, TipsyGLenum);
+	void (*EnableVertexAttribArray)(TipsyGLuint);
+	void (*DisableVertexAttribArray)(TipsyGLuint);
+	void (*VertexAttribPointer)(TipsyGLuint, TipsyGLint, TipsyGLenum,
+		TipsyGLboolean, TipsyGLsizei, const void *);
+	void (*GetVertexAttribiv)(TipsyGLuint, TipsyGLenum, TipsyGLint *);
+	void (*GetVertexAttribPointerv)(TipsyGLuint, TipsyGLenum, void **);
+	void (*DrawArrays)(TipsyGLenum, TipsyGLint, TipsyGLsizei);
+	void (*GenVertexArrays)(TipsyGLsizei, TipsyGLuint *);
+	void (*DeleteVertexArrays)(TipsyGLsizei, const TipsyGLuint *);
+	void (*BindVertexArray)(TipsyGLuint);
+	void (*BindSampler)(TipsyGLuint, TipsyGLuint);
+	int ready;
+};
+
+struct tipsy_egl_text_state {
+	EGLDisplay display;
+	EGLSurface surface;
+	void *context;
+	TipsyGLuint texture, program, vertex_buffer, vertex_array;
+	TipsyGLint foreground_uniform;
+	TipsyGLsizei texture_width, texture_height;
+	TipsyGLint geometry_x, geometry_y, geometry_width, geometry_height;
+	TipsyGLint geometry_surface_width, geometry_surface_height;
+	uint64_t generation;
+	int initialized, es3, srgb_write_control, geometry_valid;
+	struct tipsy_egl_text_state *next;
+};
+
+struct tipsy_gl_attrib_state {
+	TipsyGLint enabled, size, type, normalized, stride, buffer;
+	void *pointer;
+};
+
+struct tipsy_gl_saved_state {
+	TipsyGLint framebuffer, read_framebuffer, draw_framebuffer, program, array_buffer;
+	TipsyGLint vertex_array, sampler_0, pixel_unpack_buffer;
+	TipsyGLint viewport[4], active_texture, texture_2d, unpack_alignment;
+	TipsyGLint unpack_row_length, unpack_skip_rows, unpack_skip_pixels;
+	TipsyGLint unpack_skip_images, unpack_image_height;
+	TipsyGLint blend_src_rgb, blend_dst_rgb, blend_src_alpha, blend_dst_alpha;
+	TipsyGLint blend_equation_rgb, blend_equation_alpha;
+	TipsyGLboolean color_mask[4], depth_mask;
+	TipsyGLboolean scissor_enabled, blend_enabled, depth_enabled, stencil_enabled, cull_enabled;
+	TipsyGLboolean rasterizer_discard_enabled, framebuffer_srgb_enabled;
+	TipsyGLboolean sample_alpha_to_coverage_enabled, sample_coverage_enabled;
+	TipsyGLboolean sample_mask_enabled, transform_feedback_active;
+	struct tipsy_gl_attrib_state attrib[2];
+};
+
+static struct tipsy_gl_api egl_text_gl;
+static pthread_mutex_t egl_text_mu = PTHREAD_MUTEX_INITIALIZER;
+static struct tipsy_egl_text_state *egl_text_states;
+static void tipsy_egl_text_destroy_gpu_locked(struct tipsy_egl_text_state *state);
+
+/* A surface can die while its context is not current, in which case issuing
+ * GL deletes would target no context or the wrong context. Retain only that
+ * metadata as an orphan and reclaim its objects on the next exact context
+ * presentation. EGL itself releases any remainder when the context dies. */
+static void tipsy_egl_text_reap_orphans_locked(EGLDisplay display, void *context)
+{
+	struct tipsy_egl_text_state **cursor;
+	for (cursor = &egl_text_states; *cursor != NULL;) {
+		struct tipsy_egl_text_state *state = *cursor;
+		if (state->surface != NULL || state->display != display ||
+			state->context != context) {
+			cursor = &state->next;
+			continue;
+		}
+		*cursor = state->next;
+		tipsy_egl_text_destroy_gpu_locked(state);
+		memset(state, 0, sizeof(*state));
+		free(state);
+	}
+}
 
 /* guest_swap.go lives in the optional graphics package. The Android ABI layer
  * must remain independently test-linkable, so absent graphics exports are a
@@ -387,18 +784,695 @@ static void open_egl_libraries(void)
 		lib_gles = open_lib("libGLESv2.so");
 	}
 	if (lib_egl != NULL) {
-		host_eglCreateWindowSurface = (egl_create_window_surface_fn)dlsym(lib_egl, "eglCreateWindowSurface");
 		host_eglGetProcAddress = (egl_get_proc_address_fn)dlsym(lib_egl, "eglGetProcAddress");
+		host_eglGetPlatformDisplay = (egl_get_platform_display_fn)dlsym(lib_egl, "eglGetPlatformDisplay");
+		host_eglGetPlatformDisplayEXT =
+			(egl_get_platform_display_ext_fn)dlsym(lib_egl, "eglGetPlatformDisplayEXT");
+		if (host_eglGetPlatformDisplayEXT == NULL && host_eglGetProcAddress != NULL) {
+			host_eglGetPlatformDisplayEXT = (egl_get_platform_display_ext_fn)
+				host_eglGetProcAddress("eglGetPlatformDisplayEXT");
+		}
+		host_eglGetDisplay = (egl_get_display_fn)dlsym(lib_egl, "eglGetDisplay");
+		host_eglInitialize = (egl_initialize_fn)dlsym(lib_egl, "eglInitialize");
+		host_eglChooseConfig = (egl_choose_config_fn)dlsym(lib_egl, "eglChooseConfig");
+		host_eglCreateContext = (egl_create_context_fn)dlsym(lib_egl, "eglCreateContext");
+		host_eglCreateWindowSurface = (egl_create_window_surface_fn)dlsym(lib_egl, "eglCreateWindowSurface");
+		host_eglMakeCurrent = (egl_make_current_fn)dlsym(lib_egl, "eglMakeCurrent");
 		host_eglSwapInterval = (egl_swap_interval_fn)dlsym(lib_egl, "eglSwapInterval");
 		host_eglSwapBuffers = (egl_swap_buffers_fn)dlsym(lib_egl, "eglSwapBuffers");
 		host_eglDestroySurface = (egl_destroy_surface_fn)dlsym(lib_egl, "eglDestroySurface");
+		host_eglDestroyContext = (egl_destroy_context_fn)dlsym(lib_egl, "eglDestroyContext");
 		host_eglGetError = (egl_get_error_fn)dlsym(lib_egl, "eglGetError");
+		host_eglGetCurrentDisplay = (egl_get_current_display_fn)dlsym(lib_egl, "eglGetCurrentDisplay");
+		host_eglGetCurrentSurface = (egl_get_current_surface_fn)dlsym(lib_egl, "eglGetCurrentSurface");
+		host_eglGetCurrentContext = (egl_get_current_context_fn)dlsym(lib_egl, "eglGetCurrentContext");
+		host_eglQuerySurface = (egl_query_surface_fn)dlsym(lib_egl, "eglQuerySurface");
 	}
 }
 
 static void ensure_egl(void)
 {
 	pthread_once(&host_egl_once, open_egl_libraries);
+}
+
+static void *tipsy_egl_gl_proc(const char *name)
+{
+	void *p = NULL;
+	if (lib_gles != NULL) {
+		p = dlsym(lib_gles, name);
+	}
+	if (p == NULL && host_eglGetProcAddress != NULL) {
+		p = host_eglGetProcAddress(name);
+	}
+	return p;
+}
+
+/* Resolve only the GLES 2 core needed for an alpha upload and one textured
+ * triangle strip.  The pre-present seam must fail closed when a host does not
+ * provide the full surface; it must never replace text with an RGB/X11
+ * rectangle. */
+static int tipsy_egl_text_resolve_gl_locked(void)
+{
+	if (egl_text_gl.ready) return 1;
+	ensure_egl();
+	if (lib_gles == NULL) return 0;
+#define TIPSY_LOAD_GL(member, type, symbol) \
+	egl_text_gl.member = (type)tipsy_egl_gl_proc(symbol)
+	TIPSY_LOAD_GL(GetString, const unsigned char *(*)(TipsyGLenum), "glGetString");
+	TIPSY_LOAD_GL(GetStringi, const unsigned char *(*)(TipsyGLenum, TipsyGLuint), "glGetStringi");
+	TIPSY_LOAD_GL(GetIntegerv, void (*)(TipsyGLenum, TipsyGLint *), "glGetIntegerv");
+	TIPSY_LOAD_GL(GetBooleanv, void (*)(TipsyGLenum, TipsyGLboolean *), "glGetBooleanv");
+	TIPSY_LOAD_GL(IsEnabled, TipsyGLboolean (*)(TipsyGLenum), "glIsEnabled");
+	TIPSY_LOAD_GL(Enable, void (*)(TipsyGLenum), "glEnable");
+	TIPSY_LOAD_GL(Disable, void (*)(TipsyGLenum), "glDisable");
+	TIPSY_LOAD_GL(Viewport, void (*)(TipsyGLint, TipsyGLint, TipsyGLsizei, TipsyGLsizei), "glViewport");
+	TIPSY_LOAD_GL(ColorMask, void (*)(TipsyGLboolean, TipsyGLboolean, TipsyGLboolean, TipsyGLboolean), "glColorMask");
+	TIPSY_LOAD_GL(BlendFuncSeparate, void (*)(TipsyGLenum, TipsyGLenum, TipsyGLenum, TipsyGLenum), "glBlendFuncSeparate");
+	TIPSY_LOAD_GL(BlendEquationSeparate, void (*)(TipsyGLenum, TipsyGLenum), "glBlendEquationSeparate");
+	TIPSY_LOAD_GL(DepthMask, void (*)(TipsyGLboolean), "glDepthMask");
+	TIPSY_LOAD_GL(BindFramebuffer, void (*)(TipsyGLenum, TipsyGLuint), "glBindFramebuffer");
+	TIPSY_LOAD_GL(ActiveTexture, void (*)(TipsyGLenum), "glActiveTexture");
+	TIPSY_LOAD_GL(BindTexture, void (*)(TipsyGLenum, TipsyGLuint), "glBindTexture");
+	TIPSY_LOAD_GL(TexParameteri, void (*)(TipsyGLenum, TipsyGLenum, TipsyGLint), "glTexParameteri");
+	TIPSY_LOAD_GL(PixelStorei, void (*)(TipsyGLenum, TipsyGLint), "glPixelStorei");
+	TIPSY_LOAD_GL(GenTextures, void (*)(TipsyGLsizei, TipsyGLuint *), "glGenTextures");
+	TIPSY_LOAD_GL(DeleteTextures, void (*)(TipsyGLsizei, const TipsyGLuint *), "glDeleteTextures");
+	TIPSY_LOAD_GL(TexImage2D, void (*)(TipsyGLenum, TipsyGLint, TipsyGLint, TipsyGLsizei, TipsyGLsizei, TipsyGLint, TipsyGLenum, TipsyGLenum, const void *), "glTexImage2D");
+	TIPSY_LOAD_GL(TexSubImage2D, void (*)(TipsyGLenum, TipsyGLint, TipsyGLint, TipsyGLint, TipsyGLsizei, TipsyGLsizei, TipsyGLenum, TipsyGLenum, const void *), "glTexSubImage2D");
+	TIPSY_LOAD_GL(CreateShader, TipsyGLuint (*)(TipsyGLenum), "glCreateShader");
+	TIPSY_LOAD_GL(ShaderSource, void (*)(TipsyGLuint, TipsyGLsizei, const char *const *, const TipsyGLint *), "glShaderSource");
+	TIPSY_LOAD_GL(CompileShader, void (*)(TipsyGLuint), "glCompileShader");
+	TIPSY_LOAD_GL(GetShaderiv, void (*)(TipsyGLuint, TipsyGLenum, TipsyGLint *), "glGetShaderiv");
+	TIPSY_LOAD_GL(DeleteShader, void (*)(TipsyGLuint), "glDeleteShader");
+	TIPSY_LOAD_GL(CreateProgram, TipsyGLuint (*)(void), "glCreateProgram");
+	TIPSY_LOAD_GL(AttachShader, void (*)(TipsyGLuint, TipsyGLuint), "glAttachShader");
+	TIPSY_LOAD_GL(BindAttribLocation, void (*)(TipsyGLuint, TipsyGLuint, const char *), "glBindAttribLocation");
+	TIPSY_LOAD_GL(LinkProgram, void (*)(TipsyGLuint), "glLinkProgram");
+	TIPSY_LOAD_GL(GetProgramiv, void (*)(TipsyGLuint, TipsyGLenum, TipsyGLint *), "glGetProgramiv");
+	TIPSY_LOAD_GL(DeleteProgram, void (*)(TipsyGLuint), "glDeleteProgram");
+	TIPSY_LOAD_GL(UseProgram, void (*)(TipsyGLuint), "glUseProgram");
+	TIPSY_LOAD_GL(GetUniformLocation, TipsyGLint (*)(TipsyGLuint, const char *), "glGetUniformLocation");
+	TIPSY_LOAD_GL(Uniform1i, void (*)(TipsyGLint, TipsyGLint), "glUniform1i");
+	TIPSY_LOAD_GL(GenBuffers, void (*)(TipsyGLsizei, TipsyGLuint *), "glGenBuffers");
+	TIPSY_LOAD_GL(DeleteBuffers, void (*)(TipsyGLsizei, const TipsyGLuint *), "glDeleteBuffers");
+	TIPSY_LOAD_GL(BindBuffer, void (*)(TipsyGLenum, TipsyGLuint), "glBindBuffer");
+	TIPSY_LOAD_GL(BufferData, void (*)(TipsyGLenum, TipsyGLsizeiptr, const void *, TipsyGLenum), "glBufferData");
+	TIPSY_LOAD_GL(EnableVertexAttribArray, void (*)(TipsyGLuint), "glEnableVertexAttribArray");
+	TIPSY_LOAD_GL(DisableVertexAttribArray, void (*)(TipsyGLuint), "glDisableVertexAttribArray");
+	TIPSY_LOAD_GL(VertexAttribPointer, void (*)(TipsyGLuint, TipsyGLint, TipsyGLenum, TipsyGLboolean, TipsyGLsizei, const void *), "glVertexAttribPointer");
+	TIPSY_LOAD_GL(GetVertexAttribiv, void (*)(TipsyGLuint, TipsyGLenum, TipsyGLint *), "glGetVertexAttribiv");
+	TIPSY_LOAD_GL(GetVertexAttribPointerv, void (*)(TipsyGLuint, TipsyGLenum, void **), "glGetVertexAttribPointerv");
+	TIPSY_LOAD_GL(DrawArrays, void (*)(TipsyGLenum, TipsyGLint, TipsyGLsizei), "glDrawArrays");
+	TIPSY_LOAD_GL(GenVertexArrays, void (*)(TipsyGLsizei, TipsyGLuint *), "glGenVertexArrays");
+	TIPSY_LOAD_GL(DeleteVertexArrays, void (*)(TipsyGLsizei, const TipsyGLuint *), "glDeleteVertexArrays");
+	TIPSY_LOAD_GL(BindVertexArray, void (*)(TipsyGLuint), "glBindVertexArray");
+	TIPSY_LOAD_GL(BindSampler, void (*)(TipsyGLuint, TipsyGLuint), "glBindSampler");
+#undef TIPSY_LOAD_GL
+	if (egl_text_gl.GetString == NULL || egl_text_gl.GetIntegerv == NULL ||
+		egl_text_gl.GetBooleanv == NULL || egl_text_gl.IsEnabled == NULL ||
+		egl_text_gl.Enable == NULL || egl_text_gl.Disable == NULL ||
+		egl_text_gl.Viewport == NULL || egl_text_gl.ColorMask == NULL ||
+		egl_text_gl.BlendFuncSeparate == NULL || egl_text_gl.BlendEquationSeparate == NULL ||
+		egl_text_gl.DepthMask == NULL || egl_text_gl.BindFramebuffer == NULL ||
+		egl_text_gl.ActiveTexture == NULL || egl_text_gl.BindTexture == NULL ||
+		egl_text_gl.TexParameteri == NULL || egl_text_gl.PixelStorei == NULL ||
+		egl_text_gl.GenTextures == NULL || egl_text_gl.DeleteTextures == NULL ||
+		egl_text_gl.TexImage2D == NULL || egl_text_gl.TexSubImage2D == NULL ||
+		egl_text_gl.CreateShader == NULL ||
+		egl_text_gl.ShaderSource == NULL || egl_text_gl.CompileShader == NULL ||
+		egl_text_gl.GetShaderiv == NULL || egl_text_gl.DeleteShader == NULL ||
+		egl_text_gl.CreateProgram == NULL || egl_text_gl.AttachShader == NULL ||
+		egl_text_gl.BindAttribLocation == NULL || egl_text_gl.LinkProgram == NULL ||
+		egl_text_gl.GetProgramiv == NULL || egl_text_gl.DeleteProgram == NULL ||
+		egl_text_gl.UseProgram == NULL || egl_text_gl.GetUniformLocation == NULL ||
+		egl_text_gl.Uniform1i == NULL || egl_text_gl.GenBuffers == NULL ||
+		egl_text_gl.DeleteBuffers == NULL || egl_text_gl.BindBuffer == NULL ||
+		egl_text_gl.BufferData == NULL || egl_text_gl.EnableVertexAttribArray == NULL ||
+		egl_text_gl.DisableVertexAttribArray == NULL || egl_text_gl.VertexAttribPointer == NULL ||
+		egl_text_gl.GetVertexAttribiv == NULL || egl_text_gl.GetVertexAttribPointerv == NULL ||
+		egl_text_gl.DrawArrays == NULL) {
+		memset(&egl_text_gl, 0, sizeof(egl_text_gl));
+		return 0;
+	}
+	egl_text_gl.ready = 1;
+	return 1;
+}
+
+static struct tipsy_egl_text_state *tipsy_egl_text_find_locked(EGLDisplay display,
+	EGLSurface surface, void *context, int create)
+{
+	struct tipsy_egl_text_state *state;
+	tipsy_egl_text_reap_orphans_locked(display, context);
+	for (state = egl_text_states; state != NULL; state = state->next) {
+		if (state->display == display && state->surface == surface && state->context == context)
+			return state;
+	}
+	if (!create) return NULL;
+	state = calloc(1, sizeof(*state));
+	if (state == NULL) return NULL;
+	state->display = display;
+	state->surface = surface;
+	state->context = context;
+	state->next = egl_text_states;
+	egl_text_states = state;
+	return state;
+}
+
+static void tipsy_egl_text_destroy_gpu_locked(struct tipsy_egl_text_state *state)
+{
+	if (state == NULL || !egl_text_gl.ready) return;
+	if (state->texture != 0) egl_text_gl.DeleteTextures(1, &state->texture);
+	if (state->vertex_array != 0 && egl_text_gl.DeleteVertexArrays != NULL)
+		egl_text_gl.DeleteVertexArrays(1, &state->vertex_array);
+	if (state->vertex_buffer != 0) egl_text_gl.DeleteBuffers(1, &state->vertex_buffer);
+	if (state->program != 0) egl_text_gl.DeleteProgram(state->program);
+	state->texture = state->vertex_buffer = state->vertex_array = state->program = 0;
+	state->initialized = 0;
+	state->generation = 0;
+	state->texture_width = state->texture_height = 0;
+	state->geometry_valid = 0;
+}
+
+static void tipsy_egl_text_save_attrib(TipsyGLuint index, struct tipsy_gl_attrib_state *out)
+{
+	egl_text_gl.GetVertexAttribiv(index, TIPSY_GL_VERTEX_ATTRIB_ARRAY_ENABLED, &out->enabled);
+	egl_text_gl.GetVertexAttribiv(index, TIPSY_GL_VERTEX_ATTRIB_ARRAY_SIZE, &out->size);
+	egl_text_gl.GetVertexAttribiv(index, TIPSY_GL_VERTEX_ATTRIB_ARRAY_TYPE, &out->type);
+	egl_text_gl.GetVertexAttribiv(index, TIPSY_GL_VERTEX_ATTRIB_ARRAY_NORMALIZED, &out->normalized);
+	egl_text_gl.GetVertexAttribiv(index, TIPSY_GL_VERTEX_ATTRIB_ARRAY_STRIDE, &out->stride);
+	egl_text_gl.GetVertexAttribiv(index, TIPSY_GL_VERTEX_ATTRIB_ARRAY_BUFFER_BINDING, &out->buffer);
+	egl_text_gl.GetVertexAttribPointerv(index, TIPSY_GL_VERTEX_ATTRIB_ARRAY_POINTER, &out->pointer);
+}
+
+static void tipsy_egl_text_restore_attrib(TipsyGLuint index, const struct tipsy_gl_attrib_state *in)
+{
+	/* GLES 2 permits client-memory attribute arrays when ARRAY_BUFFER is zero,
+	 * so both the buffer-backed and zero-buffer forms must be replayed exactly.
+	 * GLES 3 never takes this path: its private VAO isolates every attribute. */
+	egl_text_gl.BindBuffer(TIPSY_GL_ARRAY_BUFFER, (TipsyGLuint)in->buffer);
+	egl_text_gl.VertexAttribPointer(index, in->size, (TipsyGLenum)in->type,
+		(TipsyGLboolean)in->normalized, in->stride, in->pointer);
+	if (in->enabled != 0) egl_text_gl.EnableVertexAttribArray(index);
+	else egl_text_gl.DisableVertexAttribArray(index);
+}
+
+static int tipsy_gl_extension_token_equal(const char *start, size_t length,
+	const char *wanted)
+{
+	return strlen(wanted) == length && memcmp(start, wanted, length) == 0;
+}
+
+static int tipsy_egl_text_has_extension(int es3, const char *wanted)
+{
+	if (es3) {
+		TipsyGLint count = 0;
+		TipsyGLint i;
+		if (egl_text_gl.GetStringi == NULL) return 0;
+		egl_text_gl.GetIntegerv(TIPSY_GL_NUM_EXTENSIONS, &count);
+		if (count < 0 || count > 65536) return 0;
+		for (i = 0; i < count; i++) {
+			const unsigned char *extension = egl_text_gl.GetStringi(
+				TIPSY_GL_EXTENSIONS, (TipsyGLuint)i);
+			if (extension != NULL && strcmp((const char *)extension, wanted) == 0)
+				return 1;
+		}
+		return 0;
+	}
+	{
+		const char *extensions = (const char *)egl_text_gl.GetString(TIPSY_GL_EXTENSIONS);
+		const char *cursor = extensions;
+		if (cursor == NULL) return 0;
+		while (*cursor != '\0') {
+			const char *end;
+			while (*cursor == ' ') cursor++;
+			end = cursor;
+			while (*end != '\0' && *end != ' ') end++;
+			if (tipsy_gl_extension_token_equal(cursor, (size_t)(end - cursor), wanted))
+				return 1;
+			cursor = end;
+		}
+	}
+	return 0;
+}
+
+static void tipsy_egl_text_save_state(struct tipsy_gl_saved_state *saved,
+	const struct tipsy_egl_text_state *state)
+{
+	memset(saved, 0, sizeof(*saved));
+	if (state->es3) {
+		egl_text_gl.GetIntegerv(TIPSY_GL_READ_FRAMEBUFFER_BINDING, &saved->read_framebuffer);
+		egl_text_gl.GetIntegerv(TIPSY_GL_DRAW_FRAMEBUFFER_BINDING, &saved->draw_framebuffer);
+		egl_text_gl.GetIntegerv(TIPSY_GL_VERTEX_ARRAY_BINDING, &saved->vertex_array);
+		egl_text_gl.GetIntegerv(TIPSY_GL_PIXEL_UNPACK_BUFFER_BINDING,
+			&saved->pixel_unpack_buffer);
+	} else {
+		egl_text_gl.GetIntegerv(TIPSY_GL_FRAMEBUFFER_BINDING, &saved->framebuffer);
+	}
+	egl_text_gl.GetIntegerv(TIPSY_GL_VIEWPORT, saved->viewport);
+	egl_text_gl.GetIntegerv(TIPSY_GL_CURRENT_PROGRAM, &saved->program);
+	egl_text_gl.GetIntegerv(TIPSY_GL_ARRAY_BUFFER_BINDING, &saved->array_buffer);
+	egl_text_gl.GetIntegerv(TIPSY_GL_ACTIVE_TEXTURE, &saved->active_texture);
+	egl_text_gl.ActiveTexture(TIPSY_GL_TEXTURE0);
+	egl_text_gl.GetIntegerv(TIPSY_GL_TEXTURE_BINDING_2D, &saved->texture_2d);
+	if (state->es3) egl_text_gl.GetIntegerv(TIPSY_GL_SAMPLER_BINDING, &saved->sampler_0);
+	egl_text_gl.GetIntegerv(TIPSY_GL_UNPACK_ALIGNMENT, &saved->unpack_alignment);
+	if (state->es3) {
+		egl_text_gl.GetIntegerv(TIPSY_GL_UNPACK_ROW_LENGTH, &saved->unpack_row_length);
+		egl_text_gl.GetIntegerv(TIPSY_GL_UNPACK_SKIP_ROWS, &saved->unpack_skip_rows);
+		egl_text_gl.GetIntegerv(TIPSY_GL_UNPACK_SKIP_PIXELS, &saved->unpack_skip_pixels);
+		egl_text_gl.GetIntegerv(TIPSY_GL_UNPACK_SKIP_IMAGES, &saved->unpack_skip_images);
+		egl_text_gl.GetIntegerv(TIPSY_GL_UNPACK_IMAGE_HEIGHT, &saved->unpack_image_height);
+	}
+	egl_text_gl.GetIntegerv(TIPSY_GL_BLEND_SRC_RGB, &saved->blend_src_rgb);
+	egl_text_gl.GetIntegerv(TIPSY_GL_BLEND_DST_RGB, &saved->blend_dst_rgb);
+	egl_text_gl.GetIntegerv(TIPSY_GL_BLEND_SRC_ALPHA, &saved->blend_src_alpha);
+	egl_text_gl.GetIntegerv(TIPSY_GL_BLEND_DST_ALPHA, &saved->blend_dst_alpha);
+	egl_text_gl.GetIntegerv(TIPSY_GL_BLEND_EQUATION_RGB, &saved->blend_equation_rgb);
+	egl_text_gl.GetIntegerv(TIPSY_GL_BLEND_EQUATION_ALPHA, &saved->blend_equation_alpha);
+	egl_text_gl.GetBooleanv(TIPSY_GL_COLOR_WRITEMASK, saved->color_mask);
+	egl_text_gl.GetBooleanv(TIPSY_GL_DEPTH_WRITEMASK, &saved->depth_mask);
+	saved->scissor_enabled = egl_text_gl.IsEnabled(TIPSY_GL_SCISSOR_TEST);
+	saved->blend_enabled = egl_text_gl.IsEnabled(TIPSY_GL_BLEND);
+	saved->depth_enabled = egl_text_gl.IsEnabled(TIPSY_GL_DEPTH_TEST);
+	saved->stencil_enabled = egl_text_gl.IsEnabled(TIPSY_GL_STENCIL_TEST);
+	saved->cull_enabled = egl_text_gl.IsEnabled(TIPSY_GL_CULL_FACE);
+	if (state->es3) {
+		saved->rasterizer_discard_enabled =
+			egl_text_gl.IsEnabled(TIPSY_GL_RASTERIZER_DISCARD);
+		saved->sample_mask_enabled = egl_text_gl.IsEnabled(TIPSY_GL_SAMPLE_MASK);
+		egl_text_gl.GetBooleanv(TIPSY_GL_TRANSFORM_FEEDBACK_ACTIVE,
+			&saved->transform_feedback_active);
+	} else {
+		tipsy_egl_text_save_attrib(0, &saved->attrib[0]);
+		tipsy_egl_text_save_attrib(1, &saved->attrib[1]);
+	}
+	saved->sample_alpha_to_coverage_enabled =
+		egl_text_gl.IsEnabled(TIPSY_GL_SAMPLE_ALPHA_TO_COVERAGE);
+	saved->sample_coverage_enabled = egl_text_gl.IsEnabled(TIPSY_GL_SAMPLE_COVERAGE);
+	if (state->srgb_write_control) {
+		saved->framebuffer_srgb_enabled =
+			egl_text_gl.IsEnabled(TIPSY_GL_FRAMEBUFFER_SRGB);
+	}
+}
+
+static void tipsy_egl_text_restore_state(const struct tipsy_gl_saved_state *saved,
+	const struct tipsy_egl_text_state *state)
+{
+	if (state->es3) {
+		egl_text_gl.BindVertexArray((TipsyGLuint)saved->vertex_array);
+	} else {
+		tipsy_egl_text_restore_attrib(0, &saved->attrib[0]);
+		tipsy_egl_text_restore_attrib(1, &saved->attrib[1]);
+	}
+	egl_text_gl.BindBuffer(TIPSY_GL_ARRAY_BUFFER, (TipsyGLuint)saved->array_buffer);
+	if (state->es3) {
+		egl_text_gl.BindBuffer(TIPSY_GL_PIXEL_UNPACK_BUFFER,
+			(TipsyGLuint)saved->pixel_unpack_buffer);
+	}
+	if (state->es3) {
+		egl_text_gl.BindFramebuffer(TIPSY_GL_READ_FRAMEBUFFER, (TipsyGLuint)saved->read_framebuffer);
+		egl_text_gl.BindFramebuffer(TIPSY_GL_DRAW_FRAMEBUFFER, (TipsyGLuint)saved->draw_framebuffer);
+	} else {
+		egl_text_gl.BindFramebuffer(TIPSY_GL_FRAMEBUFFER, (TipsyGLuint)saved->framebuffer);
+	}
+	egl_text_gl.Viewport(saved->viewport[0], saved->viewport[1], saved->viewport[2], saved->viewport[3]);
+	if (saved->scissor_enabled) egl_text_gl.Enable(TIPSY_GL_SCISSOR_TEST);
+	else egl_text_gl.Disable(TIPSY_GL_SCISSOR_TEST);
+	egl_text_gl.ColorMask(saved->color_mask[0], saved->color_mask[1], saved->color_mask[2], saved->color_mask[3]);
+	if (saved->blend_enabled) egl_text_gl.Enable(TIPSY_GL_BLEND);
+	else egl_text_gl.Disable(TIPSY_GL_BLEND);
+	egl_text_gl.BlendFuncSeparate((TipsyGLenum)saved->blend_src_rgb,
+		(TipsyGLenum)saved->blend_dst_rgb, (TipsyGLenum)saved->blend_src_alpha,
+		(TipsyGLenum)saved->blend_dst_alpha);
+	egl_text_gl.BlendEquationSeparate((TipsyGLenum)saved->blend_equation_rgb,
+		(TipsyGLenum)saved->blend_equation_alpha);
+	if (saved->depth_enabled) egl_text_gl.Enable(TIPSY_GL_DEPTH_TEST);
+	else egl_text_gl.Disable(TIPSY_GL_DEPTH_TEST);
+	egl_text_gl.DepthMask(saved->depth_mask);
+	if (saved->stencil_enabled) egl_text_gl.Enable(TIPSY_GL_STENCIL_TEST);
+	else egl_text_gl.Disable(TIPSY_GL_STENCIL_TEST);
+	if (saved->cull_enabled) egl_text_gl.Enable(TIPSY_GL_CULL_FACE);
+	else egl_text_gl.Disable(TIPSY_GL_CULL_FACE);
+	if (state->es3) {
+		if (saved->rasterizer_discard_enabled)
+			egl_text_gl.Enable(TIPSY_GL_RASTERIZER_DISCARD);
+		else
+			egl_text_gl.Disable(TIPSY_GL_RASTERIZER_DISCARD);
+		if (saved->sample_mask_enabled) egl_text_gl.Enable(TIPSY_GL_SAMPLE_MASK);
+		else egl_text_gl.Disable(TIPSY_GL_SAMPLE_MASK);
+	}
+	if (saved->sample_alpha_to_coverage_enabled)
+		egl_text_gl.Enable(TIPSY_GL_SAMPLE_ALPHA_TO_COVERAGE);
+	else
+		egl_text_gl.Disable(TIPSY_GL_SAMPLE_ALPHA_TO_COVERAGE);
+	if (saved->sample_coverage_enabled) egl_text_gl.Enable(TIPSY_GL_SAMPLE_COVERAGE);
+	else egl_text_gl.Disable(TIPSY_GL_SAMPLE_COVERAGE);
+	if (state->srgb_write_control) {
+		if (saved->framebuffer_srgb_enabled)
+			egl_text_gl.Enable(TIPSY_GL_FRAMEBUFFER_SRGB);
+		else
+			egl_text_gl.Disable(TIPSY_GL_FRAMEBUFFER_SRGB);
+	}
+	egl_text_gl.UseProgram((TipsyGLuint)saved->program);
+	egl_text_gl.ActiveTexture(TIPSY_GL_TEXTURE0);
+	egl_text_gl.BindTexture(TIPSY_GL_TEXTURE_2D, (TipsyGLuint)saved->texture_2d);
+	if (state->es3) egl_text_gl.BindSampler(0, (TipsyGLuint)saved->sampler_0);
+	egl_text_gl.PixelStorei(TIPSY_GL_UNPACK_ALIGNMENT, saved->unpack_alignment);
+	if (state->es3) {
+		egl_text_gl.PixelStorei(TIPSY_GL_UNPACK_ROW_LENGTH, saved->unpack_row_length);
+		egl_text_gl.PixelStorei(TIPSY_GL_UNPACK_SKIP_ROWS, saved->unpack_skip_rows);
+		egl_text_gl.PixelStorei(TIPSY_GL_UNPACK_SKIP_PIXELS, saved->unpack_skip_pixels);
+		egl_text_gl.PixelStorei(TIPSY_GL_UNPACK_SKIP_IMAGES, saved->unpack_skip_images);
+		egl_text_gl.PixelStorei(TIPSY_GL_UNPACK_IMAGE_HEIGHT, saved->unpack_image_height);
+	}
+	egl_text_gl.ActiveTexture((TipsyGLenum)saved->active_texture);
+}
+
+static TipsyGLuint tipsy_egl_text_compile_shader(TipsyGLenum kind, const char *source)
+{
+	TipsyGLuint shader = egl_text_gl.CreateShader(kind);
+	TipsyGLint ok = 0;
+	if (shader == 0) return 0;
+	egl_text_gl.ShaderSource(shader, 1, &source, NULL);
+	egl_text_gl.CompileShader(shader);
+	egl_text_gl.GetShaderiv(shader, TIPSY_GL_COMPILE_STATUS, &ok);
+	if (ok != 0) return shader;
+	egl_text_gl.DeleteShader(shader);
+	return 0;
+}
+
+static int tipsy_egl_text_create_texture_locked(struct tipsy_egl_text_state *state)
+{
+	if (state->texture != 0) return 1;
+	egl_text_gl.GenTextures(1, &state->texture);
+	if (state->texture == 0) return 0;
+	egl_text_gl.ActiveTexture(TIPSY_GL_TEXTURE0);
+	egl_text_gl.BindTexture(TIPSY_GL_TEXTURE_2D, state->texture);
+	egl_text_gl.TexParameteri(TIPSY_GL_TEXTURE_2D, TIPSY_GL_TEXTURE_MIN_FILTER, TIPSY_GL_LINEAR);
+	egl_text_gl.TexParameteri(TIPSY_GL_TEXTURE_2D, TIPSY_GL_TEXTURE_MAG_FILTER, TIPSY_GL_LINEAR);
+	egl_text_gl.TexParameteri(TIPSY_GL_TEXTURE_2D, TIPSY_GL_TEXTURE_WRAP_S, TIPSY_GL_CLAMP_TO_EDGE);
+	egl_text_gl.TexParameteri(TIPSY_GL_TEXTURE_2D, TIPSY_GL_TEXTURE_WRAP_T, TIPSY_GL_CLAMP_TO_EDGE);
+	state->texture_width = state->texture_height = 0;
+	return 1;
+}
+
+static int tipsy_egl_text_initialize_locked(struct tipsy_egl_text_state *state)
+{
+	static const char vertex_source[] =
+		"attribute vec2 a_position;\n"
+		"attribute vec2 a_texcoord;\n"
+		"varying vec2 v_texcoord;\n"
+		"void main() { gl_Position = vec4(a_position, 0.0, 1.0); v_texcoord = a_texcoord; }\n";
+	static const char fragment_source[] =
+		"precision mediump float;\n"
+		"varying vec2 v_texcoord;\n"
+		"uniform sampler2D u_foreground;\n"
+		"void main() { gl_FragColor = texture2D(u_foreground, v_texcoord); }\n";
+	TipsyGLuint vertex = 0, fragment = 0;
+	TipsyGLint linked = 0;
+	if (state == NULL || !egl_text_gl.ready) return 0;
+	if (state->initialized) return 1;
+	if (state->es3 && (egl_text_gl.GenVertexArrays == NULL ||
+		egl_text_gl.DeleteVertexArrays == NULL || egl_text_gl.BindVertexArray == NULL ||
+		egl_text_gl.BindSampler == NULL))
+		return 0;
+	vertex = tipsy_egl_text_compile_shader(TIPSY_GL_VERTEX_SHADER, vertex_source);
+	fragment = tipsy_egl_text_compile_shader(TIPSY_GL_FRAGMENT_SHADER, fragment_source);
+	if (vertex == 0 || fragment == 0) goto fail;
+	state->program = egl_text_gl.CreateProgram();
+	if (state->program == 0) goto fail;
+	egl_text_gl.AttachShader(state->program, vertex);
+	egl_text_gl.AttachShader(state->program, fragment);
+	egl_text_gl.BindAttribLocation(state->program, 0, "a_position");
+	egl_text_gl.BindAttribLocation(state->program, 1, "a_texcoord");
+	egl_text_gl.LinkProgram(state->program);
+	egl_text_gl.GetProgramiv(state->program, TIPSY_GL_LINK_STATUS, &linked);
+	if (linked == 0) goto fail;
+	state->foreground_uniform = egl_text_gl.GetUniformLocation(state->program, "u_foreground");
+	if (state->foreground_uniform < 0) goto fail;
+	egl_text_gl.GenBuffers(1, &state->vertex_buffer);
+	if (state->es3) egl_text_gl.GenVertexArrays(1, &state->vertex_array);
+	if (!tipsy_egl_text_create_texture_locked(state) || state->vertex_buffer == 0 ||
+		(state->es3 && state->vertex_array == 0)) goto fail;
+	if (state->es3) {
+		egl_text_gl.BindVertexArray(state->vertex_array);
+		egl_text_gl.BindBuffer(TIPSY_GL_ARRAY_BUFFER, state->vertex_buffer);
+		egl_text_gl.EnableVertexAttribArray(0);
+		egl_text_gl.EnableVertexAttribArray(1);
+		egl_text_gl.VertexAttribPointer(0, 2, TIPSY_GL_FLOAT, TIPSY_GL_FALSE,
+			4 * (TipsyGLsizei)sizeof(TipsyGLfloat), (const void *)0);
+		egl_text_gl.VertexAttribPointer(1, 2, TIPSY_GL_FLOAT, TIPSY_GL_FALSE,
+			4 * (TipsyGLsizei)sizeof(TipsyGLfloat),
+			(const void *)(2 * sizeof(TipsyGLfloat)));
+	}
+	egl_text_gl.DeleteShader(vertex);
+	egl_text_gl.DeleteShader(fragment);
+	state->initialized = 1;
+	return 1;
+fail:
+	if (vertex != 0) egl_text_gl.DeleteShader(vertex);
+	if (fragment != 0) egl_text_gl.DeleteShader(fragment);
+	tipsy_egl_text_destroy_gpu_locked(state);
+	return 0;
+}
+
+static int tipsy_egl_text_frame_valid(const struct tipsy_focused_text_frame *frame,
+	TipsyGLint max_texture)
+{
+	size_t width;
+	if (frame == NULL || frame->rgba == NULL || frame->lease == 0 || frame->generation == 0 ||
+		frame->width < 1 || frame->height < 1 || frame->stride < 1 || max_texture < 1)
+		return 0;
+	if (frame->width > max_texture || frame->height > max_texture) return 0;
+	width = (size_t)frame->width;
+	if (width > SIZE_MAX / 4 || frame->stride != (int)(width * 4)) return 0;
+	return 1;
+}
+
+/* Compose exactly one leased foreground into the current EGL draw surface.
+ * The caller always releases the lease before forwarding the real swap. A
+ * zero acquire means focus ended; its GPU texture is deleted the first time
+ * that context next presents. */
+static void tipsy_egl_compose_focused_text(EGLDisplay dpy, EGLSurface surface)
+{
+	struct tipsy_focused_text_frame frame = {0};
+	struct tipsy_egl_text_state *state;
+	struct tipsy_gl_saved_state saved;
+	EGLDisplay current_display;
+	EGLSurface current_surface;
+	void *current_context;
+	EGLint surface_width = 0, surface_height = 0, swap_behavior = 0;
+	TipsyGLint max_texture = 0;
+	int acquired, es3;
+	const unsigned char *version;
+	if (egl_text_frame_acquire_fn == NULL || egl_text_frame_release_fn == NULL ||
+		(egl_text_frame_acquire_fn == tipsy_egl_text_frame_acquire &&
+		 (tipsy_focused_text_frame_acquire == NULL ||
+		  tipsy_focused_text_frame_release == NULL))) {
+		return;
+	}
+	ensure_egl();
+	if (host_eglGetCurrentDisplay == NULL || host_eglGetCurrentSurface == NULL ||
+		host_eglGetCurrentContext == NULL || host_eglQuerySurface == NULL) {
+		return;
+	}
+	current_display = host_eglGetCurrentDisplay();
+	current_surface = host_eglGetCurrentSurface(TIPSY_EGL_DRAW);
+	current_context = host_eglGetCurrentContext();
+	if (current_display != dpy || current_surface != surface || current_context == NULL) {
+		return;
+	}
+	acquired = egl_text_frame_acquire_fn(&frame);
+	if (acquired != 0 && acquired != 1) {
+		return;
+	}
+	pthread_mutex_lock(&egl_text_mu);
+	if (acquired == 0) {
+		state = tipsy_egl_text_find_locked(dpy, surface, current_context, 0);
+		if (state != NULL && state->texture != 0 && egl_text_gl.ready) {
+			tipsy_egl_text_save_state(&saved, state);
+			egl_text_gl.DeleteTextures(1, &state->texture);
+			state->texture = 0;
+			state->generation = 0;
+			state->texture_width = state->texture_height = 0;
+			tipsy_egl_text_restore_state(&saved, state);
+		}
+		goto out;
+	}
+	if (host_eglQuerySurface(dpy, surface, TIPSY_EGL_SWAP_BEHAVIOR,
+		&swap_behavior) != TIPSY_EGL_TRUE) {
+		goto out;
+	}
+	if (swap_behavior != TIPSY_EGL_BUFFER_DESTROYED) goto out;
+	if (host_eglQuerySurface(dpy, surface, TIPSY_EGL_WIDTH, &surface_width) != TIPSY_EGL_TRUE ||
+		host_eglQuerySurface(dpy, surface, TIPSY_EGL_HEIGHT, &surface_height) != TIPSY_EGL_TRUE ||
+		surface_width < 1 || surface_height < 1) {
+		goto out;
+	}
+	if (!tipsy_egl_text_resolve_gl_locked()) {
+		goto out;
+	}
+	version = egl_text_gl.GetString(TIPSY_GL_VERSION);
+	if (version == NULL || strncmp((const char *)version, "OpenGL ES ", 10) != 0 ||
+		(((const char *)version)[10] != '2' && ((const char *)version)[10] != '3')) {
+		goto out;
+	}
+	es3 = ((const char *)version)[10] == '3';
+	state = tipsy_egl_text_find_locked(dpy, surface, current_context, acquired == 1);
+	if (state == NULL) {
+		goto out;
+	}
+	if (state->initialized && state->es3 != es3) {
+		goto out;
+	}
+	state->es3 = es3;
+	if (!state->initialized) {
+		state->srgb_write_control = tipsy_egl_text_has_extension(es3,
+			"GL_EXT_sRGB_write_control");
+	}
+	tipsy_egl_text_save_state(&saved, state);
+	if (state->es3 && saved.transform_feedback_active) {
+		tipsy_egl_text_restore_state(&saved, state);
+		goto out;
+	}
+	egl_text_gl.GetIntegerv(TIPSY_GL_MAX_TEXTURE_SIZE, &max_texture);
+	if (!tipsy_egl_text_frame_valid(&frame, max_texture)) {
+		tipsy_egl_text_restore_state(&saved, state);
+		goto out;
+	}
+	if (!tipsy_egl_text_initialize_locked(state)) {
+		tipsy_egl_text_restore_state(&saved, state);
+		goto out;
+	}
+	if (!tipsy_egl_text_create_texture_locked(state)) {
+		tipsy_egl_text_restore_state(&saved, state);
+		goto out;
+	}
+	egl_text_gl.ActiveTexture(TIPSY_GL_TEXTURE0);
+	egl_text_gl.BindTexture(TIPSY_GL_TEXTURE_2D, state->texture);
+	if (state->generation != frame.generation) {
+		if (state->es3) {
+			egl_text_gl.BindBuffer(TIPSY_GL_PIXEL_UNPACK_BUFFER, 0);
+			egl_text_gl.PixelStorei(TIPSY_GL_UNPACK_ROW_LENGTH, 0);
+			egl_text_gl.PixelStorei(TIPSY_GL_UNPACK_SKIP_ROWS, 0);
+			egl_text_gl.PixelStorei(TIPSY_GL_UNPACK_SKIP_PIXELS, 0);
+			egl_text_gl.PixelStorei(TIPSY_GL_UNPACK_SKIP_IMAGES, 0);
+			egl_text_gl.PixelStorei(TIPSY_GL_UNPACK_IMAGE_HEIGHT, 0);
+		}
+		egl_text_gl.PixelStorei(TIPSY_GL_UNPACK_ALIGNMENT, 1);
+		if (state->texture_width == frame.width && state->texture_height == frame.height) {
+			egl_text_gl.TexSubImage2D(TIPSY_GL_TEXTURE_2D, 0, 0, 0, frame.width,
+				frame.height, TIPSY_GL_RGBA, TIPSY_GL_UNSIGNED_BYTE, frame.rgba);
+		} else {
+			egl_text_gl.TexImage2D(TIPSY_GL_TEXTURE_2D, 0, TIPSY_GL_RGBA, frame.width,
+				frame.height, 0, TIPSY_GL_RGBA, TIPSY_GL_UNSIGNED_BYTE, frame.rgba);
+			state->texture_width = frame.width;
+			state->texture_height = frame.height;
+		}
+		state->generation = frame.generation;
+	}
+	if (!state->geometry_valid || state->geometry_x != frame.x ||
+		state->geometry_y != frame.y || state->geometry_width != frame.width ||
+		state->geometry_height != frame.height ||
+		state->geometry_surface_width != surface_width ||
+		state->geometry_surface_height != surface_height) {
+		const TipsyGLfloat left = (TipsyGLfloat)((2.0 * (double)frame.x / surface_width) - 1.0);
+		const TipsyGLfloat right = (TipsyGLfloat)((2.0 * ((double)frame.x + (double)frame.width) / surface_width) - 1.0);
+		const TipsyGLfloat top = (TipsyGLfloat)(1.0 - (2.0 * (double)frame.y / surface_height));
+		const TipsyGLfloat bottom = (TipsyGLfloat)(1.0 - (2.0 * ((double)frame.y + (double)frame.height) / surface_height));
+		const TipsyGLfloat vertices[] = {
+			left, top, 0.0f, 0.0f, right, top, 1.0f, 0.0f,
+			left, bottom, 0.0f, 1.0f, right, bottom, 1.0f, 1.0f,
+		};
+		egl_text_gl.BindBuffer(TIPSY_GL_ARRAY_BUFFER, state->vertex_buffer);
+		egl_text_gl.BufferData(TIPSY_GL_ARRAY_BUFFER, (TipsyGLsizeiptr)sizeof(vertices), vertices, TIPSY_GL_STATIC_DRAW);
+		state->geometry_x = frame.x;
+		state->geometry_y = frame.y;
+		state->geometry_width = frame.width;
+		state->geometry_height = frame.height;
+		state->geometry_surface_width = surface_width;
+		state->geometry_surface_height = surface_height;
+		state->geometry_valid = 1;
+	}
+	if (state->es3) {
+		egl_text_gl.BindVertexArray(state->vertex_array);
+		egl_text_gl.BindSampler(0, 0);
+	} else {
+		egl_text_gl.BindBuffer(TIPSY_GL_ARRAY_BUFFER, state->vertex_buffer);
+		egl_text_gl.EnableVertexAttribArray(0);
+		egl_text_gl.EnableVertexAttribArray(1);
+		egl_text_gl.VertexAttribPointer(0, 2, TIPSY_GL_FLOAT, TIPSY_GL_FALSE,
+			4 * (TipsyGLsizei)sizeof(TipsyGLfloat), (const void *)0);
+		egl_text_gl.VertexAttribPointer(1, 2, TIPSY_GL_FLOAT, TIPSY_GL_FALSE,
+			4 * (TipsyGLsizei)sizeof(TipsyGLfloat), (const void *)(2 * sizeof(TipsyGLfloat)));
+	}
+	if (state->es3) egl_text_gl.BindFramebuffer(TIPSY_GL_DRAW_FRAMEBUFFER, 0);
+	else egl_text_gl.BindFramebuffer(TIPSY_GL_FRAMEBUFFER, 0);
+	egl_text_gl.Viewport(0, 0, surface_width, surface_height);
+	egl_text_gl.Disable(TIPSY_GL_SCISSOR_TEST);
+	egl_text_gl.Disable(TIPSY_GL_DEPTH_TEST);
+	egl_text_gl.Disable(TIPSY_GL_STENCIL_TEST);
+	egl_text_gl.Disable(TIPSY_GL_CULL_FACE);
+	if (state->es3) egl_text_gl.Disable(TIPSY_GL_RASTERIZER_DISCARD);
+	if (state->es3) egl_text_gl.Disable(TIPSY_GL_SAMPLE_MASK);
+	egl_text_gl.Disable(TIPSY_GL_SAMPLE_ALPHA_TO_COVERAGE);
+	egl_text_gl.Disable(TIPSY_GL_SAMPLE_COVERAGE);
+	if (state->srgb_write_control) egl_text_gl.Disable(TIPSY_GL_FRAMEBUFFER_SRGB);
+	egl_text_gl.DepthMask(TIPSY_GL_FALSE);
+	egl_text_gl.ColorMask(TIPSY_GL_TRUE, TIPSY_GL_TRUE, TIPSY_GL_TRUE, TIPSY_GL_TRUE);
+	egl_text_gl.Enable(TIPSY_GL_BLEND);
+	egl_text_gl.BlendEquationSeparate(TIPSY_GL_FUNC_ADD, TIPSY_GL_FUNC_ADD);
+	egl_text_gl.BlendFuncSeparate(TIPSY_GL_ONE, TIPSY_GL_ONE_MINUS_SRC_ALPHA,
+		TIPSY_GL_ONE, TIPSY_GL_ONE_MINUS_SRC_ALPHA);
+	egl_text_gl.UseProgram(state->program);
+	egl_text_gl.Uniform1i(state->foreground_uniform, 0);
+	egl_text_gl.DrawArrays(TIPSY_GL_TRIANGLE_STRIP, 0, 4);
+	tipsy_egl_text_restore_state(&saved, state);
+out:
+	pthread_mutex_unlock(&egl_text_mu);
+	if (acquired == 1) {
+		egl_text_frame_release_fn(frame.lease);
+	}
+}
+
+static void tipsy_egl_text_forget(EGLDisplay dpy, EGLSurface surface, void *context)
+{
+	struct tipsy_egl_text_state **cursor;
+	EGLDisplay current_display = NULL;
+	void *current_context = NULL;
+	if (host_eglGetCurrentDisplay != NULL && host_eglGetCurrentContext != NULL) {
+		current_display = host_eglGetCurrentDisplay();
+		current_context = host_eglGetCurrentContext();
+	}
+	pthread_mutex_lock(&egl_text_mu);
+	for (cursor = &egl_text_states; *cursor != NULL;) {
+		struct tipsy_egl_text_state *state = *cursor;
+		if (state->display != dpy || (surface != NULL && state->surface != surface) ||
+			(context != NULL && state->context != context)) {
+			cursor = &state->next;
+			continue;
+		}
+		if (surface != NULL && context == NULL && state->initialized &&
+			(current_display != dpy || current_context != state->context)) {
+			/* Keep an unaddressable surface tombstone until this exact context is
+			 * current again. It cannot match a recycled EGLSurface value. */
+			state->surface = NULL;
+			state->generation = 0;
+			state->geometry_valid = 0;
+			cursor = &state->next;
+			continue;
+		}
+		*cursor = state->next;
+		if (surface != NULL && current_display == dpy &&
+			current_context == state->context) {
+			tipsy_egl_text_destroy_gpu_locked(state);
+		}
+		/* A context destroy releases any objects that could not be deleted on
+		 * an exact current-context turn. Never make another context current. */
+		memset(state, 0, sizeof(*state));
+		free(state);
+	}
+	pthread_mutex_unlock(&egl_text_mu);
 }
 
 static void tipsy_egl_record_successful_swap(uint64_t now_ns)
@@ -483,6 +1557,130 @@ int tipsy_egl_vsync_enabled(void)
 	return atomic_load_explicit(&egl_vsync_enabled, memory_order_acquire);
 }
 
+EGLDisplay tipsy_eglGetPlatformDisplay(EGLenum platform, void *native_display,
+	const EGLAttrib *attrib_list)
+{
+	EGLDisplay display;
+
+	ensure_egl();
+	if (host_eglGetPlatformDisplay == NULL) {
+		tipsy_egl_setup_log_missing("eglGetPlatformDisplay");
+		tipsy_egl_setup_trace_result(TIPSY_EGL_SETUP_PLATFORM_DISPLAY,
+			TIPSY_EGL_SETUP_ABSENCE);
+		return NULL;
+	}
+	display = host_eglGetPlatformDisplay(platform, native_display, attrib_list);
+	tipsy_egl_setup_trace_result(TIPSY_EGL_SETUP_PLATFORM_DISPLAY,
+		display != NULL ? TIPSY_EGL_SETUP_SUCCESS : TIPSY_EGL_SETUP_FAILURE);
+	return display;
+}
+
+EGLDisplay tipsy_eglGetPlatformDisplayEXT(EGLenum platform, void *native_display,
+	const EGLint *attrib_list)
+{
+	EGLDisplay display;
+
+	ensure_egl();
+	if (host_eglGetPlatformDisplayEXT == NULL) {
+		tipsy_egl_setup_log_missing("eglGetPlatformDisplayEXT");
+		tipsy_egl_setup_trace_result(TIPSY_EGL_SETUP_PLATFORM_DISPLAY_EXT,
+			TIPSY_EGL_SETUP_ABSENCE);
+		return NULL;
+	}
+	display = host_eglGetPlatformDisplayEXT(platform, native_display, attrib_list);
+	tipsy_egl_setup_trace_result(TIPSY_EGL_SETUP_PLATFORM_DISPLAY_EXT,
+		display != NULL ? TIPSY_EGL_SETUP_SUCCESS : TIPSY_EGL_SETUP_FAILURE);
+	return display;
+}
+
+EGLDisplay tipsy_eglGetDisplay(void *native_display)
+{
+	EGLDisplay display;
+
+	ensure_egl();
+	if (host_eglGetDisplay == NULL) {
+		tipsy_egl_setup_log_missing("eglGetDisplay");
+		tipsy_egl_setup_trace_result(TIPSY_EGL_SETUP_DISPLAY,
+			TIPSY_EGL_SETUP_ABSENCE);
+		return NULL;
+	}
+	display = host_eglGetDisplay(native_display);
+	tipsy_egl_setup_trace_result(TIPSY_EGL_SETUP_DISPLAY,
+		display != NULL ? TIPSY_EGL_SETUP_SUCCESS : TIPSY_EGL_SETUP_FAILURE);
+	return display;
+}
+
+EGLBoolean tipsy_eglInitialize(EGLDisplay dpy, EGLint *major, EGLint *minor)
+{
+	EGLBoolean ok;
+
+	ensure_egl();
+	if (host_eglInitialize == NULL) {
+		tipsy_egl_setup_log_missing("eglInitialize");
+		tipsy_egl_setup_trace_result(TIPSY_EGL_SETUP_INITIALIZE,
+			TIPSY_EGL_SETUP_ABSENCE);
+		return TIPSY_EGL_FALSE;
+	}
+	ok = host_eglInitialize(dpy, major, minor);
+	tipsy_egl_setup_trace_result(TIPSY_EGL_SETUP_INITIALIZE,
+		ok == TIPSY_EGL_TRUE ? TIPSY_EGL_SETUP_SUCCESS : TIPSY_EGL_SETUP_FAILURE);
+	return ok;
+}
+
+EGLBoolean tipsy_eglChooseConfig(EGLDisplay dpy, const EGLint *attrib_list,
+	EGLConfig *configs, EGLint config_size, EGLint *num_config)
+{
+	EGLBoolean ok;
+
+	ensure_egl();
+	if (host_eglChooseConfig == NULL) {
+		tipsy_egl_setup_log_missing("eglChooseConfig");
+		tipsy_egl_setup_trace_result(TIPSY_EGL_SETUP_CHOOSE_CONFIG,
+			TIPSY_EGL_SETUP_ABSENCE);
+		return TIPSY_EGL_FALSE;
+	}
+	ok = host_eglChooseConfig(dpy, attrib_list, configs, config_size, num_config);
+	tipsy_egl_setup_trace_result(TIPSY_EGL_SETUP_CHOOSE_CONFIG,
+		ok == TIPSY_EGL_TRUE ? TIPSY_EGL_SETUP_SUCCESS : TIPSY_EGL_SETUP_FAILURE);
+	return ok;
+}
+
+EGLContext tipsy_eglCreateContext(EGLDisplay dpy, EGLConfig config,
+	EGLContext share_context, const EGLint *attrib_list)
+{
+	EGLContext context;
+
+	ensure_egl();
+	if (host_eglCreateContext == NULL) {
+		tipsy_egl_setup_log_missing("eglCreateContext");
+		tipsy_egl_setup_trace_result(TIPSY_EGL_SETUP_CREATE_CONTEXT,
+			TIPSY_EGL_SETUP_ABSENCE);
+		return NULL;
+	}
+	context = host_eglCreateContext(dpy, config, share_context, attrib_list);
+	tipsy_egl_setup_trace_result(TIPSY_EGL_SETUP_CREATE_CONTEXT,
+		context != NULL ? TIPSY_EGL_SETUP_SUCCESS : TIPSY_EGL_SETUP_FAILURE);
+	return context;
+}
+
+EGLBoolean tipsy_eglMakeCurrent(EGLDisplay dpy, EGLSurface draw,
+	EGLSurface read, EGLContext context)
+{
+	EGLBoolean ok;
+
+	ensure_egl();
+	if (host_eglMakeCurrent == NULL) {
+		tipsy_egl_setup_log_missing("eglMakeCurrent");
+		tipsy_egl_setup_trace_result(TIPSY_EGL_SETUP_MAKE_CURRENT,
+			TIPSY_EGL_SETUP_ABSENCE);
+		return TIPSY_EGL_FALSE;
+	}
+	ok = host_eglMakeCurrent(dpy, draw, read, context);
+	tipsy_egl_setup_trace_result(TIPSY_EGL_SETUP_MAKE_CURRENT,
+		ok == TIPSY_EGL_TRUE ? TIPSY_EGL_SETUP_SUCCESS : TIPSY_EGL_SETUP_FAILURE);
+	return ok;
+}
+
 EGLBoolean tipsy_eglSwapInterval(EGLDisplay dpy, EGLint interval)
 {
 	EGLBoolean primary_ok;
@@ -539,10 +1737,18 @@ EGLBoolean tipsy_eglSwapBuffers(EGLDisplay dpy, EGLSurface surface)
 
 	ensure_egl();
 	if (host_eglSwapBuffers == NULL) {
-		GoAndroid_LogMissing("eglSwapBuffers");
+		tipsy_egl_setup_log_missing("eglSwapBuffers");
+		tipsy_egl_setup_trace_result(TIPSY_EGL_SETUP_FIRST_SWAP,
+			TIPSY_EGL_SETUP_ABSENCE);
 		return TIPSY_EGL_FALSE;
 	}
+	/* The host-owned, same-frame composition point. The foreground is a
+	 * premultiplied-alpha glyph/caret texture, so it requires no X11 compositor
+	 * and cannot synthesize a game background. */
+	tipsy_egl_compose_focused_text(dpy, surface);
 	ok = host_eglSwapBuffers(dpy, surface);
+	tipsy_egl_setup_trace_result(TIPSY_EGL_SETUP_FIRST_SWAP,
+		ok == TIPSY_EGL_TRUE ? TIPSY_EGL_SETUP_SUCCESS : TIPSY_EGL_SETUP_FAILURE);
 	if (ok == TIPSY_EGL_TRUE) {
 		tipsy_egl_note_successful_swap();
 		if (atomic_load_explicit(&egl_guest_pending_handoffs, memory_order_acquire) != 0 &&
@@ -574,10 +1780,14 @@ EGLSurface tipsy_eglCreateWindowSurface(EGLDisplay dpy, EGLConfig config, void *
 		host_win = (void *)xid;
 	}
 	if (host_eglCreateWindowSurface == NULL) {
-		GoAndroid_LogMissing("eglCreateWindowSurface");
+		tipsy_egl_setup_log_missing("eglCreateWindowSurface");
+		tipsy_egl_setup_trace_result(TIPSY_EGL_SETUP_CREATE_WINDOW_SURFACE,
+			TIPSY_EGL_SETUP_ABSENCE);
 		return NULL;
 	}
 	surface = host_eglCreateWindowSurface(dpy, config, host_win, attrib_list);
+	tipsy_egl_setup_trace_result(TIPSY_EGL_SETUP_CREATE_WINDOW_SURFACE,
+		surface != NULL ? TIPSY_EGL_SETUP_SUCCESS : TIPSY_EGL_SETUP_FAILURE);
 	if (surface == NULL || xid == 0 || dpy == NULL) {
 		return surface;
 	}
@@ -624,7 +1834,27 @@ EGLBoolean tipsy_eglDestroySurface(EGLDisplay dpy, EGLSurface surface)
 			guest->generation);
 		free(guest);
 	}
+	/* Drop the exact surface key before the host may recycle its numeric value.
+	 * Every foreground lease is released before a host swap is entered. */
+	tipsy_egl_text_forget(dpy, surface, NULL);
 	ok = host_eglDestroySurface(dpy, surface);
+	return ok;
+}
+
+EGLBoolean tipsy_eglDestroyContext(EGLDisplay dpy, void *context)
+{
+	EGLBoolean ok;
+
+	ensure_egl();
+	if (host_eglDestroyContext == NULL) {
+		GoAndroid_LogMissing("eglDestroyContext");
+		return TIPSY_EGL_FALSE;
+	}
+	/* Context addresses may be reused. This only invalidates host foreground
+	 * metadata for the exact dying context; it neither makes a context current
+	 * nor changes ordinary guest EGL behavior. */
+	tipsy_egl_text_forget(dpy, NULL, context);
+	ok = host_eglDestroyContext(dpy, context);
 	return ok;
 }
 
@@ -633,9 +1863,36 @@ void *tipsy_eglGetProcAddress(const char *name)
 	void *p;
 
 	ensure_egl();
+	if (name != NULL && strcmp(name, "eglGetPlatformDisplayEXT") == 0 &&
+		host_eglGetPlatformDisplayEXT == NULL) {
+		tipsy_egl_trace_platform_display_ext_resolver_absence();
+		return NULL;
+	}
+	tipsy_egl_trace_resolver_name(name);
 	if (name != NULL) {
+		if (strcmp(name, "eglGetPlatformDisplay") == 0) {
+			return (void *)tipsy_eglGetPlatformDisplay;
+		}
+		if (strcmp(name, "eglGetPlatformDisplayEXT") == 0) {
+			return (void *)tipsy_eglGetPlatformDisplayEXT;
+		}
+		if (strcmp(name, "eglGetDisplay") == 0) {
+			return (void *)tipsy_eglGetDisplay;
+		}
+		if (strcmp(name, "eglInitialize") == 0) {
+			return (void *)tipsy_eglInitialize;
+		}
+		if (strcmp(name, "eglChooseConfig") == 0) {
+			return (void *)tipsy_eglChooseConfig;
+		}
+		if (strcmp(name, "eglCreateContext") == 0) {
+			return (void *)tipsy_eglCreateContext;
+		}
 		if (strcmp(name, "eglCreateWindowSurface") == 0) {
 			return (void *)tipsy_eglCreateWindowSurface;
+		}
+		if (strcmp(name, "eglMakeCurrent") == 0) {
+			return (void *)tipsy_eglMakeCurrent;
 		}
 		if (strcmp(name, "eglSwapInterval") == 0) {
 			return (void *)tipsy_eglSwapInterval;
@@ -645,6 +1902,9 @@ void *tipsy_eglGetProcAddress(const char *name)
 		}
 		if (strcmp(name, "eglDestroySurface") == 0) {
 			return (void *)tipsy_eglDestroySurface;
+		}
+		if (strcmp(name, "eglDestroyContext") == 0) {
+			return (void *)tipsy_eglDestroyContext;
 		}
 		if (strcmp(name, "eglGetProcAddress") == 0) {
 			return (void *)tipsy_eglGetProcAddress;
@@ -677,6 +1937,24 @@ int tipsy_test_egl_proc_is_wrapped(const char *name)
 	if (name == NULL) {
 		return 0;
 	}
+	if (strcmp(name, "eglGetPlatformDisplay") == 0) {
+		return got == (void *)tipsy_eglGetPlatformDisplay;
+	}
+	if (strcmp(name, "eglGetPlatformDisplayEXT") == 0) {
+		return got == (void *)tipsy_eglGetPlatformDisplayEXT;
+	}
+	if (strcmp(name, "eglGetDisplay") == 0) {
+		return got == (void *)tipsy_eglGetDisplay;
+	}
+	if (strcmp(name, "eglInitialize") == 0) {
+		return got == (void *)tipsy_eglInitialize;
+	}
+	if (strcmp(name, "eglChooseConfig") == 0) {
+		return got == (void *)tipsy_eglChooseConfig;
+	}
+	if (strcmp(name, "eglCreateContext") == 0) {
+		return got == (void *)tipsy_eglCreateContext;
+	}
 	if (strcmp(name, "eglSwapInterval") == 0) {
 		return got == (void *)tipsy_eglSwapInterval;
 	}
@@ -686,8 +1964,14 @@ int tipsy_test_egl_proc_is_wrapped(const char *name)
 	if (strcmp(name, "eglCreateWindowSurface") == 0) {
 		return got == (void *)tipsy_eglCreateWindowSurface;
 	}
+	if (strcmp(name, "eglMakeCurrent") == 0) {
+		return got == (void *)tipsy_eglMakeCurrent;
+	}
 	if (strcmp(name, "eglDestroySurface") == 0) {
 		return got == (void *)tipsy_eglDestroySurface;
+	}
+	if (strcmp(name, "eglDestroyContext") == 0) {
+		return got == (void *)tipsy_eglDestroyContext;
 	}
 	return 0;
 }
@@ -697,6 +1981,965 @@ int tipsy_test_egl_init_calls(void)
 	return atomic_load_explicit(&egl_init_calls, memory_order_relaxed);
 }
 
+int tipsy_test_egl_setup_trace_value_enabled(const char *value)
+{
+	return tipsy_egl_setup_trace_value_enabled(value);
+}
+
+static uint32_t egl_setup_fixture_failure_stage;
+static TipsyEGLSetupTraceFixture *active_egl_setup_fixture;
+
+static EGLDisplay tipsy_test_egl_setup_platform_display(EGLenum platform,
+	void *native_display, const EGLAttrib *attrib_list)
+{
+	(void)platform;
+	(void)native_display;
+	(void)attrib_list;
+	return egl_setup_fixture_failure_stage == TIPSY_EGL_SETUP_PLATFORM_DISPLAY ?
+		NULL : (EGLDisplay)(uintptr_t)0x101;
+}
+
+static EGLDisplay tipsy_test_egl_setup_platform_display_ext(EGLenum platform,
+	void *native_display, const EGLint *attrib_list)
+{
+	(void)platform;
+	(void)native_display;
+	(void)attrib_list;
+	return egl_setup_fixture_failure_stage == TIPSY_EGL_SETUP_PLATFORM_DISPLAY_EXT ?
+		NULL : (EGLDisplay)(uintptr_t)0x102;
+}
+
+static EGLDisplay tipsy_test_egl_setup_display(void *native_display)
+{
+	(void)native_display;
+	return egl_setup_fixture_failure_stage == TIPSY_EGL_SETUP_DISPLAY ?
+		NULL : (EGLDisplay)(uintptr_t)0x103;
+}
+
+static EGLBoolean tipsy_test_egl_setup_initialize(EGLDisplay dpy,
+	EGLint *major, EGLint *minor)
+{
+	(void)dpy;
+	if (egl_setup_fixture_failure_stage == TIPSY_EGL_SETUP_INITIALIZE) {
+		return TIPSY_EGL_FALSE;
+	}
+	if (major != NULL) *major = 1;
+	if (minor != NULL) *minor = 5;
+	return TIPSY_EGL_TRUE;
+}
+
+static EGLBoolean tipsy_test_egl_setup_choose_config(EGLDisplay dpy,
+	const EGLint *attrib_list, EGLConfig *configs, EGLint config_size,
+	EGLint *num_config)
+{
+	(void)dpy;
+	(void)attrib_list;
+	(void)config_size;
+	if (egl_setup_fixture_failure_stage == TIPSY_EGL_SETUP_CHOOSE_CONFIG) {
+		return TIPSY_EGL_FALSE;
+	}
+	if (configs != NULL) *configs = (EGLConfig)(uintptr_t)0x201;
+	if (num_config != NULL) *num_config = 1;
+	return TIPSY_EGL_TRUE;
+}
+
+static EGLContext tipsy_test_egl_setup_create_context(EGLDisplay dpy,
+	EGLConfig config, EGLContext share_context, const EGLint *attrib_list)
+{
+	(void)dpy;
+	(void)config;
+	(void)share_context;
+	(void)attrib_list;
+	return egl_setup_fixture_failure_stage == TIPSY_EGL_SETUP_CREATE_CONTEXT ?
+		NULL : (EGLContext)(uintptr_t)0x301;
+}
+
+static EGLSurface tipsy_test_egl_setup_create_window_surface(EGLDisplay dpy,
+	EGLConfig config, void *native_window, const EGLint *attrib_list)
+{
+	(void)dpy;
+	(void)config;
+	(void)native_window;
+	(void)attrib_list;
+	return egl_setup_fixture_failure_stage ==
+		TIPSY_EGL_SETUP_CREATE_WINDOW_SURFACE ?
+		NULL : (EGLSurface)(uintptr_t)0x401;
+}
+
+static EGLBoolean tipsy_test_egl_setup_make_current(EGLDisplay dpy,
+	EGLSurface draw, EGLSurface read, EGLContext context)
+{
+	(void)dpy;
+	(void)draw;
+	(void)read;
+	(void)context;
+	return egl_setup_fixture_failure_stage == TIPSY_EGL_SETUP_MAKE_CURRENT ?
+		TIPSY_EGL_FALSE : TIPSY_EGL_TRUE;
+}
+
+static EGLBoolean tipsy_test_egl_setup_swap(EGLDisplay dpy, EGLSurface surface)
+{
+	(void)dpy;
+	(void)surface;
+	return egl_setup_fixture_failure_stage == TIPSY_EGL_SETUP_FIRST_SWAP ?
+		TIPSY_EGL_FALSE : TIPSY_EGL_TRUE;
+}
+
+static void tipsy_test_egl_setup_sink(uint32_t stage, uint32_t outcome)
+{
+	TipsyEGLSetupTraceFixture *fixture = active_egl_setup_fixture;
+	uint32_t index;
+
+	if (fixture == NULL) return;
+	index = fixture->event_count++;
+	if (index < sizeof(fixture->events) / sizeof(fixture->events[0])) {
+		fixture->events[index].stage = stage;
+		fixture->events[index].outcome = outcome;
+	}
+	if (fixture->first_failure == 0 && outcome != TIPSY_EGL_SETUP_SUCCESS) {
+		fixture->first_failure = stage;
+	}
+}
+
+int tipsy_test_egl_setup_trace_fixture(uint32_t acquisition_stage,
+	uint32_t failure_stage, uint32_t failure_outcome,
+	TipsyEGLSetupTraceFixture *out)
+{
+	egl_get_platform_display_fn saved_platform_display;
+	egl_get_platform_display_ext_fn saved_platform_display_ext;
+	egl_get_display_fn saved_display;
+	egl_initialize_fn saved_initialize;
+	egl_choose_config_fn saved_choose_config;
+	egl_create_context_fn saved_create_context;
+	egl_create_window_surface_fn saved_create_window_surface;
+	egl_make_current_fn saved_make_current;
+	egl_swap_buffers_fn saved_swap;
+	tipsy_egl_setup_test_sink_fn saved_sink;
+	int saved_suppress_missing;
+	EGLDisplay display = NULL;
+	EGLConfig config = NULL;
+	EGLContext context = NULL;
+	EGLSurface surface = NULL;
+	EGLint major = 0;
+	EGLint minor = 0;
+	EGLint config_count = 0;
+	uint32_t expected_events = 7;
+	uint32_t last;
+	int passed = 0;
+
+	if (out == NULL || (acquisition_stage != TIPSY_EGL_SETUP_PLATFORM_DISPLAY &&
+		acquisition_stage != TIPSY_EGL_SETUP_PLATFORM_DISPLAY_EXT &&
+		acquisition_stage != TIPSY_EGL_SETUP_DISPLAY) ||
+		(failure_stage != 0 && (failure_stage < TIPSY_EGL_SETUP_PLATFORM_DISPLAY ||
+		failure_stage > TIPSY_EGL_SETUP_FIRST_SWAP)) ||
+		(failure_outcome != TIPSY_EGL_SETUP_FAILURE &&
+		failure_outcome != TIPSY_EGL_SETUP_ABSENCE)) {
+		return 0;
+	}
+	if (failure_stage == TIPSY_EGL_SETUP_PLATFORM_DISPLAY ||
+		failure_stage == TIPSY_EGL_SETUP_PLATFORM_DISPLAY_EXT ||
+		failure_stage == TIPSY_EGL_SETUP_DISPLAY) {
+		if (failure_stage != acquisition_stage) return 0;
+	}
+
+	ensure_egl();
+	memset(out, 0, sizeof(*out));
+	saved_platform_display = host_eglGetPlatformDisplay;
+	saved_platform_display_ext = host_eglGetPlatformDisplayEXT;
+	saved_display = host_eglGetDisplay;
+	saved_initialize = host_eglInitialize;
+	saved_choose_config = host_eglChooseConfig;
+	saved_create_context = host_eglCreateContext;
+	saved_create_window_surface = host_eglCreateWindowSurface;
+	saved_make_current = host_eglMakeCurrent;
+	saved_swap = host_eglSwapBuffers;
+	saved_sink = egl_setup_test_sink;
+	saved_suppress_missing = egl_setup_fixture_suppress_missing;
+
+	host_eglGetPlatformDisplay = tipsy_test_egl_setup_platform_display;
+	host_eglGetPlatformDisplayEXT = tipsy_test_egl_setup_platform_display_ext;
+	host_eglGetDisplay = tipsy_test_egl_setup_display;
+	host_eglInitialize = tipsy_test_egl_setup_initialize;
+	host_eglChooseConfig = tipsy_test_egl_setup_choose_config;
+	host_eglCreateContext = tipsy_test_egl_setup_create_context;
+	host_eglCreateWindowSurface = tipsy_test_egl_setup_create_window_surface;
+	host_eglMakeCurrent = tipsy_test_egl_setup_make_current;
+	host_eglSwapBuffers = tipsy_test_egl_setup_swap;
+	egl_setup_fixture_failure_stage =
+		failure_outcome == TIPSY_EGL_SETUP_FAILURE ? failure_stage : 0;
+	if (failure_outcome == TIPSY_EGL_SETUP_ABSENCE) {
+		switch (failure_stage) {
+		case TIPSY_EGL_SETUP_PLATFORM_DISPLAY: host_eglGetPlatformDisplay = NULL; break;
+		case TIPSY_EGL_SETUP_PLATFORM_DISPLAY_EXT: host_eglGetPlatformDisplayEXT = NULL; break;
+		case TIPSY_EGL_SETUP_DISPLAY: host_eglGetDisplay = NULL; break;
+		case TIPSY_EGL_SETUP_INITIALIZE: host_eglInitialize = NULL; break;
+		case TIPSY_EGL_SETUP_CHOOSE_CONFIG: host_eglChooseConfig = NULL; break;
+		case TIPSY_EGL_SETUP_CREATE_CONTEXT: host_eglCreateContext = NULL; break;
+		case TIPSY_EGL_SETUP_CREATE_WINDOW_SURFACE: host_eglCreateWindowSurface = NULL; break;
+		case TIPSY_EGL_SETUP_MAKE_CURRENT: host_eglMakeCurrent = NULL; break;
+		case TIPSY_EGL_SETUP_FIRST_SWAP: host_eglSwapBuffers = NULL; break;
+		default: break;
+		}
+	}
+	active_egl_setup_fixture = out;
+	egl_setup_test_sink = tipsy_test_egl_setup_sink;
+	egl_setup_fixture_suppress_missing = 1;
+
+	if (acquisition_stage == TIPSY_EGL_SETUP_PLATFORM_DISPLAY) {
+		display = tipsy_eglGetPlatformDisplay(0, NULL, NULL);
+	} else if (acquisition_stage == TIPSY_EGL_SETUP_PLATFORM_DISPLAY_EXT) {
+		display = tipsy_eglGetPlatformDisplayEXT(0, NULL, NULL);
+	} else {
+		display = tipsy_eglGetDisplay(NULL);
+	}
+	if (display == NULL) goto done;
+	if (tipsy_eglInitialize(display, &major, &minor) != TIPSY_EGL_TRUE) goto done;
+	if (tipsy_eglChooseConfig(display, NULL, &config, 1, &config_count) !=
+		TIPSY_EGL_TRUE) goto done;
+	context = tipsy_eglCreateContext(display, config, NULL, NULL);
+	if (context == NULL) goto done;
+	surface = tipsy_eglCreateWindowSurface(display, config, NULL, NULL);
+	if (surface == NULL) goto done;
+	if (tipsy_eglMakeCurrent(display, surface, surface, context) !=
+		TIPSY_EGL_TRUE) goto done;
+	(void)tipsy_eglSwapBuffers(display, surface);
+
+done:
+	if (failure_stage == 0) {
+		passed = out->first_failure == 0 && out->event_count == expected_events &&
+			out->events[expected_events - 1].stage == TIPSY_EGL_SETUP_FIRST_SWAP &&
+			out->events[expected_events - 1].outcome == TIPSY_EGL_SETUP_SUCCESS;
+	} else if (out->event_count > 0) {
+		last = out->event_count - 1;
+		passed = last < sizeof(out->events) / sizeof(out->events[0]) &&
+			out->first_failure == failure_stage &&
+			out->events[last].stage == failure_stage &&
+			out->events[last].outcome == failure_outcome;
+	}
+	out->passed = passed != 0;
+
+	egl_setup_test_sink = saved_sink;
+	egl_setup_fixture_suppress_missing = saved_suppress_missing;
+	active_egl_setup_fixture = NULL;
+	egl_setup_fixture_failure_stage = 0;
+	host_eglGetPlatformDisplay = saved_platform_display;
+	host_eglGetPlatformDisplayEXT = saved_platform_display_ext;
+	host_eglGetDisplay = saved_display;
+	host_eglInitialize = saved_initialize;
+	host_eglChooseConfig = saved_choose_config;
+	host_eglCreateContext = saved_create_context;
+	host_eglCreateWindowSurface = saved_create_window_surface;
+	host_eglMakeCurrent = saved_make_current;
+	host_eglSwapBuffers = saved_swap;
+	return passed;
+}
+
+/* Deterministic, content-free EGL/GLES foreground fixture. The fake state is
+ * intentionally stricter than Mesa: a draw is counted as invalid unless it
+ * targets draw framebuffer zero through a private ES3 VAO with the exact
+ * premultiplied source-over state. No glGetError call is used because a real
+ * shim cannot consume and later restore the guest's GL error queue. */
+struct tipsy_egl_foreground_test {
+	EGLDisplay display;
+	EGLSurface surface;
+	EGLSurface current_surface;
+	void *context;
+	EGLint swap_behavior;
+	int gles_major;
+	int foreground_active;
+	uint64_t foreground_generation;
+	uint32_t acquire_calls, release_calls, draw_calls;
+	uint32_t texture_allocations, texture_deletions;
+	uint32_t full_texture_uploads, same_size_texture_updates, geometry_uploads;
+	uint32_t guest_state_restore_failures, draw_contract_failures;
+	TipsyGLint read_framebuffer, draw_framebuffer, program, array_buffer, vertex_array;
+	TipsyGLint sampler_0, pixel_unpack_buffer;
+	TipsyGLint viewport[4], active_texture, texture_2d_0, unpack_alignment;
+	TipsyGLint unpack_row_length, unpack_skip_rows, unpack_skip_pixels;
+	TipsyGLint unpack_skip_images, unpack_image_height;
+	TipsyGLint blend_src_rgb, blend_dst_rgb, blend_src_alpha, blend_dst_alpha;
+	TipsyGLint blend_equation_rgb, blend_equation_alpha;
+	TipsyGLboolean color_mask[4], depth_mask;
+	TipsyGLboolean scissor_enabled, blend_enabled, depth_enabled;
+	TipsyGLboolean stencil_enabled, cull_enabled, rasterizer_discard_enabled;
+	TipsyGLboolean framebuffer_srgb_enabled;
+	TipsyGLboolean sample_alpha_to_coverage_enabled, sample_coverage_enabled;
+	TipsyGLboolean sample_mask_enabled, transform_feedback_active;
+	TipsyGLuint next_shader, next_program;
+	struct tipsy_gl_attrib_state attrib[2];
+};
+
+static struct tipsy_egl_foreground_test *active_egl_foreground_test;
+static unsigned char tipsy_egl_foreground_test_pixels[32];
+
+static const unsigned char *tipsy_test_egl_foreground_get_string(TipsyGLenum name)
+{
+	if (name == TIPSY_GL_VERSION) {
+		if (active_egl_foreground_test != NULL &&
+			active_egl_foreground_test->gles_major == 2)
+			return (const unsigned char *)"OpenGL ES 2.0 Fake";
+		return (const unsigned char *)"OpenGL ES 3.2 Fake";
+	}
+	if (name == TIPSY_GL_EXTENSIONS)
+		return (const unsigned char *)"GL_EXT_sRGB_write_control";
+	return NULL;
+}
+
+static const unsigned char *tipsy_test_egl_foreground_get_string_i(TipsyGLenum name,
+	TipsyGLuint index)
+{
+	if (name == TIPSY_GL_EXTENSIONS && index == 0)
+		return (const unsigned char *)"GL_EXT_sRGB_write_control";
+	return NULL;
+}
+
+static void tipsy_test_egl_foreground_get_integer(TipsyGLenum name, TipsyGLint *out)
+{
+	struct tipsy_egl_foreground_test *t = active_egl_foreground_test;
+	if (t == NULL || out == NULL) return;
+	switch (name) {
+	case TIPSY_GL_FRAMEBUFFER_BINDING: *out = t->draw_framebuffer; break;
+	case TIPSY_GL_READ_FRAMEBUFFER_BINDING: *out = t->read_framebuffer; break;
+	case TIPSY_GL_VIEWPORT: memcpy(out, t->viewport, sizeof(t->viewport)); break;
+	case TIPSY_GL_CURRENT_PROGRAM: *out = t->program; break;
+	case TIPSY_GL_ARRAY_BUFFER_BINDING: *out = t->array_buffer; break;
+	case TIPSY_GL_VERTEX_ARRAY_BINDING: *out = t->vertex_array; break;
+	case TIPSY_GL_PIXEL_UNPACK_BUFFER_BINDING: *out = t->pixel_unpack_buffer; break;
+	case TIPSY_GL_ACTIVE_TEXTURE: *out = t->active_texture; break;
+	case TIPSY_GL_TEXTURE_BINDING_2D: *out = t->texture_2d_0; break;
+	case TIPSY_GL_SAMPLER_BINDING: *out = t->sampler_0; break;
+	case TIPSY_GL_UNPACK_ALIGNMENT: *out = t->unpack_alignment; break;
+	case TIPSY_GL_UNPACK_ROW_LENGTH: *out = t->unpack_row_length; break;
+	case TIPSY_GL_UNPACK_SKIP_ROWS: *out = t->unpack_skip_rows; break;
+	case TIPSY_GL_UNPACK_SKIP_PIXELS: *out = t->unpack_skip_pixels; break;
+	case TIPSY_GL_UNPACK_SKIP_IMAGES: *out = t->unpack_skip_images; break;
+	case TIPSY_GL_UNPACK_IMAGE_HEIGHT: *out = t->unpack_image_height; break;
+	case TIPSY_GL_BLEND_SRC_RGB: *out = t->blend_src_rgb; break;
+	case TIPSY_GL_BLEND_DST_RGB: *out = t->blend_dst_rgb; break;
+	case TIPSY_GL_BLEND_SRC_ALPHA: *out = t->blend_src_alpha; break;
+	case TIPSY_GL_BLEND_DST_ALPHA: *out = t->blend_dst_alpha; break;
+	case TIPSY_GL_BLEND_EQUATION_RGB: *out = t->blend_equation_rgb; break;
+	case TIPSY_GL_BLEND_EQUATION_ALPHA: *out = t->blend_equation_alpha; break;
+	case TIPSY_GL_MAX_TEXTURE_SIZE: *out = 4096; break;
+	case TIPSY_GL_NUM_EXTENSIONS: *out = 1; break;
+	default: *out = 0; break;
+	}
+}
+
+static void tipsy_test_egl_foreground_get_boolean(TipsyGLenum name, TipsyGLboolean *out)
+{
+	struct tipsy_egl_foreground_test *t = active_egl_foreground_test;
+	if (t == NULL || out == NULL) return;
+	if (name == TIPSY_GL_COLOR_WRITEMASK) memcpy(out, t->color_mask, sizeof(t->color_mask));
+	else if (name == TIPSY_GL_DEPTH_WRITEMASK) *out = t->depth_mask;
+	else if (name == TIPSY_GL_TRANSFORM_FEEDBACK_ACTIVE) *out = t->transform_feedback_active;
+}
+
+static TipsyGLboolean *tipsy_test_egl_foreground_cap(TipsyGLenum cap)
+{
+	struct tipsy_egl_foreground_test *t = active_egl_foreground_test;
+	if (t == NULL) return NULL;
+	switch (cap) {
+	case TIPSY_GL_SCISSOR_TEST: return &t->scissor_enabled;
+	case TIPSY_GL_BLEND: return &t->blend_enabled;
+	case TIPSY_GL_DEPTH_TEST: return &t->depth_enabled;
+	case TIPSY_GL_STENCIL_TEST: return &t->stencil_enabled;
+	case TIPSY_GL_CULL_FACE: return &t->cull_enabled;
+	case TIPSY_GL_RASTERIZER_DISCARD: return &t->rasterizer_discard_enabled;
+	case TIPSY_GL_FRAMEBUFFER_SRGB: return &t->framebuffer_srgb_enabled;
+	case TIPSY_GL_SAMPLE_ALPHA_TO_COVERAGE: return &t->sample_alpha_to_coverage_enabled;
+	case TIPSY_GL_SAMPLE_COVERAGE: return &t->sample_coverage_enabled;
+	case TIPSY_GL_SAMPLE_MASK: return &t->sample_mask_enabled;
+	default: return NULL;
+	}
+}
+
+static TipsyGLboolean tipsy_test_egl_foreground_is_enabled(TipsyGLenum cap)
+{
+	TipsyGLboolean *value = tipsy_test_egl_foreground_cap(cap);
+	return value != NULL ? *value : TIPSY_GL_FALSE;
+}
+
+static void tipsy_test_egl_foreground_enable(TipsyGLenum cap)
+{
+	TipsyGLboolean *value = tipsy_test_egl_foreground_cap(cap);
+	if (value != NULL) *value = TIPSY_GL_TRUE;
+}
+
+static void tipsy_test_egl_foreground_disable(TipsyGLenum cap)
+{
+	TipsyGLboolean *value = tipsy_test_egl_foreground_cap(cap);
+	if (value != NULL) *value = TIPSY_GL_FALSE;
+}
+
+static void tipsy_test_egl_foreground_viewport(TipsyGLint x, TipsyGLint y,
+	TipsyGLsizei width, TipsyGLsizei height)
+{
+	struct tipsy_egl_foreground_test *t = active_egl_foreground_test;
+	if (t != NULL) {
+		t->viewport[0] = x; t->viewport[1] = y;
+		t->viewport[2] = width; t->viewport[3] = height;
+	}
+}
+
+static void tipsy_test_egl_foreground_color_mask(TipsyGLboolean r, TipsyGLboolean g,
+	TipsyGLboolean b, TipsyGLboolean a)
+{
+	struct tipsy_egl_foreground_test *t = active_egl_foreground_test;
+	if (t != NULL) {
+		t->color_mask[0] = r; t->color_mask[1] = g;
+		t->color_mask[2] = b; t->color_mask[3] = a;
+	}
+}
+
+static void tipsy_test_egl_foreground_blend_func(TipsyGLenum src_rgb,
+	TipsyGLenum dst_rgb, TipsyGLenum src_alpha, TipsyGLenum dst_alpha)
+{
+	struct tipsy_egl_foreground_test *t = active_egl_foreground_test;
+	if (t != NULL) {
+		t->blend_src_rgb = (TipsyGLint)src_rgb; t->blend_dst_rgb = (TipsyGLint)dst_rgb;
+		t->blend_src_alpha = (TipsyGLint)src_alpha;
+		t->blend_dst_alpha = (TipsyGLint)dst_alpha;
+	}
+}
+
+static void tipsy_test_egl_foreground_blend_equation(TipsyGLenum rgb, TipsyGLenum alpha)
+{
+	struct tipsy_egl_foreground_test *t = active_egl_foreground_test;
+	if (t != NULL) {
+		t->blend_equation_rgb = (TipsyGLint)rgb;
+		t->blend_equation_alpha = (TipsyGLint)alpha;
+	}
+}
+
+static void tipsy_test_egl_foreground_depth_mask(TipsyGLboolean value)
+{
+	if (active_egl_foreground_test != NULL) active_egl_foreground_test->depth_mask = value;
+}
+
+static void tipsy_test_egl_foreground_bind_framebuffer(TipsyGLenum target,
+	TipsyGLuint framebuffer)
+{
+	struct tipsy_egl_foreground_test *t = active_egl_foreground_test;
+	if (t == NULL) return;
+	if (target == TIPSY_GL_FRAMEBUFFER || target == TIPSY_GL_DRAW_FRAMEBUFFER)
+		t->draw_framebuffer = (TipsyGLint)framebuffer;
+	if (target == TIPSY_GL_FRAMEBUFFER || target == TIPSY_GL_READ_FRAMEBUFFER)
+		t->read_framebuffer = (TipsyGLint)framebuffer;
+}
+
+static void tipsy_test_egl_foreground_active_texture(TipsyGLenum texture)
+{
+	if (active_egl_foreground_test != NULL)
+		active_egl_foreground_test->active_texture = (TipsyGLint)texture;
+}
+
+static void tipsy_test_egl_foreground_bind_texture(TipsyGLenum target, TipsyGLuint texture)
+{
+	struct tipsy_egl_foreground_test *t = active_egl_foreground_test;
+	if (t != NULL && target == TIPSY_GL_TEXTURE_2D &&
+		t->active_texture == (TipsyGLint)TIPSY_GL_TEXTURE0)
+		t->texture_2d_0 = (TipsyGLint)texture;
+}
+
+static void tipsy_test_egl_foreground_tex_parameter(TipsyGLenum target,
+	TipsyGLenum name, TipsyGLint value)
+{
+	(void)target; (void)name; (void)value;
+}
+
+static void tipsy_test_egl_foreground_pixel_store(TipsyGLenum name, TipsyGLint value)
+{
+	struct tipsy_egl_foreground_test *t = active_egl_foreground_test;
+	if (t == NULL) return;
+	if (name == TIPSY_GL_UNPACK_ALIGNMENT) t->unpack_alignment = value;
+	else if (name == TIPSY_GL_UNPACK_ROW_LENGTH) t->unpack_row_length = value;
+	else if (name == TIPSY_GL_UNPACK_SKIP_ROWS) t->unpack_skip_rows = value;
+	else if (name == TIPSY_GL_UNPACK_SKIP_PIXELS) t->unpack_skip_pixels = value;
+	else if (name == TIPSY_GL_UNPACK_SKIP_IMAGES) t->unpack_skip_images = value;
+	else if (name == TIPSY_GL_UNPACK_IMAGE_HEIGHT) t->unpack_image_height = value;
+}
+
+static void tipsy_test_egl_foreground_gen_textures(TipsyGLsizei count, TipsyGLuint *out)
+{
+	struct tipsy_egl_foreground_test *t = active_egl_foreground_test;
+	if (t != NULL && count == 1 && out != NULL) {
+		t->texture_allocations++;
+		*out = 100 + t->texture_allocations;
+	}
+}
+
+static void tipsy_test_egl_foreground_delete_textures(TipsyGLsizei count,
+	const TipsyGLuint *textures)
+{
+	(void)textures;
+	if (active_egl_foreground_test != NULL && count == 1)
+		active_egl_foreground_test->texture_deletions++;
+}
+
+static void tipsy_test_egl_foreground_tex_image(TipsyGLenum target, TipsyGLint level,
+	TipsyGLint internal_format, TipsyGLsizei width, TipsyGLsizei height,
+	TipsyGLint border, TipsyGLenum format, TipsyGLenum type, const void *pixels)
+{
+	(void)target; (void)level; (void)internal_format; (void)width; (void)height;
+	(void)border; (void)format; (void)type; (void)pixels;
+	if (active_egl_foreground_test != NULL)
+		active_egl_foreground_test->full_texture_uploads++;
+}
+
+static void tipsy_test_egl_foreground_tex_sub_image(TipsyGLenum target, TipsyGLint level,
+	TipsyGLint x, TipsyGLint y, TipsyGLsizei width, TipsyGLsizei height,
+	TipsyGLenum format, TipsyGLenum type, const void *pixels)
+{
+	(void)target; (void)level; (void)x; (void)y; (void)width; (void)height;
+	(void)format; (void)type; (void)pixels;
+	if (active_egl_foreground_test != NULL)
+		active_egl_foreground_test->same_size_texture_updates++;
+}
+
+static TipsyGLuint tipsy_test_egl_foreground_create_shader(TipsyGLenum kind)
+{
+	(void)kind;
+	return active_egl_foreground_test != NULL ?
+		++active_egl_foreground_test->next_shader : 0;
+}
+
+static void tipsy_test_egl_foreground_shader_source(TipsyGLuint shader,
+	TipsyGLsizei count, const char *const *source, const TipsyGLint *length)
+{
+	(void)shader; (void)count; (void)source; (void)length;
+}
+
+static void tipsy_test_egl_foreground_noop_uint(TipsyGLuint value) { (void)value; }
+static void tipsy_test_egl_foreground_compile_status(TipsyGLuint shader,
+	TipsyGLenum name, TipsyGLint *out)
+{
+	(void)shader; (void)name; if (out != NULL) *out = 1;
+}
+static TipsyGLuint tipsy_test_egl_foreground_create_program(void)
+{
+	return active_egl_foreground_test != NULL ?
+		++active_egl_foreground_test->next_program : 0;
+}
+static void tipsy_test_egl_foreground_attach_shader(TipsyGLuint program, TipsyGLuint shader)
+{ (void)program; (void)shader; }
+static void tipsy_test_egl_foreground_bind_attrib_location(TipsyGLuint program,
+	TipsyGLuint index, const char *name)
+{ (void)program; (void)index; (void)name; }
+static void tipsy_test_egl_foreground_program_status(TipsyGLuint program,
+	TipsyGLenum name, TipsyGLint *out)
+{ (void)program; (void)name; if (out != NULL) *out = 1; }
+static void tipsy_test_egl_foreground_use_program(TipsyGLuint program)
+{
+	if (active_egl_foreground_test != NULL)
+		active_egl_foreground_test->program = (TipsyGLint)program;
+}
+static TipsyGLint tipsy_test_egl_foreground_uniform_location(TipsyGLuint program,
+	const char *name)
+{ (void)program; (void)name; return 0; }
+static void tipsy_test_egl_foreground_uniform_1i(TipsyGLint location, TipsyGLint value)
+{ (void)location; (void)value; }
+
+static void tipsy_test_egl_foreground_gen_buffers(TipsyGLsizei count, TipsyGLuint *out)
+{ if (count == 1 && out != NULL) *out = 202; }
+static void tipsy_test_egl_foreground_delete_buffers(TipsyGLsizei count,
+	const TipsyGLuint *buffers)
+{ (void)count; (void)buffers; }
+static void tipsy_test_egl_foreground_bind_buffer(TipsyGLenum target, TipsyGLuint buffer)
+{
+	if (active_egl_foreground_test == NULL) return;
+	if (target == TIPSY_GL_ARRAY_BUFFER)
+		active_egl_foreground_test->array_buffer = (TipsyGLint)buffer;
+	else if (target == TIPSY_GL_PIXEL_UNPACK_BUFFER)
+		active_egl_foreground_test->pixel_unpack_buffer = (TipsyGLint)buffer;
+}
+static void tipsy_test_egl_foreground_buffer_data(TipsyGLenum target,
+	TipsyGLsizeiptr size, const void *data, TipsyGLenum usage)
+{
+	(void)target; (void)size; (void)data; (void)usage;
+	if (active_egl_foreground_test != NULL)
+		active_egl_foreground_test->geometry_uploads++;
+}
+static void tipsy_test_egl_foreground_enable_attrib(TipsyGLuint index)
+{
+	if (active_egl_foreground_test != NULL && index < 2)
+		active_egl_foreground_test->attrib[index].enabled = 1;
+}
+static void tipsy_test_egl_foreground_disable_attrib(TipsyGLuint index)
+{
+	if (active_egl_foreground_test != NULL && index < 2)
+		active_egl_foreground_test->attrib[index].enabled = 0;
+}
+static void tipsy_test_egl_foreground_attrib_pointer(TipsyGLuint index,
+	TipsyGLint size, TipsyGLenum type, TipsyGLboolean normalized,
+	TipsyGLsizei stride, const void *pointer)
+{
+	struct tipsy_egl_foreground_test *t = active_egl_foreground_test;
+	if (t == NULL || index >= 2) return;
+	t->attrib[index].size = size;
+	t->attrib[index].type = (TipsyGLint)type;
+	t->attrib[index].normalized = normalized;
+	t->attrib[index].stride = stride;
+	t->attrib[index].buffer = t->array_buffer;
+	t->attrib[index].pointer = (void *)pointer;
+}
+static void tipsy_test_egl_foreground_get_attrib(TipsyGLuint index,
+	TipsyGLenum name, TipsyGLint *out)
+{
+	struct tipsy_egl_foreground_test *t = active_egl_foreground_test;
+	if (t == NULL || index >= 2 || out == NULL) return;
+	if (name == TIPSY_GL_VERTEX_ATTRIB_ARRAY_ENABLED) *out = t->attrib[index].enabled;
+	else if (name == TIPSY_GL_VERTEX_ATTRIB_ARRAY_SIZE) *out = t->attrib[index].size;
+	else if (name == TIPSY_GL_VERTEX_ATTRIB_ARRAY_TYPE) *out = t->attrib[index].type;
+	else if (name == TIPSY_GL_VERTEX_ATTRIB_ARRAY_NORMALIZED) *out = t->attrib[index].normalized;
+	else if (name == TIPSY_GL_VERTEX_ATTRIB_ARRAY_STRIDE) *out = t->attrib[index].stride;
+	else if (name == TIPSY_GL_VERTEX_ATTRIB_ARRAY_BUFFER_BINDING) *out = t->attrib[index].buffer;
+	else *out = 0;
+}
+static void tipsy_test_egl_foreground_get_attrib_pointer(TipsyGLuint index,
+	TipsyGLenum name, void **out)
+{
+	struct tipsy_egl_foreground_test *t = active_egl_foreground_test;
+	(void)name;
+	if (t != NULL && index < 2 && out != NULL) *out = t->attrib[index].pointer;
+}
+
+static void tipsy_test_egl_foreground_draw(TipsyGLenum mode, TipsyGLint first,
+	TipsyGLsizei count)
+{
+	struct tipsy_egl_foreground_test *t = active_egl_foreground_test;
+	if (t == NULL) return;
+	t->draw_calls++;
+	if (mode != TIPSY_GL_TRIANGLE_STRIP || first != 0 || count != 4 ||
+		t->draw_framebuffer != 0 ||
+		(t->gles_major == 3 && (t->vertex_array == 0 || t->vertex_array == 23)) ||
+		t->viewport[0] != 0 || t->viewport[1] != 0 ||
+		t->viewport[2] != 800 || t->viewport[3] != 600 ||
+		t->scissor_enabled || !t->blend_enabled || t->depth_enabled ||
+		t->stencil_enabled || t->cull_enabled ||
+		(t->gles_major == 3 && t->rasterizer_discard_enabled) ||
+		t->framebuffer_srgb_enabled || t->sample_alpha_to_coverage_enabled ||
+		t->sample_coverage_enabled || (t->gles_major == 3 && t->sample_mask_enabled) ||
+		(t->gles_major == 3 && t->sampler_0 != 0) ||
+		t->depth_mask ||
+		!t->color_mask[0] || !t->color_mask[1] || !t->color_mask[2] || !t->color_mask[3] ||
+		t->blend_src_rgb != (TipsyGLint)TIPSY_GL_ONE ||
+		t->blend_dst_rgb != (TipsyGLint)TIPSY_GL_ONE_MINUS_SRC_ALPHA ||
+		t->blend_src_alpha != (TipsyGLint)TIPSY_GL_ONE ||
+		t->blend_dst_alpha != (TipsyGLint)TIPSY_GL_ONE_MINUS_SRC_ALPHA ||
+		t->blend_equation_rgb != (TipsyGLint)TIPSY_GL_FUNC_ADD ||
+		t->blend_equation_alpha != (TipsyGLint)TIPSY_GL_FUNC_ADD ||
+		t->active_texture != (TipsyGLint)TIPSY_GL_TEXTURE0 || t->texture_2d_0 == 0)
+		t->draw_contract_failures++;
+}
+
+static void tipsy_test_egl_foreground_gen_vertex_arrays(TipsyGLsizei count,
+	TipsyGLuint *out)
+{ if (count == 1 && out != NULL) *out = 303; }
+static void tipsy_test_egl_foreground_delete_vertex_arrays(TipsyGLsizei count,
+	const TipsyGLuint *arrays)
+{ (void)count; (void)arrays; }
+static void tipsy_test_egl_foreground_bind_vertex_array(TipsyGLuint array)
+{
+	if (active_egl_foreground_test != NULL)
+		active_egl_foreground_test->vertex_array = (TipsyGLint)array;
+}
+
+static void tipsy_test_egl_foreground_bind_sampler(TipsyGLuint unit, TipsyGLuint sampler)
+{
+	if (active_egl_foreground_test != NULL && unit == 0)
+		active_egl_foreground_test->sampler_0 = (TipsyGLint)sampler;
+}
+
+static EGLDisplay tipsy_test_egl_foreground_current_display(void)
+{ return active_egl_foreground_test != NULL ? active_egl_foreground_test->display : NULL; }
+static EGLSurface tipsy_test_egl_foreground_current_surface(EGLint which)
+{ (void)which; return active_egl_foreground_test != NULL ?
+	active_egl_foreground_test->current_surface : NULL; }
+static void *tipsy_test_egl_foreground_current_context(void)
+{ return active_egl_foreground_test != NULL ? active_egl_foreground_test->context : NULL; }
+static EGLBoolean tipsy_test_egl_foreground_query(EGLDisplay display, EGLSurface surface,
+	EGLint attribute, EGLint *out)
+{
+	struct tipsy_egl_foreground_test *t = active_egl_foreground_test;
+	if (t == NULL || display != t->display || surface != t->surface || out == NULL)
+		return TIPSY_EGL_FALSE;
+	if (attribute == TIPSY_EGL_SWAP_BEHAVIOR) *out = t->swap_behavior;
+	else if (attribute == TIPSY_EGL_WIDTH) *out = 800;
+	else if (attribute == TIPSY_EGL_HEIGHT) *out = 600;
+	else return TIPSY_EGL_FALSE;
+	return TIPSY_EGL_TRUE;
+}
+
+static int tipsy_test_egl_foreground_acquire(struct tipsy_focused_text_frame *frame)
+{
+	struct tipsy_egl_foreground_test *t = active_egl_foreground_test;
+	if (t == NULL || frame == NULL) return -1;
+	t->acquire_calls++;
+	if (!t->foreground_active) return 0;
+	memset(frame, 0, sizeof(*frame));
+	frame->rgba = tipsy_egl_foreground_test_pixels;
+	frame->width = 4; frame->height = 2; frame->stride = 16;
+	frame->x = 20; frame->y = 30;
+	frame->generation = t->foreground_generation;
+	frame->lease = 77;
+	return 1;
+}
+
+static void tipsy_test_egl_foreground_release(uint64_t lease)
+{
+	struct tipsy_egl_foreground_test *t = active_egl_foreground_test;
+	if (t != NULL) {
+		if (lease != 77) t->draw_contract_failures++;
+		t->release_calls++;
+	}
+}
+
+static void tipsy_test_egl_foreground_check_restored(void)
+{
+	struct tipsy_egl_foreground_test *t = active_egl_foreground_test;
+	if (t == NULL) return;
+	if (t->read_framebuffer != (t->gles_major == 3 ? 31 : 32) ||
+		t->draw_framebuffer != 32 ||
+		t->program != 17 || t->array_buffer != 18 || t->vertex_array != 23 ||
+		t->viewport[0] != 3 || t->viewport[1] != 4 ||
+		t->viewport[2] != 640 || t->viewport[3] != 480 ||
+		t->active_texture != (TipsyGLint)(TIPSY_GL_TEXTURE0 + 3) ||
+		t->texture_2d_0 != 19 ||
+		(t->gles_major == 3 && (t->sampler_0 != 24 ||
+		 t->pixel_unpack_buffer != 25 || t->unpack_row_length != 26 ||
+		 t->unpack_skip_rows != 27 || t->unpack_skip_pixels != 28 ||
+		 t->unpack_skip_images != 29 || t->unpack_image_height != 30)) ||
+		t->unpack_alignment != 8 ||
+		t->blend_src_rgb != 0x302 || t->blend_dst_rgb != 0x303 ||
+		t->blend_src_alpha != 0x304 || t->blend_dst_alpha != 0x305 ||
+		t->blend_equation_rgb != 0x8007 || t->blend_equation_alpha != 0x8008 ||
+		!t->color_mask[0] || t->color_mask[1] || !t->color_mask[2] || t->color_mask[3] ||
+		!t->depth_mask || !t->scissor_enabled || t->blend_enabled ||
+		!t->depth_enabled || !t->stencil_enabled || !t->cull_enabled ||
+		(t->gles_major == 3 && !t->rasterizer_discard_enabled) ||
+		!t->framebuffer_srgb_enabled ||
+		!t->sample_alpha_to_coverage_enabled || !t->sample_coverage_enabled ||
+		(t->gles_major == 3 && !t->sample_mask_enabled) || t->transform_feedback_active ||
+		(t->gles_major == 2 &&
+		 (t->attrib[0].enabled != 1 || t->attrib[0].size != 3 ||
+		  t->attrib[0].type != (TipsyGLint)TIPSY_GL_FLOAT ||
+		  t->attrib[0].normalized != 0 || t->attrib[0].stride != 12 ||
+		  t->attrib[0].buffer != 0 || t->attrib[0].pointer != (void *)(uintptr_t)0x1000 ||
+		  t->attrib[1].enabled != 0 || t->attrib[1].size != 4 ||
+		  t->attrib[1].type != (TipsyGLint)TIPSY_GL_UNSIGNED_BYTE ||
+		  t->attrib[1].normalized != 1 || t->attrib[1].stride != 16 ||
+		  t->attrib[1].buffer != 77 || t->attrib[1].pointer != (void *)(uintptr_t)0x20)))
+		t->guest_state_restore_failures++;
+}
+
+static uint32_t tipsy_test_egl_foreground_live_states(void)
+{
+	struct tipsy_egl_text_state *state;
+	uint32_t count = 0;
+	for (state = egl_text_states; state != NULL; state = state->next) count++;
+	return count;
+}
+
+int tipsy_test_egl_foreground_fixture(TipsyEGLForegroundFixture *out)
+{
+	struct tipsy_egl_foreground_test t = {0};
+	struct tipsy_gl_api saved_gl;
+	egl_get_current_display_fn saved_current_display;
+	egl_get_current_surface_fn saved_current_surface;
+	egl_get_current_context_fn saved_current_context;
+	egl_query_surface_fn saved_query_surface;
+	tipsy_egl_text_frame_acquire_fn saved_acquire;
+	tipsy_egl_text_frame_release_fn saved_release;
+	uint32_t draws_before, acquires_before, state_failures_before;
+	int passed;
+
+	if (out == NULL) return 0;
+	memset(out, 0, sizeof(*out));
+	ensure_egl();
+	saved_gl = egl_text_gl;
+	saved_current_display = host_eglGetCurrentDisplay;
+	saved_current_surface = host_eglGetCurrentSurface;
+	saved_current_context = host_eglGetCurrentContext;
+	saved_query_surface = host_eglQuerySurface;
+	saved_acquire = egl_text_frame_acquire_fn;
+	saved_release = egl_text_frame_release_fn;
+
+	t.display = (EGLDisplay)(uintptr_t)0x51;
+	t.surface = (EGLSurface)(uintptr_t)0x52;
+	t.current_surface = t.surface;
+	t.context = (void *)(uintptr_t)0x53;
+	t.swap_behavior = TIPSY_EGL_BUFFER_DESTROYED;
+	t.gles_major = 3;
+	t.foreground_active = 1;
+	t.foreground_generation = 1;
+	t.read_framebuffer = 31; t.draw_framebuffer = 32; t.program = 17;
+	t.array_buffer = 18; t.vertex_array = 23;
+	t.viewport[0] = 3; t.viewport[1] = 4; t.viewport[2] = 640; t.viewport[3] = 480;
+	t.active_texture = TIPSY_GL_TEXTURE0 + 3; t.texture_2d_0 = 19;
+	t.sampler_0 = 24; t.pixel_unpack_buffer = 25; t.unpack_alignment = 8;
+	t.unpack_row_length = 26; t.unpack_skip_rows = 27; t.unpack_skip_pixels = 28;
+	t.unpack_skip_images = 29; t.unpack_image_height = 30;
+	t.blend_src_rgb = 0x302; t.blend_dst_rgb = 0x303;
+	t.blend_src_alpha = 0x304; t.blend_dst_alpha = 0x305;
+	t.blend_equation_rgb = 0x8007; t.blend_equation_alpha = 0x8008;
+	t.color_mask[0] = 1; t.color_mask[2] = 1; t.depth_mask = 1;
+	t.scissor_enabled = 1; t.depth_enabled = 1; t.stencil_enabled = 1;
+	t.cull_enabled = 1; t.rasterizer_discard_enabled = 1;
+	t.framebuffer_srgb_enabled = 1;
+	t.sample_alpha_to_coverage_enabled = 1; t.sample_coverage_enabled = 1;
+	t.sample_mask_enabled = 1;
+	t.next_shader = 400; t.next_program = 500;
+
+	memset(&egl_text_gl, 0, sizeof(egl_text_gl));
+	egl_text_gl.GetString = tipsy_test_egl_foreground_get_string;
+	egl_text_gl.GetStringi = tipsy_test_egl_foreground_get_string_i;
+	egl_text_gl.GetIntegerv = tipsy_test_egl_foreground_get_integer;
+	egl_text_gl.GetBooleanv = tipsy_test_egl_foreground_get_boolean;
+	egl_text_gl.IsEnabled = tipsy_test_egl_foreground_is_enabled;
+	egl_text_gl.Enable = tipsy_test_egl_foreground_enable;
+	egl_text_gl.Disable = tipsy_test_egl_foreground_disable;
+	egl_text_gl.Viewport = tipsy_test_egl_foreground_viewport;
+	egl_text_gl.ColorMask = tipsy_test_egl_foreground_color_mask;
+	egl_text_gl.BlendFuncSeparate = tipsy_test_egl_foreground_blend_func;
+	egl_text_gl.BlendEquationSeparate = tipsy_test_egl_foreground_blend_equation;
+	egl_text_gl.DepthMask = tipsy_test_egl_foreground_depth_mask;
+	egl_text_gl.BindFramebuffer = tipsy_test_egl_foreground_bind_framebuffer;
+	egl_text_gl.ActiveTexture = tipsy_test_egl_foreground_active_texture;
+	egl_text_gl.BindTexture = tipsy_test_egl_foreground_bind_texture;
+	egl_text_gl.TexParameteri = tipsy_test_egl_foreground_tex_parameter;
+	egl_text_gl.PixelStorei = tipsy_test_egl_foreground_pixel_store;
+	egl_text_gl.GenTextures = tipsy_test_egl_foreground_gen_textures;
+	egl_text_gl.DeleteTextures = tipsy_test_egl_foreground_delete_textures;
+	egl_text_gl.TexImage2D = tipsy_test_egl_foreground_tex_image;
+	egl_text_gl.TexSubImage2D = tipsy_test_egl_foreground_tex_sub_image;
+	egl_text_gl.CreateShader = tipsy_test_egl_foreground_create_shader;
+	egl_text_gl.ShaderSource = tipsy_test_egl_foreground_shader_source;
+	egl_text_gl.CompileShader = tipsy_test_egl_foreground_noop_uint;
+	egl_text_gl.GetShaderiv = tipsy_test_egl_foreground_compile_status;
+	egl_text_gl.DeleteShader = tipsy_test_egl_foreground_noop_uint;
+	egl_text_gl.CreateProgram = tipsy_test_egl_foreground_create_program;
+	egl_text_gl.AttachShader = tipsy_test_egl_foreground_attach_shader;
+	egl_text_gl.BindAttribLocation = tipsy_test_egl_foreground_bind_attrib_location;
+	egl_text_gl.LinkProgram = tipsy_test_egl_foreground_noop_uint;
+	egl_text_gl.GetProgramiv = tipsy_test_egl_foreground_program_status;
+	egl_text_gl.DeleteProgram = tipsy_test_egl_foreground_noop_uint;
+	egl_text_gl.UseProgram = tipsy_test_egl_foreground_use_program;
+	egl_text_gl.GetUniformLocation = tipsy_test_egl_foreground_uniform_location;
+	egl_text_gl.Uniform1i = tipsy_test_egl_foreground_uniform_1i;
+	egl_text_gl.GenBuffers = tipsy_test_egl_foreground_gen_buffers;
+	egl_text_gl.DeleteBuffers = tipsy_test_egl_foreground_delete_buffers;
+	egl_text_gl.BindBuffer = tipsy_test_egl_foreground_bind_buffer;
+	egl_text_gl.BufferData = tipsy_test_egl_foreground_buffer_data;
+	egl_text_gl.EnableVertexAttribArray = tipsy_test_egl_foreground_enable_attrib;
+	egl_text_gl.DisableVertexAttribArray = tipsy_test_egl_foreground_disable_attrib;
+	egl_text_gl.VertexAttribPointer = tipsy_test_egl_foreground_attrib_pointer;
+	egl_text_gl.GetVertexAttribiv = tipsy_test_egl_foreground_get_attrib;
+	egl_text_gl.GetVertexAttribPointerv = tipsy_test_egl_foreground_get_attrib_pointer;
+	egl_text_gl.DrawArrays = tipsy_test_egl_foreground_draw;
+	egl_text_gl.GenVertexArrays = tipsy_test_egl_foreground_gen_vertex_arrays;
+	egl_text_gl.DeleteVertexArrays = tipsy_test_egl_foreground_delete_vertex_arrays;
+	egl_text_gl.BindVertexArray = tipsy_test_egl_foreground_bind_vertex_array;
+	egl_text_gl.BindSampler = tipsy_test_egl_foreground_bind_sampler;
+	egl_text_gl.ready = 1;
+
+	active_egl_foreground_test = &t;
+	host_eglGetCurrentDisplay = tipsy_test_egl_foreground_current_display;
+	host_eglGetCurrentSurface = tipsy_test_egl_foreground_current_surface;
+	host_eglGetCurrentContext = tipsy_test_egl_foreground_current_context;
+	host_eglQuerySurface = tipsy_test_egl_foreground_query;
+	egl_text_frame_acquire_fn = tipsy_test_egl_foreground_acquire;
+	egl_text_frame_release_fn = tipsy_test_egl_foreground_release;
+
+	tipsy_egl_compose_focused_text(t.display, t.surface);
+	tipsy_test_egl_foreground_check_restored();
+	tipsy_egl_compose_focused_text(t.display, t.surface);
+	tipsy_test_egl_foreground_check_restored();
+	t.foreground_generation = 2;
+	tipsy_egl_compose_focused_text(t.display, t.surface);
+	tipsy_test_egl_foreground_check_restored();
+	draws_before = t.draw_calls;
+	t.transform_feedback_active = 1;
+	tipsy_egl_compose_focused_text(t.display, t.surface);
+	if (!t.transform_feedback_active) t.guest_state_restore_failures++;
+	out->transform_feedback_draws = t.draw_calls - draws_before;
+	t.transform_feedback_active = 0;
+	draws_before = t.draw_calls;
+	t.swap_behavior = TIPSY_EGL_BUFFER_PRESERVED;
+	tipsy_egl_compose_focused_text(t.display, t.surface);
+	tipsy_test_egl_foreground_check_restored();
+	out->preserved_buffer_draws = t.draw_calls - draws_before;
+	acquires_before = t.acquire_calls;
+	t.current_surface = (EGLSurface)(uintptr_t)0x54;
+	tipsy_egl_compose_focused_text(t.display, t.surface);
+	out->context_mismatch_acquires = t.acquire_calls - acquires_before;
+	t.current_surface = t.surface;
+	t.swap_behavior = TIPSY_EGL_BUFFER_DESTROYED;
+	t.foreground_active = 0;
+	tipsy_egl_compose_focused_text(t.display, t.surface);
+	tipsy_test_egl_foreground_check_restored();
+
+	tipsy_egl_text_forget(t.display, t.surface, NULL);
+	out->acquire_calls = t.acquire_calls;
+	out->release_calls = t.release_calls;
+	out->draw_calls = t.draw_calls;
+	out->texture_allocations = t.texture_allocations;
+	out->full_texture_uploads = t.full_texture_uploads;
+	out->same_size_texture_updates = t.same_size_texture_updates;
+	out->geometry_uploads = t.geometry_uploads;
+	out->cache_texture_deletions = t.texture_deletions;
+
+	/* Exercise the no-core-VAO GLES 2 fallback separately. In particular,
+	 * attribute zero starts as a client-memory array with ARRAY_BUFFER zero;
+	 * restoring only nonzero VBO bindings would corrupt that guest state. */
+	t.gles_major = 2;
+	t.context = (void *)(uintptr_t)0x55;
+	t.foreground_active = 1;
+	t.foreground_generation = 10;
+	t.read_framebuffer = t.draw_framebuffer = 32;
+	t.rasterizer_discard_enabled = 0;
+	t.sample_mask_enabled = 0;
+	t.attrib[0].enabled = 1; t.attrib[0].size = 3;
+	t.attrib[0].type = TIPSY_GL_FLOAT; t.attrib[0].normalized = 0;
+	t.attrib[0].stride = 12; t.attrib[0].buffer = 0;
+	t.attrib[0].pointer = (void *)(uintptr_t)0x1000;
+	t.attrib[1].enabled = 0; t.attrib[1].size = 4;
+	t.attrib[1].type = TIPSY_GL_UNSIGNED_BYTE; t.attrib[1].normalized = 1;
+	t.attrib[1].stride = 16; t.attrib[1].buffer = 77;
+	t.attrib[1].pointer = (void *)(uintptr_t)0x20;
+	draws_before = t.draw_calls;
+	state_failures_before = t.guest_state_restore_failures;
+	tipsy_egl_compose_focused_text(t.display, t.surface);
+	tipsy_test_egl_foreground_check_restored();
+	out->gles2_draws = t.draw_calls - draws_before;
+	out->gles2_state_restore_failures =
+		t.guest_state_restore_failures - state_failures_before;
+	tipsy_egl_text_forget(t.display, t.surface, NULL);
+	out->live_state_records = tipsy_test_egl_foreground_live_states();
+	out->guest_state_restore_failures = t.guest_state_restore_failures;
+	out->draw_contract_failures = t.draw_contract_failures;
+	passed = out->acquire_calls == 6 && out->release_calls == 5 &&
+		out->draw_calls == 3 && out->texture_allocations == 1 &&
+		out->full_texture_uploads == 1 && out->same_size_texture_updates == 1 &&
+		out->geometry_uploads == 1 && out->guest_state_restore_failures == 0 &&
+		out->draw_contract_failures == 0 && out->preserved_buffer_draws == 0 &&
+		out->context_mismatch_acquires == 0 && out->transform_feedback_draws == 0 &&
+		out->cache_texture_deletions == 1 &&
+		out->gles2_draws == 1 && out->gles2_state_restore_failures == 0 &&
+		out->live_state_records == 0;
+	out->passed = passed != 0;
+
+	egl_text_frame_acquire_fn = saved_acquire;
+	egl_text_frame_release_fn = saved_release;
+	host_eglGetCurrentDisplay = saved_current_display;
+	host_eglGetCurrentSurface = saved_current_surface;
+	host_eglGetCurrentContext = saved_current_context;
+	host_eglQuerySurface = saved_query_surface;
+	egl_text_gl = saved_gl;
+	active_egl_foreground_test = NULL;
+	return passed;
+}
+
 void *tipsy_egl_dlsym(const char *name)
 {
 	void *p;
@@ -704,8 +2947,37 @@ void *tipsy_egl_dlsym(const char *name)
 	if (name == NULL) {
 		return NULL;
 	}
+	if (strcmp(name, "eglGetPlatformDisplayEXT") == 0) {
+		ensure_egl();
+		if (host_eglGetPlatformDisplayEXT == NULL) {
+			tipsy_egl_trace_platform_display_ext_resolver_absence();
+			return NULL;
+		}
+	}
+	tipsy_egl_trace_resolver_name(name);
+	if (strcmp(name, "eglGetPlatformDisplay") == 0) {
+		return (void *)tipsy_eglGetPlatformDisplay;
+	}
+	if (strcmp(name, "eglGetPlatformDisplayEXT") == 0) {
+		return (void *)tipsy_eglGetPlatformDisplayEXT;
+	}
+	if (strcmp(name, "eglGetDisplay") == 0) {
+		return (void *)tipsy_eglGetDisplay;
+	}
+	if (strcmp(name, "eglInitialize") == 0) {
+		return (void *)tipsy_eglInitialize;
+	}
+	if (strcmp(name, "eglChooseConfig") == 0) {
+		return (void *)tipsy_eglChooseConfig;
+	}
+	if (strcmp(name, "eglCreateContext") == 0) {
+		return (void *)tipsy_eglCreateContext;
+	}
 	if (strcmp(name, "eglCreateWindowSurface") == 0) {
 		return (void *)tipsy_eglCreateWindowSurface;
+	}
+	if (strcmp(name, "eglMakeCurrent") == 0) {
+		return (void *)tipsy_eglMakeCurrent;
 	}
 	if (strcmp(name, "eglSwapInterval") == 0) {
 		return (void *)tipsy_eglSwapInterval;
@@ -715,6 +2987,9 @@ void *tipsy_egl_dlsym(const char *name)
 	}
 	if (strcmp(name, "eglDestroySurface") == 0) {
 		return (void *)tipsy_eglDestroySurface;
+	}
+	if (strcmp(name, "eglDestroyContext") == 0) {
+		return (void *)tipsy_eglDestroyContext;
 	}
 	if (strcmp(name, "eglGetProcAddress") == 0) {
 		return (void *)tipsy_eglGetProcAddress;

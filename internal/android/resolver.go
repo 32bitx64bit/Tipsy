@@ -180,6 +180,104 @@ func testEGLInitCalls() int {
 	return int(C.tipsy_test_egl_init_calls())
 }
 
+func testEGLSetupTraceValueEnabled(value string) bool {
+	cValue := C.CString(value)
+	defer C.free(unsafe.Pointer(cValue))
+	return C.tipsy_test_egl_setup_trace_value_enabled(cValue) != 0
+}
+
+const (
+	eglSetupPlatformDisplay    uint32 = 1
+	eglSetupPlatformDisplayEXT uint32 = 2
+	eglSetupDisplay            uint32 = 3
+	eglSetupInitialize         uint32 = 4
+	eglSetupChooseConfig       uint32 = 5
+	eglSetupCreateContext      uint32 = 6
+	eglSetupCreateWindow       uint32 = 7
+	eglSetupMakeCurrent        uint32 = 8
+	eglSetupFirstSwap          uint32 = 9
+
+	eglSetupSuccess uint32 = 1
+	eglSetupFailure uint32 = 2
+	eglSetupAbsence uint32 = 3
+)
+
+type eglSetupTraceEvent struct {
+	stage   uint32
+	outcome uint32
+}
+
+type eglSetupTraceFixture struct {
+	passed       bool
+	firstFailure uint32
+	events       []eglSetupTraceEvent
+}
+
+func testEGLSetupTraceFixture(acquisition, failureStage, failureOutcome uint32) eglSetupTraceFixture {
+	var cFixture C.TipsyEGLSetupTraceFixture
+	passed := C.tipsy_test_egl_setup_trace_fixture(C.uint32_t(acquisition),
+		C.uint32_t(failureStage), C.uint32_t(failureOutcome), &cFixture) != 0
+	fixture := eglSetupTraceFixture{
+		passed:       passed && cFixture.passed != 0,
+		firstFailure: uint32(cFixture.first_failure),
+	}
+	count := int(cFixture.event_count)
+	if count > len(cFixture.events) {
+		count = len(cFixture.events)
+	}
+	for i := 0; i < count; i++ {
+		fixture.events = append(fixture.events, eglSetupTraceEvent{
+			stage:   uint32(cFixture.events[i].stage),
+			outcome: uint32(cFixture.events[i].outcome),
+		})
+	}
+	return fixture
+}
+
+type eglForegroundFixture struct {
+	passed                    bool
+	acquireCalls              uint32
+	releaseCalls              uint32
+	drawCalls                 uint32
+	textureAllocations        uint32
+	fullTextureUploads        uint32
+	sameSizeTextureUpdates    uint32
+	geometryUploads           uint32
+	guestStateRestoreFailures uint32
+	drawContractFailures      uint32
+	preservedBufferDraws      uint32
+	contextMismatchAcquires   uint32
+	transformFeedbackDraws    uint32
+	cacheTextureDeletions     uint32
+	gles2Draws                uint32
+	gles2StateRestoreFailures uint32
+	liveStateRecords          uint32
+}
+
+func testEGLForegroundFixture() eglForegroundFixture {
+	var cFixture C.TipsyEGLForegroundFixture
+	passed := C.tipsy_test_egl_foreground_fixture(&cFixture) != 0
+	return eglForegroundFixture{
+		passed:                    passed && cFixture.passed != 0,
+		acquireCalls:              uint32(cFixture.acquire_calls),
+		releaseCalls:              uint32(cFixture.release_calls),
+		drawCalls:                 uint32(cFixture.draw_calls),
+		textureAllocations:        uint32(cFixture.texture_allocations),
+		fullTextureUploads:        uint32(cFixture.full_texture_uploads),
+		sameSizeTextureUpdates:    uint32(cFixture.same_size_texture_updates),
+		geometryUploads:           uint32(cFixture.geometry_uploads),
+		guestStateRestoreFailures: uint32(cFixture.guest_state_restore_failures),
+		drawContractFailures:      uint32(cFixture.draw_contract_failures),
+		preservedBufferDraws:      uint32(cFixture.preserved_buffer_draws),
+		contextMismatchAcquires:   uint32(cFixture.context_mismatch_acquires),
+		transformFeedbackDraws:    uint32(cFixture.transform_feedback_draws),
+		cacheTextureDeletions:     uint32(cFixture.cache_texture_deletions),
+		gles2Draws:                uint32(cFixture.gles2_draws),
+		gles2StateRestoreFailures: uint32(cFixture.gles2_state_restore_failures),
+		liveStateRecords:          uint32(cFixture.live_state_records),
+	}
+}
+
 func eglVSyncEnabled() bool {
 	return C.tipsy_egl_vsync_enabled() != 0
 }

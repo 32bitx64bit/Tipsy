@@ -66,11 +66,19 @@ extern int tipsy_dladdr(const void *, void *);
 extern int tipsy_dl_iterate_phdr(void *, void *);
 
 /* host.c */
+extern void *tipsy_eglGetPlatformDisplay(uint32_t, void *, const intptr_t *);
+extern void *tipsy_eglGetPlatformDisplayEXT(uint32_t, void *, const int32_t *);
+extern void *tipsy_eglGetDisplay(void *);
+extern uint32_t tipsy_eglInitialize(void *, int32_t *, int32_t *);
+extern uint32_t tipsy_eglChooseConfig(void *, const int32_t *, void **, int32_t, int32_t *);
+extern void *tipsy_eglCreateContext(void *, void *, void *, const int32_t *);
 extern void *tipsy_eglCreateWindowSurface(void *, void *, void *, const int32_t *);
+extern uint32_t tipsy_eglMakeCurrent(void *, void *, void *, void *);
 extern void *tipsy_eglGetProcAddress(const char *);
 extern uint32_t tipsy_eglSwapInterval(void *, int32_t);
 extern uint32_t tipsy_eglSwapBuffers(void *, void *);
 extern uint32_t tipsy_eglDestroySurface(void *, void *);
+extern uint32_t tipsy_eglDestroyContext(void *, void *);
 extern void *tipsy_egl_dlsym(const char *);
 extern void *tipsy_gles_dlsym(const char *);
 
@@ -368,10 +376,17 @@ static const struct sym table[] = {
 	{ "libandroid.so", "ANativeWindow_lock", (void *)tipsy_ANativeWindow_lock },
 	{ "libandroid.so", "ANativeWindow_unlockAndPost", (void *)tipsy_ANativeWindow_unlockAndPost },
 
+	{ "libEGL.so", "eglGetPlatformDisplay", (void *)tipsy_eglGetPlatformDisplay },
+	{ "libEGL.so", "eglGetDisplay", (void *)tipsy_eglGetDisplay },
+	{ "libEGL.so", "eglInitialize", (void *)tipsy_eglInitialize },
+	{ "libEGL.so", "eglChooseConfig", (void *)tipsy_eglChooseConfig },
+	{ "libEGL.so", "eglCreateContext", (void *)tipsy_eglCreateContext },
 	{ "libEGL.so", "eglCreateWindowSurface", (void *)tipsy_eglCreateWindowSurface },
+	{ "libEGL.so", "eglMakeCurrent", (void *)tipsy_eglMakeCurrent },
 	{ "libEGL.so", "eglSwapInterval", (void *)tipsy_eglSwapInterval },
 	{ "libEGL.so", "eglSwapBuffers", (void *)tipsy_eglSwapBuffers },
 	{ "libEGL.so", "eglDestroySurface", (void *)tipsy_eglDestroySurface },
+	{ "libEGL.so", "eglDestroyContext", (void *)tipsy_eglDestroyContext },
 	{ "libEGL.so", "eglGetProcAddress", (void *)tipsy_eglGetProcAddress },
 
 	{ "libmediandk.so", "AMediaCodec_createDecoderByType", (void *)tipsy_AMediaCodec_createDecoderByType },
