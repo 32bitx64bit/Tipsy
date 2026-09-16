@@ -199,7 +199,7 @@ func TestSplitRendererStartupOverridesUsesOnlyOfficialExternalPath(t *testing.T)
 		flagDisableVulkan:   "True",
 		flagDisableVulkan11: "True",
 		"FFlagCustom":       "kept-out",
-	})
+	}, false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -222,12 +222,27 @@ func TestSplitRendererStartupOverridesUsesOnlyOfficialExternalPath(t *testing.T)
 		}
 	}
 	ordinary := map[string]any{"FFlagCustom": "True"}
-	if unchanged, empty, err := splitRendererStartupOverrides(ordinary); err != nil || empty != "" || !reflect.DeepEqual(unchanged, ordinary) {
+	if unchanged, empty, err := splitRendererStartupOverrides(ordinary, false); err != nil || empty != "" || !reflect.DeepEqual(unchanged, ordinary) {
 		t.Fatalf("ordinary split settings=%v overrides=%q err=%v", unchanged, empty, err)
 	}
 	ordinaryVulkan := map[string]any{flagPreferVulkan: "True"}
-	if unchanged, payload, err := splitRendererStartupOverrides(ordinaryVulkan); err != nil || payload != "" || !reflect.DeepEqual(unchanged, ordinaryVulkan) {
+	if unchanged, payload, err := splitRendererStartupOverrides(ordinaryVulkan, false); err != nil || payload != "" || !reflect.DeepEqual(unchanged, ordinaryVulkan) {
 		t.Fatalf("ordinary Vulkan split settings=%v overrides=%q err=%v", unchanged, payload, err)
+	}
+	testInput := map[string]any{flagPreferVulkan: "True", flagDisableOpenGL: "True", "FFlagCustom": "kept"}
+	testSettings, testRaw, err := splitRendererStartupOverrides(testInput, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got = nil
+	if err := json.Unmarshal([]byte(testRaw), &got); err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 3 || got[flagPreferOpenGL] != "True" || got[flagDisableVulkan] != "True" || got[flagDisableVulkan11] != "True" || testSettings["FFlagCustom"] != "kept" {
+		t.Fatalf("process-only split settings=%v overrides=%v", testSettings, got)
+	}
+	if testInput[flagPreferVulkan] != "True" || testInput[flagDisableOpenGL] != "True" {
+		t.Fatalf("process-only split mutated its input: %v", testInput)
 	}
 }
 
@@ -238,7 +253,7 @@ func TestLoadAndroidAppOverridesLeavesOrdinaryLaunchInertAndTestOverrideTransien
 	t.Setenv(luaLogEnv, "")
 	cachePath := filepath.Join(t.TempDir(), "ClientAppSettings.json")
 
-	ordinary, err := loadAndroidAppOverrides(context.Background(), cachePath, "")
+	ordinary, err := loadAndroidAppOverrides(context.Background(), cachePath, false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -249,7 +264,7 @@ func TestLoadAndroidAppOverridesLeavesOrdinaryLaunchInertAndTestOverrideTransien
 		t.Fatalf("ordinary launch invented OpenGL controls: %v", ordinary.values)
 	}
 
-	strict, err := loadAndroidAppOverrides(context.Background(), cachePath, clientsettings.RendererOpenGL)
+	strict, err := loadAndroidAppOverrides(context.Background(), cachePath, true)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -312,29 +327,5 @@ func TestApplicationSettingsAutoDoesNotReplaceOfficial(t *testing.T) {
 	}
 	if !strings.Contains(got, `"FFlagDebugGraphicsPreferVulkan":"True"`) || !strings.Contains(got, `"DFIntTaskSchedulerTargetFps":"60"`) {
 		t.Fatalf("auto replaced official settings: %s", got)
-	}
-}
-
-func TestTestRendererOverrideWinsOnlyForOpenGLVisualTest(t *testing.T) {
-	base := map[string]any{
-		flagPreferVulkan:  "True",
-		flagDisableOpenGL: "True",
-		"FFlagCustom":     "kept",
-	}
-	got := withTestRendererOverride(base, clientsettings.RendererOpenGL)
-	if base[flagPreferVulkan] != "True" || base[flagDisableOpenGL] != "True" {
-		t.Fatal("transient override mutated persisted override input")
-	}
-	if got[flagPreferOpenGL] != "True" || got[flagDisableVulkan] != "True" || got[flagDisableVulkan11] != "True" || got["FFlagCustom"] != "kept" {
-		t.Fatalf("OpenGL test override = %v", got)
-	}
-	if _, exists := got[flagPreferVulkan]; exists {
-		t.Fatalf("OpenGL test override retained Vulkan preference: %v", got)
-	}
-	if _, exists := got[flagDisableOpenGL]; exists {
-		t.Fatalf("OpenGL test override retained OpenGL disable flag: %v", got)
-	}
-	if same := withTestRendererOverride(base, clientsettings.RendererVulkan); !reflect.DeepEqual(same, base) {
-		t.Fatalf("non-OpenGL test override changed settings: %v", same)
 	}
 }

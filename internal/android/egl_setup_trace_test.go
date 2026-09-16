@@ -52,45 +52,7 @@ func TestEGLSetupLookupsUseCompatibilityWrappers(t *testing.T) {
 }
 
 func TestEGLSetupTraceNamesFirstFakeHostFailure(t *testing.T) {
-	acquisitions := []uint32{
-		eglSetupPlatformDisplay,
-		eglSetupPlatformDisplayEXT,
-		eglSetupDisplay,
-	}
-	commonStages := []uint32{
-		eglSetupInitialize,
-		eglSetupChooseConfig,
-		eglSetupCreateContext,
-		eglSetupCreateWindow,
-		eglSetupMakeCurrent,
-		eglSetupFirstSwap,
-	}
-	for _, acquisition := range acquisitions {
-		stages := append([]uint32{acquisition}, commonStages...)
-		got := testEGLSetupTraceFixture(acquisition, 0, eglSetupFailure)
-		if !got.passed || got.firstFailure != 0 || len(got.events) != len(stages) {
-			t.Fatalf("successful acquisition %d fixture=%+v", acquisition, got)
-		}
-		for i, event := range got.events {
-			if event.stage != stages[i] || event.outcome != eglSetupSuccess {
-				t.Fatalf("successful acquisition %d event[%d]=%+v want stage=%d success",
-					acquisition, i, event, stages[i])
-			}
-		}
-
-		for _, stage := range stages {
-			for _, outcome := range []uint32{eglSetupFailure, eglSetupAbsence} {
-				got := testEGLSetupTraceFixture(acquisition, stage, outcome)
-				if !got.passed || got.firstFailure != stage || len(got.events) == 0 {
-					t.Fatalf("acquisition=%d stage=%d outcome=%d fixture=%+v",
-						acquisition, stage, outcome, got)
-				}
-				last := got.events[len(got.events)-1]
-				if last.stage != stage || last.outcome != outcome {
-					t.Fatalf("acquisition=%d stage=%d outcome=%d last=%+v",
-						acquisition, stage, outcome, last)
-				}
-			}
-		}
+	if !testEGLSetupTraceFixture() {
+		t.Fatal("fake EGL setup trace matrix failed")
 	}
 }

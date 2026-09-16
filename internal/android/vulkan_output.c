@@ -43,10 +43,6 @@ static const uint32_t tipsy_text_fragment_spirv[] =
 #include "vulkan_text_frag.inc"
 ;
 
-typedef struct TipsyVkOutputSwapchainStorage {
-	VkSwapchainCreateInfoKHR info;
-} TipsyVkOutputSwapchainStorage;
-
 typedef struct TipsyVkOutputFrame {
 	VkCommandBuffer command;
 	VkSemaphore acquire;
@@ -213,7 +209,6 @@ typedef struct TipsyVkOutputState {
 
 	uint32_t pending_swapchain_qualified;
 	VkSwapchainCreateInfoKHR pending_output_info;
-	VkSwapchainKHR pending_old_output;
 
 	TipsyVkOutputDispatch vk;
 	TipsyVkOutputPair active;
@@ -258,13 +253,15 @@ static void tipsy_vk_output_foreground_release(uintptr_t lease)
 	}
 }
 
-#define LOAD_INSTANCE(field, name) do { \
+#define LOAD_INSTANCE(field, name, loaded) do { \
 	tipsy_output.vk.field = (PFN_vk##name)tipsy_output.gipa( \
 		tipsy_output.instance, "vk" #name); \
+	(loaded) &= tipsy_output.vk.field != NULL; \
 } while (0)
-#define LOAD_DEVICE(field, name) do { \
+#define LOAD_DEVICE(field, name, loaded) do { \
 	tipsy_output.vk.field = (PFN_vk##name)tipsy_output.gdpa( \
 		tipsy_output.device, "vk" #name); \
+	(loaded) &= tipsy_output.vk.field != NULL; \
 } while (0)
 
 static void tipsy_vk_output_unmap_child_locked(void)
@@ -360,152 +357,89 @@ static void tipsy_vk_output_resize_child_locked(VkExtent2D extent)
 
 static int tipsy_vk_output_load_instance_dispatch_locked(void)
 {
+	int loaded = 1;
 	if (tipsy_output.gipa == NULL || tipsy_output.instance == VK_NULL_HANDLE) {
 		return 0;
 	}
-	LOAD_INSTANCE(get_queue_families, GetPhysicalDeviceQueueFamilyProperties);
-	LOAD_INSTANCE(get_surface_support, GetPhysicalDeviceSurfaceSupportKHR);
-	LOAD_INSTANCE(get_surface_capabilities, GetPhysicalDeviceSurfaceCapabilitiesKHR);
-	LOAD_INSTANCE(get_surface_formats, GetPhysicalDeviceSurfaceFormatsKHR);
-	LOAD_INSTANCE(get_present_modes, GetPhysicalDeviceSurfacePresentModesKHR);
-	LOAD_INSTANCE(get_memory_properties, GetPhysicalDeviceMemoryProperties);
-	LOAD_INSTANCE(get_format_properties, GetPhysicalDeviceFormatProperties);
-	LOAD_INSTANCE(destroy_surface, DestroySurfaceKHR);
-	return tipsy_output.vk.get_queue_families != NULL &&
-		tipsy_output.vk.get_surface_support != NULL &&
-		tipsy_output.vk.get_surface_capabilities != NULL &&
-		tipsy_output.vk.get_surface_formats != NULL &&
-		tipsy_output.vk.get_present_modes != NULL &&
-		tipsy_output.vk.get_memory_properties != NULL &&
-		tipsy_output.vk.get_format_properties != NULL &&
-		tipsy_output.vk.destroy_surface != NULL;
+	LOAD_INSTANCE(get_queue_families, GetPhysicalDeviceQueueFamilyProperties, loaded);
+	LOAD_INSTANCE(get_surface_support, GetPhysicalDeviceSurfaceSupportKHR, loaded);
+	LOAD_INSTANCE(get_surface_capabilities, GetPhysicalDeviceSurfaceCapabilitiesKHR,
+		loaded);
+	LOAD_INSTANCE(get_surface_formats, GetPhysicalDeviceSurfaceFormatsKHR, loaded);
+	LOAD_INSTANCE(get_present_modes, GetPhysicalDeviceSurfacePresentModesKHR, loaded);
+	LOAD_INSTANCE(get_memory_properties, GetPhysicalDeviceMemoryProperties, loaded);
+	LOAD_INSTANCE(get_format_properties, GetPhysicalDeviceFormatProperties, loaded);
+	LOAD_INSTANCE(destroy_surface, DestroySurfaceKHR, loaded);
+	return loaded;
 }
 
 static int tipsy_vk_output_load_device_dispatch_locked(void)
 {
+	int loaded = 1;
 	if (tipsy_output.gdpa == NULL || tipsy_output.device == VK_NULL_HANDLE) {
 		return 0;
 	}
-	LOAD_DEVICE(create_swapchain, CreateSwapchainKHR);
-	LOAD_DEVICE(destroy_swapchain, DestroySwapchainKHR);
-	LOAD_DEVICE(get_swapchain_images, GetSwapchainImagesKHR);
-	LOAD_DEVICE(acquire_next_image, AcquireNextImageKHR);
-	LOAD_DEVICE(create_semaphore, CreateSemaphore);
-	LOAD_DEVICE(destroy_semaphore, DestroySemaphore);
-	LOAD_DEVICE(create_fence, CreateFence);
-	LOAD_DEVICE(destroy_fence, DestroyFence);
-	LOAD_DEVICE(wait_fences, WaitForFences);
-	LOAD_DEVICE(reset_fences, ResetFences);
-	LOAD_DEVICE(create_command_pool, CreateCommandPool);
-	LOAD_DEVICE(destroy_command_pool, DestroyCommandPool);
-	LOAD_DEVICE(allocate_command_buffers, AllocateCommandBuffers);
-	LOAD_DEVICE(reset_command_buffer, ResetCommandBuffer);
-	LOAD_DEVICE(begin_command_buffer, BeginCommandBuffer);
-	LOAD_DEVICE(end_command_buffer, EndCommandBuffer);
-	LOAD_DEVICE(queue_submit, QueueSubmit);
-	LOAD_DEVICE(create_image_view, CreateImageView);
-	LOAD_DEVICE(destroy_image_view, DestroyImageView);
-	LOAD_DEVICE(create_render_pass, CreateRenderPass);
-	LOAD_DEVICE(destroy_render_pass, DestroyRenderPass);
-	LOAD_DEVICE(create_framebuffer, CreateFramebuffer);
-	LOAD_DEVICE(destroy_framebuffer, DestroyFramebuffer);
-	LOAD_DEVICE(create_shader_module, CreateShaderModule);
-	LOAD_DEVICE(destroy_shader_module, DestroyShaderModule);
-	LOAD_DEVICE(create_descriptor_set_layout, CreateDescriptorSetLayout);
-	LOAD_DEVICE(destroy_descriptor_set_layout, DestroyDescriptorSetLayout);
-	LOAD_DEVICE(create_pipeline_layout, CreatePipelineLayout);
-	LOAD_DEVICE(destroy_pipeline_layout, DestroyPipelineLayout);
-	LOAD_DEVICE(create_graphics_pipelines, CreateGraphicsPipelines);
-	LOAD_DEVICE(destroy_pipeline, DestroyPipeline);
-	LOAD_DEVICE(create_descriptor_pool, CreateDescriptorPool);
-	LOAD_DEVICE(destroy_descriptor_pool, DestroyDescriptorPool);
-	LOAD_DEVICE(allocate_descriptor_sets, AllocateDescriptorSets);
-	LOAD_DEVICE(update_descriptor_sets, UpdateDescriptorSets);
-	LOAD_DEVICE(create_sampler, CreateSampler);
-	LOAD_DEVICE(destroy_sampler, DestroySampler);
-	LOAD_DEVICE(create_buffer, CreateBuffer);
-	LOAD_DEVICE(destroy_buffer, DestroyBuffer);
-	LOAD_DEVICE(get_buffer_memory_requirements, GetBufferMemoryRequirements);
-	LOAD_DEVICE(create_image, CreateImage);
-	LOAD_DEVICE(destroy_image, DestroyImage);
-	LOAD_DEVICE(get_image_memory_requirements, GetImageMemoryRequirements);
-	LOAD_DEVICE(allocate_memory, AllocateMemory);
-	LOAD_DEVICE(free_memory, FreeMemory);
-	LOAD_DEVICE(bind_buffer_memory, BindBufferMemory);
-	LOAD_DEVICE(bind_image_memory, BindImageMemory);
-	LOAD_DEVICE(map_memory, MapMemory);
-	LOAD_DEVICE(unmap_memory, UnmapMemory);
-	LOAD_DEVICE(cmd_pipeline_barrier, CmdPipelineBarrier);
-	LOAD_DEVICE(cmd_copy_image, CmdCopyImage);
-	LOAD_DEVICE(cmd_copy_buffer_to_image, CmdCopyBufferToImage);
-	LOAD_DEVICE(cmd_begin_render_pass, CmdBeginRenderPass);
-	LOAD_DEVICE(cmd_end_render_pass, CmdEndRenderPass);
-	LOAD_DEVICE(cmd_bind_pipeline, CmdBindPipeline);
-	LOAD_DEVICE(cmd_bind_descriptor_sets, CmdBindDescriptorSets);
-	LOAD_DEVICE(cmd_set_viewport, CmdSetViewport);
-	LOAD_DEVICE(cmd_set_scissor, CmdSetScissor);
-	LOAD_DEVICE(cmd_push_constants, CmdPushConstants);
-	LOAD_DEVICE(cmd_draw, CmdDraw);
-	return tipsy_output.vk.create_swapchain != NULL &&
-		tipsy_output.vk.destroy_swapchain != NULL &&
-		tipsy_output.vk.get_swapchain_images != NULL &&
-		tipsy_output.vk.acquire_next_image != NULL &&
-		tipsy_output.vk.create_semaphore != NULL &&
-		tipsy_output.vk.destroy_semaphore != NULL &&
-		tipsy_output.vk.create_fence != NULL &&
-		tipsy_output.vk.destroy_fence != NULL &&
-		tipsy_output.vk.wait_fences != NULL &&
-		tipsy_output.vk.reset_fences != NULL &&
-		tipsy_output.vk.create_command_pool != NULL &&
-		tipsy_output.vk.destroy_command_pool != NULL &&
-		tipsy_output.vk.allocate_command_buffers != NULL &&
-		tipsy_output.vk.reset_command_buffer != NULL &&
-		tipsy_output.vk.begin_command_buffer != NULL &&
-		tipsy_output.vk.end_command_buffer != NULL &&
-		tipsy_output.vk.queue_submit != NULL &&
-		tipsy_output.vk.create_image_view != NULL &&
-		tipsy_output.vk.destroy_image_view != NULL &&
-		tipsy_output.vk.create_render_pass != NULL &&
-		tipsy_output.vk.destroy_render_pass != NULL &&
-		tipsy_output.vk.create_framebuffer != NULL &&
-		tipsy_output.vk.destroy_framebuffer != NULL &&
-		tipsy_output.vk.create_shader_module != NULL &&
-		tipsy_output.vk.destroy_shader_module != NULL &&
-		tipsy_output.vk.create_descriptor_set_layout != NULL &&
-		tipsy_output.vk.destroy_descriptor_set_layout != NULL &&
-		tipsy_output.vk.create_pipeline_layout != NULL &&
-		tipsy_output.vk.destroy_pipeline_layout != NULL &&
-		tipsy_output.vk.create_graphics_pipelines != NULL &&
-		tipsy_output.vk.destroy_pipeline != NULL &&
-		tipsy_output.vk.create_descriptor_pool != NULL &&
-		tipsy_output.vk.destroy_descriptor_pool != NULL &&
-		tipsy_output.vk.allocate_descriptor_sets != NULL &&
-		tipsy_output.vk.update_descriptor_sets != NULL &&
-		tipsy_output.vk.create_sampler != NULL &&
-		tipsy_output.vk.destroy_sampler != NULL &&
-		tipsy_output.vk.create_buffer != NULL &&
-		tipsy_output.vk.destroy_buffer != NULL &&
-		tipsy_output.vk.get_buffer_memory_requirements != NULL &&
-		tipsy_output.vk.create_image != NULL &&
-		tipsy_output.vk.destroy_image != NULL &&
-		tipsy_output.vk.get_image_memory_requirements != NULL &&
-		tipsy_output.vk.allocate_memory != NULL &&
-		tipsy_output.vk.free_memory != NULL &&
-		tipsy_output.vk.bind_buffer_memory != NULL &&
-		tipsy_output.vk.bind_image_memory != NULL &&
-		tipsy_output.vk.map_memory != NULL &&
-		tipsy_output.vk.unmap_memory != NULL &&
-		tipsy_output.vk.cmd_pipeline_barrier != NULL &&
-		tipsy_output.vk.cmd_copy_image != NULL &&
-		tipsy_output.vk.cmd_copy_buffer_to_image != NULL &&
-		tipsy_output.vk.cmd_begin_render_pass != NULL &&
-		tipsy_output.vk.cmd_end_render_pass != NULL &&
-		tipsy_output.vk.cmd_bind_pipeline != NULL &&
-		tipsy_output.vk.cmd_bind_descriptor_sets != NULL &&
-		tipsy_output.vk.cmd_set_viewport != NULL &&
-		tipsy_output.vk.cmd_set_scissor != NULL &&
-		tipsy_output.vk.cmd_push_constants != NULL &&
-		tipsy_output.vk.cmd_draw != NULL;
+	LOAD_DEVICE(create_swapchain, CreateSwapchainKHR, loaded);
+	LOAD_DEVICE(destroy_swapchain, DestroySwapchainKHR, loaded);
+	LOAD_DEVICE(get_swapchain_images, GetSwapchainImagesKHR, loaded);
+	LOAD_DEVICE(acquire_next_image, AcquireNextImageKHR, loaded);
+	LOAD_DEVICE(create_semaphore, CreateSemaphore, loaded);
+	LOAD_DEVICE(destroy_semaphore, DestroySemaphore, loaded);
+	LOAD_DEVICE(create_fence, CreateFence, loaded);
+	LOAD_DEVICE(destroy_fence, DestroyFence, loaded);
+	LOAD_DEVICE(wait_fences, WaitForFences, loaded);
+	LOAD_DEVICE(reset_fences, ResetFences, loaded);
+	LOAD_DEVICE(create_command_pool, CreateCommandPool, loaded);
+	LOAD_DEVICE(destroy_command_pool, DestroyCommandPool, loaded);
+	LOAD_DEVICE(allocate_command_buffers, AllocateCommandBuffers, loaded);
+	LOAD_DEVICE(reset_command_buffer, ResetCommandBuffer, loaded);
+	LOAD_DEVICE(begin_command_buffer, BeginCommandBuffer, loaded);
+	LOAD_DEVICE(end_command_buffer, EndCommandBuffer, loaded);
+	LOAD_DEVICE(queue_submit, QueueSubmit, loaded);
+	LOAD_DEVICE(create_image_view, CreateImageView, loaded);
+	LOAD_DEVICE(destroy_image_view, DestroyImageView, loaded);
+	LOAD_DEVICE(create_render_pass, CreateRenderPass, loaded);
+	LOAD_DEVICE(destroy_render_pass, DestroyRenderPass, loaded);
+	LOAD_DEVICE(create_framebuffer, CreateFramebuffer, loaded);
+	LOAD_DEVICE(destroy_framebuffer, DestroyFramebuffer, loaded);
+	LOAD_DEVICE(create_shader_module, CreateShaderModule, loaded);
+	LOAD_DEVICE(destroy_shader_module, DestroyShaderModule, loaded);
+	LOAD_DEVICE(create_descriptor_set_layout, CreateDescriptorSetLayout, loaded);
+	LOAD_DEVICE(destroy_descriptor_set_layout, DestroyDescriptorSetLayout, loaded);
+	LOAD_DEVICE(create_pipeline_layout, CreatePipelineLayout, loaded);
+	LOAD_DEVICE(destroy_pipeline_layout, DestroyPipelineLayout, loaded);
+	LOAD_DEVICE(create_graphics_pipelines, CreateGraphicsPipelines, loaded);
+	LOAD_DEVICE(destroy_pipeline, DestroyPipeline, loaded);
+	LOAD_DEVICE(create_descriptor_pool, CreateDescriptorPool, loaded);
+	LOAD_DEVICE(destroy_descriptor_pool, DestroyDescriptorPool, loaded);
+	LOAD_DEVICE(allocate_descriptor_sets, AllocateDescriptorSets, loaded);
+	LOAD_DEVICE(update_descriptor_sets, UpdateDescriptorSets, loaded);
+	LOAD_DEVICE(create_sampler, CreateSampler, loaded);
+	LOAD_DEVICE(destroy_sampler, DestroySampler, loaded);
+	LOAD_DEVICE(create_buffer, CreateBuffer, loaded);
+	LOAD_DEVICE(destroy_buffer, DestroyBuffer, loaded);
+	LOAD_DEVICE(get_buffer_memory_requirements, GetBufferMemoryRequirements, loaded);
+	LOAD_DEVICE(create_image, CreateImage, loaded);
+	LOAD_DEVICE(destroy_image, DestroyImage, loaded);
+	LOAD_DEVICE(get_image_memory_requirements, GetImageMemoryRequirements, loaded);
+	LOAD_DEVICE(allocate_memory, AllocateMemory, loaded);
+	LOAD_DEVICE(free_memory, FreeMemory, loaded);
+	LOAD_DEVICE(bind_buffer_memory, BindBufferMemory, loaded);
+	LOAD_DEVICE(bind_image_memory, BindImageMemory, loaded);
+	LOAD_DEVICE(map_memory, MapMemory, loaded);
+	LOAD_DEVICE(unmap_memory, UnmapMemory, loaded);
+	LOAD_DEVICE(cmd_pipeline_barrier, CmdPipelineBarrier, loaded);
+	LOAD_DEVICE(cmd_copy_image, CmdCopyImage, loaded);
+	LOAD_DEVICE(cmd_copy_buffer_to_image, CmdCopyBufferToImage, loaded);
+	LOAD_DEVICE(cmd_begin_render_pass, CmdBeginRenderPass, loaded);
+	LOAD_DEVICE(cmd_end_render_pass, CmdEndRenderPass, loaded);
+	LOAD_DEVICE(cmd_bind_pipeline, CmdBindPipeline, loaded);
+	LOAD_DEVICE(cmd_bind_descriptor_sets, CmdBindDescriptorSets, loaded);
+	LOAD_DEVICE(cmd_set_viewport, CmdSetViewport, loaded);
+	LOAD_DEVICE(cmd_set_scissor, CmdSetScissor, loaded);
+	LOAD_DEVICE(cmd_push_constants, CmdPushConstants, loaded);
+	LOAD_DEVICE(cmd_draw, CmdDraw, loaded);
+	return loaded;
 }
 
 static int tipsy_vk_output_create_platform_surface_locked(Window window,
@@ -743,10 +677,8 @@ reject:
 	pthread_mutex_unlock(&tipsy_output.mutex);
 }
 
-void tipsy_vk_output_device_created(void *physical, const void *guest_create_info,
-	void *device, int32_t result)
+void tipsy_vk_output_device_created(void *physical, void *device, int32_t result)
 {
-	(void)guest_create_info;
 	pthread_mutex_lock(&tipsy_output.mutex);
 	if (result != VK_SUCCESS || device == NULL || !tipsy_output.device_candidate ||
 		(VkPhysicalDevice)physical != tipsy_output.physical) {
@@ -762,7 +694,6 @@ void tipsy_vk_output_device_created(void *physical, const void *guest_create_inf
 		return;
 	}
 	tipsy_output.device_ready = 1;
-	tipsy_output.device_candidate = tipsy_output.device_ready;
 	pthread_mutex_unlock(&tipsy_output.mutex);
 }
 
@@ -823,11 +754,6 @@ static int tipsy_vk_output_present_mode_supported_locked(VkPresentModeKHR mode)
 	return found;
 }
 
-static int tipsy_vk_output_has_retired_slot_locked(void)
-{
-	return tipsy_output.retired_count < TIPSY_VK_OUTPUT_MAX_RETIRED;
-}
-
 static TipsyVkOutputQueueRecord *tipsy_vk_output_queue_locked(VkQueue queue)
 {
 	uint32_t i;
@@ -844,7 +770,7 @@ int tipsy_vk_output_prepare_swapchain(void *device_ptr, const void *create_info_
 {
 	const VkSwapchainCreateInfoKHR *info =
 		(const VkSwapchainCreateInfoKHR *)create_info_ptr;
-	TipsyVkOutputSwapchainStorage *storage = NULL;
+	VkSwapchainCreateInfoKHR *clone_info = NULL;
 	VkSurfaceCapabilitiesKHR source_caps;
 	VkSurfaceCapabilitiesKHR output_caps;
 	VkSwapchainKHR old_output = VK_NULL_HANDLE;
@@ -865,7 +791,7 @@ int tipsy_vk_output_prepare_swapchain(void *device_ptr, const void *create_info_
 		(info->oldSwapchain == VK_NULL_HANDLE && tipsy_output.active.active) ||
 		(info->oldSwapchain != VK_NULL_HANDLE &&
 			(!tipsy_output.active.active || tipsy_output.active.guest != info->oldSwapchain ||
-			 !tipsy_vk_output_has_retired_slot_locked()))) {
+			 tipsy_output.retired_count >= TIPSY_VK_OUTPUT_MAX_RETIRED))) {
 		goto reject;
 	}
 	memset(&source_caps, 0, sizeof(source_caps));
@@ -907,12 +833,12 @@ int tipsy_vk_output_prepare_swapchain(void *device_ptr, const void *create_info_
 	if (info->oldSwapchain != VK_NULL_HANDLE) {
 		old_output = tipsy_output.active.output;
 	}
-	storage = calloc(1, sizeof(*storage));
-	if (storage == NULL) {
+	clone_info = calloc(1, sizeof(*clone_info));
+	if (clone_info == NULL) {
 		goto reject;
 	}
-	storage->info = *info;
-	storage->info.imageUsage |= VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
+	*clone_info = *info;
+	clone_info->imageUsage |= VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
 	memset(&tipsy_output.pending_output_info, 0,
 		sizeof(tipsy_output.pending_output_info));
 	tipsy_output.pending_output_info.sType = VK_STRUCTURE_TYPE_SWAPCHAIN_CREATE_INFO_KHR;
@@ -930,19 +856,17 @@ int tipsy_vk_output_prepare_swapchain(void *device_ptr, const void *create_info_
 	tipsy_output.pending_output_info.presentMode = info->presentMode;
 	tipsy_output.pending_output_info.clipped = VK_TRUE;
 	tipsy_output.pending_output_info.oldSwapchain = old_output;
-	tipsy_output.pending_old_output = old_output;
 	tipsy_output.pending_swapchain_qualified = 1;
 	atomic_store_explicit(&output_route_ready, 0, memory_order_release);
 	tipsy_vk_output_unmap_child_locked();
 	tipsy_vk_output_resize_child_locked(info->imageExtent);
-	clone->storage = storage;
-	clone->create_info = &storage->info;
+	clone->create_info = clone_info;
 	clone->qualified = 1;
 	pthread_mutex_unlock(&tipsy_output.mutex);
 	return 1;
 
 reject:
-	free(storage);
+	free(clone_info);
 	pthread_mutex_unlock(&tipsy_output.mutex);
 	return 0;
 }
@@ -952,7 +876,7 @@ void tipsy_vk_output_swapchain_clone_release(TipsyVkOutputSwapchainClone *clone)
 	if (clone == NULL) {
 		return;
 	}
-	free(clone->storage);
+	free(clone->create_info);
 	memset(clone, 0, sizeof(*clone));
 }
 
@@ -1386,13 +1310,11 @@ static void tipsy_vk_output_retire_active_locked(void)
 }
 
 void tipsy_vk_output_swapchain_created(void *device_ptr,
-	const void *guest_create_info, uint64_t guest_swapchain, int32_t result,
-	uint32_t qualified)
+	uint64_t guest_swapchain, int32_t result, uint32_t qualified)
 {
 	VkSwapchainKHR output = VK_NULL_HANDLE;
 	VkResult output_result;
 	TipsyVkOutputPair pair;
-	(void)guest_create_info;
 	pthread_mutex_lock(&tipsy_output.mutex);
 	if (result != VK_SUCCESS || guest_swapchain == 0 || !qualified ||
 		!tipsy_output.pending_swapchain_qualified ||
@@ -1410,7 +1332,7 @@ void tipsy_vk_output_swapchain_created(void *device_ptr,
 		return;
 	}
 	memset(&pair, 0, sizeof(pair));
-	if (tipsy_output.pending_old_output != VK_NULL_HANDLE) {
+	if (tipsy_output.pending_output_info.oldSwapchain != VK_NULL_HANDLE) {
 		/* A successful create with oldSwapchain retires that output immediately,
 		 * even if later command/pipeline allocation fails. */
 		tipsy_vk_output_retire_active_locked();
@@ -2320,38 +2242,28 @@ void tipsy_vk_output_instance_destroying(void *instance_ptr)
 	pthread_mutex_unlock(&tipsy_output.mutex);
 }
 
-void tipsy_test_vk_output_capability_fixture(uint32_t scenario,
-	TipsyVkOutputCapabilityFixture *out)
+uint32_t tipsy_test_vk_output_queue_eligible(uint32_t scenario)
 {
 	VkDeviceQueueCreateInfo queue;
 	VkDeviceCreateInfo device;
 	VkQueueFamilyProperties family;
 	float priorities[2] = {0.75f, 0.5f};
-	const char *extensions[1] = {VK_KHR_SWAPCHAIN_EXTENSION_NAME};
-	uint32_t marker = 0x144;
 	VkBool32 source_supported = VK_TRUE;
 	VkBool32 output_supported = VK_TRUE;
-	uint32_t guest_count = 2;
-	int eligible;
-	if (out == NULL) return;
-	memset(out, 0, sizeof(*out));
 	memset(&queue, 0, sizeof(queue));
 	queue.sType = VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO;
 	queue.queueFamilyIndex = 3;
-	queue.queueCount = guest_count;
+	queue.queueCount = 2;
 	queue.pQueuePriorities = priorities;
 	memset(&device, 0, sizeof(device));
 	device.sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO;
-	device.pNext = &marker;
 	device.queueCreateInfoCount = 1;
 	device.pQueueCreateInfos = &queue;
-	device.enabledExtensionCount = 1;
-	device.ppEnabledExtensionNames = extensions;
 	memset(&family, 0, sizeof(family));
 	family.queueFlags = VK_QUEUE_GRAPHICS_BIT;
 	family.queueCount = 4;
 	if (scenario == TIPSY_VK_OUTPUT_FIXTURE_ALL_QUEUES_REQUESTED) {
-		family.queueCount = guest_count;
+		family.queueCount = queue.queueCount;
 	}
 	if (scenario == TIPSY_VK_OUTPUT_FIXTURE_SOURCE_UNSUPPORTED) source_supported = VK_FALSE;
 	if (scenario == TIPSY_VK_OUTPUT_FIXTURE_OUTPUT_UNSUPPORTED) output_supported = VK_FALSE;
@@ -2359,34 +2271,8 @@ void tipsy_test_vk_output_capability_fixture(uint32_t scenario,
 	if (scenario == TIPSY_VK_OUTPUT_FIXTURE_INTERNALLY_SYNCHRONIZED_QUEUE) {
 		queue.flags = VK_DEVICE_QUEUE_CREATE_INTERNALLY_SYNCHRONIZED_BIT_KHR;
 	}
-	eligible = tipsy_vk_output_queue_request_valid(&device, 3, &family,
+	return (uint32_t)tipsy_vk_output_queue_request_valid(&device, 3, &family,
 		source_supported, output_supported, NULL);
-	out->eligible = eligible;
-	out->guest_queue_count_preserved = queue.queueCount == guest_count;
-	out->device_request_unchanged = device.pQueueCreateInfos == &queue &&
-		queue.queueCount == guest_count;
-	out->no_additional_queue = 1;
-	out->eligible_queue_family = eligible ? 3u : UINT32_MAX;
-	out->ordinary_queue_required = queue.flags == 0;
-	out->exact_present_queue_required = eligible;
-	out->guest_priorities_preserved = priorities[0] == 0.75f && priorities[1] == 0.5f;
-	out->device_pnext_preserved = device.pNext == &marker;
-	out->extension_array_preserved = device.ppEnabledExtensionNames == extensions;
-	out->source_transfer_src_required = eligible;
-	out->output_transfer_dst_required = eligible;
-	out->output_color_attachment_required = eligible;
-	out->whole_present_gate = scenario != TIPSY_VK_OUTPUT_FIXTURE_MULTI_SWAPCHAIN;
-	out->direct_fallback = !eligible || !out->whole_present_gate;
-	if (eligible && out->whole_present_gate) {
-		uint64_t guest_wait = 0x1001;
-		uint64_t guest_completion = 0x2001;
-		uint64_t output_completion = 0x3001;
-		out->guest_waits_consumed_once = guest_wait != 0;
-		out->guest_completion_distinct = guest_completion != guest_wait;
-		out->output_completion_distinct = output_completion != guest_wait &&
-			output_completion != guest_completion;
-		out->full_frame_copy_before_blend = 1;
-	}
 }
 
 static void tipsy_vk_output_fixture_operation(
@@ -2679,9 +2565,11 @@ void tipsy_test_vk_output_transaction_fixture(uint32_t scenario,
 		offsetof(TipsyVkOutputState, gipa)];
 	uint8_t staging[4] = {0, 0, 0, 0};
 	VkSemaphore original_wait = test_transaction_original_wait;
-	VkSwapchainKHR guest_swapchain = test_transaction_guest;
+	VkSwapchainKHR guest_swapchains[2] = {test_transaction_guest,
+		(VkSwapchainKHR)(uintptr_t)0x52};
+	uint32_t image_indices[2] = {0, 0};
 	VkPresentInfoKHR present;
-	VkResult individual = VK_SUCCESS;
+	VkResult individual[2] = {VK_SUCCESS, VK_SUCCESS};
 	int32_t result = VK_ERROR_INITIALIZATION_FAILED;
 	uint32_t saved_route_ready;
 	int handled;
@@ -2754,19 +2642,17 @@ void tipsy_test_vk_output_transaction_fixture(uint32_t scenario,
 	tipsy_output.vk.cmd_draw = tipsy_vk_output_fixture_draw;
 	test_transaction_scenario = scenario;
 	test_transaction_fixture = out;
-	atomic_store_explicit(&output_route_ready,
-		scenario == TIPSY_VK_OUTPUT_TX_DIRECT_GATE ? 0u : 1u,
-		memory_order_release);
+	atomic_store_explicit(&output_route_ready, 1, memory_order_release);
 	pthread_mutex_unlock(&tipsy_output.mutex);
 
 	memset(&present, 0, sizeof(present));
 	present.sType = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR;
 	present.waitSemaphoreCount = 1;
 	present.pWaitSemaphores = &original_wait;
-	present.swapchainCount = 1;
-	present.pSwapchains = &guest_swapchain;
-	present.pImageIndices = &(uint32_t){0};
-	present.pResults = &individual;
+	present.swapchainCount = scenario == TIPSY_VK_OUTPUT_TX_DIRECT_GATE ? 2u : 1u;
+	present.pSwapchains = guest_swapchains;
+	present.pImageIndices = image_indices;
+	present.pResults = individual;
 	handled = tipsy_vk_output_present(test_transaction_queue, &present,
 		(void *)tipsy_vk_output_fixture_present, &result);
 	if (!handled) result = tipsy_vk_output_fixture_present(test_transaction_queue,

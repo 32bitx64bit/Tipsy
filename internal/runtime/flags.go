@@ -245,29 +245,20 @@ func withFlogOverrides(overrides map[string]any, spec, luaSpec string) (map[stri
 	return overrides, flogGroupCount(extra), len(lua) > 0
 }
 
-// withTestRendererOverride applies the same strict, process-local renderer
-// selection used by Launch to the settings response handed to this one client
-// process. It runs after persisted custom Fast Flags so the visual-test route
-// cannot diverge from the presenter. It never writes a settings document.
-func withTestRendererOverride(overrides map[string]any, renderer clientsettings.Renderer) map[string]any {
-	if renderer != clientsettings.RendererOpenGL {
-		return overrides
-	}
-	overrides = cloneFlagMap(overrides)
-	delete(overrides, flagPreferVulkan)
-	delete(overrides, flagDisableOpenGL)
-	overrides[flagPreferOpenGL] = "True"
-	overrides[flagDisableVulkan] = "True"
-	overrides[flagDisableVulkan11] = "True"
-	return overrides
-}
-
 // splitRendererStartupOverrides removes an explicit OpenGL request from the
 // ordinary AndroidApp settings merge and serializes it for the APK's external
 // override path. MainGameActivity consumes that one payload at both of its
 // official boundaries: pre-super preload and nativeInitClientSettings.
 // Auto and explicit Vulkan retain the existing settings-envelope behavior.
-func splitRendererStartupOverrides(overrides map[string]any) (map[string]any, string, error) {
+func splitRendererStartupOverrides(overrides map[string]any, testOpenGL bool) (map[string]any, string, error) {
+	if testOpenGL {
+		overrides = cloneFlagMap(overrides)
+		delete(overrides, flagPreferVulkan)
+		delete(overrides, flagDisableOpenGL)
+		overrides[flagPreferOpenGL] = "True"
+		overrides[flagDisableVulkan] = "True"
+		overrides[flagDisableVulkan11] = "True"
+	}
 	if _, explicitOpenGL := overrides[flagPreferOpenGL]; !explicitOpenGL {
 		return overrides, "", nil
 	}
@@ -307,7 +298,7 @@ type androidAppOverrides struct {
 // client lock is held. Explicit OpenGL controls are separated for the APK's
 // external override path; all other settings retain the ordinary AndroidApp
 // response merge.
-func loadAndroidAppOverrides(ctx context.Context, cachePath string, processRenderer clientsettings.Renderer) (androidAppOverrides, error) {
+func loadAndroidAppOverrides(ctx context.Context, cachePath string, testOpenGL bool) (androidAppOverrides, error) {
 	if ctx == nil {
 		ctx = context.Background()
 	}
@@ -336,10 +327,7 @@ func loadAndroidAppOverrides(ctx context.Context, cachePath string, processRende
 	if flogGroups > 0 || luaLog {
 		logging.Logger(logging.CatGameActivity).Info("log level overrides applied", "flogGroups", flogGroups, "luaLogger", luaLog)
 	}
-	if processRenderer != "" {
-		overrides = withTestRendererOverride(overrides, processRenderer)
-	}
-	overrides, rendererOverrides, err := splitRendererStartupOverrides(overrides)
+	overrides, rendererOverrides, err := splitRendererStartupOverrides(overrides, testOpenGL)
 	if err != nil {
 		return androidAppOverrides{}, fmt.Errorf("renderer startup overrides: %w", err)
 	}

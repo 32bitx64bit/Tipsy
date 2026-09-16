@@ -170,37 +170,10 @@ int tipsy_test_egl_swap_interval_policy(int vsync, int requested,
                                         int *first_interval, int *second_interval,
                                         int *calls, int *reported_error);
 
-/* Content-free fake-host setup trace. Stages and outcomes are fixed enums;
- * events contain no EGL handles, attributes, geometry, or client content. */
-enum {
-	TIPSY_EGL_SETUP_PLATFORM_DISPLAY = 1,
-	TIPSY_EGL_SETUP_PLATFORM_DISPLAY_EXT = 2,
-	TIPSY_EGL_SETUP_DISPLAY = 3,
-	TIPSY_EGL_SETUP_INITIALIZE = 4,
-	TIPSY_EGL_SETUP_CHOOSE_CONFIG = 5,
-	TIPSY_EGL_SETUP_CREATE_CONTEXT = 6,
-	TIPSY_EGL_SETUP_CREATE_WINDOW_SURFACE = 7,
-	TIPSY_EGL_SETUP_MAKE_CURRENT = 8,
-	TIPSY_EGL_SETUP_FIRST_SWAP = 9,
-};
-enum {
-	TIPSY_EGL_SETUP_SUCCESS = 1,
-	TIPSY_EGL_SETUP_FAILURE = 2,
-	TIPSY_EGL_SETUP_ABSENCE = 3,
-};
-typedef struct {
-	uint32_t stage;
-	uint32_t outcome;
-} TipsyEGLSetupTraceEvent;
-typedef struct {
-	uint32_t passed;
-	uint32_t first_failure;
-	uint32_t event_count;
-	TipsyEGLSetupTraceEvent events[8];
-} TipsyEGLSetupTraceFixture;
-int tipsy_test_egl_setup_trace_fixture(uint32_t acquisition_stage,
-	uint32_t failure_stage, uint32_t failure_outcome,
-	TipsyEGLSetupTraceFixture *out);
+/* Content-free fake-host setup trace matrix. It exercises every acquisition,
+ * failure, and absence boundary without exposing fixture internals to the
+ * production C/Go ABI. */
+int tipsy_test_egl_setup_trace_fixture(void);
 
 /* Direct Android EGL guest-handoff fixture. It substitutes host EGL and the
  * optional graphics callbacks, records identity-only event order, and restores
@@ -230,29 +203,9 @@ typedef struct {
 } TipsyEGLGuestHandoffFixture;
 int tipsy_test_egl_guest_handoff_fixture(TipsyEGLGuestHandoffFixture *out);
 
-/* Content-free fake EGL/GLES foreground result. It contains operation counts
- * and state-contract booleans only: no pixels, text, handles, dimensions, or
- * client content. The fixture never opens a display or invokes a host driver. */
-typedef struct {
-	uint32_t passed;
-	uint32_t acquire_calls;
-	uint32_t release_calls;
-	uint32_t draw_calls;
-	uint32_t texture_allocations;
-	uint32_t full_texture_uploads;
-	uint32_t same_size_texture_updates;
-	uint32_t geometry_uploads;
-	uint32_t guest_state_restore_failures;
-	uint32_t draw_contract_failures;
-	uint32_t preserved_buffer_draws;
-	uint32_t context_mismatch_acquires;
-	uint32_t transform_feedback_draws;
-	uint32_t cache_texture_deletions;
-	uint32_t gles2_draws;
-	uint32_t gles2_state_restore_failures;
-	uint32_t live_state_records;
-} TipsyEGLForegroundFixture;
-int tipsy_test_egl_foreground_fixture(TipsyEGLForegroundFixture *out);
+/* Content-free fake EGL/GLES foreground contract. The fixture never opens a
+ * display or invokes a host driver. */
+int tipsy_test_egl_foreground_fixture(void);
 
 /* liblog.so: C-side VERBOSE/DEBUG skip when slog Debug is off. */
 void tipsy_android_set_debug_log(int enabled);

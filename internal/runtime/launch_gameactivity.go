@@ -15,7 +15,6 @@ import (
 	"time"
 
 	"github.com/tipsy-linux/tipsy/internal/android"
-	"github.com/tipsy-linux/tipsy/internal/clientsettings"
 	"github.com/tipsy-linux/tipsy/internal/jni"
 	"github.com/tipsy-linux/tipsy/internal/loader"
 	"github.com/tipsy-linux/tipsy/internal/logging"
@@ -529,13 +528,13 @@ func (s *gameActivitySession) shutdown(reason string) time.Duration {
 	return s.shutdownDuration
 }
 
-func startGameActivity(ctx context.Context, vm *jni.VM, mod *loader.Module, aw *android.Window, files, cache, preferences, obb, assets, version string, width, height int, currentRefreshHz float32, supportedRefreshHz []float32, req rbxuri.Request, processRenderer clientsettings.Renderer) (*gameActivitySession, error) {
+func startGameActivity(ctx context.Context, vm *jni.VM, mod *loader.Module, aw *android.Window, files, cache, preferences, obb, assets, version string, width, height int, currentRefreshHz float32, supportedRefreshHz []float32, req rbxuri.Request, testOpenGL bool) (*gameActivitySession, error) {
 	env := vm.Env()
 	activity := env.AllocObject(env.FindClass("com/roblox/client/startup/MainGameActivity"))
 	if activity == 0 {
 		return nil, fmt.Errorf("AllocObject MainGameActivity failed")
 	}
-	overrides, overrideErr := loadAndroidAppOverrides(ctx, filepath.Join(files, "ClientAppSettings.json"), processRenderer)
+	overrides, overrideErr := loadAndroidAppOverrides(ctx, filepath.Join(files, "ClientAppSettings.json"), testOpenGL)
 	assetsObj := env.AllocObject(env.FindClass("android/content/res/AssetManager"))
 	cfg := env.AllocObject(env.FindClass("android/content/res/Configuration"))
 	// The APK's NativeHelper startup calls org.fmod.FMOD.init(context)

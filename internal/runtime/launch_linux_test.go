@@ -55,28 +55,28 @@ func TestStutterDiagnosticsRequiresExactOptIn(t *testing.T) {
 	}
 }
 
-func TestTestRendererOverrideIsStrictAndProcessLocal(t *testing.T) {
+func TestTestOpenGLRequestIsExactAndProcessLocal(t *testing.T) {
 	for _, value := range []string{"", "opengl", "vulkan", "auto", "opengl ", "OpenGL", "gl"} {
 		value := value
-		renderer, forced, err := testRendererOverride(func(string) string { return value })
+		requested, err := testOpenGLRequested(func(string) string { return value })
 		if value == "opengl" {
-			if err != nil || !forced || renderer != clientsettings.RendererOpenGL {
-				t.Fatalf("opengl override = %q, %t, %v", renderer, forced, err)
+			if err != nil || !requested {
+				t.Fatalf("opengl request = %t, %v", requested, err)
 			}
 			continue
 		}
 		if value == "" {
-			if err != nil || forced || renderer != "" {
-				t.Fatalf("empty override = %q, %t, %v", renderer, forced, err)
+			if err != nil || requested {
+				t.Fatalf("empty request = %t, %v", requested, err)
 			}
 			continue
 		}
-		if err == nil || forced || renderer != "" {
-			t.Errorf("invalid %q override = %q, %t, %v", value, renderer, forced, err)
+		if err == nil || requested {
+			t.Errorf("invalid %q request = %t, %v", value, requested, err)
 		}
 	}
-	if renderer, forced, err := testRendererOverride(nil); err != nil || forced || renderer != "" {
-		t.Fatalf("nil environment override = %q, %t, %v", renderer, forced, err)
+	if requested, err := testOpenGLRequested(nil); err != nil || requested {
+		t.Fatalf("nil environment request = %t, %v", requested, err)
 	}
 }
 

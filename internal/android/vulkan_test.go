@@ -63,48 +63,16 @@ func TestVulkanDrawFamilyGIPAIsHostPassthrough(t *testing.T) {
 	}
 }
 
-func TestVulkanPrivateOutputCapabilityAndCompletionModel(t *testing.T) {
-	got := testVulkanOutputCapabilityFixture(0)
-	if !got.eligible || !got.guestQueueCountPreserved ||
-		!got.deviceRequestUnchanged || !got.noAdditionalQueue ||
-		got.eligibleQueueFamily != 3 || !got.ordinaryQueueRequired ||
-		!got.exactPresentQueueRequired ||
-		!got.guestPrioritiesPreserved || !got.devicePNextPreserved ||
-		!got.extensionArrayPreserved {
-		t.Fatalf("same-queue qualification changed the guest device request: %+v", got)
-	}
-	if !got.sourceTransferSrcRequired || !got.outputTransferDstRequired ||
-		!got.outputColorAttachmentRequired || !got.wholePresentGate ||
-		!got.fullFrameCopyBeforeBlend {
-		t.Fatalf("private output capability/copy gate incomplete: %+v", got)
-	}
-	if !got.guestWaitsConsumedOnce || !got.guestCompletionDistinct ||
-		!got.outputCompletionDistinct || got.directFallback {
-		t.Fatalf("G/O completion transaction is not distinct and single-consumer: %+v", got)
-	}
-}
-
-func TestVulkanPrivateOutputCapabilityRejectionsStayDirect(t *testing.T) {
-	allRequested := testVulkanOutputCapabilityFixture(1)
-	if !allRequested.eligible || !allRequested.noAdditionalQueue ||
-		!allRequested.deviceRequestUnchanged {
-		t.Fatalf("requesting every exposed queue must not block same-queue use: %+v",
-			allRequested)
-	}
-	for _, scenario := range []uint32{2, 3, 4, 6} {
-		got := testVulkanOutputCapabilityFixture(scenario)
-		if got.eligible || !got.directFallback || !got.guestQueueCountPreserved ||
-			!got.noAdditionalQueue || !got.deviceRequestUnchanged ||
-			!got.guestPrioritiesPreserved || !got.devicePNextPreserved ||
-			!got.extensionArrayPreserved {
-			t.Errorf("scenario %d did not fail closed with preserved guest request: %+v",
-				scenario, got)
+func TestVulkanPrivateOutputQueueQualification(t *testing.T) {
+	for _, scenario := range []uint32{0, 1} {
+		if !testVulkanOutputQueueEligible(scenario) {
+			t.Errorf("ordinary same-family scenario %d was rejected", scenario)
 		}
 	}
-	got := testVulkanOutputCapabilityFixture(5)
-	if !got.eligible || got.wholePresentGate || !got.directFallback ||
-		got.guestWaitsConsumedOnce {
-		t.Fatalf("multi-swapchain present was partially rewritten: %+v", got)
+	for _, scenario := range []uint32{2, 3, 4, 5} {
+		if testVulkanOutputQueueEligible(scenario) {
+			t.Errorf("unsupported/protected queue scenario %d was accepted", scenario)
+		}
 	}
 }
 

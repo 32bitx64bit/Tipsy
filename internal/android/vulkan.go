@@ -395,52 +395,8 @@ func testVulkanProcIsHostPassthrough(name string) bool {
 	return C.tipsy_test_vk_proc_is_host_passthrough(cName) != 0
 }
 
-type vulkanOutputCapabilityFixture struct {
-	eligible                      bool
-	guestQueueCountPreserved      bool
-	deviceRequestUnchanged        bool
-	noAdditionalQueue             bool
-	eligibleQueueFamily           uint32
-	ordinaryQueueRequired         bool
-	exactPresentQueueRequired     bool
-	guestPrioritiesPreserved      bool
-	devicePNextPreserved          bool
-	extensionArrayPreserved       bool
-	sourceTransferSrcRequired     bool
-	outputTransferDstRequired     bool
-	outputColorAttachmentRequired bool
-	guestWaitsConsumedOnce        bool
-	guestCompletionDistinct       bool
-	outputCompletionDistinct      bool
-	wholePresentGate              bool
-	fullFrameCopyBeforeBlend      bool
-	directFallback                bool
-}
-
-func testVulkanOutputCapabilityFixture(scenario uint32) vulkanOutputCapabilityFixture {
-	var raw C.TipsyVkOutputCapabilityFixture
-	C.tipsy_test_vk_output_capability_fixture(C.uint32_t(scenario), &raw)
-	return vulkanOutputCapabilityFixture{
-		eligible:                      raw.eligible != 0,
-		guestQueueCountPreserved:      raw.guest_queue_count_preserved != 0,
-		deviceRequestUnchanged:        raw.device_request_unchanged != 0,
-		noAdditionalQueue:             raw.no_additional_queue != 0,
-		eligibleQueueFamily:           uint32(raw.eligible_queue_family),
-		ordinaryQueueRequired:         raw.ordinary_queue_required != 0,
-		exactPresentQueueRequired:     raw.exact_present_queue_required != 0,
-		guestPrioritiesPreserved:      raw.guest_priorities_preserved != 0,
-		devicePNextPreserved:          raw.device_pnext_preserved != 0,
-		extensionArrayPreserved:       raw.extension_array_preserved != 0,
-		sourceTransferSrcRequired:     raw.source_transfer_src_required != 0,
-		outputTransferDstRequired:     raw.output_transfer_dst_required != 0,
-		outputColorAttachmentRequired: raw.output_color_attachment_required != 0,
-		guestWaitsConsumedOnce:        raw.guest_waits_consumed_once != 0,
-		guestCompletionDistinct:       raw.guest_completion_distinct != 0,
-		outputCompletionDistinct:      raw.output_completion_distinct != 0,
-		wholePresentGate:              raw.whole_present_gate != 0,
-		fullFrameCopyBeforeBlend:      raw.full_frame_copy_before_blend != 0,
-		directFallback:                raw.direct_fallback != 0,
-	}
+func testVulkanOutputQueueEligible(scenario uint32) bool {
+	return C.tipsy_test_vk_output_queue_eligible(C.uint32_t(scenario)) != 0
 }
 
 type vulkanOutputTransactionFixture struct {

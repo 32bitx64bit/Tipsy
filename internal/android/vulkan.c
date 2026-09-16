@@ -992,7 +992,7 @@ static TipsyVkResult tipsy_vkCreateDevice(TipsyVkPhysicalDevice physicalDevice,
 	tipsy_vk_observe_device_create(physicalDevice, pCreateInfo);
 	tipsy_vk_output_device_preparing(physicalDevice, pCreateInfo);
 	result = host_vkCreateDevice(physicalDevice, pCreateInfo, pAllocator, pDevice);
-	tipsy_vk_output_device_created(physicalDevice, pCreateInfo,
+	tipsy_vk_output_device_created(physicalDevice,
 		result == TIPSY_VK_SUCCESS && pDevice != NULL ? *pDevice : NULL, result);
 	return result;
 }
@@ -1179,7 +1179,7 @@ static TipsyVkResult tipsy_vkCreateSwapchainKHR(TipsyVkDevice device, const Tips
 		host_create_info = (const TipsyVkSwapchainCreateInfoKHR *)output_clone.create_info;
 	}
 	result = fn(device, host_create_info, pAllocator, pSwapchain);
-	tipsy_vk_output_swapchain_created(device, pCreateInfo,
+	tipsy_vk_output_swapchain_created(device,
 		result == TIPSY_VK_SUCCESS && pSwapchain != NULL ? *pSwapchain : 0,
 		result, output_clone.qualified);
 	if (result == TIPSY_VK_SUCCESS) {

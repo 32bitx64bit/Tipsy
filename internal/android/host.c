@@ -55,6 +55,8 @@ typedef EGLSurface (*egl_get_current_surface_fn)(EGLint);
 typedef void *(*egl_get_current_context_fn)(void);
 typedef EGLBoolean (*egl_query_surface_fn)(EGLDisplay, EGLSurface, EGLint, EGLint *);
 
+void *tipsy_eglGetProcAddress(const char *name);
+
 static egl_get_platform_display_fn host_eglGetPlatformDisplay;
 static egl_get_platform_display_ext_fn host_eglGetPlatformDisplayEXT;
 static egl_get_display_fn host_eglGetDisplay;
@@ -94,6 +96,22 @@ static _Atomic uint64_t egl_last_swap_ns;
  * the fixed labels below; no EGL handles, addresses, attributes, dimensions,
  * errors, or client content are inspected or printed. */
 #define TIPSY_EGL_SETUP_TRACE_ENV "TIPSY_TEST_EGL_SETUP_TRACE"
+enum {
+	TIPSY_EGL_SETUP_PLATFORM_DISPLAY = 1,
+	TIPSY_EGL_SETUP_PLATFORM_DISPLAY_EXT,
+	TIPSY_EGL_SETUP_DISPLAY,
+	TIPSY_EGL_SETUP_INITIALIZE,
+	TIPSY_EGL_SETUP_CHOOSE_CONFIG,
+	TIPSY_EGL_SETUP_CREATE_CONTEXT,
+	TIPSY_EGL_SETUP_CREATE_WINDOW_SURFACE,
+	TIPSY_EGL_SETUP_MAKE_CURRENT,
+	TIPSY_EGL_SETUP_FIRST_SWAP,
+};
+enum {
+	TIPSY_EGL_SETUP_SUCCESS = 1,
+	TIPSY_EGL_SETUP_FAILURE,
+	TIPSY_EGL_SETUP_ABSENCE,
+};
 typedef void (*tipsy_egl_setup_test_sink_fn)(uint32_t, uint32_t);
 
 static pthread_once_t egl_setup_trace_once = PTHREAD_ONCE_INIT;
@@ -448,7 +466,6 @@ static void tipsy_egl_text_reap_orphans_locked(EGLDisplay display, void *context
 		}
 		*cursor = state->next;
 		tipsy_egl_text_destroy_gpu_locked(state);
-		memset(state, 0, sizeof(*state));
 		free(state);
 	}
 }
@@ -976,14 +993,9 @@ static void tipsy_egl_text_restore_attrib(TipsyGLuint index, const struct tipsy_
 	else egl_text_gl.DisableVertexAttribArray(index);
 }
 
-static int tipsy_gl_extension_token_equal(const char *start, size_t length,
-	const char *wanted)
+static int tipsy_egl_text_has_srgb_write_control(int es3)
 {
-	return strlen(wanted) == length && memcmp(start, wanted, length) == 0;
-}
-
-static int tipsy_egl_text_has_extension(int es3, const char *wanted)
-{
+	static const char extension_name[] = "GL_EXT_sRGB_write_control";
 	if (es3) {
 		TipsyGLint count = 0;
 		TipsyGLint i;
@@ -993,7 +1005,7 @@ static int tipsy_egl_text_has_extension(int es3, const char *wanted)
 		for (i = 0; i < count; i++) {
 			const unsigned char *extension = egl_text_gl.GetStringi(
 				TIPSY_GL_EXTENSIONS, (TipsyGLuint)i);
-			if (extension != NULL && strcmp((const char *)extension, wanted) == 0)
+			if (extension != NULL && strcmp((const char *)extension, extension_name) == 0)
 				return 1;
 		}
 		return 0;
@@ -1007,7 +1019,8 @@ static int tipsy_egl_text_has_extension(int es3, const char *wanted)
 			while (*cursor == ' ') cursor++;
 			end = cursor;
 			while (*end != '\0' && *end != ' ') end++;
-			if (tipsy_gl_extension_token_equal(cursor, (size_t)(end - cursor), wanted))
+			if ((size_t)(end - cursor) == sizeof(extension_name) - 1 &&
+				memcmp(cursor, extension_name, sizeof(extension_name) - 1) == 0)
 				return 1;
 			cursor = end;
 		}
@@ -1327,8 +1340,7 @@ static void tipsy_egl_compose_focused_text(EGLDisplay dpy, EGLSurface surface)
 	}
 	state->es3 = es3;
 	if (!state->initialized) {
-		state->srgb_write_control = tipsy_egl_text_has_extension(es3,
-			"GL_EXT_sRGB_write_control");
+		state->srgb_write_control = tipsy_egl_text_has_srgb_write_control(es3);
 	}
 	tipsy_egl_text_save_state(&saved, state);
 	if (state->es3 && saved.transform_feedback_active) {
@@ -1469,7 +1481,6 @@ static void tipsy_egl_text_forget(EGLDisplay dpy, EGLSurface surface, void *cont
 		}
 		/* A context destroy releases any objects that could not be deleted on
 		 * an exact current-context turn. Never make another context current. */
-		memset(state, 0, sizeof(*state));
 		free(state);
 	}
 	pthread_mutex_unlock(&egl_text_mu);
@@ -1858,6 +1869,31 @@ EGLBoolean tipsy_eglDestroyContext(EGLDisplay dpy, void *context)
 	return ok;
 }
 
+/* Both dlsym and eglGetProcAddress must expose the same compatibility
+ * wrappers. Keep that identity table in one place so new EGL seams cannot be
+ * accidentally visible through only one loader path. */
+static void *tipsy_egl_wrapped_proc(const char *name)
+{
+	if (name == NULL) return NULL;
+	if (strcmp(name, "eglGetPlatformDisplay") == 0)
+		return (void *)tipsy_eglGetPlatformDisplay;
+	if (strcmp(name, "eglGetPlatformDisplayEXT") == 0)
+		return (void *)tipsy_eglGetPlatformDisplayEXT;
+	if (strcmp(name, "eglGetDisplay") == 0) return (void *)tipsy_eglGetDisplay;
+	if (strcmp(name, "eglInitialize") == 0) return (void *)tipsy_eglInitialize;
+	if (strcmp(name, "eglChooseConfig") == 0) return (void *)tipsy_eglChooseConfig;
+	if (strcmp(name, "eglCreateContext") == 0) return (void *)tipsy_eglCreateContext;
+	if (strcmp(name, "eglCreateWindowSurface") == 0)
+		return (void *)tipsy_eglCreateWindowSurface;
+	if (strcmp(name, "eglMakeCurrent") == 0) return (void *)tipsy_eglMakeCurrent;
+	if (strcmp(name, "eglSwapInterval") == 0) return (void *)tipsy_eglSwapInterval;
+	if (strcmp(name, "eglSwapBuffers") == 0) return (void *)tipsy_eglSwapBuffers;
+	if (strcmp(name, "eglDestroySurface") == 0) return (void *)tipsy_eglDestroySurface;
+	if (strcmp(name, "eglDestroyContext") == 0) return (void *)tipsy_eglDestroyContext;
+	if (strcmp(name, "eglGetProcAddress") == 0) return (void *)tipsy_eglGetProcAddress;
+	return NULL;
+}
+
 void *tipsy_eglGetProcAddress(const char *name)
 {
 	void *p;
@@ -1869,47 +1905,8 @@ void *tipsy_eglGetProcAddress(const char *name)
 		return NULL;
 	}
 	tipsy_egl_trace_resolver_name(name);
-	if (name != NULL) {
-		if (strcmp(name, "eglGetPlatformDisplay") == 0) {
-			return (void *)tipsy_eglGetPlatformDisplay;
-		}
-		if (strcmp(name, "eglGetPlatformDisplayEXT") == 0) {
-			return (void *)tipsy_eglGetPlatformDisplayEXT;
-		}
-		if (strcmp(name, "eglGetDisplay") == 0) {
-			return (void *)tipsy_eglGetDisplay;
-		}
-		if (strcmp(name, "eglInitialize") == 0) {
-			return (void *)tipsy_eglInitialize;
-		}
-		if (strcmp(name, "eglChooseConfig") == 0) {
-			return (void *)tipsy_eglChooseConfig;
-		}
-		if (strcmp(name, "eglCreateContext") == 0) {
-			return (void *)tipsy_eglCreateContext;
-		}
-		if (strcmp(name, "eglCreateWindowSurface") == 0) {
-			return (void *)tipsy_eglCreateWindowSurface;
-		}
-		if (strcmp(name, "eglMakeCurrent") == 0) {
-			return (void *)tipsy_eglMakeCurrent;
-		}
-		if (strcmp(name, "eglSwapInterval") == 0) {
-			return (void *)tipsy_eglSwapInterval;
-		}
-		if (strcmp(name, "eglSwapBuffers") == 0) {
-			return (void *)tipsy_eglSwapBuffers;
-		}
-		if (strcmp(name, "eglDestroySurface") == 0) {
-			return (void *)tipsy_eglDestroySurface;
-		}
-		if (strcmp(name, "eglDestroyContext") == 0) {
-			return (void *)tipsy_eglDestroyContext;
-		}
-		if (strcmp(name, "eglGetProcAddress") == 0) {
-			return (void *)tipsy_eglGetProcAddress;
-		}
-	}
+	p = tipsy_egl_wrapped_proc(name);
+	if (p != NULL) return p;
 	if (host_eglGetProcAddress != NULL) {
 		p = host_eglGetProcAddress(name);
 		if (p != NULL) {
@@ -1934,46 +1931,7 @@ void *tipsy_eglGetProcAddress(const char *name)
 int tipsy_test_egl_proc_is_wrapped(const char *name)
 {
 	void *got = tipsy_eglGetProcAddress(name);
-	if (name == NULL) {
-		return 0;
-	}
-	if (strcmp(name, "eglGetPlatformDisplay") == 0) {
-		return got == (void *)tipsy_eglGetPlatformDisplay;
-	}
-	if (strcmp(name, "eglGetPlatformDisplayEXT") == 0) {
-		return got == (void *)tipsy_eglGetPlatformDisplayEXT;
-	}
-	if (strcmp(name, "eglGetDisplay") == 0) {
-		return got == (void *)tipsy_eglGetDisplay;
-	}
-	if (strcmp(name, "eglInitialize") == 0) {
-		return got == (void *)tipsy_eglInitialize;
-	}
-	if (strcmp(name, "eglChooseConfig") == 0) {
-		return got == (void *)tipsy_eglChooseConfig;
-	}
-	if (strcmp(name, "eglCreateContext") == 0) {
-		return got == (void *)tipsy_eglCreateContext;
-	}
-	if (strcmp(name, "eglSwapInterval") == 0) {
-		return got == (void *)tipsy_eglSwapInterval;
-	}
-	if (strcmp(name, "eglSwapBuffers") == 0) {
-		return got == (void *)tipsy_eglSwapBuffers;
-	}
-	if (strcmp(name, "eglCreateWindowSurface") == 0) {
-		return got == (void *)tipsy_eglCreateWindowSurface;
-	}
-	if (strcmp(name, "eglMakeCurrent") == 0) {
-		return got == (void *)tipsy_eglMakeCurrent;
-	}
-	if (strcmp(name, "eglDestroySurface") == 0) {
-		return got == (void *)tipsy_eglDestroySurface;
-	}
-	if (strcmp(name, "eglDestroyContext") == 0) {
-		return got == (void *)tipsy_eglDestroyContext;
-	}
-	return 0;
+	return got != NULL && got == tipsy_egl_wrapped_proc(name);
 }
 
 int tipsy_test_egl_init_calls(void)
@@ -1986,8 +1944,20 @@ int tipsy_test_egl_setup_trace_value_enabled(const char *value)
 	return tipsy_egl_setup_trace_value_enabled(value);
 }
 
+struct tipsy_egl_setup_trace_event {
+	uint32_t stage;
+	uint32_t outcome;
+};
+
+struct tipsy_egl_setup_trace_fixture {
+	uint32_t passed;
+	uint32_t first_failure;
+	uint32_t event_count;
+	struct tipsy_egl_setup_trace_event events[8];
+};
+
 static uint32_t egl_setup_fixture_failure_stage;
-static TipsyEGLSetupTraceFixture *active_egl_setup_fixture;
+static struct tipsy_egl_setup_trace_fixture *active_egl_setup_fixture;
 
 static EGLDisplay tipsy_test_egl_setup_platform_display(EGLenum platform,
 	void *native_display, const EGLAttrib *attrib_list)
@@ -2087,7 +2057,7 @@ static EGLBoolean tipsy_test_egl_setup_swap(EGLDisplay dpy, EGLSurface surface)
 
 static void tipsy_test_egl_setup_sink(uint32_t stage, uint32_t outcome)
 {
-	TipsyEGLSetupTraceFixture *fixture = active_egl_setup_fixture;
+	struct tipsy_egl_setup_trace_fixture *fixture = active_egl_setup_fixture;
 	uint32_t index;
 
 	if (fixture == NULL) return;
@@ -2101,9 +2071,9 @@ static void tipsy_test_egl_setup_sink(uint32_t stage, uint32_t outcome)
 	}
 }
 
-int tipsy_test_egl_setup_trace_fixture(uint32_t acquisition_stage,
+static int tipsy_egl_setup_trace_fixture(uint32_t acquisition_stage,
 	uint32_t failure_stage, uint32_t failure_outcome,
-	TipsyEGLSetupTraceFixture *out)
+	struct tipsy_egl_setup_trace_fixture *out)
 {
 	egl_get_platform_display_fn saved_platform_display;
 	egl_get_platform_display_ext_fn saved_platform_display_ext;
@@ -2234,6 +2204,58 @@ done:
 	return passed;
 }
 
+int tipsy_test_egl_setup_trace_fixture(void)
+{
+	static const uint32_t acquisitions[] = {
+		TIPSY_EGL_SETUP_PLATFORM_DISPLAY,
+		TIPSY_EGL_SETUP_PLATFORM_DISPLAY_EXT,
+		TIPSY_EGL_SETUP_DISPLAY,
+	};
+	static const uint32_t later_stages[] = {
+		TIPSY_EGL_SETUP_INITIALIZE,
+		TIPSY_EGL_SETUP_CHOOSE_CONFIG,
+		TIPSY_EGL_SETUP_CREATE_CONTEXT,
+		TIPSY_EGL_SETUP_CREATE_WINDOW_SURFACE,
+		TIPSY_EGL_SETUP_MAKE_CURRENT,
+		TIPSY_EGL_SETUP_FIRST_SWAP,
+	};
+	static const uint32_t outcomes[] = {
+		TIPSY_EGL_SETUP_FAILURE,
+		TIPSY_EGL_SETUP_ABSENCE,
+	};
+	struct tipsy_egl_setup_trace_fixture fixture;
+	uint32_t acquisition_index, stage_index, outcome_index;
+
+	for (acquisition_index = 0;
+		acquisition_index < sizeof(acquisitions) / sizeof(acquisitions[0]);
+		acquisition_index++) {
+		uint32_t acquisition = acquisitions[acquisition_index];
+		if (!tipsy_egl_setup_trace_fixture(acquisition, 0,
+			TIPSY_EGL_SETUP_FAILURE, &fixture) || fixture.first_failure != 0 ||
+			fixture.event_count != 7 || fixture.events[0].stage != acquisition ||
+			fixture.events[0].outcome != TIPSY_EGL_SETUP_SUCCESS) return 0;
+		for (stage_index = 0;
+			stage_index < sizeof(later_stages) / sizeof(later_stages[0]);
+			stage_index++) {
+			if (fixture.events[stage_index + 1].stage != later_stages[stage_index] ||
+				fixture.events[stage_index + 1].outcome != TIPSY_EGL_SETUP_SUCCESS)
+				return 0;
+		}
+		for (stage_index = 0;
+			stage_index <= sizeof(later_stages) / sizeof(later_stages[0]);
+			stage_index++) {
+			uint32_t stage = stage_index == 0 ? acquisition : later_stages[stage_index - 1];
+			for (outcome_index = 0;
+				outcome_index < sizeof(outcomes) / sizeof(outcomes[0]);
+				outcome_index++) {
+				if (!tipsy_egl_setup_trace_fixture(acquisition, stage,
+					outcomes[outcome_index], &fixture)) return 0;
+			}
+		}
+	}
+	return 1;
+}
+
 /* Deterministic, content-free EGL/GLES foreground fixture. The fake state is
  * intentionally stricter than Mesa: a draw is counted as invalid unless it
  * targets draw framebuffer zero through a private ES3 VAO with the exact
@@ -2267,6 +2289,16 @@ struct tipsy_egl_foreground_test {
 	TipsyGLboolean sample_mask_enabled, transform_feedback_active;
 	TipsyGLuint next_shader, next_program;
 	struct tipsy_gl_attrib_state attrib[2];
+};
+
+struct tipsy_egl_foreground_fixture {
+	uint32_t passed;
+	uint32_t acquire_calls, release_calls, draw_calls, texture_allocations;
+	uint32_t full_texture_uploads, same_size_texture_updates, geometry_uploads;
+	uint32_t guest_state_restore_failures, draw_contract_failures;
+	uint32_t preserved_buffer_draws, context_mismatch_acquires, transform_feedback_draws;
+	uint32_t cache_texture_deletions, gles2_draws, gles2_state_restore_failures;
+	uint32_t live_state_records;
 };
 
 static struct tipsy_egl_foreground_test *active_egl_foreground_test;
@@ -2741,9 +2773,11 @@ static uint32_t tipsy_test_egl_foreground_live_states(void)
 	return count;
 }
 
-int tipsy_test_egl_foreground_fixture(TipsyEGLForegroundFixture *out)
+int tipsy_test_egl_foreground_fixture(void)
 {
 	struct tipsy_egl_foreground_test t = {0};
+	struct tipsy_egl_foreground_fixture fixture = {0};
+	struct tipsy_egl_foreground_fixture *out = &fixture;
 	struct tipsy_gl_api saved_gl;
 	egl_get_current_display_fn saved_current_display;
 	egl_get_current_surface_fn saved_current_surface;
@@ -2754,8 +2788,6 @@ int tipsy_test_egl_foreground_fixture(TipsyEGLForegroundFixture *out)
 	uint32_t draws_before, acquires_before, state_failures_before;
 	int passed;
 
-	if (out == NULL) return 0;
-	memset(out, 0, sizeof(*out));
 	ensure_egl();
 	saved_gl = egl_text_gl;
 	saved_current_display = host_eglGetCurrentDisplay;
@@ -2955,45 +2987,8 @@ void *tipsy_egl_dlsym(const char *name)
 		}
 	}
 	tipsy_egl_trace_resolver_name(name);
-	if (strcmp(name, "eglGetPlatformDisplay") == 0) {
-		return (void *)tipsy_eglGetPlatformDisplay;
-	}
-	if (strcmp(name, "eglGetPlatformDisplayEXT") == 0) {
-		return (void *)tipsy_eglGetPlatformDisplayEXT;
-	}
-	if (strcmp(name, "eglGetDisplay") == 0) {
-		return (void *)tipsy_eglGetDisplay;
-	}
-	if (strcmp(name, "eglInitialize") == 0) {
-		return (void *)tipsy_eglInitialize;
-	}
-	if (strcmp(name, "eglChooseConfig") == 0) {
-		return (void *)tipsy_eglChooseConfig;
-	}
-	if (strcmp(name, "eglCreateContext") == 0) {
-		return (void *)tipsy_eglCreateContext;
-	}
-	if (strcmp(name, "eglCreateWindowSurface") == 0) {
-		return (void *)tipsy_eglCreateWindowSurface;
-	}
-	if (strcmp(name, "eglMakeCurrent") == 0) {
-		return (void *)tipsy_eglMakeCurrent;
-	}
-	if (strcmp(name, "eglSwapInterval") == 0) {
-		return (void *)tipsy_eglSwapInterval;
-	}
-	if (strcmp(name, "eglSwapBuffers") == 0) {
-		return (void *)tipsy_eglSwapBuffers;
-	}
-	if (strcmp(name, "eglDestroySurface") == 0) {
-		return (void *)tipsy_eglDestroySurface;
-	}
-	if (strcmp(name, "eglDestroyContext") == 0) {
-		return (void *)tipsy_eglDestroyContext;
-	}
-	if (strcmp(name, "eglGetProcAddress") == 0) {
-		return (void *)tipsy_eglGetProcAddress;
-	}
+	p = tipsy_egl_wrapped_proc(name);
+	if (p != NULL) return p;
 	ensure_egl();
 	if (lib_egl != NULL) {
 		p = dlsym(lib_egl, name);

@@ -30,17 +30,17 @@ import (
 // its ordinary Auto/persisted selection path instead of a second test mode.
 const testRendererEnv = "TIPSY_TEST_RENDERER"
 
-func testRendererOverride(getenv func(string) string) (clientsettings.Renderer, bool, error) {
+func testOpenGLRequested(getenv func(string) string) (bool, error) {
 	if getenv == nil {
-		return "", false, nil
+		return false, nil
 	}
 	switch getenv(testRendererEnv) {
 	case "":
-		return "", false, nil
+		return false, nil
 	case "opengl":
-		return clientsettings.RendererOpenGL, true, nil
+		return true, nil
 	default:
-		return "", false, fmt.Errorf("%s only accepts opengl", testRendererEnv)
+		return false, fmt.Errorf("%s only accepts opengl", testRendererEnv)
 	}
 }
 
@@ -208,16 +208,16 @@ func Launch(ctx context.Context, opt LaunchOptions) error {
 	if err != nil {
 		return fmt.Errorf("load client settings: %w", err)
 	}
-	processRenderer, rendererForced, err := testRendererOverride(os.Getenv)
+	testOpenGL, err := testOpenGLRequested(os.Getenv)
 	if err != nil {
 		return fmt.Errorf("test renderer: %w", err)
 	}
-	if rendererForced {
+	if testOpenGL {
 		// Keep this process-local: settingsService still owns the persisted
 		// selection and the deferred reconciliation below writes that original
 		// document, never this visual-test choice.
-		settings.Renderer = processRenderer
-		logging.Logger(logging.CatGraphics).Info("transient renderer override", "renderer", processRenderer)
+		settings.Renderer = clientsettings.RendererOpenGL
+		logging.Logger(logging.CatGraphics).Info("transient renderer override", "renderer", clientsettings.RendererOpenGL)
 	}
 	// Roblox may normalize experimental values while shutting down. Reapply an
 	// explicit Tipsy-owned value after the client loop exits, while the launch
@@ -337,7 +337,7 @@ func Launch(ctx context.Context, opt LaunchOptions) error {
 	refreshVersion := win.RefreshVersion()
 	currentRefreshHz, supportedRefreshHz := presenter.refreshRates()
 	session, err := startGameActivity(ctx, vm, mod, aw, files, cache, preferences, obb, assets, ver,
-		opt.Width, opt.Height, currentRefreshHz, supportedRefreshHz, opt.Request, processRenderer)
+		opt.Width, opt.Height, currentRefreshHz, supportedRefreshHz, opt.Request, testOpenGL)
 	if err != nil {
 		return err
 	}

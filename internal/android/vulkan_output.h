@@ -11,8 +11,7 @@
  * declarations.  All public parameters are opaque ABI-compatible handles or
  * pointers to standard Vulkan structures. */
 typedef struct TipsyVkOutputSwapchainClone {
-	void *storage;
-	const void *create_info;
+	void *create_info;
 	uint32_t qualified;
 } TipsyVkOutputSwapchainClone;
 
@@ -27,15 +26,14 @@ void tipsy_vk_output_source_surface_destroying(void *instance, uint64_t surface)
 void tipsy_vk_output_instance_destroying(void *instance);
 
 void tipsy_vk_output_device_preparing(void *physical, const void *create_info);
-void tipsy_vk_output_device_created(void *physical, const void *guest_create_info,
-	void *device, int32_t result);
+void tipsy_vk_output_device_created(void *physical, void *device, int32_t result);
 void tipsy_vk_output_device_destroying(void *device);
 
 int tipsy_vk_output_prepare_swapchain(void *device, const void *create_info,
 	TipsyVkOutputSwapchainClone *clone);
 void tipsy_vk_output_swapchain_clone_release(TipsyVkOutputSwapchainClone *clone);
-void tipsy_vk_output_swapchain_created(void *device, const void *guest_create_info,
-	uint64_t guest_swapchain, int32_t result, uint32_t qualified);
+void tipsy_vk_output_swapchain_created(void *device, uint64_t guest_swapchain,
+	int32_t result, uint32_t qualified);
 void tipsy_vk_output_swapchain_images(void *device, uint64_t swapchain,
 	uint32_t count, const uint64_t *images, int32_t result);
 void tipsy_vk_output_swapchain_destroying(void *device, uint64_t swapchain);
@@ -63,32 +61,9 @@ enum {
 	TIPSY_VK_OUTPUT_FIXTURE_SOURCE_UNSUPPORTED = 2,
 	TIPSY_VK_OUTPUT_FIXTURE_OUTPUT_UNSUPPORTED = 3,
 	TIPSY_VK_OUTPUT_FIXTURE_PROTECTED_QUEUE = 4,
-	TIPSY_VK_OUTPUT_FIXTURE_MULTI_SWAPCHAIN = 5,
-	TIPSY_VK_OUTPUT_FIXTURE_INTERNALLY_SYNCHRONIZED_QUEUE = 6,
+	TIPSY_VK_OUTPUT_FIXTURE_INTERNALLY_SYNCHRONIZED_QUEUE = 5,
 };
-typedef struct TipsyVkOutputCapabilityFixture {
-	uint32_t eligible;
-	uint32_t guest_queue_count_preserved;
-	uint32_t device_request_unchanged;
-	uint32_t no_additional_queue;
-	uint32_t eligible_queue_family;
-	uint32_t ordinary_queue_required;
-	uint32_t exact_present_queue_required;
-	uint32_t guest_priorities_preserved;
-	uint32_t device_pnext_preserved;
-	uint32_t extension_array_preserved;
-	uint32_t source_transfer_src_required;
-	uint32_t output_transfer_dst_required;
-	uint32_t output_color_attachment_required;
-	uint32_t guest_waits_consumed_once;
-	uint32_t guest_completion_distinct;
-	uint32_t output_completion_distinct;
-	uint32_t whole_present_gate;
-	uint32_t full_frame_copy_before_blend;
-	uint32_t direct_fallback;
-} TipsyVkOutputCapabilityFixture;
-void tipsy_test_vk_output_capability_fixture(uint32_t scenario,
-	TipsyVkOutputCapabilityFixture *out);
+uint32_t tipsy_test_vk_output_queue_eligible(uint32_t scenario);
 
 enum {
 	TIPSY_VK_OUTPUT_TX_SUCCESS = 0,
