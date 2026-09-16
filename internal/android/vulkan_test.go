@@ -16,12 +16,23 @@ func TestVulkanLoaderLookupsUseCompatibilityWrappers(t *testing.T) {
 	for _, name := range []string{
 		"vkGetInstanceProcAddr",
 		"vkCreateInstance",
+		"vkDestroyInstance",
 		"vkCreateDevice",
 		"vkCreateAndroidSurfaceKHR",
+		"vkDestroySurfaceKHR",
 		"vkEnumerateInstanceExtensionProperties",
 		"vkGetPhysicalDeviceSurfacePresentModesKHR",
 		"vkCreateSwapchainKHR",
+		"vkDestroySwapchainKHR",
+		"vkGetSwapchainImagesKHR",
+		"vkAcquireNextImageKHR",
+		"vkAcquireNextImage2KHR",
+		"vkGetDeviceQueue",
+		"vkGetDeviceQueue2",
+		"vkQueueSubmit",
+		"vkQueueSubmit2",
 		"vkQueuePresentKHR",
+		"vkDestroyDevice",
 	} {
 		ours, err := Provider().Lookup("libvulkan.so", name)
 		if err != nil || ours == 0 {
@@ -38,12 +49,127 @@ func TestVulkanLoaderLookupsUseCompatibilityWrappers(t *testing.T) {
 }
 
 func TestVulkanDrawFamilyGIPAIsHostPassthrough(t *testing.T) {
-	for _, name := range []string{"vkDestroyInstance", "vkEnumeratePhysicalDevices"} {
+	for _, name := range []string{
+		"vkEnumeratePhysicalDevices",
+		"vkGetPhysicalDeviceQueueFamilyProperties",
+		"vkGetPhysicalDeviceSurfaceSupportKHR",
+	} {
 		if !testVulkanProcIsHostPassthrough(name) {
 			if _, err := Provider().Lookup("libvulkan.so", name); err != nil {
 				t.Skipf("host Vulkan loader has no %s; passthrough cannot be proven", name)
 			}
 			t.Fatalf("%s GIPA must return the host loader pointer, not a Tipsy trampoline", name)
+		}
+	}
+}
+
+func TestVulkanPrivateOutputCapabilityAndCompletionModel(t *testing.T) {
+	got := testVulkanOutputCapabilityFixture(0)
+	if !got.eligible || !got.guestQueueCountPreserved ||
+		!got.deviceRequestUnchanged || !got.noAdditionalQueue ||
+		got.eligibleQueueFamily != 3 || !got.ordinaryQueueRequired ||
+		!got.exactPresentQueueRequired ||
+		!got.guestPrioritiesPreserved || !got.devicePNextPreserved ||
+		!got.extensionArrayPreserved {
+		t.Fatalf("same-queue qualification changed the guest device request: %+v", got)
+	}
+	if !got.sourceTransferSrcRequired || !got.outputTransferDstRequired ||
+		!got.outputColorAttachmentRequired || !got.wholePresentGate ||
+		!got.fullFrameCopyBeforeBlend {
+		t.Fatalf("private output capability/copy gate incomplete: %+v", got)
+	}
+	if !got.guestWaitsConsumedOnce || !got.guestCompletionDistinct ||
+		!got.outputCompletionDistinct || got.directFallback {
+		t.Fatalf("G/O completion transaction is not distinct and single-consumer: %+v", got)
+	}
+}
+
+func TestVulkanPrivateOutputCapabilityRejectionsStayDirect(t *testing.T) {
+	allRequested := testVulkanOutputCapabilityFixture(1)
+	if !allRequested.eligible || !allRequested.noAdditionalQueue ||
+		!allRequested.deviceRequestUnchanged {
+		t.Fatalf("requesting every exposed queue must not block same-queue use: %+v",
+			allRequested)
+	}
+	for _, scenario := range []uint32{2, 3, 4, 6} {
+		got := testVulkanOutputCapabilityFixture(scenario)
+		if got.eligible || !got.directFallback || !got.guestQueueCountPreserved ||
+			!got.noAdditionalQueue || !got.deviceRequestUnchanged ||
+			!got.guestPrioritiesPreserved || !got.devicePNextPreserved ||
+			!got.extensionArrayPreserved {
+			t.Errorf("scenario %d did not fail closed with preserved guest request: %+v",
+				scenario, got)
+		}
+	}
+	got := testVulkanOutputCapabilityFixture(5)
+	if !got.eligible || got.wholePresentGate || !got.directFallback ||
+		got.guestWaitsConsumedOnce {
+		t.Fatalf("multi-swapchain present was partially rewritten: %+v", got)
+	}
+}
+
+func TestVulkanSameQueueTransactionOrderAndCounts(t *testing.T) {
+	got := testVulkanOutputTransactionFixture(0)
+	if !slices.Equal(got.order, []uint32{1, 2, 3, 4}) ||
+		got.acquireCalls != 1 || got.compositionSubmitCalls != 1 ||
+		got.acquireConsumeCalls != 0 || got.guestPresentCalls != 1 ||
+		got.outputPresentCalls != 1 || got.originalGuestForwarded ||
+		got.fullCopyCount != 1 || got.drawCount != 1 || got.uploadCount != 1 ||
+		!got.guestWaitConsumedOnce || !got.gWaitConsumedOnce ||
+		!got.oWaitConsumedOnce || got.quarantined || got.deviceTerminal ||
+		got.returnedResult != 0 {
+		t.Fatalf("qualified same-queue operation sequence=%+v", got)
+	}
+}
+
+func TestVulkanSameQueueDirectGatesHaveNoPrivateOperations(t *testing.T) {
+	for _, scenario := range []uint32{1, 2} {
+		got := testVulkanOutputTransactionFixture(scenario)
+		if !slices.Equal(got.order, []uint32{3}) || got.acquireCalls != 0 ||
+			got.compositionSubmitCalls != 0 || got.acquireConsumeCalls != 0 ||
+			got.guestPresentCalls != 1 || got.outputPresentCalls != 0 ||
+			!got.originalGuestForwarded || got.fullCopyCount != 0 ||
+			got.drawCount != 0 || got.uploadCount != 0 || got.quarantined ||
+			got.deviceTerminal || got.returnedResult != 0 {
+			t.Errorf("direct scenario %d performed private work: %+v", scenario, got)
+		}
+	}
+}
+
+func TestVulkanSameQueueFailureMatrix(t *testing.T) {
+	tests := []struct {
+		scenario          uint32
+		order             []uint32
+		consume           uint32
+		guestPresents     uint32
+		outputPresents    uint32
+		originalForwarded bool
+		gConsumed         bool
+		oConsumed         bool
+		terminal          bool
+		guestResult       int32
+	}{
+		{3, []uint32{1, 2, 5, 3}, 1, 1, 0, true, false, false, false, 0},
+		{4, []uint32{1, 2}, 0, 0, 0, false, false, false, true, -4},
+		{5, []uint32{1, 2}, 0, 0, 0, false, false, false, false, -13},
+		{6, []uint32{1, 2, 3, 4}, 0, 1, 1, false, false, true, false, -1},
+		{7, []uint32{1, 2, 3}, 0, 1, 0, false, false, false, true, -4},
+		{8, []uint32{1, 2, 3, 4}, 0, 1, 1, false, true, true, false, -1000001004},
+		{9, []uint32{1, 2, 3, 4}, 0, 1, 1, false, true, false, false, 0},
+		{10, []uint32{1, 2, 3, 4}, 0, 1, 1, false, true, false, true, -4},
+	}
+	for _, tt := range tests {
+		got := testVulkanOutputTransactionFixture(tt.scenario)
+		if !slices.Equal(got.order, tt.order) ||
+			got.acquireCalls != 1 || got.compositionSubmitCalls != 1 ||
+			got.acquireConsumeCalls != tt.consume ||
+			got.guestPresentCalls != tt.guestPresents ||
+			got.outputPresentCalls != tt.outputPresents ||
+			got.originalGuestForwarded != tt.originalForwarded ||
+			got.gWaitConsumedOnce != tt.gConsumed ||
+			got.oWaitConsumedOnce != tt.oConsumed || !got.quarantined ||
+			got.deviceTerminal != tt.terminal || got.returnedResult != tt.guestResult {
+			t.Errorf("failure scenario %d=%+v", tt.scenario, got)
 		}
 	}
 }

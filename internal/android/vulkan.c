@@ -1,13 +1,16 @@
 /* Copyright 2026 The Tipsy Authors
  * SPDX-License-Identifier: GPL-3.0-or-later
  *
- * Android libvulkan.so adapter: identity-handle passthrough to the host
- * Khronos loader with VK_KHR_android_surface rewritten to XCB (Xlib fallback).
+ * Android libvulkan.so adapter: host Khronos-loader passthrough with
+ * VK_KHR_android_surface rewritten to XCB (Xlib fallback).
  * Draw-family entry points are never wrapped. Present-mode preference is
  * expressed only by filtering the modes advertised from the actual host
  * surface; swapchain creation preserves the client's selected request.
+ * The companion Vulkan output unit owns the capability-gated opaque child,
+ * full-frame copy/blend, and exact same-queue presentation transaction.
  */
 #include "android_bridge.h"
+#include "vulkan_output.h"
 
 #include <dlfcn.h>
 #include <pthread.h>
@@ -136,8 +139,19 @@ typedef struct {
 	uint32_t sType;
 	const void *pNext;
 	uint32_t flags;
+	uint32_t queueFamilyIndex;
+	uint32_t queueCount;
+	const float *pQueuePriorities;
+} TipsyVkDeviceQueueCreateInfo;
+
+_Static_assert(sizeof(TipsyVkDeviceQueueCreateInfo) == 40, "VkDeviceQueueCreateInfo x86-64 ABI");
+
+typedef struct {
+	uint32_t sType;
+	const void *pNext;
+	uint32_t flags;
 	uint32_t queueCreateInfoCount;
-	const void *pQueueCreateInfos;
+	const TipsyVkDeviceQueueCreateInfo *pQueueCreateInfos;
 	uint32_t enabledLayerCount;
 	const char *const *ppEnabledLayerNames;
 	uint32_t enabledExtensionCount;
@@ -148,6 +162,42 @@ typedef struct {
 _Static_assert(sizeof(TipsyVkDeviceCreateInfo) == 72, "VkDeviceCreateInfo x86-64 ABI");
 _Static_assert(offsetof(TipsyVkDeviceCreateInfo, ppEnabledExtensionNames) == 56,
 	"ppEnabledExtensionNames x86-64 offset");
+
+typedef struct {
+	uint32_t sType;
+	const void *pNext;
+	uint32_t flags;
+	uint32_t queueFamilyIndex;
+	uint32_t queueIndex;
+} TipsyVkDeviceQueueInfo2;
+
+_Static_assert(sizeof(TipsyVkDeviceQueueInfo2) == 32, "VkDeviceQueueInfo2 x86-64 ABI");
+
+typedef struct {
+	uint32_t sType;
+	const void *pNext;
+	uint32_t waitSemaphoreCount;
+	const uint64_t *pWaitSemaphores;
+	const uint32_t *pWaitDstStageMask;
+	uint32_t commandBufferCount;
+	const uint64_t *pCommandBuffers;
+	uint32_t signalSemaphoreCount;
+	const uint64_t *pSignalSemaphores;
+} TipsyVkSubmitInfo;
+
+_Static_assert(sizeof(TipsyVkSubmitInfo) == 72, "VkSubmitInfo x86-64 ABI");
+
+typedef struct {
+	uint32_t sType;
+	const void *pNext;
+	uint64_t swapchain;
+	uint64_t timeout;
+	uint64_t semaphore;
+	uint64_t fence;
+	uint32_t deviceMask;
+} TipsyVkAcquireNextImageInfoKHR;
+
+_Static_assert(sizeof(TipsyVkAcquireNextImageInfoKHR) == 56, "VkAcquireNextImageInfoKHR x86-64 ABI");
 
 typedef void *(*tipsy_vkGIPA_fn)(TipsyVkInstance, const char *);
 typedef void *(*tipsy_vkGDPA_fn)(TipsyVkDevice, const char *);
@@ -160,6 +210,17 @@ typedef TipsyVkResult (*tipsy_vkCreateXlibSurface_fn)(TipsyVkInstance, const Tip
 typedef TipsyVkResult (*tipsy_vkGetPresentModes_fn)(TipsyVkPhysicalDevice, TipsyVkSurfaceKHR, uint32_t *, uint32_t *);
 typedef TipsyVkResult (*tipsy_vkQueuePresent_fn)(TipsyVkQueue, const void *);
 typedef TipsyVkResult (*tipsy_vkCreateSwapchain_fn)(TipsyVkDevice, const TipsyVkSwapchainCreateInfoKHR *, const void *, uint64_t *);
+typedef void (*tipsy_vkDestroySwapchain_fn)(TipsyVkDevice, uint64_t, const void *);
+typedef TipsyVkResult (*tipsy_vkGetSwapchainImages_fn)(TipsyVkDevice, uint64_t, uint32_t *, uint64_t *);
+typedef TipsyVkResult (*tipsy_vkAcquireNextImage_fn)(TipsyVkDevice, uint64_t, uint64_t, uint64_t, uint64_t, uint32_t *);
+typedef TipsyVkResult (*tipsy_vkAcquireNextImage2_fn)(TipsyVkDevice, const TipsyVkAcquireNextImageInfoKHR *, uint32_t *);
+typedef void (*tipsy_vkGetDeviceQueue_fn)(TipsyVkDevice, uint32_t, uint32_t, TipsyVkQueue *);
+typedef void (*tipsy_vkGetDeviceQueue2_fn)(TipsyVkDevice, const TipsyVkDeviceQueueInfo2 *, TipsyVkQueue *);
+typedef TipsyVkResult (*tipsy_vkQueueSubmit_fn)(TipsyVkQueue, uint32_t, const TipsyVkSubmitInfo *, uint64_t);
+typedef TipsyVkResult (*tipsy_vkQueueSubmit2_fn)(TipsyVkQueue, uint32_t, const void *, uint64_t);
+typedef void (*tipsy_vkDestroyDevice_fn)(TipsyVkDevice, const void *);
+typedef void (*tipsy_vkDestroySurface_fn)(TipsyVkInstance, TipsyVkSurfaceKHR, const void *);
+typedef void (*tipsy_vkDestroyInstance_fn)(TipsyVkInstance, const void *);
 
 static pthread_once_t vk_once = PTHREAD_ONCE_INIT;
 static void *lib_vulkan;
@@ -171,6 +232,8 @@ static tipsy_vkEnumerateInstanceExtensionProperties_fn host_vkEnumerateInstanceE
 static tipsy_vkEnumerateDeviceExtensionProperties_fn host_vkEnumerateDeviceExtensionProperties;
 static tipsy_vkGetPresentModes_fn host_vkGetPhysicalDeviceSurfacePresentModesKHR;
 static tipsy_vkQueuePresent_fn host_vkQueuePresentKHR;
+static tipsy_vkQueueSubmit_fn host_vkQueueSubmit;
+static tipsy_vkQueueSubmit2_fn host_vkQueueSubmit2;
 static tipsy_vkCreateSwapchain_fn host_vkCreateSwapchainKHR;
 static tipsy_vkCreateSwapchain_fn test_vkCreateSwapchainKHR;
 static int host_has_xcb;
@@ -237,13 +300,26 @@ static uint64_t vk_present_call_duration_ns[TIPSY_VK_PRESENT_TIMING_CAPACITY];
 
 static void *tipsy_vkGetInstanceProcAddr(TipsyVkInstance instance, const char *name);
 static void *tipsy_vkGetDeviceProcAddr(TipsyVkDevice device, const char *name);
+static void *host_proc(TipsyVkInstance instance, const char *name);
 static TipsyVkResult tipsy_vkCreateInstance(const TipsyVkInstanceCreateInfo *pCreateInfo, const void *pAllocator, TipsyVkInstance *pInstance);
 static TipsyVkResult tipsy_vkCreateDevice(TipsyVkPhysicalDevice physicalDevice, const TipsyVkDeviceCreateInfo *pCreateInfo, const void *pAllocator, TipsyVkDevice *pDevice);
 static TipsyVkResult tipsy_vkEnumerateInstanceExtensionProperties(const char *pLayerName, uint32_t *pPropertyCount, TipsyVkExtensionProperties *pProperties);
 static TipsyVkResult tipsy_vkCreateAndroidSurfaceKHR(TipsyVkInstance instance, const TipsyVkAndroidSurfaceCreateInfoKHR *pCreateInfo, const void *pAllocator, TipsyVkSurfaceKHR *pSurface);
 static TipsyVkResult tipsy_vkGetPhysicalDeviceSurfacePresentModesKHR(TipsyVkPhysicalDevice physicalDevice, TipsyVkSurfaceKHR surface, uint32_t *pPresentModeCount, uint32_t *pPresentModes);
 static TipsyVkResult tipsy_vkCreateSwapchainKHR(TipsyVkDevice device, const TipsyVkSwapchainCreateInfoKHR *pCreateInfo, const void *pAllocator, uint64_t *pSwapchain);
+static void tipsy_vkDestroySwapchainKHR(TipsyVkDevice device, uint64_t swapchain, const void *pAllocator);
+static TipsyVkResult tipsy_vkGetSwapchainImagesKHR(TipsyVkDevice device, uint64_t swapchain, uint32_t *pSwapchainImageCount, uint64_t *pSwapchainImages);
+static TipsyVkResult tipsy_vkAcquireNextImageKHR(TipsyVkDevice device, uint64_t swapchain, uint64_t timeout, uint64_t semaphore, uint64_t fence, uint32_t *pImageIndex);
+static TipsyVkResult tipsy_vkAcquireNextImage2KHR(TipsyVkDevice device, const TipsyVkAcquireNextImageInfoKHR *pAcquireInfo, uint32_t *pImageIndex);
+static void tipsy_vkGetDeviceQueue(TipsyVkDevice device, uint32_t queueFamilyIndex, uint32_t queueIndex, TipsyVkQueue *pQueue);
+static void tipsy_vkGetDeviceQueue2(TipsyVkDevice device, const TipsyVkDeviceQueueInfo2 *pQueueInfo, TipsyVkQueue *pQueue);
+static TipsyVkResult tipsy_vkQueueSubmit(TipsyVkQueue queue, uint32_t submitCount, const TipsyVkSubmitInfo *pSubmits, uint64_t fence);
+static TipsyVkResult tipsy_vkQueueSubmit2(TipsyVkQueue queue, uint32_t submitCount, const void *pSubmits, uint64_t fence);
 static TipsyVkResult tipsy_vkQueuePresentKHR(TipsyVkQueue queue, const void *pPresentInfo);
+static void tipsy_vkDestroyDevice(TipsyVkDevice device, const void *pAllocator);
+static void tipsy_vkDestroySurfaceKHR(TipsyVkInstance instance, TipsyVkSurfaceKHR surface,
+	const void *pAllocator);
+static void tipsy_vkDestroyInstance(TipsyVkInstance instance, const void *pAllocator);
 
 static int hide_host_wsi_name(const char *name)
 {
@@ -580,7 +656,15 @@ static void vk_init_once(void)
 	host_vkGetPhysicalDeviceSurfacePresentModesKHR =
 		(tipsy_vkGetPresentModes_fn)dlsym(lib_vulkan, "vkGetPhysicalDeviceSurfacePresentModesKHR");
 	host_vkQueuePresentKHR = (tipsy_vkQueuePresent_fn)dlsym(lib_vulkan, "vkQueuePresentKHR");
+	host_vkQueueSubmit = (tipsy_vkQueueSubmit_fn)dlsym(lib_vulkan, "vkQueueSubmit");
+	host_vkQueueSubmit2 = (tipsy_vkQueueSubmit2_fn)dlsym(lib_vulkan, "vkQueueSubmit2");
+	if (host_vkQueueSubmit2 == NULL) {
+		host_vkQueueSubmit2 = (tipsy_vkQueueSubmit2_fn)dlsym(lib_vulkan,
+			"vkQueueSubmit2KHR");
+	}
 	host_vkCreateSwapchainKHR = (tipsy_vkCreateSwapchain_fn)dlsym(lib_vulkan, "vkCreateSwapchainKHR");
+	tipsy_vk_output_set_loader((void *)host_vkGetInstanceProcAddr,
+		(void *)host_vkGetDeviceProcAddr);
 	vk_scan_host_wsi();
 }
 
@@ -859,7 +943,11 @@ static TipsyVkResult tipsy_vkCreateInstance(const TipsyVkInstanceCreateInfo *pCr
 		return TIPSY_VK_ERROR_INITIALIZATION_FAILED;
 	}
 	if (pCreateInfo == NULL) {
-		return host_vkCreateInstance(pCreateInfo, pAllocator, pInstance);
+		result = host_vkCreateInstance(pCreateInfo, pAllocator, pInstance);
+		tipsy_vk_output_instance_created(
+			result == TIPSY_VK_SUCCESS && pInstance != NULL ? *pInstance : NULL,
+			result);
+		return result;
 	}
 	local = *pCreateInfo;
 	if (local.enabledExtensionCount > 0 && local.ppEnabledExtensionNames != NULL) {
@@ -878,6 +966,9 @@ static TipsyVkResult tipsy_vkCreateInstance(const TipsyVkInstanceCreateInfo *pCr
 		local.ppEnabledExtensionNames = names;
 	}
 	result = host_vkCreateInstance(&local, pAllocator, pInstance);
+	tipsy_vk_output_instance_created(
+		result == TIPSY_VK_SUCCESS && pInstance != NULL ? *pInstance : NULL,
+		result);
 	free(names);
 	return result;
 }
@@ -885,6 +976,8 @@ static TipsyVkResult tipsy_vkCreateInstance(const TipsyVkInstanceCreateInfo *pCr
 static TipsyVkResult tipsy_vkCreateDevice(TipsyVkPhysicalDevice physicalDevice,
 	const TipsyVkDeviceCreateInfo *pCreateInfo, const void *pAllocator, TipsyVkDevice *pDevice)
 {
+	TipsyVkResult result;
+
 	ensure_vulkan();
 	if (host_vkCreateDevice == NULL) {
 		host_vkCreateDevice = (tipsy_vkCreateDevice_fn)dlsym(lib_vulkan, "vkCreateDevice");
@@ -897,7 +990,11 @@ static TipsyVkResult tipsy_vkCreateDevice(TipsyVkPhysicalDevice physicalDevice,
 	// reported even when device creation itself fails. The host result is
 	// returned unchanged.
 	tipsy_vk_observe_device_create(physicalDevice, pCreateInfo);
-	return host_vkCreateDevice(physicalDevice, pCreateInfo, pAllocator, pDevice);
+	tipsy_vk_output_device_preparing(physicalDevice, pCreateInfo);
+	result = host_vkCreateDevice(physicalDevice, pCreateInfo, pAllocator, pDevice);
+	tipsy_vk_output_device_created(physicalDevice, pCreateInfo,
+		result == TIPSY_VK_SUCCESS && pDevice != NULL ? *pDevice : NULL, result);
+	return result;
 }
 
 static TipsyVkResult tipsy_vkCreateAndroidSurfaceKHR(TipsyVkInstance instance,
@@ -905,6 +1002,7 @@ static TipsyVkResult tipsy_vkCreateAndroidSurfaceKHR(TipsyVkInstance instance,
 {
 	void *window;
 	unsigned long xid;
+	TipsyVkResult result;
 
 	ensure_vulkan();
 	if (pCreateInfo == NULL || pSurface == NULL) {
@@ -941,7 +1039,10 @@ static TipsyVkResult tipsy_vkCreateAndroidSurfaceKHR(TipsyVkInstance instance,
 		xcb_info.window = (xcb_window_t)xid;
 		create_xcb = (tipsy_vkCreateXcbSurface_fn)host_vkGetInstanceProcAddr(instance, "vkCreateXcbSurfaceKHR");
 		if (create_xcb != NULL) {
-			return create_xcb(instance, &xcb_info, pAllocator, pSurface);
+			result = create_xcb(instance, &xcb_info, pAllocator, pSurface);
+			tipsy_vk_output_source_surface_created(instance,
+				result == TIPSY_VK_SUCCESS ? *pSurface : 0, result);
+			return result;
 		}
 	}
 	if (host_has_xlib && host_vkGetInstanceProcAddr != NULL) {
@@ -955,11 +1056,84 @@ static TipsyVkResult tipsy_vkCreateAndroidSurfaceKHR(TipsyVkInstance instance,
 		xlib_info.window = (Window)xid;
 		create_xlib = (tipsy_vkCreateXlibSurface_fn)host_vkGetInstanceProcAddr(instance, "vkCreateXlibSurfaceKHR");
 		if (create_xlib != NULL) {
-			return create_xlib(instance, &xlib_info, pAllocator, pSurface);
+			result = create_xlib(instance, &xlib_info, pAllocator, pSurface);
+			tipsy_vk_output_source_surface_created(instance,
+				result == TIPSY_VK_SUCCESS ? *pSurface : 0, result);
+			return result;
 		}
 	}
 	GoAndroid_LogMissing("vkCreateAndroidSurfaceKHR(host WSI)");
 	return TIPSY_VK_ERROR_EXTENSION_NOT_PRESENT;
+}
+
+static void *resolve_device_proc(TipsyVkDevice device, const char *name)
+{
+	void *p = NULL;
+	ensure_vulkan();
+	if (host_vkGetDeviceProcAddr != NULL && device != NULL) {
+		p = host_vkGetDeviceProcAddr(device, name);
+	}
+	if (p == NULL) {
+		p = host_proc(NULL, name);
+	}
+	return p;
+}
+
+static void tipsy_vkDestroySurfaceKHR(TipsyVkInstance instance,
+	TipsyVkSurfaceKHR surface, const void *pAllocator)
+{
+	tipsy_vkDestroySurface_fn fn = (tipsy_vkDestroySurface_fn)
+		host_proc(instance, "vkDestroySurfaceKHR");
+	if (fn == NULL) {
+		GoAndroid_LogMissing("vkDestroySurfaceKHR");
+		return;
+	}
+	tipsy_vk_output_source_surface_destroying(instance, surface);
+	fn(instance, surface, pAllocator);
+}
+
+static void tipsy_vkDestroyInstance(TipsyVkInstance instance, const void *pAllocator)
+{
+	tipsy_vkDestroyInstance_fn fn = (tipsy_vkDestroyInstance_fn)
+		host_proc(instance, "vkDestroyInstance");
+	if (fn == NULL) {
+		GoAndroid_LogMissing("vkDestroyInstance");
+		return;
+	}
+	tipsy_vk_output_instance_destroying(instance);
+	fn(instance, pAllocator);
+}
+
+static void tipsy_vkGetDeviceQueue(TipsyVkDevice device, uint32_t queueFamilyIndex,
+	uint32_t queueIndex, TipsyVkQueue *pQueue)
+{
+	tipsy_vkGetDeviceQueue_fn fn =
+		(tipsy_vkGetDeviceQueue_fn)resolve_device_proc(device, "vkGetDeviceQueue");
+	if (fn == NULL) {
+		GoAndroid_LogMissing("vkGetDeviceQueue");
+		return;
+	}
+	fn(device, queueFamilyIndex, queueIndex, pQueue);
+	if (pQueue != NULL) {
+		tipsy_vk_output_queue_observed(device, queueFamilyIndex, queueIndex, 0,
+			*pQueue);
+	}
+}
+
+static void tipsy_vkGetDeviceQueue2(TipsyVkDevice device,
+	const TipsyVkDeviceQueueInfo2 *pQueueInfo, TipsyVkQueue *pQueue)
+{
+	tipsy_vkGetDeviceQueue2_fn fn =
+		(tipsy_vkGetDeviceQueue2_fn)resolve_device_proc(device, "vkGetDeviceQueue2");
+	if (fn == NULL) {
+		GoAndroid_LogMissing("vkGetDeviceQueue2");
+		return;
+	}
+	fn(device, pQueueInfo, pQueue);
+	if (pQueueInfo != NULL && pQueue != NULL) {
+		tipsy_vk_output_queue_observed(device, pQueueInfo->queueFamilyIndex,
+			pQueueInfo->queueIndex, pQueueInfo->flags, *pQueue);
+	}
 }
 
 static tipsy_vkCreateSwapchain_fn resolve_create_swapchain(TipsyVkDevice device)
@@ -984,6 +1158,10 @@ static TipsyVkResult tipsy_vkCreateSwapchainKHR(TipsyVkDevice device, const Tips
 {
 	tipsy_vkCreateSwapchain_fn fn;
 	TipsyVkResult result;
+	TipsyVkOutputSwapchainClone output_clone;
+	const TipsyVkSwapchainCreateInfoKHR *host_create_info = pCreateInfo;
+
+	memset(&output_clone, 0, sizeof(output_clone));
 
 	fn = resolve_create_swapchain(device);
 	if (fn == NULL) {
@@ -996,10 +1174,115 @@ static TipsyVkResult tipsy_vkCreateSwapchainKHR(TipsyVkDevice device, const Tips
 	/* The client selected this from the actual host surface list we advertised.
 	 * A probe that was unavailable, malformed, or incomplete cannot justify a
 	 * guessed replacement either, so the host receives this exact request once. */
-	result = fn(device, pCreateInfo, pAllocator, pSwapchain);
+	if (tipsy_vk_output_prepare_swapchain(device, pCreateInfo,
+		&output_clone) != 0 && output_clone.create_info != NULL) {
+		host_create_info = (const TipsyVkSwapchainCreateInfoKHR *)output_clone.create_info;
+	}
+	result = fn(device, host_create_info, pAllocator, pSwapchain);
+	tipsy_vk_output_swapchain_created(device, pCreateInfo,
+		result == TIPSY_VK_SUCCESS && pSwapchain != NULL ? *pSwapchain : 0,
+		result, output_clone.qualified);
 	if (result == TIPSY_VK_SUCCESS) {
 		tipsy_vk_reset_present_stats();
 	}
+	tipsy_vk_output_swapchain_clone_release(&output_clone);
+	return result;
+}
+
+static void tipsy_vkDestroySwapchainKHR(TipsyVkDevice device, uint64_t swapchain,
+	const void *pAllocator)
+{
+	tipsy_vkDestroySwapchain_fn fn = (tipsy_vkDestroySwapchain_fn)
+		resolve_device_proc(device, "vkDestroySwapchainKHR");
+	if (fn == NULL) {
+		GoAndroid_LogMissing("vkDestroySwapchainKHR");
+		return;
+	}
+	tipsy_vk_output_swapchain_destroying(device, swapchain);
+	fn(device, swapchain, pAllocator);
+}
+
+static TipsyVkResult tipsy_vkGetSwapchainImagesKHR(TipsyVkDevice device, uint64_t swapchain,
+	uint32_t *pSwapchainImageCount, uint64_t *pSwapchainImages)
+{
+	tipsy_vkGetSwapchainImages_fn fn;
+	TipsyVkResult result;
+	uint32_t count = 0;
+	fn = (tipsy_vkGetSwapchainImages_fn)
+		resolve_device_proc(device, "vkGetSwapchainImagesKHR");
+	if (fn == NULL) {
+		GoAndroid_LogMissing("vkGetSwapchainImagesKHR");
+		return TIPSY_VK_ERROR_INITIALIZATION_FAILED;
+	}
+	result = fn(device, swapchain, pSwapchainImageCount, pSwapchainImages);
+	if (pSwapchainImageCount != NULL) {
+		count = *pSwapchainImageCount;
+	}
+	tipsy_vk_output_swapchain_images(device, swapchain, count,
+		pSwapchainImages, result);
+	return result;
+}
+
+static TipsyVkResult tipsy_vkAcquireNextImageKHR(TipsyVkDevice device, uint64_t swapchain,
+	uint64_t timeout, uint64_t semaphore, uint64_t fence, uint32_t *pImageIndex)
+{
+	tipsy_vkAcquireNextImage_fn fn;
+	TipsyVkResult result;
+	fn = (tipsy_vkAcquireNextImage_fn)
+		resolve_device_proc(device, "vkAcquireNextImageKHR");
+	if (fn == NULL) {
+		GoAndroid_LogMissing("vkAcquireNextImageKHR");
+		return TIPSY_VK_ERROR_INITIALIZATION_FAILED;
+	}
+	result = fn(device, swapchain, timeout, semaphore, fence, pImageIndex);
+	tipsy_vk_output_acquire_observed(device, swapchain, semaphore, fence,
+		pImageIndex, result);
+	return result;
+}
+
+static TipsyVkResult tipsy_vkAcquireNextImage2KHR(TipsyVkDevice device,
+	const TipsyVkAcquireNextImageInfoKHR *pAcquireInfo, uint32_t *pImageIndex)
+{
+	tipsy_vkAcquireNextImage2_fn fn;
+	TipsyVkResult result;
+	fn = (tipsy_vkAcquireNextImage2_fn)resolve_device_proc(device, "vkAcquireNextImage2KHR");
+	if (fn == NULL) {
+		GoAndroid_LogMissing("vkAcquireNextImage2KHR");
+		return TIPSY_VK_ERROR_INITIALIZATION_FAILED;
+	}
+	result = fn(device, pAcquireInfo, pImageIndex);
+	if (pAcquireInfo != NULL) {
+		tipsy_vk_output_acquire_observed(device, pAcquireInfo->swapchain,
+			pAcquireInfo->semaphore, pAcquireInfo->fence, pImageIndex, result);
+	}
+	return result;
+}
+
+static TipsyVkResult tipsy_vkQueueSubmit(TipsyVkQueue queue, uint32_t submitCount,
+	const TipsyVkSubmitInfo *pSubmits, uint64_t fence)
+{
+	TipsyVkResult result;
+	ensure_vulkan();
+	if (host_vkQueueSubmit == NULL) {
+		GoAndroid_LogMissing("vkQueueSubmit");
+		return TIPSY_VK_ERROR_INITIALIZATION_FAILED;
+	}
+	result = host_vkQueueSubmit(queue, submitCount, pSubmits, fence);
+	tipsy_vk_output_submit_observed(queue, submitCount, pSubmits, result);
+	return result;
+}
+
+static TipsyVkResult tipsy_vkQueueSubmit2(TipsyVkQueue queue, uint32_t submitCount,
+	const void *pSubmits, uint64_t fence)
+{
+	TipsyVkResult result;
+	ensure_vulkan();
+	if (host_vkQueueSubmit2 == NULL) {
+		GoAndroid_LogMissing("vkQueueSubmit2");
+		return TIPSY_VK_ERROR_INITIALIZATION_FAILED;
+	}
+	result = host_vkQueueSubmit2(queue, submitCount, pSubmits, fence);
+	tipsy_vk_output_submit2_observed(queue, submitCount, pSubmits, result);
 	return result;
 }
 
@@ -1092,6 +1375,8 @@ static TipsyVkResult tipsy_vkQueuePresentKHR(TipsyVkQueue queue, const void *pPr
 	uint64_t start_ns = 0;
 	uint64_t end_ns = 0;
 	uint64_t duration_ns = 0;
+	int32_t output_guest_result = TIPSY_VK_ERROR_INITIALIZATION_FAILED;
+	int output_handled;
 
 	ensure_vulkan();
 	if (host_vkQueuePresentKHR == NULL) {
@@ -1105,7 +1390,14 @@ static TipsyVkResult tipsy_vkQueuePresentKHR(TipsyVkQueue queue, const void *pPr
 	if ((epoch & 1) != 0) {
 		start_ns = tipsy_vk_monotonic_ns();
 	}
-	result = host_vkQueuePresentKHR(queue, pPresentInfo);
+	output_handled = tipsy_vk_output_present(queue, pPresentInfo,
+		(void *)host_vkQueuePresentKHR,
+		&output_guest_result);
+	if (output_handled) {
+		result = output_guest_result;
+	} else {
+		result = host_vkQueuePresentKHR(queue, pPresentInfo);
+	}
 	if (start_ns != 0) {
 		end_ns = tipsy_vk_monotonic_ns();
 		if (end_ns > start_ns) {
@@ -1114,6 +1406,18 @@ static TipsyVkResult tipsy_vkQueuePresentKHR(TipsyVkQueue queue, const void *pPr
 	}
 	tipsy_vk_note_present_result_at(result, end_ns, duration_ns);
 	return result;
+}
+
+static void tipsy_vkDestroyDevice(TipsyVkDevice device, const void *pAllocator)
+{
+	tipsy_vkDestroyDevice_fn fn = (tipsy_vkDestroyDevice_fn)
+		resolve_device_proc(device, "vkDestroyDevice");
+	if (fn == NULL) {
+		GoAndroid_LogMissing("vkDestroyDevice");
+		return;
+	}
+	tipsy_vk_output_device_destroying(device);
+	fn(device, pAllocator);
 }
 
 static void *host_proc(TipsyVkInstance instance, const char *name)
@@ -1128,6 +1432,23 @@ static void *host_proc(TipsyVkInstance instance, const char *name)
 	return p;
 }
 
+#define TIPSY_VK_RETURN_GIPA(instance, name, proc) do { \
+	(void)(instance); \
+	(void)(name); \
+	return (void *)(proc); \
+} while (0)
+
+#define TIPSY_VK_RETURN_GDPA(device, name, proc) do { \
+	(void)(device); \
+	(void)(name); \
+	return (void *)(proc); \
+} while (0)
+
+#define TIPSY_VK_RETURN_DLSYM(name, proc) do { \
+	(void)(name); \
+	return (void *)(proc); \
+} while (0)
+
 static void *tipsy_vkGetInstanceProcAddr(TipsyVkInstance instance, const char *name)
 {
 	void *p;
@@ -1136,31 +1457,64 @@ static void *tipsy_vkGetInstanceProcAddr(TipsyVkInstance instance, const char *n
 		return NULL;
 	}
 	if (strcmp(name, "vkGetInstanceProcAddr") == 0) {
-		return (void *)tipsy_vkGetInstanceProcAddr;
+		TIPSY_VK_RETURN_GIPA(instance, "vkGetInstanceProcAddr", tipsy_vkGetInstanceProcAddr);
 	}
 	if (strcmp(name, "vkGetDeviceProcAddr") == 0) {
-		return (void *)tipsy_vkGetDeviceProcAddr;
+		TIPSY_VK_RETURN_GIPA(instance, "vkGetDeviceProcAddr", tipsy_vkGetDeviceProcAddr);
 	}
 	if (strcmp(name, "vkEnumerateInstanceExtensionProperties") == 0) {
-		return (void *)tipsy_vkEnumerateInstanceExtensionProperties;
+		TIPSY_VK_RETURN_GIPA(instance, "vkEnumerateInstanceExtensionProperties", tipsy_vkEnumerateInstanceExtensionProperties);
 	}
 	if (strcmp(name, "vkCreateInstance") == 0) {
-		return (void *)tipsy_vkCreateInstance;
+		TIPSY_VK_RETURN_GIPA(instance, "vkCreateInstance", tipsy_vkCreateInstance);
+	}
+	if (strcmp(name, "vkDestroyInstance") == 0) {
+		TIPSY_VK_RETURN_GIPA(instance, "vkDestroyInstance", tipsy_vkDestroyInstance);
 	}
 	if (strcmp(name, "vkCreateDevice") == 0) {
-		return (void *)tipsy_vkCreateDevice;
+		TIPSY_VK_RETURN_GIPA(instance, "vkCreateDevice", tipsy_vkCreateDevice);
 	}
 	if (strcmp(name, "vkCreateAndroidSurfaceKHR") == 0) {
-		return (void *)tipsy_vkCreateAndroidSurfaceKHR;
+		TIPSY_VK_RETURN_GIPA(instance, "vkCreateAndroidSurfaceKHR", tipsy_vkCreateAndroidSurfaceKHR);
+	}
+	if (strcmp(name, "vkDestroySurfaceKHR") == 0) {
+		TIPSY_VK_RETURN_GIPA(instance, "vkDestroySurfaceKHR", tipsy_vkDestroySurfaceKHR);
 	}
 	if (strcmp(name, "vkGetPhysicalDeviceSurfacePresentModesKHR") == 0) {
-		return (void *)tipsy_vkGetPhysicalDeviceSurfacePresentModesKHR;
+		TIPSY_VK_RETURN_GIPA(instance, "vkGetPhysicalDeviceSurfacePresentModesKHR", tipsy_vkGetPhysicalDeviceSurfacePresentModesKHR);
 	}
 	if (strcmp(name, "vkCreateSwapchainKHR") == 0) {
-		return (void *)tipsy_vkCreateSwapchainKHR;
+		TIPSY_VK_RETURN_GIPA(instance, "vkCreateSwapchainKHR", tipsy_vkCreateSwapchainKHR);
+	}
+	if (strcmp(name, "vkDestroySwapchainKHR") == 0) {
+		TIPSY_VK_RETURN_GIPA(instance, "vkDestroySwapchainKHR", tipsy_vkDestroySwapchainKHR);
+	}
+	if (strcmp(name, "vkGetSwapchainImagesKHR") == 0) {
+		TIPSY_VK_RETURN_GIPA(instance, "vkGetSwapchainImagesKHR", tipsy_vkGetSwapchainImagesKHR);
+	}
+	if (strcmp(name, "vkAcquireNextImageKHR") == 0) {
+		TIPSY_VK_RETURN_GIPA(instance, "vkAcquireNextImageKHR", tipsy_vkAcquireNextImageKHR);
+	}
+	if (strcmp(name, "vkAcquireNextImage2KHR") == 0) {
+		TIPSY_VK_RETURN_GIPA(instance, "vkAcquireNextImage2KHR", tipsy_vkAcquireNextImage2KHR);
+	}
+	if (strcmp(name, "vkGetDeviceQueue") == 0) {
+		TIPSY_VK_RETURN_GIPA(instance, "vkGetDeviceQueue", tipsy_vkGetDeviceQueue);
+	}
+	if (strcmp(name, "vkGetDeviceQueue2") == 0) {
+		TIPSY_VK_RETURN_GIPA(instance, "vkGetDeviceQueue2", tipsy_vkGetDeviceQueue2);
+	}
+	if (strcmp(name, "vkQueueSubmit") == 0) {
+		TIPSY_VK_RETURN_GIPA(instance, "vkQueueSubmit", tipsy_vkQueueSubmit);
+	}
+	if (strcmp(name, "vkQueueSubmit2") == 0 || strcmp(name, "vkQueueSubmit2KHR") == 0) {
+		TIPSY_VK_RETURN_GIPA(instance, "vkQueueSubmit2", tipsy_vkQueueSubmit2);
 	}
 	if (strcmp(name, "vkQueuePresentKHR") == 0) {
-		return (void *)tipsy_vkQueuePresentKHR;
+		TIPSY_VK_RETURN_GIPA(instance, "vkQueuePresentKHR", tipsy_vkQueuePresentKHR);
+	}
+	if (strcmp(name, "vkDestroyDevice") == 0) {
+		TIPSY_VK_RETURN_GIPA(instance, "vkDestroyDevice", tipsy_vkDestroyDevice);
 	}
 	if (strcmp(name, "vkCreateXcbSurfaceKHR") == 0 ||
 		strcmp(name, "vkCreateXlibSurfaceKHR") == 0 ||
@@ -1187,13 +1541,40 @@ static void *tipsy_vkGetDeviceProcAddr(TipsyVkDevice device, const char *name)
 	// entry points; report the counts once, on the first non-zero count.
 	tipsy_vk_note_pacing_query(name);
 	if (strcmp(name, "vkGetDeviceProcAddr") == 0) {
-		return (void *)tipsy_vkGetDeviceProcAddr;
+		TIPSY_VK_RETURN_GDPA(device, "vkGetDeviceProcAddr", tipsy_vkGetDeviceProcAddr);
 	}
 	if (strcmp(name, "vkCreateSwapchainKHR") == 0) {
-		return (void *)tipsy_vkCreateSwapchainKHR;
+		TIPSY_VK_RETURN_GDPA(device, "vkCreateSwapchainKHR", tipsy_vkCreateSwapchainKHR);
+	}
+	if (strcmp(name, "vkDestroySwapchainKHR") == 0) {
+		TIPSY_VK_RETURN_GDPA(device, "vkDestroySwapchainKHR", tipsy_vkDestroySwapchainKHR);
+	}
+	if (strcmp(name, "vkGetSwapchainImagesKHR") == 0) {
+		TIPSY_VK_RETURN_GDPA(device, "vkGetSwapchainImagesKHR", tipsy_vkGetSwapchainImagesKHR);
+	}
+	if (strcmp(name, "vkAcquireNextImageKHR") == 0) {
+		TIPSY_VK_RETURN_GDPA(device, "vkAcquireNextImageKHR", tipsy_vkAcquireNextImageKHR);
+	}
+	if (strcmp(name, "vkAcquireNextImage2KHR") == 0) {
+		TIPSY_VK_RETURN_GDPA(device, "vkAcquireNextImage2KHR", tipsy_vkAcquireNextImage2KHR);
+	}
+	if (strcmp(name, "vkGetDeviceQueue") == 0) {
+		TIPSY_VK_RETURN_GDPA(device, "vkGetDeviceQueue", tipsy_vkGetDeviceQueue);
+	}
+	if (strcmp(name, "vkGetDeviceQueue2") == 0) {
+		TIPSY_VK_RETURN_GDPA(device, "vkGetDeviceQueue2", tipsy_vkGetDeviceQueue2);
+	}
+	if (strcmp(name, "vkQueueSubmit") == 0) {
+		TIPSY_VK_RETURN_GDPA(device, "vkQueueSubmit", tipsy_vkQueueSubmit);
+	}
+	if (strcmp(name, "vkQueueSubmit2") == 0 || strcmp(name, "vkQueueSubmit2KHR") == 0) {
+		TIPSY_VK_RETURN_GDPA(device, "vkQueueSubmit2", tipsy_vkQueueSubmit2);
 	}
 	if (strcmp(name, "vkQueuePresentKHR") == 0) {
-		return (void *)tipsy_vkQueuePresentKHR;
+		TIPSY_VK_RETURN_GDPA(device, "vkQueuePresentKHR", tipsy_vkQueuePresentKHR);
+	}
+	if (strcmp(name, "vkDestroyDevice") == 0) {
+		TIPSY_VK_RETURN_GDPA(device, "vkDestroyDevice", tipsy_vkDestroyDevice);
 	}
 	ensure_vulkan();
 	if (host_vkGetDeviceProcAddr != NULL) {
@@ -1202,7 +1583,8 @@ static void *tipsy_vkGetDeviceProcAddr(TipsyVkDevice device, const char *name)
 			return p;
 		}
 	}
-	return host_proc(NULL, name);
+	p = host_proc(NULL, name);
+	return p;
 }
 
 void *tipsy_vk_dlsym(const char *name)
@@ -1211,31 +1593,64 @@ void *tipsy_vk_dlsym(const char *name)
 		return NULL;
 	}
 	if (strcmp(name, "vkGetInstanceProcAddr") == 0) {
-		return (void *)tipsy_vkGetInstanceProcAddr;
+		TIPSY_VK_RETURN_DLSYM("vkGetInstanceProcAddr", tipsy_vkGetInstanceProcAddr);
 	}
 	if (strcmp(name, "vkGetDeviceProcAddr") == 0) {
-		return (void *)tipsy_vkGetDeviceProcAddr;
+		TIPSY_VK_RETURN_DLSYM("vkGetDeviceProcAddr", tipsy_vkGetDeviceProcAddr);
 	}
 	if (strcmp(name, "vkEnumerateInstanceExtensionProperties") == 0) {
-		return (void *)tipsy_vkEnumerateInstanceExtensionProperties;
+		TIPSY_VK_RETURN_DLSYM("vkEnumerateInstanceExtensionProperties", tipsy_vkEnumerateInstanceExtensionProperties);
 	}
 	if (strcmp(name, "vkCreateInstance") == 0) {
-		return (void *)tipsy_vkCreateInstance;
+		TIPSY_VK_RETURN_DLSYM("vkCreateInstance", tipsy_vkCreateInstance);
+	}
+	if (strcmp(name, "vkDestroyInstance") == 0) {
+		TIPSY_VK_RETURN_DLSYM("vkDestroyInstance", tipsy_vkDestroyInstance);
 	}
 	if (strcmp(name, "vkCreateDevice") == 0) {
-		return (void *)tipsy_vkCreateDevice;
+		TIPSY_VK_RETURN_DLSYM("vkCreateDevice", tipsy_vkCreateDevice);
 	}
 	if (strcmp(name, "vkCreateAndroidSurfaceKHR") == 0) {
-		return (void *)tipsy_vkCreateAndroidSurfaceKHR;
+		TIPSY_VK_RETURN_DLSYM("vkCreateAndroidSurfaceKHR", tipsy_vkCreateAndroidSurfaceKHR);
+	}
+	if (strcmp(name, "vkDestroySurfaceKHR") == 0) {
+		TIPSY_VK_RETURN_DLSYM("vkDestroySurfaceKHR", tipsy_vkDestroySurfaceKHR);
 	}
 	if (strcmp(name, "vkGetPhysicalDeviceSurfacePresentModesKHR") == 0) {
-		return (void *)tipsy_vkGetPhysicalDeviceSurfacePresentModesKHR;
+		TIPSY_VK_RETURN_DLSYM("vkGetPhysicalDeviceSurfacePresentModesKHR", tipsy_vkGetPhysicalDeviceSurfacePresentModesKHR);
 	}
 	if (strcmp(name, "vkCreateSwapchainKHR") == 0) {
-		return (void *)tipsy_vkCreateSwapchainKHR;
+		TIPSY_VK_RETURN_DLSYM("vkCreateSwapchainKHR", tipsy_vkCreateSwapchainKHR);
+	}
+	if (strcmp(name, "vkDestroySwapchainKHR") == 0) {
+		TIPSY_VK_RETURN_DLSYM("vkDestroySwapchainKHR", tipsy_vkDestroySwapchainKHR);
+	}
+	if (strcmp(name, "vkGetSwapchainImagesKHR") == 0) {
+		TIPSY_VK_RETURN_DLSYM("vkGetSwapchainImagesKHR", tipsy_vkGetSwapchainImagesKHR);
+	}
+	if (strcmp(name, "vkAcquireNextImageKHR") == 0) {
+		TIPSY_VK_RETURN_DLSYM("vkAcquireNextImageKHR", tipsy_vkAcquireNextImageKHR);
+	}
+	if (strcmp(name, "vkAcquireNextImage2KHR") == 0) {
+		TIPSY_VK_RETURN_DLSYM("vkAcquireNextImage2KHR", tipsy_vkAcquireNextImage2KHR);
+	}
+	if (strcmp(name, "vkGetDeviceQueue") == 0) {
+		TIPSY_VK_RETURN_DLSYM("vkGetDeviceQueue", tipsy_vkGetDeviceQueue);
+	}
+	if (strcmp(name, "vkGetDeviceQueue2") == 0) {
+		TIPSY_VK_RETURN_DLSYM("vkGetDeviceQueue2", tipsy_vkGetDeviceQueue2);
+	}
+	if (strcmp(name, "vkQueueSubmit") == 0) {
+		TIPSY_VK_RETURN_DLSYM("vkQueueSubmit", tipsy_vkQueueSubmit);
+	}
+	if (strcmp(name, "vkQueueSubmit2") == 0 || strcmp(name, "vkQueueSubmit2KHR") == 0) {
+		TIPSY_VK_RETURN_DLSYM("vkQueueSubmit2", tipsy_vkQueueSubmit2);
 	}
 	if (strcmp(name, "vkQueuePresentKHR") == 0) {
-		return (void *)tipsy_vkQueuePresentKHR;
+		TIPSY_VK_RETURN_DLSYM("vkQueuePresentKHR", tipsy_vkQueuePresentKHR);
+	}
+	if (strcmp(name, "vkDestroyDevice") == 0) {
+		TIPSY_VK_RETURN_DLSYM("vkDestroyDevice", tipsy_vkDestroyDevice);
 	}
 	return tipsy_vkGetInstanceProcAddr(NULL, name);
 }
@@ -1243,6 +1658,7 @@ void *tipsy_vk_dlsym(const char *name)
 int tipsy_vk_bind_wsi(uintptr_t display, uintptr_t xid)
 {
 	if (display == 0 || xid == 0) {
+		tipsy_vk_output_unbind_x11();
 		wsi_dpy = NULL;
 		wsi_xid = 0;
 		wsi_xcb = NULL;
@@ -1252,11 +1668,13 @@ int tipsy_vk_bind_wsi(uintptr_t display, uintptr_t xid)
 	wsi_xid = (unsigned long)xid;
 	wsi_xcb = XGetXCBConnection(wsi_dpy);
 	ensure_vulkan();
+	tipsy_vk_output_bind_x11(display, wsi_xid, wsi_xcb);
 	return 0;
 }
 
 void tipsy_vk_unbind_wsi(void)
 {
+	tipsy_vk_output_unbind_x11();
 	wsi_dpy = NULL;
 	wsi_xid = 0;
 	wsi_xcb = NULL;
@@ -1392,11 +1810,17 @@ int tipsy_test_vk_proc_is_wrapped(const char *name)
 	if (strcmp(name, "vkCreateInstance") == 0) {
 		return got == (void *)tipsy_vkCreateInstance;
 	}
+	if (strcmp(name, "vkDestroyInstance") == 0) {
+		return got == (void *)tipsy_vkDestroyInstance;
+	}
 	if (strcmp(name, "vkCreateDevice") == 0) {
 		return got == (void *)tipsy_vkCreateDevice;
 	}
 	if (strcmp(name, "vkCreateAndroidSurfaceKHR") == 0) {
 		return got == (void *)tipsy_vkCreateAndroidSurfaceKHR;
+	}
+	if (strcmp(name, "vkDestroySurfaceKHR") == 0) {
+		return got == (void *)tipsy_vkDestroySurfaceKHR;
 	}
 	if (strcmp(name, "vkEnumerateInstanceExtensionProperties") == 0) {
 		return got == (void *)tipsy_vkEnumerateInstanceExtensionProperties;
@@ -1410,8 +1834,35 @@ int tipsy_test_vk_proc_is_wrapped(const char *name)
 	if (strcmp(name, "vkCreateSwapchainKHR") == 0) {
 		return got == (void *)tipsy_vkCreateSwapchainKHR;
 	}
+	if (strcmp(name, "vkDestroySwapchainKHR") == 0) {
+		return got == (void *)tipsy_vkDestroySwapchainKHR;
+	}
+	if (strcmp(name, "vkGetSwapchainImagesKHR") == 0) {
+		return got == (void *)tipsy_vkGetSwapchainImagesKHR;
+	}
+	if (strcmp(name, "vkAcquireNextImageKHR") == 0) {
+		return got == (void *)tipsy_vkAcquireNextImageKHR;
+	}
+	if (strcmp(name, "vkAcquireNextImage2KHR") == 0) {
+		return got == (void *)tipsy_vkAcquireNextImage2KHR;
+	}
+	if (strcmp(name, "vkGetDeviceQueue") == 0) {
+		return got == (void *)tipsy_vkGetDeviceQueue;
+	}
+	if (strcmp(name, "vkGetDeviceQueue2") == 0) {
+		return got == (void *)tipsy_vkGetDeviceQueue2;
+	}
+	if (strcmp(name, "vkQueueSubmit") == 0) {
+		return got == (void *)tipsy_vkQueueSubmit;
+	}
+	if (strcmp(name, "vkQueueSubmit2") == 0 || strcmp(name, "vkQueueSubmit2KHR") == 0) {
+		return got == (void *)tipsy_vkQueueSubmit2;
+	}
 	if (strcmp(name, "vkQueuePresentKHR") == 0) {
 		return got == (void *)tipsy_vkQueuePresentKHR;
+	}
+	if (strcmp(name, "vkDestroyDevice") == 0) {
+		return got == (void *)tipsy_vkDestroyDevice;
 	}
 	return 0;
 }

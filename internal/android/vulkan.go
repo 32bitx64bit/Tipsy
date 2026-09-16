@@ -6,8 +6,9 @@
 package android
 
 /*
-#cgo LDFLAGS: -lX11 -lX11-xcb -lxcb -ldl -pthread
+#cgo LDFLAGS: -lX11 -lX11-xcb -lXext -lxcb -ldl -pthread
 #include "android_bridge.h"
+#include "vulkan_output.h"
 #include <stdlib.h>
 
 uint32_t tipsy_vk_present_call_durations(uint64_t after, uint64_t *out_ns,
@@ -48,15 +49,19 @@ func lookupVulkan(sym string) (uintptr, error) {
 	return 0, nil
 }
 
-// BindVulkanWSI records the X11 Display* and Window used to translate
-// vkCreateAndroidSurfaceKHR onto the host XCB/Xlib WSI. display and xid must
-// be the same connection and window the client will present to.
+// BindVulkanWSI records the X11 Display* and Window used to translate any
+// client vkCreateAndroidSurfaceKHR call onto the host XCB/Xlib WSI. display
+// and xid must be the same connection and window the client will present to.
+//
+// This is a window lifetime binding, not a renderer-selection decision: an
+// EGL-selected client can still issue the Android Vulkan-surface request while
+// it is starting. Presentation statistics remain controlled by the selected
+// presenter, so merely making the WSI route available cannot enable Vulkan
+// per-present work on an EGL launch.
 func BindVulkanWSI(display, xid uintptr) error {
 	if C.tipsy_vk_bind_wsi(C.uintptr_t(display), C.uintptr_t(xid)) != 0 {
 		return fmt.Errorf("graphics: vulkan WSI bind requires a live X11 display and window")
 	}
-	SetVulkanPresentStats(presentStatsLoggerEnabled())
-	seedPresentRateWindow()
 	logging.Logger(logging.CatGraphics).Info("Android Vulkan WSI bound to X11 window",
 		"xcb", C.tipsy_vk_host_has_xcb_surface() != 0,
 		"xlib", C.tipsy_vk_host_has_xlib_surface() != 0)
@@ -66,6 +71,15 @@ func BindVulkanWSI(display, xid uintptr) error {
 // UnbindVulkanWSI clears the process-wide Android Vulkan WSI binding.
 func UnbindVulkanWSI() {
 	C.tipsy_vk_unbind_wsi()
+}
+
+// ConfigureVulkanPresentStatsForSelectedPresenter sets the default-off
+// per-present observer only after Runtime selected the Vulkan presenter. WSI
+// binding alone is intentionally insufficient because an EGL-selected client
+// can still request an Android Vulkan surface during startup.
+func ConfigureVulkanPresentStatsForSelectedPresenter() {
+	SetVulkanPresentStats(presentStatsLoggerEnabled())
+	seedPresentRateWindow()
 }
 
 func vulkanPresentModeName(mode int) string {
@@ -129,8 +143,8 @@ func resetVulkanPresentStats() {
 // presentStatsLoggerEnabled reports whether the present-stats consumer will
 // actually run. launch.go's logPresentStats is called only under TIPSY_DIAG=1
 // and the record is dropped unless the graphics Info logger emits, so both
-// gates must hold before either backend pays per-present bookkeeping. EGL
-// (resolver.go SetEGLVSync) and Vulkan (BindVulkanWSI) share this gate.
+// gates must hold before either backend pays per-present bookkeeping. EGL's
+// VSync setup and Vulkan's selected-presenter setup share this gate.
 func presentStatsLoggerEnabled() bool {
 	if os.Getenv("TIPSY_DIAG") != "1" {
 		return false
@@ -140,9 +154,9 @@ func presentStatsLoggerEnabled() bool {
 
 // SetVulkanPresentStats enables or disables vkQueuePresentKHR success
 // counters. Both EGL and Vulkan default off: a successful present is a host
-// call plus one relaxed enable load. BindVulkanWSI and SetEGLVSync turn the
-// matching backend on only when the real TIPSY_DIAG=1 present-stats consumer
-// and the graphics Info logger are both active.
+// call plus one relaxed enable load. The selected presenter turns the matching
+// backend on only when the real TIPSY_DIAG=1 present-stats consumer and the
+// graphics Info logger are both active.
 func SetVulkanPresentStats(enabled bool) {
 	v := C.int(0)
 	if enabled {
@@ -379,6 +393,100 @@ func testVulkanProcIsHostPassthrough(name string) bool {
 	cName := C.CString(name)
 	defer C.free(unsafe.Pointer(cName))
 	return C.tipsy_test_vk_proc_is_host_passthrough(cName) != 0
+}
+
+type vulkanOutputCapabilityFixture struct {
+	eligible                      bool
+	guestQueueCountPreserved      bool
+	deviceRequestUnchanged        bool
+	noAdditionalQueue             bool
+	eligibleQueueFamily           uint32
+	ordinaryQueueRequired         bool
+	exactPresentQueueRequired     bool
+	guestPrioritiesPreserved      bool
+	devicePNextPreserved          bool
+	extensionArrayPreserved       bool
+	sourceTransferSrcRequired     bool
+	outputTransferDstRequired     bool
+	outputColorAttachmentRequired bool
+	guestWaitsConsumedOnce        bool
+	guestCompletionDistinct       bool
+	outputCompletionDistinct      bool
+	wholePresentGate              bool
+	fullFrameCopyBeforeBlend      bool
+	directFallback                bool
+}
+
+func testVulkanOutputCapabilityFixture(scenario uint32) vulkanOutputCapabilityFixture {
+	var raw C.TipsyVkOutputCapabilityFixture
+	C.tipsy_test_vk_output_capability_fixture(C.uint32_t(scenario), &raw)
+	return vulkanOutputCapabilityFixture{
+		eligible:                      raw.eligible != 0,
+		guestQueueCountPreserved:      raw.guest_queue_count_preserved != 0,
+		deviceRequestUnchanged:        raw.device_request_unchanged != 0,
+		noAdditionalQueue:             raw.no_additional_queue != 0,
+		eligibleQueueFamily:           uint32(raw.eligible_queue_family),
+		ordinaryQueueRequired:         raw.ordinary_queue_required != 0,
+		exactPresentQueueRequired:     raw.exact_present_queue_required != 0,
+		guestPrioritiesPreserved:      raw.guest_priorities_preserved != 0,
+		devicePNextPreserved:          raw.device_pnext_preserved != 0,
+		extensionArrayPreserved:       raw.extension_array_preserved != 0,
+		sourceTransferSrcRequired:     raw.source_transfer_src_required != 0,
+		outputTransferDstRequired:     raw.output_transfer_dst_required != 0,
+		outputColorAttachmentRequired: raw.output_color_attachment_required != 0,
+		guestWaitsConsumedOnce:        raw.guest_waits_consumed_once != 0,
+		guestCompletionDistinct:       raw.guest_completion_distinct != 0,
+		outputCompletionDistinct:      raw.output_completion_distinct != 0,
+		wholePresentGate:              raw.whole_present_gate != 0,
+		fullFrameCopyBeforeBlend:      raw.full_frame_copy_before_blend != 0,
+		directFallback:                raw.direct_fallback != 0,
+	}
+}
+
+type vulkanOutputTransactionFixture struct {
+	order                  []uint32
+	acquireCalls           uint32
+	compositionSubmitCalls uint32
+	acquireConsumeCalls    uint32
+	guestPresentCalls      uint32
+	outputPresentCalls     uint32
+	originalGuestForwarded bool
+	fullCopyCount          uint32
+	drawCount              uint32
+	uploadCount            uint32
+	guestWaitConsumedOnce  bool
+	gWaitConsumedOnce      bool
+	oWaitConsumedOnce      bool
+	quarantined            bool
+	deviceTerminal         bool
+	returnedResult         int32
+}
+
+func testVulkanOutputTransactionFixture(scenario uint32) vulkanOutputTransactionFixture {
+	var raw C.TipsyVkOutputTransactionFixture
+	C.tipsy_test_vk_output_transaction_fixture(C.uint32_t(scenario), &raw)
+	order := make([]uint32, int(raw.order_count))
+	for i := range order {
+		order[i] = uint32(raw.order[i])
+	}
+	return vulkanOutputTransactionFixture{
+		order:                  order,
+		acquireCalls:           uint32(raw.acquire_calls),
+		compositionSubmitCalls: uint32(raw.composition_submit_calls),
+		acquireConsumeCalls:    uint32(raw.acquire_consume_calls),
+		guestPresentCalls:      uint32(raw.guest_present_calls),
+		outputPresentCalls:     uint32(raw.output_present_calls),
+		originalGuestForwarded: raw.original_guest_forwarded != 0,
+		fullCopyCount:          uint32(raw.full_copy_count),
+		drawCount:              uint32(raw.draw_count),
+		uploadCount:            uint32(raw.upload_count),
+		guestWaitConsumedOnce:  raw.guest_wait_consumed_once != 0,
+		gWaitConsumedOnce:      raw.g_wait_consumed_once != 0,
+		oWaitConsumedOnce:      raw.o_wait_consumed_once != 0,
+		quarantined:            raw.quarantined != 0,
+		deviceTerminal:         raw.device_terminal != 0,
+		returnedResult:         int32(raw.returned_result),
+	}
 }
 
 func testVulkanAndroidSurfaceAdvertised(hostNames []string) bool {
