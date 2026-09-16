@@ -41,7 +41,6 @@ lib/*.so
 /AGENTS.md
 /.cursor
 /docs/
-/CONTRIBUTING.md
 
 # Credentials and private key material
 /.env
