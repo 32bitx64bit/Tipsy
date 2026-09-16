@@ -10,11 +10,13 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/tipsy-linux/tipsy/internal/apk"
+	"github.com/tipsy-linux/tipsy/internal/clientsettings"
 )
 
 func TestRuntimeDir(t *testing.T) {
@@ -191,18 +193,95 @@ func TestApplicationSettingsFromResponse(t *testing.T) {
 	}
 }
 
+func TestSplitRendererStartupOverridesUsesOnlyOfficialExternalPath(t *testing.T) {
+	settings, raw, err := splitRendererStartupOverrides(map[string]any{
+		flagPreferOpenGL:    "True",
+		flagDisableVulkan:   "True",
+		flagDisableVulkan11: "True",
+		"FFlagCustom":       "kept-out",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got map[string]any
+	if err := json.Unmarshal([]byte(raw), &got); err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 3 || got[flagPreferOpenGL] != "True" || got[flagDisableVulkan] != "True" || got[flagDisableVulkan11] != "True" {
+		t.Fatalf("renderer startup overrides=%v", got)
+	}
+	if _, ok := got["FFlagCustom"]; ok {
+		t.Fatalf("unrelated flag leaked into renderer startup overrides: %v", got)
+	}
+	if settings["FFlagCustom"] != "kept-out" {
+		t.Fatalf("ordinary override lost from settings envelope: %v", settings)
+	}
+	for _, key := range []string{flagPreferOpenGL, flagPreferVulkan, flagDisableOpenGL, flagDisableVulkan, flagDisableVulkan11} {
+		if _, exists := settings[key]; exists {
+			t.Fatalf("renderer key %q remained in settings envelope: %v", key, settings)
+		}
+	}
+	ordinary := map[string]any{"FFlagCustom": "True"}
+	if unchanged, empty, err := splitRendererStartupOverrides(ordinary); err != nil || empty != "" || !reflect.DeepEqual(unchanged, ordinary) {
+		t.Fatalf("ordinary split settings=%v overrides=%q err=%v", unchanged, empty, err)
+	}
+	ordinaryVulkan := map[string]any{flagPreferVulkan: "True"}
+	if unchanged, payload, err := splitRendererStartupOverrides(ordinaryVulkan); err != nil || payload != "" || !reflect.DeepEqual(unchanged, ordinaryVulkan) {
+		t.Fatalf("ordinary Vulkan split settings=%v overrides=%q err=%v", unchanged, payload, err)
+	}
+}
+
+func TestLoadAndroidAppOverridesLeavesOrdinaryLaunchInertAndTestOverrideTransient(t *testing.T) {
+	configHome := t.TempDir()
+	t.Setenv("XDG_CONFIG_HOME", configHome)
+	t.Setenv(flogOverridesEnv, "")
+	t.Setenv(luaLogEnv, "")
+	cachePath := filepath.Join(t.TempDir(), "ClientAppSettings.json")
+
+	ordinary, err := loadAndroidAppOverrides(context.Background(), cachePath, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ordinary.renderer != "" {
+		t.Fatalf("ordinary renderer preload=%q", ordinary.renderer)
+	}
+	if ordinary.values[flagPreferOpenGL] != nil || ordinary.values[flagDisableVulkan] != nil || ordinary.values[flagDisableVulkan11] != nil {
+		t.Fatalf("ordinary launch invented OpenGL controls: %v", ordinary.values)
+	}
+
+	strict, err := loadAndroidAppOverrides(context.Background(), cachePath, clientsettings.RendererOpenGL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var renderer map[string]any
+	if err := json.Unmarshal([]byte(strict.renderer), &renderer); err != nil {
+		t.Fatal(err)
+	}
+	if len(renderer) != 3 || renderer[flagPreferOpenGL] != "True" || renderer[flagDisableVulkan] != "True" || renderer[flagDisableVulkan11] != "True" {
+		t.Fatalf("strict renderer preload=%v", renderer)
+	}
+	for _, key := range []string{flagPreferOpenGL, flagDisableVulkan, flagDisableVulkan11} {
+		if _, exists := strict.values[key]; exists {
+			t.Fatalf("strict renderer key %q duplicated in settings envelope: %v", key, strict.values)
+		}
+	}
+	if _, err := os.Stat(clientsettings.New().Path); !os.IsNotExist(err) {
+		t.Fatalf("process-only renderer override wrote settings: err=%v", err)
+	}
+}
+
 func TestApplicationSettingsUserOverridesMergeWithOfficial(t *testing.T) {
-	raw := []byte(`{"applicationSettings":{"OfficialOnly":"kept","FFlagDebugGraphicsPreferVulkan":"True","FFlagDebugGraphicsDisableVulkan":"True","DFIntTaskSchedulerTargetFps":"60"}}`)
+	raw := []byte(`{"applicationSettings":{"OfficialOnly":"kept","FFlagDebugGraphicsPreferOpenGL":"True","FFlagDebugGraphicsDisableVulkan":"True","FFlagDebugGraphicsDisableVulkan11":"True","DFIntTaskSchedulerTargetFps":"60"}}`)
 	overrides := map[string]any{
-		"FFlagDebugGraphicsPreferOpenGL": "True",
-		"DFIntTaskSchedulerTargetFps":    "144",
+		flagPreferVulkan:              "True",
+		"DFIntTaskSchedulerTargetFps": "144",
 	}
 	got, n, err := applicationSettingsFromResponseWithOverrides(raw, overrides)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if n != 4 {
-		t.Fatalf("official count=%d want 4", n)
+	if n != 5 {
+		t.Fatalf("official count=%d want 5", n)
 	}
 	var envelope map[string]map[string]any
 	if err := json.Unmarshal([]byte(got), &envelope); err != nil {
@@ -210,14 +289,17 @@ func TestApplicationSettingsUserOverridesMergeWithOfficial(t *testing.T) {
 	}
 	for _, key := range []string{"applicationSettings", "ClientAppSettings"} {
 		m := envelope[key]
-		if m["OfficialOnly"] != "kept" || m["DFIntTaskSchedulerTargetFps"] != "144" || m["FFlagDebugGraphicsPreferOpenGL"] != "True" {
+		if m["OfficialOnly"] != "kept" || m["DFIntTaskSchedulerTargetFps"] != "144" || m[flagPreferVulkan] != "True" {
 			t.Fatalf("%s merge=%v", key, m)
 		}
-		if _, ok := m["FFlagDebugGraphicsPreferVulkan"]; ok {
-			t.Fatalf("%s retained conflicting Vulkan key: %v", key, m)
+		if _, ok := m[flagPreferOpenGL]; ok {
+			t.Fatalf("%s retained conflicting OpenGL preference: %v", key, m)
 		}
-		if _, ok := m["FFlagDebugGraphicsDisableVulkan"]; ok {
-			t.Fatalf("%s retained conflicting disable key: %v", key, m)
+		if _, ok := m[flagDisableVulkan]; ok {
+			t.Fatalf("%s retained conflicting Vulkan-disable key: %v", key, m)
+		}
+		if _, ok := m[flagDisableVulkan11]; ok {
+			t.Fatalf("%s retained conflicting Vulkan11-disable key: %v", key, m)
 		}
 	}
 }
@@ -230,5 +312,29 @@ func TestApplicationSettingsAutoDoesNotReplaceOfficial(t *testing.T) {
 	}
 	if !strings.Contains(got, `"FFlagDebugGraphicsPreferVulkan":"True"`) || !strings.Contains(got, `"DFIntTaskSchedulerTargetFps":"60"`) {
 		t.Fatalf("auto replaced official settings: %s", got)
+	}
+}
+
+func TestTestRendererOverrideWinsOnlyForOpenGLVisualTest(t *testing.T) {
+	base := map[string]any{
+		flagPreferVulkan:  "True",
+		flagDisableOpenGL: "True",
+		"FFlagCustom":     "kept",
+	}
+	got := withTestRendererOverride(base, clientsettings.RendererOpenGL)
+	if base[flagPreferVulkan] != "True" || base[flagDisableOpenGL] != "True" {
+		t.Fatal("transient override mutated persisted override input")
+	}
+	if got[flagPreferOpenGL] != "True" || got[flagDisableVulkan] != "True" || got[flagDisableVulkan11] != "True" || got["FFlagCustom"] != "kept" {
+		t.Fatalf("OpenGL test override = %v", got)
+	}
+	if _, exists := got[flagPreferVulkan]; exists {
+		t.Fatalf("OpenGL test override retained Vulkan preference: %v", got)
+	}
+	if _, exists := got[flagDisableOpenGL]; exists {
+		t.Fatalf("OpenGL test override retained OpenGL disable flag: %v", got)
+	}
+	if same := withTestRendererOverride(base, clientsettings.RendererVulkan); !reflect.DeepEqual(same, base) {
+		t.Fatalf("non-OpenGL test override changed settings: %v", same)
 	}
 }

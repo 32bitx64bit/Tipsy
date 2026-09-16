@@ -23,6 +23,27 @@ import (
 	"github.com/tipsy-linux/tipsy/internal/x11"
 )
 
+// testRendererEnv is a deliberately narrow, process-only control for visual
+// compatibility validation. It never writes the Tipsy settings document or
+// Roblox's durable settings files. OpenGL is the sole accepted value because
+// this seam exists to exercise the non-default guest GLES path; Vulkan keeps
+// its ordinary Auto/persisted selection path instead of a second test mode.
+const testRendererEnv = "TIPSY_TEST_RENDERER"
+
+func testRendererOverride(getenv func(string) string) (clientsettings.Renderer, bool, error) {
+	if getenv == nil {
+		return "", false, nil
+	}
+	switch getenv(testRendererEnv) {
+	case "":
+		return "", false, nil
+	case "opengl":
+		return clientsettings.RendererOpenGL, true, nil
+	default:
+		return "", false, fmt.Errorf("%s only accepts opengl", testRendererEnv)
+	}
+}
+
 // launchStartedAck gives in-process frontends one deterministic handoff from
 // launcher chrome to the live client. The sync.Once guard makes the API safe
 // if the loop setup is refactored to have more than one entry edge later.
@@ -187,6 +208,17 @@ func Launch(ctx context.Context, opt LaunchOptions) error {
 	if err != nil {
 		return fmt.Errorf("load client settings: %w", err)
 	}
+	processRenderer, rendererForced, err := testRendererOverride(os.Getenv)
+	if err != nil {
+		return fmt.Errorf("test renderer: %w", err)
+	}
+	if rendererForced {
+		// Keep this process-local: settingsService still owns the persisted
+		// selection and the deferred reconciliation below writes that original
+		// document, never this visual-test choice.
+		settings.Renderer = processRenderer
+		logging.Logger(logging.CatGraphics).Info("transient renderer override", "renderer", processRenderer)
+	}
 	// Roblox may normalize experimental values while shutting down. Reapply an
 	// explicit Tipsy-owned value after the client loop exits, while the launch
 	// lock still excludes GUI settings writes. The next launch also reconciles.
@@ -305,7 +337,7 @@ func Launch(ctx context.Context, opt LaunchOptions) error {
 	refreshVersion := win.RefreshVersion()
 	currentRefreshHz, supportedRefreshHz := presenter.refreshRates()
 	session, err := startGameActivity(ctx, vm, mod, aw, files, cache, preferences, obb, assets, ver,
-		opt.Width, opt.Height, currentRefreshHz, supportedRefreshHz, opt.Request)
+		opt.Width, opt.Height, currentRefreshHz, supportedRefreshHz, opt.Request, processRenderer)
 	if err != nil {
 		return err
 	}

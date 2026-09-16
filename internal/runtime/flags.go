@@ -24,6 +24,14 @@ const androidAppSettingsURL = "https://clientsettingscdn.roblox.com/v2/settings/
 
 const desktopAppPolicyFlag = "FStringAppConfigurationOverrideAppPolicy"
 
+const (
+	flagPreferOpenGL    = "FFlagDebugGraphicsPreferOpenGL"
+	flagPreferVulkan    = "FFlagDebugGraphicsPreferVulkan"
+	flagDisableOpenGL   = "FFlagDebugGraphicsDisableOpenGL"
+	flagDisableVulkan   = "FFlagDebugGraphicsDisableVulkan"
+	flagDisableVulkan11 = "FFlagDebugGraphicsDisableVulkan11"
+)
+
 // applicationSettingsFromResponse extracts the flag map as a JSON object.
 // Does not log flag names or values.
 func applicationSettingsFromResponse(body []byte) (string, int, error) {
@@ -54,13 +62,14 @@ func applicationSettingsFromResponseWithOverrides(body []byte, overrides map[str
 	}
 	// Explicit renderer choices own this narrow conflict set. Auto emits
 	// PreferVulkan only when the Vulkan WSI path is the resolved platform.
-	if _, ok := overrides["FFlagDebugGraphicsPreferOpenGL"]; ok {
-		delete(m, "FFlagDebugGraphicsPreferVulkan")
-		delete(m, "FFlagDebugGraphicsDisableVulkan")
+	if _, ok := overrides[flagPreferOpenGL]; ok {
+		delete(m, flagPreferVulkan)
+		delete(m, flagDisableOpenGL)
 	}
-	if _, ok := overrides["FFlagDebugGraphicsPreferVulkan"]; ok {
-		delete(m, "FFlagDebugGraphicsPreferOpenGL")
-		delete(m, "FFlagDebugGraphicsDisableVulkan")
+	if _, ok := overrides[flagPreferVulkan]; ok {
+		delete(m, flagPreferOpenGL)
+		delete(m, flagDisableVulkan)
+		delete(m, flagDisableVulkan11)
 	}
 	for k, v := range overrides {
 		if v == nil {
@@ -236,7 +245,69 @@ func withFlogOverrides(overrides map[string]any, spec, luaSpec string) (map[stri
 	return overrides, flogGroupCount(extra), len(lua) > 0
 }
 
-func loadAndroidAppSettings(ctx context.Context, cachePath, version string) (string, int, error) {
+// withTestRendererOverride applies the same strict, process-local renderer
+// selection used by Launch to the settings response handed to this one client
+// process. It runs after persisted custom Fast Flags so the visual-test route
+// cannot diverge from the presenter. It never writes a settings document.
+func withTestRendererOverride(overrides map[string]any, renderer clientsettings.Renderer) map[string]any {
+	if renderer != clientsettings.RendererOpenGL {
+		return overrides
+	}
+	overrides = cloneFlagMap(overrides)
+	delete(overrides, flagPreferVulkan)
+	delete(overrides, flagDisableOpenGL)
+	overrides[flagPreferOpenGL] = "True"
+	overrides[flagDisableVulkan] = "True"
+	overrides[flagDisableVulkan11] = "True"
+	return overrides
+}
+
+// splitRendererStartupOverrides removes an explicit OpenGL request from the
+// ordinary AndroidApp settings merge and serializes it for the APK's external
+// override path. MainGameActivity consumes that one payload at both of its
+// official boundaries: pre-super preload and nativeInitClientSettings.
+// Auto and explicit Vulkan retain the existing settings-envelope behavior.
+func splitRendererStartupOverrides(overrides map[string]any) (map[string]any, string, error) {
+	if _, explicitOpenGL := overrides[flagPreferOpenGL]; !explicitOpenGL {
+		return overrides, "", nil
+	}
+	keys := [...]string{
+		flagPreferOpenGL,
+		flagPreferVulkan,
+		flagDisableOpenGL,
+		flagDisableVulkan,
+		flagDisableVulkan11,
+	}
+	renderer := make(map[string]any, len(keys))
+	for _, key := range keys {
+		if value, ok := overrides[key]; ok && value != nil {
+			renderer[key] = value
+		}
+	}
+	if len(renderer) == 0 {
+		return overrides, "", nil
+	}
+	raw, err := json.Marshal(renderer)
+	if err != nil {
+		return nil, "", err
+	}
+	settings := cloneFlagMap(overrides)
+	for _, key := range keys {
+		delete(settings, key)
+	}
+	return settings, string(raw), nil
+}
+
+type androidAppOverrides struct {
+	values   map[string]any
+	renderer string
+}
+
+// loadAndroidAppOverrides resolves Tipsy's local settings once while the
+// client lock is held. Explicit OpenGL controls are separated for the APK's
+// external override path; all other settings retain the ordinary AndroidApp
+// response merge.
+func loadAndroidAppOverrides(ctx context.Context, cachePath string, processRenderer clientsettings.Renderer) (androidAppOverrides, error) {
 	if ctx == nil {
 		ctx = context.Background()
 	}
@@ -265,16 +336,30 @@ func loadAndroidAppSettings(ctx context.Context, cachePath, version string) (str
 	if flogGroups > 0 || luaLog {
 		logging.Logger(logging.CatGameActivity).Info("log level overrides applied", "flogGroups", flogGroups, "luaLogger", luaLog)
 	}
+	if processRenderer != "" {
+		overrides = withTestRendererOverride(overrides, processRenderer)
+	}
+	overrides, rendererOverrides, err := splitRendererStartupOverrides(overrides)
+	if err != nil {
+		return androidAppOverrides{}, fmt.Errorf("renderer startup overrides: %w", err)
+	}
+	return androidAppOverrides{values: overrides, renderer: rendererOverrides}, nil
+}
+
+func loadAndroidAppSettings(ctx context.Context, cachePath, version string, overrides androidAppOverrides) (string, int, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	body, err := fetchAndroidAppSettings(ctx, version)
 	if err != nil {
 		if cachePath != "" {
 			if cached, rerr := os.ReadFile(cachePath); rerr == nil && len(cached) > 2 {
-				return applicationSettingsFromResponseWithOverrides(cached, overrides)
+				return applicationSettingsFromResponseWithOverrides(cached, overrides.values)
 			}
 		}
 		return "", 0, err
 	}
-	js, n, err := applicationSettingsFromResponseWithOverrides(body, overrides)
+	js, n, err := applicationSettingsFromResponseWithOverrides(body, overrides.values)
 	if err != nil {
 		return "", 0, err
 	}

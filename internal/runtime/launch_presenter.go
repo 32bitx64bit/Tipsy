@@ -391,10 +391,11 @@ func configureMesaVBlankMode(vsync bool) error {
 }
 
 type clientPresenter struct {
-	vulkan bool
-	egl    *graphics.EGL
-	xdpy   uintptr
-	xid    uintptr
+	vulkan   bool
+	wsiBound bool
+	egl      *graphics.EGL
+	xdpy     uintptr
+	xid      uintptr
 }
 
 func (p *clientPresenter) refreshRates() (float32, []float32) {
@@ -447,8 +448,18 @@ func (p *clientPresenter) stop() {
 }
 
 func (p *clientPresenter) close() {
-	if p != nil && p.egl != nil {
+	if p == nil {
+		return
+	}
+	if p.egl != nil {
 		_ = p.egl.Close()
+	}
+	if p.wsiBound {
+		// The binding refers to this X11 Display and Window. Clear it before
+		// the outer launch defer closes the X11 window, including EGL-selected
+		// sessions that made an early Android Vulkan-surface request.
+		android.UnbindVulkanWSI()
+		p.wsiBound = false
 	}
 }
 
@@ -488,18 +499,26 @@ func bindClientPresenter(win *x11.Window, settings clientsettings.Settings) (*cl
 	presenter := &clientPresenter{xdpy: win.Display(), xid: win.XID(), vulkan: resolved == graphics.RendererVulkan}
 	logging.Logger(logging.CatGraphics).Info("resolved client renderer",
 		"choice", settings.Renderer, "resolved", resolved)
+	// The APK can request VK_KHR_android_surface during startup even when this
+	// process has selected EGL for guest presentation. The mapped X11 window is
+	// already the authoritative host WSI target, so retain this binding for the
+	// complete presenter lifetime instead of tying it to the selected backend.
+	if err := android.BindVulkanWSI(win.Display(), win.XID()); err != nil {
+		return nil, err
+	}
+	presenter.wsiBound = true
 	if presenter.vulkan {
-		if err := android.BindVulkanWSI(win.Display(), win.XID()); err != nil {
-			return nil, err
-		}
+		android.ConfigureVulkanPresentStatsForSelectedPresenter()
 		configureVulkanPresentationPolicy(settings)
 		return presenter, nil
 	}
 	if err := configureMesaVBlankMode(settings.VSync); err != nil {
+		presenter.close()
 		return nil, err
 	}
 	eglSurf, err := graphics.BindEGL(win)
 	if err != nil {
+		presenter.close()
 		return nil, fmt.Errorf("egl: %w", err)
 	}
 	presenter.egl = eglSurf
@@ -511,7 +530,7 @@ func bindClientPresenter(win *x11.Window, settings clientsettings.Settings) (*cl
 	// pre-clear present would flash garbage and race the sentinel's single
 	// defined frame.
 	if err := eglSurf.ReleaseCurrent(); err != nil {
-		_ = eglSurf.Close()
+		presenter.close()
 		return nil, fmt.Errorf("egl release: %w", err)
 	}
 	if err := eglSurf.StartSwapThread(); err != nil {

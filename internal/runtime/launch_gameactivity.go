@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/tipsy-linux/tipsy/internal/android"
+	"github.com/tipsy-linux/tipsy/internal/clientsettings"
 	"github.com/tipsy-linux/tipsy/internal/jni"
 	"github.com/tipsy-linux/tipsy/internal/loader"
 	"github.com/tipsy-linux/tipsy/internal/logging"
@@ -528,12 +529,13 @@ func (s *gameActivitySession) shutdown(reason string) time.Duration {
 	return s.shutdownDuration
 }
 
-func startGameActivity(ctx context.Context, vm *jni.VM, mod *loader.Module, aw *android.Window, files, cache, preferences, obb, assets, version string, width, height int, currentRefreshHz float32, supportedRefreshHz []float32, req rbxuri.Request) (*gameActivitySession, error) {
+func startGameActivity(ctx context.Context, vm *jni.VM, mod *loader.Module, aw *android.Window, files, cache, preferences, obb, assets, version string, width, height int, currentRefreshHz float32, supportedRefreshHz []float32, req rbxuri.Request, processRenderer clientsettings.Renderer) (*gameActivitySession, error) {
 	env := vm.Env()
 	activity := env.AllocObject(env.FindClass("com/roblox/client/startup/MainGameActivity"))
 	if activity == 0 {
 		return nil, fmt.Errorf("AllocObject MainGameActivity failed")
 	}
+	overrides, overrideErr := loadAndroidAppOverrides(ctx, filepath.Join(files, "ClientAppSettings.json"), processRenderer)
 	assetsObj := env.AllocObject(env.FindClass("android/content/res/AssetManager"))
 	cfg := env.AllocObject(env.FindClass("android/content/res/Configuration"))
 	// The APK's NativeHelper startup calls org.fmod.FMOD.init(context)
@@ -545,7 +547,12 @@ func startGameActivity(ctx context.Context, vm *jni.VM, mod *loader.Module, aw *
 	if err != nil {
 		return nil, fmt.Errorf("initializeNativeCode: %w", err)
 	}
-	handle := loader.CallP8(fn, env.Raw(), activity, env.NewStringUTF(files), env.NewStringUTF(obb), env.NewStringUTF(files), assetsObj, 0, cfg)
+	var handle int64
+	runMainGameActivityOnCreateBoundary(overrides.renderer, func(payload string) {
+		callRobloxJNI(mod, env.Raw(), activity, "Java_com_roblox_client_startup_MainGameActivity_nativePreloadFlagOverrides", env.NewStringUTF(payload))
+	}, func() {
+		handle = loader.CallP8(fn, env.Raw(), activity, env.NewStringUTF(files), env.NewStringUTF(obb), env.NewStringUTF(files), assetsObj, 0, cfg)
+	})
 	if handle == 0 {
 		return nil, fmt.Errorf("initializeNativeCode returned 0")
 	}
@@ -579,7 +586,7 @@ func startGameActivity(ctx context.Context, vm *jni.VM, mod *loader.Module, aw *
 	x11.SetWebViewAssetsDir(assets)
 	wireRobloxWebViewProtocol(mod, env)
 	return dispatchGameActivityLifecycle(ctx, vm, mod, env, activity, uintptr(handle), commands, files, cache, preferences, assets, version,
-		width, height, currentRefreshHz, supportedRefreshHz, aw, req), nil
+		width, height, currentRefreshHz, supportedRefreshHz, aw, req, overrides, overrideErr), nil
 }
 
 // deliverTextInputConnection ensures the Tipsy-owned InputConnection object
@@ -758,7 +765,7 @@ func wireRobloxTextInput(mod *loader.Module, env *jni.Env) {
 	jni.SetRobloxTextInputTarget(env, class, passFn, returnFn, syncFn, getInfoFn, loader.CallP8)
 }
 
-func dispatchGameActivityLifecycle(ctx context.Context, vm *jni.VM, mod *loader.Module, env *jni.Env, activity, handle uintptr, commands appCommandWriter, files, cache, preferences, assets, version string, width, height int, currentRefreshHz float32, supportedRefreshHz []float32, aw *android.Window, req rbxuri.Request) *gameActivitySession {
+func dispatchGameActivityLifecycle(ctx context.Context, vm *jni.VM, mod *loader.Module, env *jni.Env, activity, handle uintptr, commands appCommandWriter, files, cache, preferences, assets, version string, width, height int, currentRefreshHz float32, supportedRefreshHz []float32, aw *android.Window, req rbxuri.Request, overrides androidAppOverrides, overrideErr error) *gameActivitySession {
 	call := func(name, sig string, extra ...uintptr) {
 		callGameActivityNative(vm, env, activity, handle, name, sig, extra...)
 	}
@@ -767,7 +774,7 @@ func dispatchGameActivityLifecycle(ctx context.Context, vm *jni.VM, mod *loader.
 	content := assetContentDir(assets)
 	setRobloxAssetPath(mod, env, activity, content)
 	handleColdStartProtocolLaunch(mod, env, activity, req)
-	startRobloxApp(ctx, mod, env, activity, files, version)
+	startRobloxApp(ctx, mod, env, activity, files, version, overrides, overrideErr)
 	// Official MainScreenController ON_CREATE publishes Display 0's current
 	// and supported refresh rates after native/client-settings initialization
 	// and before resume/surface/V2Start. Reproduce that named JNI boundary
@@ -895,8 +902,30 @@ func initRobloxLocalStorageManager(mod *loader.Module, env *jni.Env, files, cach
 	loader.CallP8(fn, env.Raw(), thiz, am, env.NewStringUTF(files), env.NewStringUTF(cache), 0, 0, 0)
 }
 
-func startRobloxApp(ctx context.Context, mod *loader.Module, env *jni.Env, activity uintptr, files, version string) {
-	flags, _, err := loadAndroidAppSettings(ctx, filepath.Join(files, "ClientAppSettings.json"), version)
+const androidAppSettingsGroup = "GoogleAndroidApp"
+
+func androidClientSettingsInitArgs(settings, rendererOverrides string) [3]string {
+	return [3]string{settings, rendererOverrides, androidAppSettingsGroup}
+}
+
+// runMainGameActivityOnCreateBoundary preserves the APK's MainGameActivity
+// order: a non-empty external override is preloaded before the
+// GameActivity.super.onCreate equivalent initializes native code. Ordinary
+// launches have no external renderer payload and therefore make no synthetic
+// empty preload call.
+func runMainGameActivityOnCreateBoundary(rendererOverrides string, preload func(string), superCreate func()) {
+	if rendererOverrides != "" {
+		preload(rendererOverrides)
+	}
+	superCreate()
+}
+
+func startRobloxApp(ctx context.Context, mod *loader.Module, env *jni.Env, activity uintptr, files, version string, overrides androidAppOverrides, overrideErr error) {
+	if overrideErr != nil {
+		logging.Logger(logging.CatGameActivity).Info("client settings unavailable", "err", overrideErr)
+		return
+	}
+	flags, _, err := loadAndroidAppSettings(ctx, filepath.Join(files, "ClientAppSettings.json"), version, overrides)
 	if err != nil || flags == "" {
 		logging.Logger(logging.CatGameActivity).Info("client settings unavailable", "err", err)
 		return
@@ -905,7 +934,8 @@ func startRobloxApp(ctx context.Context, mod *loader.Module, env *jni.Env, activ
 	if gl == 0 {
 		gl = activity
 	}
-	settingsStatus := callRobloxJNI(mod, env.Raw(), gl, "Java_com_roblox_engine_jni_NativeGLInterface_nativeInitClientSettings", env.NewString(flags), env.NewString(""), env.NewString(""))
+	initArgs := androidClientSettingsInitArgs(flags, overrides.renderer)
+	settingsStatus := callRobloxJNI(mod, env.Raw(), gl, "Java_com_roblox_engine_jni_NativeGLInterface_nativeInitClientSettings", env.NewString(initArgs[0]), env.NewString(initArgs[1]), env.NewString(initArgs[2]))
 	callRobloxJNI(mod, env.Raw(), gl, "Java_com_roblox_engine_jni_NativeGLInterface_nativePostClientSettingsLoadedInitialization3", env.NewArrayList())
 	// Complete the APK Java setup phase which owns CookieProtocol construction.
 	if int32(settingsStatus) == 0 {
@@ -914,7 +944,6 @@ func startRobloxApp(ctx context.Context, mod *loader.Module, env *jni.Env, activ
 		logging.Logger(logging.CatFilesystem).Error("official cookie initialization unavailable after client-settings failure")
 	}
 	logNativeCookieRestoreState(mod, env, "after-native-init")
-	callRobloxJNI(mod, env.Raw(), activity, "Java_com_roblox_client_startup_MainGameActivity_nativePreloadFlagOverrides", env.NewStringUTF(""))
 	startLoggedOutAppBridge(mod, env)
 	logNativeCookieRestoreState(mod, env, "after-app-start")
 }

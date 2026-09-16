@@ -33,8 +33,11 @@ const (
 	RendererOpenGL Renderer = "opengl"
 	RendererVulkan Renderer = "vulkan"
 
-	flagPreferOpenGL = "FFlagDebugGraphicsPreferOpenGL"
-	flagPreferVulkan = "FFlagDebugGraphicsPreferVulkan"
+	flagPreferOpenGL    = "FFlagDebugGraphicsPreferOpenGL"
+	flagPreferVulkan    = "FFlagDebugGraphicsPreferVulkan"
+	flagDisableOpenGL   = "FFlagDebugGraphicsDisableOpenGL"
+	flagDisableVulkan   = "FFlagDebugGraphicsDisableVulkan"
+	flagDisableVulkan11 = "FFlagDebugGraphicsDisableVulkan11"
 	// The 2.734.917 client resolves GameBasicSettingsFramerateCap through its
 	// versioned flag lookup with version 5. Fast-variable ingestion supplies
 	// the FFlag type prefix used here.
@@ -191,6 +194,9 @@ var fastFlagPrefixes = []string{"FFlag", "DFFlag", "FInt", "DFInt", "FString", "
 var fastFlagControlLabels = map[string]string{
 	flagPreferOpenGL:                      "Renderer",
 	flagPreferVulkan:                      "Renderer",
+	flagDisableOpenGL:                     "Renderer",
+	flagDisableVulkan:                     "Renderer",
+	flagDisableVulkan11:                   "Renderer",
 	flagGameBasicSettingsFramerateCap:     "Frame rate",
 	flagTaskSchedulerLimitFPS240:          "Frame rate",
 	intTaskSchedulerTargetFPS:             "Frame rate",
@@ -663,6 +669,14 @@ func Overrides(s Settings) (map[string]any, error) {
 	switch s.Renderer {
 	case RendererOpenGL:
 		out[flagPreferOpenGL] = "True"
+		// PreferOpenGL only changes the ordering of the client's candidates.
+		// The current Android client can still initialize and choose its Vulkan
+		// candidate first. These are the client's registered, named gates read
+		// by nativeAppBridgeV2StartAppWithParams; setting both generations keeps
+		// an explicit OpenGL selection exclusive without hiding libvulkan or
+		// changing any engine code.
+		out[flagDisableVulkan] = "True"
+		out[flagDisableVulkan11] = "True"
 	case RendererVulkan:
 		out[flagPreferVulkan] = "True"
 	case RendererAuto:

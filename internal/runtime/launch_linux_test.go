@@ -55,6 +55,71 @@ func TestStutterDiagnosticsRequiresExactOptIn(t *testing.T) {
 	}
 }
 
+func TestTestRendererOverrideIsStrictAndProcessLocal(t *testing.T) {
+	for _, value := range []string{"", "opengl", "vulkan", "auto", "opengl ", "OpenGL", "gl"} {
+		value := value
+		renderer, forced, err := testRendererOverride(func(string) string { return value })
+		if value == "opengl" {
+			if err != nil || !forced || renderer != clientsettings.RendererOpenGL {
+				t.Fatalf("opengl override = %q, %t, %v", renderer, forced, err)
+			}
+			continue
+		}
+		if value == "" {
+			if err != nil || forced || renderer != "" {
+				t.Fatalf("empty override = %q, %t, %v", renderer, forced, err)
+			}
+			continue
+		}
+		if err == nil || forced || renderer != "" {
+			t.Errorf("invalid %q override = %q, %t, %v", value, renderer, forced, err)
+		}
+	}
+	if renderer, forced, err := testRendererOverride(nil); err != nil || forced || renderer != "" {
+		t.Fatalf("nil environment override = %q, %t, %v", renderer, forced, err)
+	}
+}
+
+func TestAndroidClientSettingsInitArgsMatchOfficialAPK(t *testing.T) {
+	settings := `{"applicationSettings":{"Official":"kept"}}`
+	overridePayload := `{"FFlagDebugGraphicsPreferOpenGL":"True"}`
+	got := androidClientSettingsInitArgs(settings, overridePayload)
+	want := [3]string{settings, overridePayload, "GoogleAndroidApp"}
+	if got != want {
+		t.Fatalf("nativeInitClientSettings args=%q want %q", got, want)
+	}
+
+	ordinary := androidClientSettingsInitArgs(settings, "")
+	if ordinary != [3]string{settings, "", "GoogleAndroidApp"} {
+		t.Fatalf("ordinary nativeInitClientSettings args=%q", ordinary)
+	}
+}
+
+func TestRendererPreloadPrecedesGameActivitySuperAndOrdinaryIsInert(t *testing.T) {
+	var order []string
+	runMainGameActivityOnCreateBoundary(`{"renderer":"opengl"}`, func(payload string) {
+		if payload != `{"renderer":"opengl"}` {
+			t.Fatalf("preload payload=%q", payload)
+		}
+		order = append(order, "preload")
+	}, func() {
+		order = append(order, "super_create")
+	})
+	if !reflect.DeepEqual(order, []string{"preload", "super_create"}) {
+		t.Fatalf("GameActivity order=%v", order)
+	}
+
+	order = nil
+	runMainGameActivityOnCreateBoundary("", func(string) {
+		order = append(order, "unexpected_preload")
+	}, func() {
+		order = append(order, "super_create")
+	})
+	if !reflect.DeepEqual(order, []string{"super_create"}) {
+		t.Fatalf("ordinary GameActivity order=%v", order)
+	}
+}
+
 func TestStutterInputDrainDiagnosticsDefaultOff(t *testing.T) {
 	var setCalls []bool
 	snapshotCalls := 0

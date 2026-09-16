@@ -411,8 +411,11 @@ func TestFrameRateWritesWorkingXMLWhenMissing(t *testing.T) {
 
 func TestRendererOverridesAndVulkanAvailability(t *testing.T) {
 	got, err := Overrides(Settings{Renderer: RendererOpenGL, FrameRate: FrameRate{Mode: FrameRateUnlimited}})
-	if err != nil || got[flagPreferOpenGL] != "True" {
+	if err != nil || got[flagPreferOpenGL] != "True" || got[flagDisableVulkan] != "True" || got[flagDisableVulkan11] != "True" {
 		t.Fatalf("OpenGL overrides=%v err=%v", got, err)
+	}
+	if _, ok := got[flagDisableOpenGL]; ok {
+		t.Fatalf("OpenGL must not disable its selected backend: %v", got)
 	}
 	if got[flagTextureQualityOverrideEnabled] != "True" || got[intTextureQualityOverride] != textureQualityHigh {
 		t.Fatalf("OpenGL high texture overrides=%v", got)
@@ -913,6 +916,7 @@ func TestCustomFastFlagsOverrideSettingsAndReportConflicts(t *testing.T) {
 		{Name: flagGameBasicSettingsFramerateCap, Value: "False"},
 		{Name: "FFlagIndependentCustom", Value: "True"},
 		{Name: flagPreferOpenGL, Value: "False"},
+		{Name: flagDisableVulkan11, Value: "False"},
 	}
 	overrides, err := OverridesWithFastFlags(Default(), flags)
 	if err != nil {
@@ -926,6 +930,7 @@ func TestCustomFastFlagsOverrideSettingsAndReportConflicts(t *testing.T) {
 		{Name: flagRenderUseTextureManager2, Setting: "Texture quality"},
 		{Name: flagGameBasicSettingsFramerateCap, Setting: "Frame rate"},
 		{Name: flagPreferOpenGL, Setting: "Renderer"},
+		{Name: flagDisableVulkan11, Setting: "Renderer"},
 	}
 	if len(conflicts) != len(want) {
 		t.Fatalf("conflicts=%+v want %+v", conflicts, want)
