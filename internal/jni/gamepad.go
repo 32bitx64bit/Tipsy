@@ -852,11 +852,15 @@ func gamepadPumpLoop(mgr *gamepad.Manager, stop <-chan struct{}, done chan<- str
 	}
 	loggedDeny := false
 	pump := gamepad.NewReadyPump(mgr)
+	// Single-pad pump: one scratch AndroidFrame reused across SYN_REPORT.
+	// handleGamepadFrame copies edges into gamepadState and does not retain
+	// Buttons/Axes after return. DisconnectSnapshotFor still uses MapFrame.
+	var mapped gamepad.AndroidFrame
 	pump.OnFrame = func(pad gamepad.Pad, frame *gamepad.Frame) {
 		// ReadyPump invokes this only at a real SYN_REPORT boundary and keeps
 		// source order. The frame is owned by this callback until it returns.
 		gamepad.ApplyCalibration(frame, pad.Mapping, gamepadCalibration())
-		handleGamepadFrame(gamepad.MapFrame(frame, pad.DevID, pad.Mapping, pad.Info.Abs))
+		handleGamepadFrame(gamepad.MapFrameInto(&mapped, frame, pad.DevID, pad.Mapping, pad.Info.Abs))
 	}
 	pump.OnRescanError = func(err error) {
 		// EACCES carries the actionable input-group/Flatpak hint. Log once per

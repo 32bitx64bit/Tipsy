@@ -185,7 +185,14 @@ type AndroidFrame struct {
 	Disconnect bool
 }
 
-// MapFrame translates a normalized reader Frame to Android vocabulary.
+// MapFrame translates a normalized reader Frame to Android vocabulary
+// and returns a freshly allocated AndroidFrame. Snapshot callers
+// (DisconnectSnapshotFor, tests that keep first then next) may retain or
+// mutate the result after the next SYN_REPORT; successive MapFrame
+// results never alias.
+//
+// Hot-path consumers that copy edges before return must use MapFrameInto
+// so Buttons/Axes/Ranges are cleared and refilled in place.
 //
 //   - ABS_X/Y → AXIS_X/Y (0/1).
 //   - Physical right stick (mapping.RightX/RightY) → both Z(11)/RZ(14)
@@ -199,130 +206,154 @@ type AndroidFrame struct {
 //   - Face buttons use f.FaceButtonLayout (Xbox by default; Switch swaps
 //     only A/B and X/Y).
 func MapFrame(f *Frame, deviceID int, m Mapping, infos map[uint16]AbsInfo) AndroidFrame {
-	buttonCap, axisCap := 0, 0
-	if f != nil {
-		// Android translation can add at most the two hat-derived DPAD keys
-		// beyond the normalized button snapshot, and only the physical right
-		// stick expands its two source axes into the Z/RZ + RX/RY mirrors.
-		// Reserve the bounded topology up front so the independently owned
-		// output frame does not grow its maps or compact range slice while it
-		// is being populated. Every call still allocates new containers:
-		// callers may retain or mutate a returned AndroidFrame after the next
-		// SYN_REPORT.
-		buttonCap = len(f.Buttons) + 2
-		axisCap = len(f.Axes) + 2
+	return MapFrameInto(nil, f, deviceID, m, infos)
+}
+
+// MapFrameInto is MapFrame for a reused destination. It clears and fills
+// dst.Buttons, dst.Axes, and dst.Ranges (growing slice cap when needed).
+// dst's containers are recycled: a retained copy of those maps or the
+// range slice aliases the next call. Nil dst allocates like MapFrame.
+//
+// The JNI pump keeps one scratch AndroidFrame per pump goroutine and
+// copies edges in handleGamepadFrame before return.
+func MapFrameInto(dst *AndroidFrame, f *Frame, deviceID int, m Mapping, infos map[uint16]AbsInfo) AndroidFrame {
+	var fresh AndroidFrame
+	if dst == nil {
+		dst = &fresh
 	}
-	out := AndroidFrame{
-		DeviceID: deviceID,
-		Buttons:  make(map[int]bool, buttonCap),
-		Axes:     make(map[int]float32, axisCap),
-		Ranges:   make([]MotionRange, 0, axisCap),
-	}
+	prepareAndroidFrame(dst, f, deviceID)
 	if f == nil {
-		return out
+		return *dst
 	}
-	out.Disconnect = f.Disconnect
+	dst.Disconnect = f.Disconnect
 
 	for code := range f.Buttons {
 		if key, ok := MapEvdevButtonWithFaceButtonLayout(code, m.HIDLinearButtons, f.FaceButtonLayout); ok {
-			out.Buttons[key] = true
+			dst.Buttons[key] = true
 		}
 	}
 
-	axis := func(code uint16) (float64, bool) {
-		v, ok := f.Axes[code]
-		return v, ok
+	axes := f.Axes
+	if v, ok := axes[AbsX]; ok {
+		dst.Axes[AndroidAxisX] = float32(v)
+		dst.Ranges = setRange(dst.Ranges, AndroidAxisX, infos, AbsX, -1, 1)
 	}
-
-	if v, ok := axis(AbsX); ok {
-		out.Axes[AndroidAxisX] = float32(v)
-		out.Ranges = setRange(out.Ranges, AndroidAxisX, infos, AbsX, -1, 1)
-	}
-	if v, ok := axis(AbsY); ok {
-		out.Axes[AndroidAxisY] = float32(v)
-		out.Ranges = setRange(out.Ranges, AndroidAxisY, infos, AbsY, -1, 1)
+	if v, ok := axes[AbsY]; ok {
+		dst.Axes[AndroidAxisY] = float32(v)
+		dst.Ranges = setRange(dst.Ranges, AndroidAxisY, infos, AbsY, -1, 1)
 	}
 
 	// Right stick → Z/RZ + RX/RY mirror.
 	if m.RightX != NoAxis && m.RightY != NoAxis {
-		if vx, ok := axis(m.RightX); ok {
-			out.Axes[AndroidAxisZ] = float32(vx)
-			out.Axes[AndroidAxisRX] = float32(vx)
-			out.Ranges = setRange(out.Ranges, AndroidAxisZ, infos, m.RightX, -1, 1)
-			out.Ranges = setRange(out.Ranges, AndroidAxisRX, infos, m.RightX, -1, 1)
+		if vx, ok := axes[m.RightX]; ok {
+			dst.Axes[AndroidAxisZ] = float32(vx)
+			dst.Axes[AndroidAxisRX] = float32(vx)
+			dst.Ranges = setRange(dst.Ranges, AndroidAxisZ, infos, m.RightX, -1, 1)
+			dst.Ranges = setRange(dst.Ranges, AndroidAxisRX, infos, m.RightX, -1, 1)
 		}
-		if vy, ok := axis(m.RightY); ok {
-			out.Axes[AndroidAxisRZ] = float32(vy)
-			out.Axes[AndroidAxisRY] = float32(vy)
-			out.Ranges = setRange(out.Ranges, AndroidAxisRZ, infos, m.RightY, -1, 1)
-			out.Ranges = setRange(out.Ranges, AndroidAxisRY, infos, m.RightY, -1, 1)
+		if vy, ok := axes[m.RightY]; ok {
+			dst.Axes[AndroidAxisRZ] = float32(vy)
+			dst.Axes[AndroidAxisRY] = float32(vy)
+			dst.Ranges = setRange(dst.Ranges, AndroidAxisRZ, infos, m.RightY, -1, 1)
+			dst.Ranges = setRange(dst.Ranges, AndroidAxisRY, infos, m.RightY, -1, 1)
 		}
 	}
 
 	// Analog triggers → L/RTRIGGER.
 	if m.TriggerL != NoAxis {
-		if v, ok := axis(m.TriggerL); ok {
-			out.Axes[AndroidAxisLTrigger] = float32(v)
-			out.Ranges = setRange(out.Ranges, AndroidAxisLTrigger, infos, m.TriggerL, 0, 1)
+		if v, ok := axes[m.TriggerL]; ok {
+			dst.Axes[AndroidAxisLTrigger] = float32(v)
+			dst.Ranges = setRange(dst.Ranges, AndroidAxisLTrigger, infos, m.TriggerL, 0, 1)
 		}
 	}
 	if m.TriggerR != NoAxis {
-		if v, ok := axis(m.TriggerR); ok {
-			out.Axes[AndroidAxisRTrigger] = float32(v)
-			out.Ranges = setRange(out.Ranges, AndroidAxisRTrigger, infos, m.TriggerR, 0, 1)
+		if v, ok := axes[m.TriggerR]; ok {
+			dst.Axes[AndroidAxisRTrigger] = float32(v)
+			dst.Ranges = setRange(dst.Ranges, AndroidAxisRTrigger, infos, m.TriggerR, 0, 1)
 		}
 	}
 
 	// Hat/DPAD duality: hat axes drive HAT_X/Y plus DPAD keys at ±0.5;
 	// DPAD button keys (already in Buttons) additionally drive the HAT
 	// axes so both doors fire from one physical motion.
-	hatX, hasHatX := axis(AbsHat0X)
-	hatY, hasHatY := axis(AbsHat0Y)
+	hatX, hasHatX := axes[AbsHat0X]
+	hatY, hasHatY := axes[AbsHat0Y]
 	if hasHatX {
-		out.Axes[AndroidAxisHatX] = float32(hatX)
-		out.Ranges = setRange(out.Ranges, AndroidAxisHatX, infos, AbsHat0X, -1, 1)
+		dst.Axes[AndroidAxisHatX] = float32(hatX)
+		dst.Ranges = setRange(dst.Ranges, AndroidAxisHatX, infos, AbsHat0X, -1, 1)
 	}
 	if hasHatY {
-		out.Axes[AndroidAxisHatY] = float32(hatY)
-		out.Ranges = setRange(out.Ranges, AndroidAxisHatY, infos, AbsHat0Y, -1, 1)
+		dst.Axes[AndroidAxisHatY] = float32(hatY)
+		dst.Ranges = setRange(dst.Ranges, AndroidAxisHatY, infos, AbsHat0Y, -1, 1)
 	}
 	if hasHatX || hasHatY {
 		if hatX < -HatDpadThreshold {
-			out.Buttons[AndroidDpadLeft] = true
+			dst.Buttons[AndroidDpadLeft] = true
 		} else if hatX > HatDpadThreshold {
-			out.Buttons[AndroidDpadRight] = true
+			dst.Buttons[AndroidDpadRight] = true
 		}
 		if hatY < -HatDpadThreshold {
-			out.Buttons[AndroidDpadUp] = true
+			dst.Buttons[AndroidDpadUp] = true
 		} else if hatY > HatDpadThreshold {
-			out.Buttons[AndroidDpadDown] = true
+			dst.Buttons[AndroidDpadDown] = true
 		}
 	}
 	// DPAD buttons → HAT axes (only when the hat axes are absent, so a
 	// real hat keeps its analog value).
 	if !hasHatX {
 		hx := 0.0
-		if out.Buttons[AndroidDpadLeft] {
+		if dst.Buttons[AndroidDpadLeft] {
 			hx = -1
-		} else if out.Buttons[AndroidDpadRight] {
+		} else if dst.Buttons[AndroidDpadRight] {
 			hx = 1
 		}
-		if out.Buttons[AndroidDpadLeft] || out.Buttons[AndroidDpadRight] {
-			out.Axes[AndroidAxisHatX] = float32(hx)
+		if dst.Buttons[AndroidDpadLeft] || dst.Buttons[AndroidDpadRight] {
+			dst.Axes[AndroidAxisHatX] = float32(hx)
 		}
 	}
 	if !hasHatY {
 		hy := 0.0
-		if out.Buttons[AndroidDpadUp] {
+		if dst.Buttons[AndroidDpadUp] {
 			hy = -1
-		} else if out.Buttons[AndroidDpadDown] {
+		} else if dst.Buttons[AndroidDpadDown] {
 			hy = 1
 		}
-		if out.Buttons[AndroidDpadUp] || out.Buttons[AndroidDpadDown] {
-			out.Axes[AndroidAxisHatY] = float32(hy)
+		if dst.Buttons[AndroidDpadUp] || dst.Buttons[AndroidDpadDown] {
+			dst.Axes[AndroidAxisHatY] = float32(hy)
 		}
 	}
-	return out
+	return *dst
+}
+
+func prepareAndroidFrame(dst *AndroidFrame, f *Frame, deviceID int) {
+	buttonCap, axisCap := 0, 0
+	if f != nil {
+		// Android translation can add at most the two hat-derived DPAD keys
+		// beyond the normalized button snapshot, and only the physical right
+		// stick expands its two source axes into the Z/RZ + RX/RY mirrors.
+		// Reserve the bounded topology up front so a first fill (or a
+		// capacity-short reuse) does not grow maps or the compact range
+		// slice while it is being populated.
+		buttonCap = len(f.Buttons) + 2
+		axisCap = len(f.Axes) + 2
+	}
+	dst.DeviceID = deviceID
+	dst.Disconnect = false
+	if dst.Buttons == nil {
+		dst.Buttons = make(map[int]bool, buttonCap)
+	} else {
+		clear(dst.Buttons)
+	}
+	if dst.Axes == nil {
+		dst.Axes = make(map[int]float32, axisCap)
+	} else {
+		clear(dst.Axes)
+	}
+	if cap(dst.Ranges) < axisCap {
+		dst.Ranges = make([]MotionRange, 0, axisCap)
+	} else {
+		dst.Ranges = dst.Ranges[:0]
+	}
 }
 
 // Range returns the honest MotionRange for an Android axis, if that physical

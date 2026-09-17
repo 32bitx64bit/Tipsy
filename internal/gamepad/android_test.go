@@ -133,6 +133,99 @@ func TestMapFrameReturnsIndependentContainers(t *testing.T) {
 	}
 }
 
+func xpadTranslateFrame() *Frame {
+	return &Frame{
+		Buttons: map[uint16]bool{BtnSouth: true, BtnTL2: true, BtnDpadRight: true},
+		Axes: map[uint16]float64{
+			AbsX: 0.125, AbsY: -0.125, AbsRX: 0.25, AbsRY: -0.25,
+			AbsZ: 0.75, AbsRZ: 0.625, AbsHat0X: 1, AbsHat0Y: -1,
+		},
+	}
+}
+
+func TestMapFrameIntoReusesAndClearsContainers(t *testing.T) {
+	info, m := xboxDevice()
+	var dst AndroidFrame
+	first := MapFrameInto(&dst, &Frame{
+		Buttons: map[uint16]bool{BtnSouth: true},
+		Axes:    map[uint16]float64{AbsX: 0.5},
+	}, 1, m, info.Abs)
+	if !first.Buttons[AndroidButtonA] || first.Axes[AndroidAxisX] != 0.5 {
+		t.Fatalf("first Into fill: %+v", first)
+	}
+	buttons, axes, ranges := dst.Buttons, dst.Axes, dst.Ranges
+
+	second := MapFrameInto(&dst, &Frame{
+		Buttons: map[uint16]bool{BtnEast: true},
+		Axes:    map[uint16]float64{AbsX: -0.5},
+	}, 2, m, info.Abs)
+	if second.DeviceID != 2 {
+		t.Fatalf("DeviceID not overwritten, got %d", second.DeviceID)
+	}
+	if second.Buttons[AndroidButtonA] || !second.Buttons[AndroidButtonB] {
+		t.Fatalf("Into must drop stale keys: %+v", second.Buttons)
+	}
+	if second.Axes[AndroidAxisX] != -0.5 {
+		t.Fatalf("Into must replace axes, got %v", second.Axes[AndroidAxisX])
+	}
+
+	buttons[999] = true
+	if !dst.Buttons[999] {
+		t.Fatal("Buttons map was replaced instead of cleared")
+	}
+	delete(dst.Buttons, 999)
+	axes[999] = 7
+	if dst.Axes[999] != 7 {
+		t.Fatal("Axes map was replaced instead of cleared")
+	}
+	delete(dst.Axes, 999)
+	if cap(ranges) == 0 || len(dst.Ranges) == 0 {
+		t.Fatal("expected reused range slice with a current fill")
+	}
+	ranges[0].Min = 99
+	if dst.Ranges[0].Min != 99 {
+		t.Fatal("Ranges slice was reallocated")
+	}
+}
+
+func TestMapFrameIntoDoesNotAliasMapFrame(t *testing.T) {
+	info, m := xboxDevice()
+	var dst AndroidFrame
+	reused := MapFrameInto(&dst, xpadTranslateFrame(), 1, m, info.Abs)
+	fresh := MapFrame(xpadTranslateFrame(), 1, m, info.Abs)
+	reused.Buttons[AndroidButtonA] = false
+	reused.Axes[AndroidAxisX] = 42
+	if !fresh.Buttons[AndroidButtonA] || fresh.Axes[AndroidAxisX] == 42 {
+		t.Fatalf("MapFrame aliased MapFrameInto scratch: %+v", fresh)
+	}
+	nextFresh := MapFrame(&Frame{
+		Buttons: map[uint16]bool{BtnEast: true},
+		Axes:    map[uint16]float64{AbsX: -0.5},
+	}, 1, m, info.Abs)
+	if !fresh.Buttons[AndroidButtonA] || fresh.Axes[AndroidAxisX] != 0.125 {
+		t.Fatalf("later MapFrame changed earlier MapFrame snapshot: %+v", fresh)
+	}
+	if !nextFresh.Buttons[AndroidButtonB] {
+		t.Fatalf("next MapFrame must reflect its own input: %+v", nextFresh)
+	}
+}
+
+func TestMapFrameIntoWarmAllocations(t *testing.T) {
+	info, m := xboxDevice()
+	f := xpadTranslateFrame()
+	var dst AndroidFrame
+	got := MapFrameInto(&dst, f, 7, m, info.Abs)
+	if len(got.Buttons) < 3 || len(got.Axes) < 8 || len(got.Ranges) < 8 {
+		t.Fatalf("incomplete translation: %+v", got)
+	}
+	n := testing.AllocsPerRun(1000, func() {
+		MapFrameInto(&dst, f, 7, m, info.Abs)
+	})
+	if n != 0 {
+		t.Fatalf("warm MapFrameInto allocs/op = %v, want 0", n)
+	}
+}
+
 // TestPositionalDiamondMapping pins BTN compass → BUTTON letters.
 // (The duplicate PS-family recorded stream is deleted vs v1: one golden per
 // path — the Xbox stream above covers buttons, sticks, triggers, hats,
