@@ -248,3 +248,7 @@ func (f focusedTextForegroundLeaseForTest) release() {
 		C.tipsy_focused_text_frame_release(C.uintptr_t(f.lease))
 	}
 }
+
+func focusedTextOverlayLiveForTest() bool {
+	return C.tipsy_focused_text_overlay_live() != 0
+}

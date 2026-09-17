@@ -12,6 +12,7 @@
 #include <pango/pangofc-fontmap.h>
 #include <math.h>
 #include <pthread.h>
+#include <stdatomic.h>
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
@@ -38,8 +39,23 @@ struct tipsy_focused_overlay {
 
 static pthread_mutex_t published_mutex = PTHREAD_MUTEX_INITIALIZER;
 static struct tipsy_focused_overlay *published_overlay;
+static _Atomic uint32_t overlay_live;
 
 static void wipe(void *p, size_t n) { if (p != NULL && n != 0) memset(p, 0, n); }
+
+static void tipsy_focused_overlay_mark_live_locked(void)
+{
+	atomic_store_explicit(&overlay_live, 1, memory_order_release);
+}
+
+static void tipsy_focused_overlay_clear_publish_locked(struct tipsy_focused_overlay *o)
+{
+	if (published_overlay == o) {
+		atomic_store_explicit(&overlay_live, 0, memory_order_release);
+		published_overlay = NULL;
+	}
+	if (o != NULL) o->published = 0;
+}
 
 static void close_font(struct tipsy_focused_overlay *o) {
 	if (o->font_desc != NULL) pango_font_description_free(o->font_desc);
@@ -255,8 +271,8 @@ int tipsy_focused_overlay_update(uintptr_t ptr, int visible, uint64_t version,
 	pthread_mutex_lock(&published_mutex); pthread_mutex_lock(&o->mutex);
 	while (o->readers != 0) pthread_cond_wait(&o->readers_done, &o->mutex);
 	if (!visible) {
-		if (published_overlay == o) published_overlay = NULL;
-		o->published = 0; clear_pixels(o); o->requested_argb = 0;
+		tipsy_focused_overlay_clear_publish_locked(o);
+		clear_pixels(o); o->requested_argb = 0;
 		o->glyph_pixels = o->caret_pixels = o->antialias_pixels = o->bright_pixels = 0;
 		o->version = 0; pthread_mutex_unlock(&o->mutex); pthread_mutex_unlock(&published_mutex); return 0;
 	}
@@ -271,11 +287,12 @@ int tipsy_focused_overlay_update(uintptr_t ptr, int visible, uint64_t version,
 		rasterize(o, text, text_len, cursor_byte, argb, x_alignment, y_alignment,
 			multiline, wrapped, editable, cursor_visible, spacing, left, top, right,
 			bottom, include_font_padding) != 0)) {
-		if (published_overlay == o) published_overlay = NULL;
-		o->published = 0; clear_pixels(o);
+		tipsy_focused_overlay_clear_publish_locked(o);
+		clear_pixels(o);
 		pthread_mutex_unlock(&o->mutex); pthread_mutex_unlock(&published_mutex); return -1;
 	}
 	if (dirty) { o->version = version; o->generation++; o->requested_argb = argb; }
+	tipsy_focused_overlay_mark_live_locked();
 	o->published = 1; published_overlay = o;
 	pthread_mutex_unlock(&o->mutex); pthread_mutex_unlock(&published_mutex);
 	return 0;
@@ -285,8 +302,7 @@ void tipsy_focused_overlay_free(uintptr_t ptr) {
 	struct tipsy_focused_overlay *o = (struct tipsy_focused_overlay *)ptr;
 	if (o == NULL) return;
 	pthread_mutex_lock(&published_mutex); pthread_mutex_lock(&o->mutex);
-	if (published_overlay == o) published_overlay = NULL;
-	o->published = 0;
+	tipsy_focused_overlay_clear_publish_locked(o);
 	while (o->readers != 0) pthread_cond_wait(&o->readers_done, &o->mutex);
 	discard_surface(o); close_font(o);
 	pthread_mutex_unlock(&o->mutex); pthread_mutex_unlock(&published_mutex);
@@ -313,6 +329,10 @@ void tipsy_focused_text_frame_release(uintptr_t lease) {
 	pthread_mutex_lock(&o->mutex);
 	if (o->readers != 0 && --o->readers == 0) pthread_cond_broadcast(&o->readers_done);
 	pthread_mutex_unlock(&o->mutex);
+}
+
+int tipsy_focused_text_overlay_live(void) {
+	return atomic_load_explicit(&overlay_live, memory_order_acquire) != 0;
 }
 
 int tipsy_focused_overlay_query(uintptr_t ptr,

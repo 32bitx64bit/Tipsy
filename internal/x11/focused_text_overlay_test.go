@@ -117,6 +117,9 @@ func TestFocusedTextForegroundLeaseHasDirtyGeometryAndClearsOnHide(t *testing.T)
 	if err := o.Update(s); err != nil {
 		t.Fatal(err)
 	}
+	if !focusedTextOverlayLiveForTest() {
+		t.Fatal("published overlay did not advertise live")
+	}
 	first, ok := acquireFocusedTextForegroundForTest()
 	if !ok || first.x != 17 || first.y != 29 || first.width != 190 ||
 		first.height != 38 || first.stride != 190*4 || first.generation == 0 {
@@ -137,8 +140,50 @@ func TestFocusedTextForegroundLeaseHasDirtyGeometryAndClearsOnHide(t *testing.T)
 	if err := o.Update(s); err != nil {
 		t.Fatal(err)
 	}
+	if focusedTextOverlayLiveForTest() {
+		t.Fatal("hidden overlay stayed live")
+	}
 	if _, ok := acquireFocusedTextForegroundForTest(); ok {
 		t.Fatal("inactive field retained a host foreground lease")
+	}
+}
+
+func TestFocusedTextOverlayLiveTracksPublishFailAndFree(t *testing.T) {
+	o := newFocusedTextOverlayForTest(t, 240, 120)
+	if focusedTextOverlayLiveForTest() {
+		t.Fatal("new overlay advertised live before publish")
+	}
+	s := validFocusedTextSnapshot()
+	if err := o.Update(s); err != nil {
+		t.Fatal(err)
+	}
+	if !focusedTextOverlayLiveForTest() {
+		t.Fatal("successful publish did not set overlay live")
+	}
+	s.Version++
+	s.FontFile = "/definitely/missing/tipsy-official-font.ttf"
+	if err := o.Update(s); err == nil {
+		t.Fatal("missing official font silently fell back")
+	}
+	if focusedTextOverlayLiveForTest() {
+		t.Fatal("failed republish left overlay live")
+	}
+	if _, ok := acquireFocusedTextForegroundForTest(); ok {
+		t.Fatal("failed republish retained a host foreground lease")
+	}
+	s = validFocusedTextSnapshot()
+	s.Version += 2
+	if err := o.Update(s); err != nil {
+		t.Fatal(err)
+	}
+	if !focusedTextOverlayLiveForTest() {
+		t.Fatal("republish after failure did not set overlay live")
+	}
+	if err := o.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if focusedTextOverlayLiveForTest() {
+		t.Fatal("freed overlay stayed live")
 	}
 }
 

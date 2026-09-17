@@ -22,4 +22,10 @@ struct tipsy_focused_text_frame {
 int tipsy_focused_text_frame_acquire(struct tipsy_focused_text_frame *out);
 void tipsy_focused_text_frame_release(uintptr_t lease);
 
+/* Acquire-load: 1 while a published overlay exists, else 0. Present paths may
+ * skip overlay/output mutex and GLES GetCurrent/save-restore when this is 0
+ * and they hold no retained child/texture. Acquire/release stay required for
+ * the live compose path. */
+int tipsy_focused_text_overlay_live(void);
+
 #endif /* TIPSY_FOCUSED_TEXT_FOREGROUND_H */
