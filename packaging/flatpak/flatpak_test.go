@@ -48,6 +48,10 @@ func TestBuildFlatpakRendersManifestForBothModes(t *testing.T) {
 				"install -Dm0644 tipsy.png /app/share/icons/hicolor/512x512/apps/io.github.tipsy_linux.Tipsy.png\n",
 				"install -Dm0644 tipsy.png /app/share/icons/hicolor/512x512/apps/tipsy.png\n",
 				"GOAMD64: v3",
+				"path: webkit-prefix",
+				"PKG_CONFIG_PATH: /app/lib/pkgconfig",
+				"WEBKIT_EXEC_PATH=/app/libexec/webkit2gtk-4.1",
+				"name: webkit2gtk-4.1",
 			} {
 				if !strings.Contains(manifest, want) {
 					t.Errorf("rendered manifest lacks %q", want)
@@ -81,5 +85,24 @@ func TestBuildFlatpakDefaultsToDeveloperMode(t *testing.T) {
 	}
 	if strings.Contains(string(raw), `"releaseKind":"release-repository-signed"`) {
 		t.Fatal("default mode must never mark the bundle official")
+	}
+}
+
+func TestBuildFlatpakStagesGnomeWebKitForKDERuntime(t *testing.T) {
+	data, err := os.ReadFile("build-flatpak.sh")
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(data)
+	for _, required := range []string{
+		"stage_webkit_prefix",
+		"org.gnome.Platform//49",
+		"webkit2gtk-4.1.pc",
+		"/usr/libexec/webkit2gtk-4.1",
+		"/app/libexec/webkit2gtk-4.1",
+	} {
+		if !strings.Contains(text, required) {
+			t.Errorf("build-flatpak.sh is missing WebKitGTK staging %q", required)
+		}
 	}
 }

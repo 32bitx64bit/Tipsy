@@ -37,7 +37,24 @@ finish-args:
   - --filesystem=xdg-config/mimeapps.list:ro
   - --talk-name=org.freedesktop.Notifications
   # No --socket=wayland: Tipsy is X11-first by design.
+  # WebKitGTK 4.1 is in the GNOME runtime, not org.kde.Sdk. build-flatpak.sh
+  # stages matching Freedesktop 25.08 libraries into webkit-prefix (libexec
+  # paths rewritten /usr → /app).
+  - --env=WEBKIT_EXEC_PATH=/app/libexec/webkit2gtk-4.1
 modules:
+  # KDE 6.10 has gtk+-3.0 but not webkit2gtk-4.1. Install the GNOME 49
+  # (same Freedesktop 25.08) WebKitGTK into /app before compiling Tipsy.
+  - name: webkit2gtk-4.1
+    buildsystem: simple
+    build-commands:
+      - mkdir -p /app/lib /app/libexec /app/include /app/lib/pkgconfig
+      - cp -a lib/. /app/lib/
+      - cp -a libexec/. /app/libexec/
+      - cp -a include/. /app/include/
+      - cp -a pkgconfig/. /app/lib/pkgconfig/
+    sources:
+      - type: dir
+        path: webkit-prefix
   - name: tipsy
     buildsystem: simple
     build-options:
@@ -52,6 +69,7 @@ modules:
         GOCACHE: /run/build/tipsy/.gocache
         GOMODCACHE: /run/build/tipsy/.gomodcache
         GOPATH: /run/build/tipsy/.gopath
+        PKG_CONFIG_PATH: /app/lib/pkgconfig
       build-args:
         # go.mod dependencies (miqt, x/sys) are fetched from the module proxy
         # at build time; this is a self-hosted repository, not Flathub.

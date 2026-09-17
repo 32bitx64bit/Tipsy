@@ -66,6 +66,113 @@ render_manifest() {
   ! grep -q '@VERSION@\|@RELEASE_KIND@' "$out" || fail 'manifest still has an unexpanded placeholder'
 }
 
+# org.kde.Sdk has gtk+-3.0 but not webkit2gtk-4.1. GNOME 49 sits on the same
+# Freedesktop 25.08 ABI as KDE 6.10, so its WebKitGTK libraries can live in
+# /app. Hardcoded /usr libexec paths are rewritten to /app (equal length).
+stage_webkit_prefix() {
+  local dest=$1
+  local gnome=org.gnome.Platform//49
+  local header_root
+  mkdir -p "$dest/lib" "$dest/libexec" "$dest/include" "$dest/pkgconfig"
+
+  flatpak info --user "$gnome" >/dev/null 2>&1 || \
+    flatpak install --user -y --noninteractive flathub "$gnome"
+
+  DEST="$dest" flatpak run --filesystem="$dest:create" --env=DEST="$dest" --command=bash "$gnome" -c '
+    set -euo pipefail
+    dest=$DEST
+    libdir=/usr/lib/x86_64-linux-gnu
+    mkdir -p "$dest/lib/webkit2gtk-4.1/injected-bundle" "$dest/libexec/webkit2gtk-4.1"
+    for name in \
+      libwebkit2gtk-4.1.so.0 \
+      libjavascriptcoregtk-4.1.so.0 \
+      libenchant-2.so.2 \
+      libevdev.so.2 \
+      libglycin-2.so.0 \
+      libgssapi_krb5.so.2 \
+      libhidapi-hidraw.so.0 \
+      libk5crypto.so.3 \
+      libkrb5.so.3 \
+      libkrb5support.so.0 \
+      libmanette-0.2.so.0 \
+      libtinysparql-3.0.so.0
+    do
+      src=$libdir/$name
+      [[ -e $src ]] || { printf "build-flatpak: missing %s in GNOME 49\n" "$src" >&2; exit 1; }
+      cp -a -- "$src" "$dest/lib/"
+      if [[ -L $src ]]; then
+        cp -a -- "$(readlink -f -- "$src")" "$dest/lib/"
+      fi
+    done
+    ln -sfn libwebkit2gtk-4.1.so.0 "$dest/lib/libwebkit2gtk-4.1.so"
+    ln -sfn libjavascriptcoregtk-4.1.so.0 "$dest/lib/libjavascriptcoregtk-4.1.so"
+    cp -a /usr/libexec/webkit2gtk-4.1/. "$dest/libexec/webkit2gtk-4.1/"
+    cp -a "$libdir/webkit2gtk-4.1/injected-bundle/." "$dest/lib/webkit2gtk-4.1/injected-bundle/"
+  '
+
+  header_root=
+  if [[ -d /usr/include/webkitgtk-4.1 ]]; then
+    header_root=/usr/include/webkitgtk-4.1
+  elif command -v apt-get >/dev/null 2>&1; then
+    sudo apt-get install -y --no-install-recommends libwebkit2gtk-4.1-dev
+    header_root=/usr/include/webkitgtk-4.1
+  fi
+  [[ -d ${header_root:-} ]] || fail 'webkitgtk-4.1 headers are required (libwebkit2gtk-4.1-dev)'
+  cp -a -- "$header_root" "$dest/include/webkitgtk-4.1"
+
+  cat >"$dest/pkgconfig/javascriptcoregtk-4.1.pc" <<'EOF'
+prefix=/app
+libdir=${prefix}/lib
+includedir=${prefix}/include
+Name: JavaScriptCoreGTK
+Description: Tipsy-staged JavaScriptCoreGTK from GNOME 49
+Version: 2.50
+Requires: glib-2.0 gobject-2.0
+Libs: -L${libdir} -ljavascriptcoregtk-4.1
+Cflags: -I${includedir}/webkitgtk-4.1
+EOF
+  cat >"$dest/pkgconfig/webkit2gtk-4.1.pc" <<'EOF'
+prefix=/app
+libdir=${prefix}/lib
+includedir=${prefix}/include
+Name: WebKit2GTK
+Description: Tipsy-staged WebKitGTK 4.1 from GNOME 49
+Version: 2.50
+Requires: gtk+-3.0 libsoup-3.0 javascriptcoregtk-4.1
+Libs: -L${libdir} -lwebkit2gtk-4.1
+Cflags: -I${includedir}/webkitgtk-4.1
+EOF
+
+  python3 - "$dest" <<'PY'
+import pathlib
+import sys
+
+root = pathlib.Path(sys.argv[1])
+replacements = (
+    (b"/usr/libexec/webkit2gtk-4.1", b"/app/libexec/webkit2gtk-4.1"),
+    (b"/usr/lib/x86_64-linux-gnu/webkit2gtk-4.1", b"/app/lib/webkit2gtk-4.1"),
+)
+for path in list(root.rglob("*")):
+    if not path.is_file() or path.is_symlink():
+        continue
+    data = path.read_bytes()
+    if b"webkit" not in data:
+        continue
+    updated = data
+    for old, new in replacements:
+        if len(new) > len(old):
+            raise SystemExit(f"replacement longer than original: {new!r}")
+        padded = new + b"\0" * (len(old) - len(new))
+        updated = updated.replace(old, padded)
+    if updated != data:
+        path.write_bytes(updated)
+PY
+
+  [[ -f $dest/lib/libwebkit2gtk-4.1.so.0 ]] || fail 'staged WebKitGTK library is missing'
+  [[ -f $dest/pkgconfig/webkit2gtk-4.1.pc ]] || fail 'staged webkit2gtk-4.1.pc is missing'
+  [[ -f $dest/include/webkitgtk-4.1/webkit2/webkit2.h ]] || fail 'staged webkit2.h is missing'
+}
+
 if [[ -n "$render_manifest" ]]; then
   render_manifest "$render_manifest"
   exit 0
@@ -104,6 +211,7 @@ trap cleanup EXIT HUP INT TERM
 
 manifest="$work/$app_id.yaml"
 render_manifest "$manifest"
+stage_webkit_prefix "$work/webkit-prefix"
 
 # --state-dir keeps flatpak-builder's cache out of the source checkout
 # (its default is ./.flatpak-builder in the current directory).
