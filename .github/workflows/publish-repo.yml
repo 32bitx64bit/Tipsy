@@ -37,6 +37,11 @@ on:
         required: false
         default: true
         type: boolean
+      native_packages:
+        description: "Rebuild .deb/.rpm/pacman (untick to reuse Tipsy-repo assets and only build Flatpak)"
+        required: false
+        default: true
+        type: boolean
 
 permissions:
   contents: read
@@ -156,6 +161,7 @@ jobs:
           TIPSY_GPG_KEY_ID: ${{ secrets.TIPSY_GPG_KEY_ID }}
 
       - name: Select Go toolchain
+        if: github.event_name != 'workflow_dispatch' || inputs.native_packages
         uses: actions/setup-go@d35c59abb061a4a6fb18e82ac0862c26744d6ab5 # v5.5.0
         with:
           go-version: ${{ env.GO_VERSION }}
@@ -177,6 +183,7 @@ jobs:
           df -h / /tmp
 
       - name: Install native and packaging tools
+        if: github.event_name != 'workflow_dispatch' || inputs.native_packages
         shell: bash
         run: |
           set -euo pipefail
@@ -190,6 +197,7 @@ jobs:
           command -v bsdtar
 
       - name: Download the signed AppImage from the Tipsy release
+        if: github.event_name != 'workflow_dispatch' || inputs.native_packages
         env:
           GH_TOKEN: ${{ github.token }}
         shell: bash
@@ -203,6 +211,7 @@ jobs:
           ls dist/Tipsy-*-x86_64.AppImage
 
       - name: Build the tipsy binaries once
+        if: github.event_name != 'workflow_dispatch' || inputs.native_packages
         shell: bash
         run: |
           set -euo pipefail
@@ -213,6 +222,7 @@ jobs:
           find build-bin -maxdepth 1 -type f -printf '%f %s bytes\n'
 
       - name: Assemble .deb, .rpm, and pacman packages from those binaries
+        if: github.event_name != 'workflow_dispatch' || inputs.native_packages
         shell: bash
         env:
           TIPSY_BINARIES_DIR: ${{ github.workspace }}/build-bin
@@ -228,6 +238,29 @@ jobs:
           bash packaging/arch/build-pacman.sh \
             --version '${{ needs.prepare.outputs.version }}' --output-dir dist --mode official
           ls -la dist/
+
+      - name: Reuse .deb, .rpm, pacman, and AppImage from Tipsy-repo
+        if: github.event_name == 'workflow_dispatch' && inputs.native_packages == false
+        env:
+          GH_TOKEN: ${{ secrets.TIPSY_REPO_TOKEN }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          gh release download '${{ needs.prepare.outputs.tag }}' \
+            --repo "$DISTRO_REPO" \
+            --dir dist \
+            --pattern 'Tipsy-*-x86_64.AppImage' \
+            --pattern 'tipsy_*_amd64.deb' \
+            --pattern 'tipsy-*.rpm' \
+            --pattern 'tipsy-*.pkg.tar.zst'
+          rm -f dist/SHA256SUMS dist/Tipsy-*.flatpak
+          ls -la dist/
+          version='${{ needs.prepare.outputs.version }}'
+          [[ -f dist/Tipsy-${version}-x86_64.AppImage ]]
+          [[ -f dist/tipsy_${version}_amd64.deb ]]
+          [[ -f dist/tipsy-${version}-1.x86_64.rpm ]]
+          [[ -f dist/tipsy-${version}-1-x86_64.pkg.tar.zst ]]
 
       - name: Build the Flatpak bundle
         # Official packaging: built on every publish. Only a manual dispatch
