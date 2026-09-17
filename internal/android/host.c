@@ -251,9 +251,11 @@ static void tipsy_egl_trace_platform_display_ext_resolver_absence(void)
  * source text crosses this boundary. */
 #pragma weak tipsy_focused_text_frame_acquire
 #pragma weak tipsy_focused_text_frame_release
+#pragma weak tipsy_focused_text_overlay_live
 
 typedef int (*tipsy_egl_text_frame_acquire_fn)(struct tipsy_focused_text_frame *);
 typedef void (*tipsy_egl_text_frame_release_fn)(uintptr_t);
+typedef int (*tipsy_egl_text_overlay_live_fn)(void);
 
 static int tipsy_egl_text_frame_acquire(struct tipsy_focused_text_frame *frame)
 {
@@ -266,10 +268,18 @@ static void tipsy_egl_text_frame_release(uintptr_t lease)
 	if (tipsy_focused_text_frame_release != NULL) tipsy_focused_text_frame_release(lease);
 }
 
+static int tipsy_egl_text_overlay_live_weak(void)
+{
+	if (tipsy_focused_text_overlay_live == NULL) return 0;
+	return tipsy_focused_text_overlay_live() != 0;
+}
+
 static tipsy_egl_text_frame_acquire_fn egl_text_frame_acquire_fn =
 	tipsy_egl_text_frame_acquire;
 static tipsy_egl_text_frame_release_fn egl_text_frame_release_fn =
 	tipsy_egl_text_frame_release;
+static tipsy_egl_text_overlay_live_fn egl_text_overlay_live_fn =
+	tipsy_egl_text_overlay_live_weak;
 
 typedef unsigned int TipsyGLenum;
 typedef unsigned char TipsyGLboolean;
@@ -448,7 +458,26 @@ struct tipsy_gl_saved_state {
 static struct tipsy_gl_api egl_text_gl;
 static pthread_mutex_t egl_text_mu = PTHREAD_MUTEX_INITIALIZER;
 static struct tipsy_egl_text_state *egl_text_states;
+static _Atomic uint32_t egl_text_cached_textures;
 static void tipsy_egl_text_destroy_gpu_locked(struct tipsy_egl_text_state *state);
+
+static int tipsy_egl_text_overlay_is_live(void)
+{
+	if (egl_text_overlay_live_fn != NULL) return egl_text_overlay_live_fn() != 0;
+	return 0;
+}
+
+static void tipsy_egl_text_drop_texture_locked(struct tipsy_egl_text_state *state)
+{
+	if (state == NULL || state->texture == 0) return;
+	if (egl_text_gl.ready && egl_text_gl.DeleteTextures != NULL) {
+		egl_text_gl.DeleteTextures(1, &state->texture);
+	}
+	state->texture = 0;
+	state->generation = 0;
+	state->texture_width = state->texture_height = 0;
+	atomic_fetch_sub_explicit(&egl_text_cached_textures, 1, memory_order_release);
+}
 
 /* A surface can die while its context is not current, in which case issuing
  * GL deletes would target no context or the wrong context. Retain only that
@@ -958,7 +987,7 @@ static struct tipsy_egl_text_state *tipsy_egl_text_find_locked(EGLDisplay displa
 static void tipsy_egl_text_destroy_gpu_locked(struct tipsy_egl_text_state *state)
 {
 	if (state == NULL || !egl_text_gl.ready) return;
-	if (state->texture != 0) egl_text_gl.DeleteTextures(1, &state->texture);
+	tipsy_egl_text_drop_texture_locked(state);
 	if (state->vertex_array != 0 && egl_text_gl.DeleteVertexArrays != NULL)
 		egl_text_gl.DeleteVertexArrays(1, &state->vertex_array);
 	if (state->vertex_buffer != 0) egl_text_gl.DeleteBuffers(1, &state->vertex_buffer);
@@ -1179,6 +1208,7 @@ static int tipsy_egl_text_create_texture_locked(struct tipsy_egl_text_state *sta
 	if (state->texture != 0) return 1;
 	egl_text_gl.GenTextures(1, &state->texture);
 	if (state->texture == 0) return 0;
+	atomic_fetch_add_explicit(&egl_text_cached_textures, 1, memory_order_release);
 	egl_text_gl.ActiveTexture(TIPSY_GL_TEXTURE0);
 	egl_text_gl.BindTexture(TIPSY_GL_TEXTURE_2D, state->texture);
 	egl_text_gl.TexParameteri(TIPSY_GL_TEXTURE_2D, TIPSY_GL_TEXTURE_MIN_FILTER, TIPSY_GL_LINEAR);
@@ -1284,6 +1314,10 @@ static void tipsy_egl_compose_focused_text(EGLDisplay dpy, EGLSurface surface)
 		  tipsy_focused_text_frame_release == NULL))) {
 		return;
 	}
+	if (!tipsy_egl_text_overlay_is_live() &&
+		atomic_load_explicit(&egl_text_cached_textures, memory_order_acquire) == 0) {
+		return;
+	}
 	ensure_egl();
 	if (host_eglGetCurrentDisplay == NULL || host_eglGetCurrentSurface == NULL ||
 		host_eglGetCurrentContext == NULL || host_eglQuerySurface == NULL) {
@@ -1304,10 +1338,7 @@ static void tipsy_egl_compose_focused_text(EGLDisplay dpy, EGLSurface surface)
 		state = tipsy_egl_text_find_locked(dpy, surface, current_context, 0);
 		if (state != NULL && state->texture != 0 && egl_text_gl.ready) {
 			tipsy_egl_text_save_state(&saved, state);
-			egl_text_gl.DeleteTextures(1, &state->texture);
-			state->texture = 0;
-			state->generation = 0;
-			state->texture_width = state->texture_height = 0;
+			tipsy_egl_text_drop_texture_locked(state);
 			tipsy_egl_text_restore_state(&saved, state);
 		}
 		goto out;
@@ -2269,8 +2300,10 @@ struct tipsy_egl_foreground_test {
 	EGLint swap_behavior;
 	int gles_major;
 	int foreground_active;
+	int overlay_live;
 	uint64_t foreground_generation;
 	uint32_t acquire_calls, release_calls, draw_calls;
+	uint32_t current_display_calls;
 	uint32_t texture_allocations, texture_deletions;
 	uint32_t full_texture_uploads, same_size_texture_updates, geometry_uploads;
 	uint32_t guest_state_restore_failures, draw_contract_failures;
@@ -2299,6 +2332,7 @@ struct tipsy_egl_foreground_fixture {
 	uint32_t preserved_buffer_draws, context_mismatch_acquires, transform_feedback_draws;
 	uint32_t cache_texture_deletions, gles2_draws, gles2_state_restore_failures;
 	uint32_t live_state_records;
+	uint32_t unpublished_skip_acquires, unpublished_skip_currents;
 };
 
 static struct tipsy_egl_foreground_test *active_egl_foreground_test;
@@ -2684,7 +2718,11 @@ static void tipsy_test_egl_foreground_bind_sampler(TipsyGLuint unit, TipsyGLuint
 }
 
 static EGLDisplay tipsy_test_egl_foreground_current_display(void)
-{ return active_egl_foreground_test != NULL ? active_egl_foreground_test->display : NULL; }
+{
+	if (active_egl_foreground_test != NULL)
+		active_egl_foreground_test->current_display_calls++;
+	return active_egl_foreground_test != NULL ? active_egl_foreground_test->display : NULL;
+}
 static EGLSurface tipsy_test_egl_foreground_current_surface(EGLint which)
 { (void)which; return active_egl_foreground_test != NULL ?
 	active_egl_foreground_test->current_surface : NULL; }
@@ -2716,6 +2754,12 @@ static int tipsy_test_egl_foreground_acquire(struct tipsy_focused_text_frame *fr
 	frame->generation = t->foreground_generation;
 	frame->lease = 77;
 	return 1;
+}
+
+static int tipsy_test_egl_foreground_overlay_live(void)
+{
+	return active_egl_foreground_test != NULL &&
+		active_egl_foreground_test->overlay_live != 0;
 }
 
 static void tipsy_test_egl_foreground_release(uint64_t lease)
@@ -2785,7 +2829,8 @@ int tipsy_test_egl_foreground_fixture(void)
 	egl_query_surface_fn saved_query_surface;
 	tipsy_egl_text_frame_acquire_fn saved_acquire;
 	tipsy_egl_text_frame_release_fn saved_release;
-	uint32_t draws_before, acquires_before, state_failures_before;
+	tipsy_egl_text_overlay_live_fn saved_live;
+	uint32_t draws_before, acquires_before, state_failures_before, currents_before;
 	int passed;
 
 	ensure_egl();
@@ -2796,6 +2841,7 @@ int tipsy_test_egl_foreground_fixture(void)
 	saved_query_surface = host_eglQuerySurface;
 	saved_acquire = egl_text_frame_acquire_fn;
 	saved_release = egl_text_frame_release_fn;
+	saved_live = egl_text_overlay_live_fn;
 
 	t.display = (EGLDisplay)(uintptr_t)0x51;
 	t.surface = (EGLSurface)(uintptr_t)0x52;
@@ -2804,6 +2850,7 @@ int tipsy_test_egl_foreground_fixture(void)
 	t.swap_behavior = TIPSY_EGL_BUFFER_DESTROYED;
 	t.gles_major = 3;
 	t.foreground_active = 1;
+	t.overlay_live = 1;
 	t.foreground_generation = 1;
 	t.read_framebuffer = 31; t.draw_framebuffer = 32; t.program = 17;
 	t.array_buffer = 18; t.vertex_array = 23;
@@ -2882,6 +2929,7 @@ int tipsy_test_egl_foreground_fixture(void)
 	host_eglQuerySurface = tipsy_test_egl_foreground_query;
 	egl_text_frame_acquire_fn = tipsy_test_egl_foreground_acquire;
 	egl_text_frame_release_fn = tipsy_test_egl_foreground_release;
+	egl_text_overlay_live_fn = tipsy_test_egl_foreground_overlay_live;
 
 	tipsy_egl_compose_focused_text(t.display, t.surface);
 	tipsy_test_egl_foreground_check_restored();
@@ -2907,9 +2955,15 @@ int tipsy_test_egl_foreground_fixture(void)
 	out->context_mismatch_acquires = t.acquire_calls - acquires_before;
 	t.current_surface = t.surface;
 	t.swap_behavior = TIPSY_EGL_BUFFER_DESTROYED;
+	t.overlay_live = 0;
 	t.foreground_active = 0;
 	tipsy_egl_compose_focused_text(t.display, t.surface);
 	tipsy_test_egl_foreground_check_restored();
+	acquires_before = t.acquire_calls;
+	currents_before = t.current_display_calls;
+	tipsy_egl_compose_focused_text(t.display, t.surface);
+	out->unpublished_skip_acquires = t.acquire_calls - acquires_before;
+	out->unpublished_skip_currents = t.current_display_calls - currents_before;
 
 	tipsy_egl_text_forget(t.display, t.surface, NULL);
 	out->acquire_calls = t.acquire_calls;
@@ -2926,6 +2980,7 @@ int tipsy_test_egl_foreground_fixture(void)
 	 * restoring only nonzero VBO bindings would corrupt that guest state. */
 	t.gles_major = 2;
 	t.context = (void *)(uintptr_t)0x55;
+	t.overlay_live = 1;
 	t.foreground_active = 1;
 	t.foreground_generation = 10;
 	t.read_framebuffer = t.draw_framebuffer = 32;
@@ -2957,12 +3012,15 @@ int tipsy_test_egl_foreground_fixture(void)
 		out->draw_contract_failures == 0 && out->preserved_buffer_draws == 0 &&
 		out->context_mismatch_acquires == 0 && out->transform_feedback_draws == 0 &&
 		out->cache_texture_deletions == 1 &&
+		out->unpublished_skip_acquires == 0 &&
+		out->unpublished_skip_currents == 0 &&
 		out->gles2_draws == 1 && out->gles2_state_restore_failures == 0 &&
 		out->live_state_records == 0;
 	out->passed = passed != 0;
 
 	egl_text_frame_acquire_fn = saved_acquire;
 	egl_text_frame_release_fn = saved_release;
+	egl_text_overlay_live_fn = saved_live;
 	host_eglGetCurrentDisplay = saved_current_display;
 	host_eglGetCurrentSurface = saved_current_surface;
 	host_eglGetCurrentContext = saved_current_context;
@@ -3399,6 +3457,9 @@ void *tipsy_gles_dlsym(const char *name)
 
 	if (name == NULL) {
 		return NULL;
+	}
+	if (name[0] == 'e' && name[1] == 'g' && name[2] == 'l') {
+		return tipsy_egl_dlsym(name);
 	}
 	ensure_egl();
 	if (lib_gles != NULL) {
