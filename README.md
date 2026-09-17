@@ -109,7 +109,7 @@ The image never contains Roblox bytes. Use the in-app assistant, then Play.
 
 **At a glance**
 
-- **Platform:** Linux x86_64, native X11
+- **Platform:** Linux x86_64-v3 (AVX2), native X11
 - **Client:** official Android x86-64 Roblox
 - **Window:** native X11, not a full Android OS
 - **Graphics:** OpenGL ES via EGL; Vulkan when Auto can probe a complete host path
@@ -144,7 +144,7 @@ launcher or URI handler of your real Tipsy install.
 
 | Need | Detail |
 | --- | --- |
-| CPU / OS | Linux **x86_64** |
+| CPU / OS | Linux **x86_64-v3** (AVX2: Intel Haswell 2013+, AMD Excavator 2015+ or Zen). Official packages use `GOAMD64=v3`. |
 | Display | Native **X11** (`DISPLAY` set). Tipsy is X11-first, not a Wayland client. |
 | GPU | Mesa (or equivalent) EGL / OpenGL ES. Vulkan is used when Auto can probe a complete host path (loader, physical device, xcb/xlib WSI). |
 | Audio | PulseAudio or PipeWire’s Pulse server |
@@ -331,7 +331,7 @@ The GUI (`cmd/tipsy-gui`) is presentation only. Package provenance, extraction, 
 ## Compile from source
 
 > [!NOTE]
-> Target is **Linux x86_64**. The CLI is Go-first. The GUI uses Qt 6 through [MIQT](https://github.com/mappu/miqt). Both binaries use cgo against X11, EGL/GLES, Pango/Cairo, and PulseAudio. Vulkan development headers are **not** required; the Vulkan path `dlopen`s the host loader at runtime.
+> Target is **Linux x86_64-v3** (`GOAMD64=v3`, AVX2). The CLI is Go-first. The GUI uses Qt 6 through [MIQT](https://github.com/mappu/miqt). Both binaries use cgo against X11, EGL/GLES, Pango/Cairo, and PulseAudio. Vulkan development headers are **not** required; the Vulkan path `dlopen`s the host loader at runtime.
 
 ### 1. Toolchain
 
@@ -385,12 +385,12 @@ git clone https://github.com/32bitx64bit/Tipsy.git
 cd Tipsy
 
 ./scripts/bootstrap.sh
-GOAMD64=v2 go test ./...
-GOAMD64=v2 go build -o bin/tipsy ./cmd/tipsy
-GOAMD64=v2 go build -o bin/tipsy-gui ./cmd/tipsy-gui
+GOAMD64=v3 go test ./...
+GOAMD64=v3 go build -o bin/tipsy ./cmd/tipsy
+GOAMD64=v3 go build -o bin/tipsy-gui ./cmd/tipsy-gui
 ```
 
-`bootstrap.sh` never fails with a one-liner: it reports Go, architecture, Qt, X11, and a C compiler, then tells you what is missing.
+`bootstrap.sh` never fails with a one-liner: it reports Go, architecture, AVX2, Qt, X11, and a C compiler, then tells you what is missing. On a CPU without AVX2, `GOAMD64=v2` still compiles a local fallback; that is not an official release target.
 
 ### 4. Install launchers (optional)
 

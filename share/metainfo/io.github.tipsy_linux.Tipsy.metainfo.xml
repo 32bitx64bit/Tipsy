@@ -10,6 +10,7 @@
   </developer>
 	<description>
     <p>Tipsy is a Linux compatibility runtime and Qt 6 desktop application for a user-provided official Roblox Android x86-64 client.</p>
+    <p>Official builds require an x86-64-v3 CPU (AVX2).</p>
     <p>The package installs two launchers: Tipsy - Play starts the official client directly, and Tipsy - Settings opens the setup and configuration window. Play also handles roblox: and roblox-player: website launch URIs. Roblox is not included. Tipsy does not collect Roblox credentials.</p>
   </description>
   <launchable type="desktop-id">io.github.tipsy_linux.Tipsy.Play.desktop</launchable>

@@ -45,6 +45,8 @@ func TestAppRunUsesOnlyItsAppDir(t *testing.T) {
 		"--settings",
 		"integrate_pin_entries",
 		`"$appdir/usr/bin/tipsy" desktop adopt --if-unowned`,
+		"require_avx2",
+		"GOAMD64=v2",
 	} {
 		if !strings.Contains(text, required) {
 			t.Errorf("AppRun is missing %q", required)
@@ -54,6 +56,9 @@ func TestAppRunUsesOnlyItsAppDir(t *testing.T) {
 		if strings.Contains(text, forbidden) {
 			t.Errorf("AppRun contains forbidden release coupling %q", forbidden)
 		}
+	}
+	if !strings.Contains(text, "require_avx2\n\nif [ \"$integrate\" -eq 1 ]; then") {
+		t.Fatal("AppRun must require AVX2 after argument parsing and before exec of tipsy or tipsy-gui")
 	}
 }
 
@@ -220,6 +225,7 @@ func TestAppDirBuilderRequiresFocusedTextNativeStack(t *testing.T) {
 		`pkg-config --exists "${required_pkg_modules[@]}"`,
 		`queue+=("$library")`,
 		`copy_package_license "$library"`,
+		"export GOAMD64=v3",
 	} {
 		if !strings.Contains(text, required) {
 			t.Errorf("build-appdir.sh is missing %q", required)

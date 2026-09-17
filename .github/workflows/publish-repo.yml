@@ -203,7 +203,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          export GOAMD64=v2 CGO_ENABLED=1
+          export GOAMD64=v3 CGO_ENABLED=1
           scripts/build-tipsy-binaries.sh \
             --version '${{ needs.prepare.outputs.version }}' --channel stable \
             --output-dir build-bin

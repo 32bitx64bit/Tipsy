@@ -46,7 +46,7 @@ modules:
       # live here rather than in an `export` line.
       env:
         CGO_ENABLED: '1'
-        GOAMD64: v2
+        GOAMD64: v3
         GOFLAGS: -buildvcs=false -mod=readonly -modcacherw -trimpath
         GOTOOLCHAIN: local
         GOCACHE: /run/build/tipsy/.gocache

@@ -47,6 +47,7 @@ func TestBuildFlatpakRendersManifestForBothModes(t *testing.T) {
 				"/app/share/tipsy/build-info.json",
 				"install -Dm0644 tipsy.png /app/share/icons/hicolor/512x512/apps/io.github.tipsy_linux.Tipsy.png\n",
 				"install -Dm0644 tipsy.png /app/share/icons/hicolor/512x512/apps/tipsy.png\n",
+				"GOAMD64: v3",
 			} {
 				if !strings.Contains(manifest, want) {
 					t.Errorf("rendered manifest lacks %q", want)

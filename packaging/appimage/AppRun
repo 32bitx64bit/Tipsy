@@ -5,6 +5,17 @@ set -eu
 
 appdir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 
+# Official payloads are GOAMD64=v3. A v3 Go binary SIGILLs before main on a
+# CPU without AVX2, so this check must run before any exec of tipsy/tipsy-gui.
+require_avx2() {
+	if [ -r /proc/cpuinfo ] && grep -E '(^|[[:space:]])avx2([[:space:]]|$)' /proc/cpuinfo >/dev/null 2>&1; then
+		return 0
+	fi
+	printf '%s\n' "Tipsy: this AppImage needs a CPU with AVX2 (x86-64-v3: Intel Haswell 2013+, AMD Excavator 2015+ or Zen)." >&2
+	printf '%s\n' "Build from source with GOAMD64=v2 for a local fallback; that is not an official release." >&2
+	exit 1
+}
+
 export APPDIR="$appdir"
 export PATH="$appdir/usr/bin${PATH:+:$PATH}"
 export LD_LIBRARY_PATH="$appdir/usr/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
@@ -116,6 +127,8 @@ while [ $# -gt 0 ]; do
 			;;
 	esac
 done
+
+require_avx2
 
 if [ "$integrate" -eq 1 ]; then
 	(integrate_pin_entries) || true

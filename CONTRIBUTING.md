@@ -10,8 +10,9 @@ This guide is the contribution contract. Please read the [README](README.md),
 
 ## Start here
 
-The supported development target is Linux x86_64. Tipsy uses Go 1.27.1, a C
-compiler, pkg-config, Qt 6, and the native headers listed in the README's
+The supported development target is Linux x86_64-v3 (AVX2), matching official
+packages. Tipsy uses Go 1.27.1, a C compiler, pkg-config, Qt 6, and the native
+headers listed in the README's
 [source-build instructions](README.md#compile-from-source).
 
 ```sh
@@ -19,9 +20,9 @@ git clone https://github.com/32bitx64bit/Tipsy.git
 cd Tipsy
 
 ./scripts/bootstrap.sh
-GOAMD64=v2 go test ./...
-GOAMD64=v2 go build -o bin/tipsy ./cmd/tipsy
-GOAMD64=v2 go build -o bin/tipsy-gui ./cmd/tipsy-gui
+GOAMD64=v3 go test ./...
+GOAMD64=v3 go build -o bin/tipsy ./cmd/tipsy
+GOAMD64=v3 go build -o bin/tipsy-gui ./cmd/tipsy-gui
 ```
 
 Use a source build only as a development build. `--development` records that
@@ -84,10 +85,10 @@ review, run the broad checks your machine can support:
 
 ```sh
 gofmt -w <changed-go-files>
-GOAMD64=v2 go vet -unsafeptr=false ./...
-GOAMD64=v2 go test -count=1 ./...
-GOAMD64=v2 go build -o bin/tipsy ./cmd/tipsy
-GOAMD64=v2 go build -o bin/tipsy-gui ./cmd/tipsy-gui
+GOAMD64=v3 go vet -unsafeptr=false ./...
+GOAMD64=v3 go test -count=1 ./...
+GOAMD64=v3 go build -o bin/tipsy ./cmd/tipsy
+GOAMD64=v3 go build -o bin/tipsy-gui ./cmd/tipsy-gui
 git diff --check
 ```
 

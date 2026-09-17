@@ -28,6 +28,12 @@ else
 	bad "Architecture $arch is not x86_64. Tipsy runs the official Android x86-64 client natively."
 fi
 
+if [ -r /proc/cpuinfo ] && grep -E '(^|[[:space:]])avx2([[:space:]]|$)' /proc/cpuinfo >/dev/null 2>&1; then
+	pass "CPU: AVX2 (x86-64-v3), matches official GOAMD64=v3 packages"
+else
+	note "CPU has no AVX2. Official packages need x86-64-v3. Local fallback: GOAMD64=v2 go build ..."
+fi
+
 if command -v pkg-config >/dev/null 2>&1; then
 	pass "pkg-config: $(command -v pkg-config)"
 else
@@ -59,4 +65,4 @@ if [ "$fail" -ne 0 ]; then
 	exit 1
 fi
 
-say "Next: go test ./... && go build -o bin/tipsy ./cmd/tipsy"
+say "Next: GOAMD64=v3 go test ./... && GOAMD64=v3 go build -o bin/tipsy ./cmd/tipsy"

@@ -46,7 +46,9 @@ repo=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 mkdir -p "$output_dir"
 output_dir=$(CDPATH= cd -- "$output_dir" && pwd)
 
-export GOAMD64="${GOAMD64:-v2}"
+# Official packages target x86-64-v3 (AVX2). Override with GOAMD64=v2 only for
+# a local fallback on older CPUs; that is not a public release baseline.
+export GOAMD64="${GOAMD64:-v3}"
 ldflags="-buildid= -s -w -X github.com/tipsy-linux/tipsy/internal/version.Version=${version} -X github.com/tipsy-linux/tipsy/internal/version.Channel=${channel}"
 cd "$repo"
 go build -buildvcs=false -mod=readonly -trimpath -ldflags "$ldflags" -o "$output_dir/tipsy" ./cmd/tipsy
