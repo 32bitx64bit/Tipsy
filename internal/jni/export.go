@@ -17,6 +17,7 @@ import (
 	"math"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"unicode/utf16"
 	"unsafe"
 
@@ -845,6 +846,99 @@ func GoJNI_GetStringLength(env *C.JNIEnv, str C.jstring) C.jsize {
 	return C.jsize(objectUTF16Length(o))
 }
 
+func stringCharsUnitBytes() int {
+	return int(unsafe.Sizeof(C.jchar(0)))
+}
+
+func stringCharsPinOverflow(units int) bool {
+	const maxInt = int(^uint(0) >> 1)
+	unitBytes := stringCharsUnitBytes()
+	return units < 0 || units >= maxInt || units+1 > maxInt/unitBytes
+}
+
+func encodeStringCharsPin(o *Object) unsafe.Pointer {
+	if o == nil {
+		return nil
+	}
+	units := objectUTF16Length(o)
+	if stringCharsPinOverflow(units) {
+		return nil
+	}
+	// Preserve Tipsy's existing terminator-inclusive allocation convention;
+	// GetStringChars itself does not require a trailing zero.
+	count := units + 1
+	p := C.malloc(C.size_t(count * stringCharsUnitBytes()))
+	if p == nil {
+		return nil
+	}
+	dst := unsafe.Slice((*uint16)(p), count)
+	// An ordinary Go string has no retained UTF-16 representation. Encode it
+	// straight into the native buffer instead of materializing a temporary
+	// full UTF-16 slice. rawUTF16 is intentionally different: it exists
+	// exactly for a Java String whose unpaired surrogates cannot be recovered
+	// from o.str, so copy those retained code units. Never return a pointer
+	// into a Go []uint16; this buffer is C-owned.
+	written := 0
+	if o.utf16 != nil {
+		written = copy(dst[:units], o.utf16.units)
+	} else {
+		written = encodeUTF16To(dst[:units], o.str)
+	}
+	if written != units {
+		C.free(p)
+		return nil
+	}
+	dst[units] = 0
+	return p
+}
+
+func internStringCharsPin(vm *VM, o *Object) (p *C.jchar, interned bool) {
+	if o == nil {
+		return nil, false
+	}
+	if pin := atomic.LoadPointer(&o.charsPin); pin != nil {
+		return (*C.jchar)(pin), false
+	}
+	buf := encodeStringCharsPin(o)
+	if buf == nil {
+		return nil, false
+	}
+	if vm == nil {
+		C.free(buf)
+		return nil, false
+	}
+	vm.mu.Lock()
+	if vm.objects[o.id] != o {
+		vm.mu.Unlock()
+		C.free(buf)
+		return nil, false
+	}
+	if pin := atomic.LoadPointer(&o.charsPin); pin != nil {
+		vm.mu.Unlock()
+		C.free(buf)
+		return (*C.jchar)(pin), false
+	}
+	atomic.StorePointer(&o.charsPin, buf)
+	vm.mu.Unlock()
+	return (*C.jchar)(buf), true
+}
+
+func freeStringCharsPin(o *Object) {
+	if o == nil {
+		return
+	}
+	if pin := atomic.SwapPointer(&o.charsPin, nil); pin != nil {
+		C.free(pin)
+	}
+}
+
+func stringCharsPinOf(o *Object) unsafe.Pointer {
+	if o == nil {
+		return nil
+	}
+	return atomic.LoadPointer(&o.charsPin)
+}
+
 //export GoJNI_GetStringChars
 func GoJNI_GetStringChars(env *C.JNIEnv, str C.jstring, isCopy *C.jboolean) *C.jchar {
 	vm := vmFromEnv(unsafe.Pointer(env))
@@ -858,38 +952,45 @@ func GoJNI_GetStringChars(env *C.JNIEnv, str C.jstring, isCopy *C.jboolean) *C.j
 	if o == nil {
 		return nil
 	}
-	units := objectUTF16Length(o)
-	const maxInt = int(^uint(0) >> 1)
-	unitBytes := int(unsafe.Sizeof(C.jchar(0)))
-	if units < 0 || units >= maxInt || units+1 > maxInt/unitBytes {
-		return nil
-	}
-	// Preserve Tipsy's existing terminator-inclusive allocation convention;
-	// GetStringChars itself does not require a trailing zero.
-	count := units + 1
-	p := C.malloc(C.size_t(count * unitBytes))
+	p, interned := internStringCharsPin(vm, o)
 	if p == nil {
 		return nil
 	}
-	dst := unsafe.Slice((*uint16)(p), count)
-	// An ordinary Go string has no retained UTF-16 representation. Encode it
-	// straight into the native buffer that this JNI call returns instead of
-	// materializing a temporary full UTF-16 slice. rawUTF16 is intentionally
-	// different: it exists exactly for a Java String whose unpaired surrogates
-	// cannot be recovered from o.str, so copy those retained code units.
-	written := 0
-	if o.utf16 != nil {
-		written = copy(dst[:units], o.utf16.units)
-	} else {
-		written = encodeUTF16To(dst[:units], o.str)
+	if isCopy != nil {
+		*isCopy = C.JNI_FALSE
 	}
-	if written != units {
-		C.free(p)
-		return nil
+	units := objectUTF16Length(o)
+	unitBytes := stringCharsUnitBytes()
+	utf16Bytes := uint64(units * unitBytes)
+	cBytes := uint64(0)
+	copied := uint64(0)
+	if interned {
+		cBytes = uint64((units + 1) * unitBytes)
+		copied = utf16Bytes
 	}
-	dst[units] = 0
-	stringDiagnosticsAddCurrent(1, 0, 0, uint64(units*unitBytes), uint64(count*unitBytes), uint64(units*unitBytes), 0)
-	return (*C.jchar)(p)
+	stringDiagnosticsAddCurrent(1, 0, 0, utf16Bytes, cBytes, copied, 0)
+	return p
+}
+
+//export GoJNI_ReleaseStringChars
+func GoJNI_ReleaseStringChars(env *C.JNIEnv, str C.jstring, chars *C.jchar) {
+	if chars == nil {
+		return
+	}
+	vm := vmFromEnv(unsafe.Pointer(env))
+	if vm == nil {
+		return
+	}
+	o := vm.get(jobjectToID(uintptr(str)))
+	if o == nil {
+		// Reclaimed or invalid: a pin was already freed on destroy. Do not
+		// free again. GetStringChars no longer returns per-call copies.
+		return
+	}
+	if pin := stringCharsPinOf(o); pin != nil && unsafe.Pointer(chars) == pin {
+		return
+	}
+	C.free(unsafe.Pointer(chars))
 }
 
 //export GoJNI_NewStringUTF

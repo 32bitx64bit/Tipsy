@@ -24,7 +24,11 @@ type Object struct {
 	// String's UTF-16 code units (an unpaired surrogate). Ordinary strings
 	// continue to derive units when a JNI string operation needs them rather
 	// than retaining a second representation as a cache.
-	utf16       *rawUTF16
+	utf16 *rawUTF16
+	// charsPin is a C.malloc UTF-16 buffer plus the existing NUL terminator.
+	// GetStringChars returns it with isCopy=JNI_FALSE. It is not a Go slice.
+	// Access only with atomic.LoadPointer / StorePointer / SwapPointer.
+	charsPin    unsafe.Pointer
 	fields      map[string]any
 	elems       []int64
 	bytes       []byte

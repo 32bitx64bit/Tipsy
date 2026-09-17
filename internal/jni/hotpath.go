@@ -14,6 +14,17 @@ static void tipsy_test_release_string_chars(JNIEnv *env, jstring str, const jcha
 		env->functions->ReleaseStringChars(env, str, chars);
 	}
 }
+static const jchar *tipsy_test_get_string_critical(JNIEnv *env, jstring str, jboolean *isCopy) {
+	if (env == NULL || env->functions == NULL || env->functions->GetStringCritical == NULL) {
+		return NULL;
+	}
+	return env->functions->GetStringCritical(env, str, isCopy);
+}
+static void tipsy_test_release_string_critical(JNIEnv *env, jstring str, const jchar *chars) {
+	if (env != NULL && env->functions != NULL && env->functions->ReleaseStringCritical != NULL) {
+		env->functions->ReleaseStringCritical(env, str, chars);
+	}
+}
 */
 import "C"
 
@@ -31,6 +42,16 @@ func testGetStringChars(envRaw unsafe.Pointer, strID int64) (ptr unsafe.Pointer,
 
 func testReleaseStringChars(envRaw unsafe.Pointer, strID int64, chars unsafe.Pointer) {
 	C.tipsy_test_release_string_chars((*C.JNIEnv)(envRaw), jstringOf(idToJobject(strID)), (*C.jchar)(chars))
+}
+
+func testGetStringCritical(envRaw unsafe.Pointer, strID int64) (ptr unsafe.Pointer, isCopy bool) {
+	var copyFlag C.jboolean
+	p := C.tipsy_test_get_string_critical((*C.JNIEnv)(envRaw), jstringOf(idToJobject(strID)), &copyFlag)
+	return unsafe.Pointer(p), copyFlag != 0
+}
+
+func testReleaseStringCritical(envRaw unsafe.Pointer, strID int64, chars unsafe.Pointer) {
+	C.tipsy_test_release_string_critical((*C.JNIEnv)(envRaw), jstringOf(idToJobject(strID)), (*C.jchar)(chars))
 }
 
 func testIsInstanceOf(envRaw unsafe.Pointer, obj, clazz uintptr) bool {

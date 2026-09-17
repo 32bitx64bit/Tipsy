@@ -209,7 +209,7 @@ static int consume_string_chars(JNIEnv *env, jstring value, const struct tipsy_j
 	jsize i;
 
 	chars = env->functions->GetStringChars(env, value, &is_copy);
-	if (chars == NULL || is_copy != JNI_TRUE) {
+	if (chars == NULL || is_copy != JNI_FALSE) {
 		return TIPSY_JNI_PERF_EXPECTED;
 	}
 	length = query_length ? env->functions->GetStringLength(env, value) : (jsize)cfg->expected;

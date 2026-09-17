@@ -144,10 +144,11 @@ func TestJNIStringDiagnosticsExactVTableMappingAndAggregation(t *testing.T) {
 			t.Fatalf("release path %d retained unsupported payload metric: %+v", path, stats)
 		}
 	}
-	for _, stats := range []JNIStringPathStats{chars, critical} {
-		if stats.Succeeded != iterations || stats.OutputUTF16Bytes != iterations*fixtureUTF16Bytes || stats.CAllocatedBytes != iterations*(fixtureUTF16Bytes+2) || stats.CopiedBytes != iterations*fixtureUTF16Bytes {
-			t.Fatalf("UTF-16 get aggregate = %+v", stats)
-		}
+	if chars.Succeeded != iterations || chars.OutputUTF16Bytes != iterations*fixtureUTF16Bytes || chars.CAllocatedBytes != fixtureUTF16Bytes+2 || chars.CopiedBytes != fixtureUTF16Bytes {
+		t.Fatalf("GetStringChars pin aggregate = %+v", chars)
+	}
+	if critical.Succeeded != iterations || critical.OutputUTF16Bytes != iterations*fixtureUTF16Bytes || critical.CAllocatedBytes != 0 || critical.CopiedBytes != 0 {
+		t.Fatalf("GetStringCritical pin-hit aggregate = %+v", critical)
 	}
 	if utf.Succeeded != iterations || utf.OutputUTF8Bytes != iterations*fixtureUTF8Bytes || utf.CAllocatedBytes != iterations*(fixtureUTF8Bytes+1) || utf.CopiedBytes != iterations*fixtureUTF8Bytes {
 		t.Fatalf("UTF get aggregate = %+v", utf)

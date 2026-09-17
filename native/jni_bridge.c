@@ -47,6 +47,7 @@ extern void GoJNI_SetField(JNIEnv *env, jobject obj, jclass clazz, jfieldID fiel
 extern jstring GoJNI_NewString(JNIEnv *env, const jchar *unicode, jsize len);
 extern jsize GoJNI_GetStringLength(JNIEnv *env, jstring str);
 extern const jchar *GoJNI_GetStringChars(JNIEnv *env, jstring str, jboolean *isCopy);
+extern void GoJNI_ReleaseStringChars(JNIEnv *env, jstring str, const jchar *chars);
 extern jstring GoJNI_NewStringUTF(JNIEnv *env, char *utf);
 extern jsize GoJNI_GetStringUTFLength(JNIEnv *env, jstring str);
 extern const char *GoJNI_GetStringUTFChars(JNIEnv *env, jstring str, jboolean *isCopy);
@@ -958,8 +959,6 @@ static void JNICALL t_ReleaseStringChars(JNIEnv *env, jstring str, const jchar *
 	int sampled = 0;
 	uint64_t started_ns = 0;
 
-	(void)env;
-	(void)str;
 	diag = tipsy_jni_string_diag_enabled();
 	if (diag) {
 		sampled = tipsy_jni_string_diag_record_call(TIPSY_JNI_STRING_RELEASE_CHARS);
@@ -968,7 +967,7 @@ static void JNICALL t_ReleaseStringChars(JNIEnv *env, jstring str, const jchar *
 			started_ns = string_diag_monotonic_ns();
 		}
 	}
-	free((void *)chars);
+	GoJNI_ReleaseStringChars(env, str, chars);
 	if (diag) {
 		tipsy_jni_string_diag_leave();
 		if (sampled) {
@@ -1214,8 +1213,6 @@ static void JNICALL t_ReleaseStringCritical(JNIEnv *env, jstring str, const jcha
 	int sampled = 0;
 	uint64_t started_ns = 0;
 
-	(void)env;
-	(void)str;
 	diag = tipsy_jni_string_diag_enabled();
 	if (diag) {
 		sampled = tipsy_jni_string_diag_record_call(TIPSY_JNI_STRING_RELEASE_CRITICAL);
@@ -1224,7 +1221,9 @@ static void JNICALL t_ReleaseStringCritical(JNIEnv *env, jstring str, const jcha
 			started_ns = string_diag_monotonic_ns();
 		}
 	}
-	free((void *)carray);
+	/* GetStringCritical currently shares GoJNI_GetStringChars, so this may be
+	 * the interned pin. Free only owned copies (same rule as ReleaseStringChars). */
+	GoJNI_ReleaseStringChars(env, str, carray);
 	if (diag) {
 		tipsy_jni_string_diag_leave();
 		if (sampled) {

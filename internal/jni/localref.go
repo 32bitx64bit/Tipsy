@@ -267,6 +267,7 @@ func (vm *VM) maybeReclaimLocked(id int64) {
 	}
 	delete(vm.objects, id)
 	delete(vm.monitors, id)
+	freeStringCharsPin(o)
 	vm.unpinOutgoingLocked(o)
 }
 

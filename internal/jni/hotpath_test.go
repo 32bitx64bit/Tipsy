@@ -37,8 +37,8 @@ func TestGetStringLengthAndChars(t *testing.T) {
 	if chars == nil {
 		t.Fatal("GetStringChars")
 	}
-	if !isCopy {
-		t.Fatal("GetStringChars isCopy=false, want true")
+	if isCopy {
+		t.Fatal("GetStringChars isCopy=true, want pinned false")
 	}
 	n := utf16UnitCount(want)
 	got := string(utf16.Decode(unsafe.Slice((*uint16)(chars), n)))
@@ -55,8 +55,11 @@ func checkStringCharsAgainstEncode(t *testing.T, vm *VM, value string) {
 		t.Fatal("NewString")
 	}
 	chars, isCopy := testGetStringChars(vm.envRaw, js)
-	if chars == nil || !isCopy {
-		t.Fatalf("GetStringChars(%q) = (%p, isCopy=%v)", value, chars, isCopy)
+	if chars == nil {
+		t.Fatalf("GetStringChars(%q) = nil isCopy=%v", value, isCopy)
+	}
+	if isCopy {
+		t.Fatalf("GetStringChars(%q) isCopy=true, want pinned false", value)
 	}
 	want := utf16.Encode([]rune(value))
 	got := unsafe.Slice((*uint16)(chars), len(want)+1)
@@ -157,13 +160,16 @@ func TestGetStringCharsUsesOnlyItsFinalUTF16Buffer(t *testing.T) {
 				want = utf16.Encode([]rune(tc.value))
 			}
 
-			// C.malloc owns the returned JNI buffer and is intentionally outside
+			// C.malloc owns the interned JNI pin and is intentionally outside
 			// Go's allocation count. A nonzero count here would mean the normal
 			// path rebuilt a transient UTF-16 slice instead of using that buffer.
 			allocs := testing.AllocsPerRun(100, func() {
 				chars, isCopy := testGetStringChars(vm.envRaw, id)
-				if chars == nil || !isCopy {
+				if chars == nil {
 					t.Fatal("GetStringChars")
+				}
+				if isCopy {
+					t.Fatal("GetStringChars isCopy=true, want pinned false")
 				}
 				testReleaseStringChars(vm.envRaw, id, chars)
 			})
@@ -172,8 +178,11 @@ func TestGetStringCharsUsesOnlyItsFinalUTF16Buffer(t *testing.T) {
 			}
 
 			chars, isCopy := testGetStringChars(vm.envRaw, id)
-			if chars == nil || !isCopy {
+			if chars == nil {
 				t.Fatal("GetStringChars final check")
+			}
+			if isCopy {
+				t.Fatal("GetStringChars final isCopy=true, want pinned false")
 			}
 			got := unsafe.Slice((*uint16)(chars), len(want)+1)
 			for i, unit := range want {
@@ -186,6 +195,66 @@ func TestGetStringCharsUsesOnlyItsFinalUTF16Buffer(t *testing.T) {
 			}
 			testReleaseStringChars(vm.envRaw, id, chars)
 		})
+	}
+}
+
+func TestGetStringCharsPinsStableBuffer(t *testing.T) {
+	vm, err := NewVM()
+	if err != nil {
+		t.Fatal(err)
+	}
+	const wantText = "pin me 😀"
+	js := testNewUTF16String(vm, wantText)
+	first, copyFirst := testGetStringChars(vm.envRaw, js)
+	if first == nil || copyFirst {
+		t.Fatalf("first GetStringChars = (%p, isCopy=%v)", first, copyFirst)
+	}
+	second, copySecond := testGetStringChars(vm.envRaw, js)
+	if second != first || copySecond {
+		t.Fatalf("second GetStringChars = (%p, isCopy=%v), want (%p, false)", second, copySecond, first)
+	}
+	want := utf16.Encode([]rune(wantText))
+	got := unsafe.Slice((*uint16)(first), len(want)+1)
+	for i, unit := range want {
+		if got[i] != unit {
+			t.Fatalf("unit[%d] = %#x, want %#x", i, got[i], unit)
+		}
+	}
+	if got[len(want)] != 0 {
+		t.Fatalf("terminator = %#x, want 0", got[len(want)])
+	}
+	testReleaseStringChars(vm.envRaw, js, first)
+	testReleaseStringChars(vm.envRaw, js, first)
+	third, copyThird := testGetStringChars(vm.envRaw, js)
+	if third != first || copyThird {
+		t.Fatalf("post-release GetStringChars = (%p, isCopy=%v), want (%p, false)", third, copyThird, first)
+	}
+	critical, copyCritical := testGetStringCritical(vm.envRaw, js)
+	if critical != first || copyCritical {
+		t.Fatalf("GetStringCritical = (%p, isCopy=%v), want interned pin (%p, false)", critical, copyCritical, first)
+	}
+	testReleaseStringCritical(vm.envRaw, js, critical)
+	testReleaseStringChars(vm.envRaw, js, third)
+}
+
+func TestReleaseStringCharsAfterReclaimIsSafe(t *testing.T) {
+	vm, err := NewVM()
+	if err != nil {
+		t.Fatal(err)
+	}
+	js := testNewUTF16String(vm, "reclaim pin")
+	chars, isCopy := testGetStringChars(vm.envRaw, js)
+	if chars == nil || isCopy {
+		t.Fatalf("GetStringChars = (%p, isCopy=%v)", chars, isCopy)
+	}
+	testDeleteLocalRef(vm.envRaw, js)
+	if o := vm.get(js); o != nil {
+		t.Fatal("string survived DeleteLocalRef")
+	}
+	testReleaseStringChars(vm.envRaw, js, chars)
+	testReleaseStringChars(vm.envRaw, js, chars)
+	if chars, isCopy := testGetStringChars(vm.envRaw, js); chars != nil || !isCopy {
+		t.Fatalf("Get after reclaim = (%p, isCopy=%v), want (nil, true)", chars, isCopy)
 	}
 }
 
