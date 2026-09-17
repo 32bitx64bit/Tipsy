@@ -848,10 +848,29 @@ static void free_node(queue_node *n)
 	free(n);
 }
 
+/* PCM snapshot between distinct buffers. memcpy onto an aliased pointer is
+ * undefined, and a second Tipsy copy of the same bytes is wasted once Pulse
+ * or the fake host already consume io_buffer in place. Returns 1 when bytes
+ * moved. Does not log or inspect sample values. */
+static int queue_snapshot_pcm(void *dst, const void *src, size_t size)
+{
+	if (dst == NULL || src == NULL || size == 0 || dst == src)
+		return 0;
+	memcpy(dst, src, size);
+	return 1;
+}
+
+static void queue_note_copy_locked(tipsy_sl_object *o, size_t size)
+{
+	o->queue_copy_operations++;
+	o->queue_copy_bytes += size;
+}
+
 /* o->mu protects the pool. Completed nodes return before the callback so a
  * reentrant Enqueue can safely reserve that same storage. client_buffer is
  * borrowed only for the active queue entry and is never retained in a free
- * node; playback has already copied it, while recorder copies only at delivery. */
+ * node; playback has already snapshotted it into io_buffer, while recorder
+ * copies io->client only at delivery when the pointers are distinct. */
 static void recycle_node_locked(tipsy_sl_object *o, queue_node *n)
 {
 	if (n == NULL)
@@ -1091,6 +1110,9 @@ static void *stream_worker(void *arg)
 					rc = -1;
 				}
 				if (rc == 0)
+					/* Host transfer is io_buffer in place. Do not snapshot
+					 * that PCM into another Tipsy buffer first; pa_simple_write
+					 * / pa_simple_read (or the fake host) is the remaining copy. */
 					rc = backend_transfer(o, n->io_buffer, n->size);
 			}
 		}
@@ -1112,8 +1134,9 @@ static void *stream_worker(void *arg)
 			o->queue_count--;
 		int deliver = rc == 0 && transfer && !o->destroying && state_active(o) &&
 		              n->generation == o->queue_generation;
-		if (deliver && o->kind == OBJ_RECORDER)
-			memcpy(n->client_buffer, n->io_buffer, n->size);
+		if (deliver && o->kind == OBJ_RECORDER &&
+		    queue_snapshot_pcm(n->client_buffer, n->io_buffer, n->size))
+			queue_note_copy_locked(o, n->size);
 		if (deliver) {
 			o->queue_index++;
 			o->bytes_transferred += n->size;
@@ -1561,11 +1584,11 @@ static SLresult queue_enqueue(SLBufferQueueItf self, const void *buffer, SLuint3
 	n->client_buffer = (void *)buffer;
 	n->size = size;
 	n->generation = o->queue_generation;
-	if (o->kind == OBJ_PLAYER) {
-		memcpy(n->io_buffer, buffer, size);
-		o->queue_copy_operations++;
-		o->queue_copy_bytes += size;
-	}
+	/* Player Enqueue owns a snapshot in io_buffer so a later client mutation
+	 * (or a recycled node reused before Pulse finishes) cannot change the
+	 * queued PCM. The worker then hands that same io_buffer to the host. */
+	if (o->kind == OBJ_PLAYER && queue_snapshot_pcm(n->io_buffer, buffer, size))
+		queue_note_copy_locked(o, size);
 	if (o->tail != NULL)
 		o->tail->next = n;
 	else
@@ -2363,6 +2386,8 @@ int tipsy_audio_test_queue_ownership(tipsy_audio_queue_ownership_result *out)
 	state.bytes = bytes;
 	int ok = 0;
 	if (buffer == NULL) goto done;
+	/* Aliased src/dst must not call memcpy (undefined) or count as a copy. */
+	if (queue_snapshot_pcm(buffer, buffer, bytes) != 0) goto done;
 	/* Enqueue owns the player PCM copy, not the caller's buffer. Mutating the
 	 * caller allocation after the first enqueue must not change its later host
 	 * transfer; the fake backend exposes only a pass/fail bit, never samples. */
@@ -2375,12 +2400,20 @@ int tipsy_audio_test_queue_ownership(tipsy_audio_queue_ownership_result *out)
 	if ((*player)->Realize(player, 0) != 0 || (*player)->GetInterface(player, SL_IID_ANDROIDSIMPLEBUFFERQUEUE, &queue) != 0 ||
 	    (*player)->GetInterface(player, SL_IID_PLAY, &play) != 0) goto done;
 	if ((*queue)->RegisterCallback(queue, queue_ownership_test_callback, &state) != 0) goto done;
-	/* The third pre-play enqueue must be rejected. The baseline records that
-	 * it nevertheless allocated and copied before capacity was checked. */
+	/* Capacity is reserved under o->mu before any node/payload allocation or
+	 * player ownership copy. A full-queue Enqueue must not malloc or memcpy. */
 	if ((*queue)->Enqueue(queue, buffer, bytes) != 0) goto done;
 	memset(buffer, expected_playback_first[1], bytes);
 	if ((*queue)->Enqueue(queue, buffer, bytes) != 0 ||
 	    (*queue)->Enqueue(queue, buffer, bytes) != SL_RESULT_BUFFER_INSUFFICIENT) goto done;
+	tipsy_sl_object *player_obj = from_object(player);
+	pthread_mutex_lock(&player_obj->mu);
+	int rejected_without_copy = player_obj->queue_copy_operations == 2 &&
+	                            player_obj->queue_payload_allocations == 2 &&
+	                            player_obj->queue_node_allocations == 2 &&
+	                            player_obj->queue_capacity_rejections == 1;
+	pthread_mutex_unlock(&player_obj->mu);
+	if (!rejected_without_copy) goto done;
 	if ((*play)->SetPlayState(play, SL_PLAYSTATE_PLAYING) != 0 ||
 	    !test_wait_count(&state.state, QUEUE_OWNERSHIP_CALLBACKS, 2000)) goto done;
 	pthread_mutex_lock(&state.state.mu);
