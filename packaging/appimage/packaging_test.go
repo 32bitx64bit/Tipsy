@@ -714,6 +714,9 @@ func TestAllWorkflowsShareTheNativeInstallSurface(t *testing.T) {
 		if compilesNative && !strings.Contains(text, "scripts/ci-install-native.sh") {
 			t.Errorf("%s compiles CGO without scripts/ci-install-native.sh", name)
 		}
+		if name == "publish-repo.yml" && strings.Contains(text, "ppa:flatpak") {
+			t.Errorf("%s must install archive Flatpak; Launchpad PPAs 503 the publish job", name)
+		}
 	}
 }
 
