@@ -22,11 +22,12 @@ as_root() {
 }
 
 native_modules=(
-	x11 x11-xcb xrandr xext xi xtst
+	x11 x11-xcb xrandr xext xi xtst xdamage
 	pangocairo pangoft2 cairo-xlib
 	egl glesv2
 	libpulse libpulse-simple
 	gtk+-3.0 webkit2gtk-4.1
+	vulkan
 )
 qt_modules=(Qt6Widgets Qt6Gui Qt6Core)
 qt_pc_dir=/tmp/tipsy-ci-pkgconfig
@@ -128,19 +129,21 @@ if command -v apt-get >/dev/null 2>&1; then
 	as_root apt-get update
 	as_root apt-get install -y --no-install-recommends \
 		ca-certificates curl gcc g++ git pkg-config xvfb \
-		libx11-dev libx11-xcb-dev libxext-dev libxrandr-dev libxtst-dev libxi-dev libxcb1-dev \
+		libx11-dev libx11-xcb-dev libxext-dev libxrandr-dev libxtst-dev libxi-dev libxdamage-dev libxcb1-dev \
 		libegl1-mesa-dev libgles2-mesa-dev libgl1-mesa-dev libcairo2-dev \
 		libpango1.0-dev libpulse-dev \
 		libgtk-3-dev libwebkit2gtk-4.1-dev \
+		libvulkan-dev \
 		qt6-base-dev qt6-base-dev-tools
 elif command -v dnf >/dev/null 2>&1; then
 	as_root dnf install -y --setopt=install_weak_deps=False \
 		ca-certificates curl gcc gcc-c++ git pkgconf-pkg-config \
 		xorg-x11-server-Xvfb \
-		libX11-devel libXext-devel libXrandr-devel libXtst-devel libXi-devel libxcb-devel \
+		libX11-devel libXext-devel libXrandr-devel libXtst-devel libXi-devel libXdamage-devel libxcb-devel \
 		mesa-libEGL-devel mesa-libGLES-devel mesa-libGL-devel \
 		pango-devel cairo-devel pulseaudio-libs-devel \
 		gtk3-devel webkit2gtk4.1-devel \
+		vulkan-headers vulkan-loader-devel \
 		qt6-qtbase-devel
 else
 	fail 'need apt-get or dnf'
@@ -153,6 +156,8 @@ if ! require_modules "${qt_modules[@]}"; then
 	require_modules "${qt_modules[@]}" || fail 'Qt 6 pkg-config still missing after qmake synthesis'
 fi
 test -f /usr/include/X11/Xlib-xcb.h || fail 'missing Xlib-xcb.h'
+test -f /usr/include/X11/extensions/Xdamage.h || fail 'missing Xdamage.h'
+test -f /usr/include/vulkan/vulkan.h || fail 'missing vulkan.h'
 test -f /usr/include/pulse/simple.h || fail 'missing pulse/simple.h'
 test -f /usr/include/pulse/error.h || fail 'missing pulse/error.h'
 command -v Xvfb >/dev/null 2>&1 || fail 'Xvfb is not on PATH'

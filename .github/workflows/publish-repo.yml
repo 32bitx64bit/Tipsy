@@ -181,6 +181,9 @@ jobs:
         run: |
           set -euo pipefail
           scripts/ci-install-native.sh
+          if [ -d /tmp/tipsy-ci-pkgconfig ]; then
+            export PKG_CONFIG_PATH="/tmp/tipsy-ci-pkgconfig${PKG_CONFIG_PATH:+:$PKG_CONFIG_PATH}"
+          fi
           sudo apt-get install -y --no-install-recommends \
             dpkg-dev rpm createrepo-c gnupg lintian libarchive-tools zstd fakeroot
           command -v dpkg-deb && command -v rpmbuild && command -v createrepo_c
@@ -495,7 +498,7 @@ jobs:
     # secrets: everything checked is public.
     needs: [prepare, publish]
     if: needs.prepare.outputs.do_publish == 'true'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 20
     steps:
       - name: Wait for Pages, then verify the live repositories

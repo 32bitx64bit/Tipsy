@@ -19,6 +19,15 @@
 
 #include <vulkan/vulkan.h>
 
+/* Ubuntu 22.04 / Debian Bookworm Khronos headers predate these create flags.
+ * Spec values: VkDeviceQueueCreateFlagBits, VkPipelineCacheCreateFlagBits. */
+#ifndef VK_DEVICE_QUEUE_CREATE_INTERNALLY_SYNCHRONIZED_BIT_KHR
+#define VK_DEVICE_QUEUE_CREATE_INTERNALLY_SYNCHRONIZED_BIT_KHR 0x00000002u
+#endif
+#ifndef VK_PIPELINE_CACHE_CREATE_EXTERNALLY_SYNCHRONIZED_BIT_EXT
+#define VK_PIPELINE_CACHE_CREATE_EXTERNALLY_SYNCHRONIZED_BIT_EXT 0x00000001u
+#endif
+
 #include <X11/Xlib.h>
 #include <X11/Xutil.h>
 #include <X11/extensions/shape.h>

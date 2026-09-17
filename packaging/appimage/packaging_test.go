@@ -221,8 +221,10 @@ func TestAppDirBuilderRequiresFocusedTextNativeStack(t *testing.T) {
 	}
 	text := string(data)
 	for _, required := range []string{
-		"required_pkg_modules=(Qt6Widgets Qt6Gui Qt6Core x11 xext pangocairo pangoft2 cairo-xlib libpulse libpulse-simple)",
+		"required_pkg_modules=(Qt6Widgets Qt6Gui Qt6Core x11 x11-xcb xext xrandr xi xdamage pangocairo pangoft2 cairo-xlib libpulse libpulse-simple gtk+-3.0 webkit2gtk-4.1 vulkan)",
 		`pkg-config --exists "${required_pkg_modules[@]}"`,
+		"[[ -f /usr/include/vulkan/vulkan.h ]]",
+		"[[ -f /usr/include/X11/extensions/Xdamage.h ]]",
 		`queue+=("$library")`,
 		`copy_package_license "$library"`,
 		"export GOAMD64=v3",
@@ -669,7 +671,7 @@ func TestWorkflowDependenciesAreImmutableAndLeastPrivilege(t *testing.T) {
 		t.Fatal(err)
 	}
 	installText := string(install)
-	for _, required := range []string{"libpulse-dev", "libxi-dev", "xvfb", "pulseaudio-libs-devel", "libXi-devel", "pkg-config --exists", "qmake6", "Qt6Widgets.pc"} {
+	for _, required := range []string{"libpulse-dev", "libxi-dev", "libxdamage-dev", "libvulkan-dev", "libgtk-3-dev", "libwebkit2gtk-4.1-dev", "xvfb", "pulseaudio-libs-devel", "libXi-devel", "libXdamage-devel", "vulkan-headers", "pkg-config --exists", "qmake6", "Qt6Widgets.pc", "xdamage", "gtk+-3.0", "webkit2gtk-4.1", "vulkan"} {
 		if !strings.Contains(installText, required) {
 			t.Errorf("ci-install-native.sh is missing %q", required)
 		}
@@ -682,6 +684,35 @@ func TestWorkflowDependenciesAreImmutableAndLeastPrivilege(t *testing.T) {
 	for _, required := range []string{"go vet -unsafeptr=false ./...", "go test", "-race", "go build -o bin/tipsy ./cmd/tipsy", "go build -o bin/tipsy-gui ./cmd/tipsy-gui", "Xvfb", "/tmp/tipsy-ci-pkgconfig"} {
 		if !strings.Contains(testText, required) {
 			t.Errorf("ci-test-build.sh is missing %q", required)
+		}
+	}
+}
+
+func TestAllWorkflowsShareTheNativeInstallSurface(t *testing.T) {
+	root := repoRoot(t)
+	workflows, err := filepath.Glob(filepath.Join(root, ".github", "workflows", "*.yml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(workflows) == 0 {
+		t.Fatal("no GitHub workflows found")
+	}
+	for _, path := range workflows {
+		data, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		text := string(data)
+		name := filepath.Base(path)
+		if strings.Contains(text, "ubuntu-latest") {
+			t.Errorf("%s still uses mutable ubuntu-latest", name)
+		}
+		compilesNative := strings.Contains(text, "scripts/ci-test-build.sh") ||
+			strings.Contains(text, "scripts/release-build.sh") ||
+			strings.Contains(text, "scripts/build-tipsy-binaries.sh") ||
+			strings.Contains(text, "scripts/build-appdir.sh")
+		if compilesNative && !strings.Contains(text, "scripts/ci-install-native.sh") {
+			t.Errorf("%s compiles CGO without scripts/ci-install-native.sh", name)
 		}
 	}
 }
@@ -730,10 +761,12 @@ func TestReleaseWorkflowSecurityIfPresent(t *testing.T) {
 		"scripts/release-build.sh",
 		"--mode github-signed",
 		"release-candidate-keyless",
+		"scripts/ci-install-native.sh",
 		"libcap2-bin",
-		"libpulse-dev",
-		"libxi-dev",
 		"libpulse-simple",
+		"xdamage",
+		"webkit2gtk-4.1",
+		"vulkan/vulkan.h",
 		"actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02",
 		"actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093",
 		"sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6",
@@ -1113,6 +1146,7 @@ func TestReleaseBuilderUsesUnprivilegedCredentialScrubbedBuilds(t *testing.T) {
 	for _, required := range []string{
 		"env -i",
 		`PATH="$go_bin_dir:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"`,
+		`PKG_CONFIG_PATH="${PKG_CONFIG_PATH:-}"`,
 		"GOPROXY=off",
 		"GOSUMDB=off",
 		"assert_clean_source",

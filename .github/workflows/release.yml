@@ -141,16 +141,18 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          # Native headers are not present on the base runner. This ordinary
-          # package installation is the only sudo use; the build itself uses no
-          # sudo, Bubblewrap, unshare, or systemd-run.
-          sudo apt-get update
-          sudo apt-get install -y \
-            ca-certificates curl file gcc git libcap2-bin libpulse-dev patchelf pkg-config qmake6 \
-            qt6-base-dev libegl1-mesa-dev libgles2-mesa-dev libpango1.0-dev \
-            libx11-dev libx11-xcb-dev libxext-dev libxrandr-dev libxtst-dev libxi-dev
-          pkg-config --exists Qt6Widgets Qt6Gui Qt6Core x11 x11-xcb xext xrandr xtst xi pangocairo pangoft2 cairo-xlib egl glesv2 libpulse libpulse-simple
+          # Same native headers as CI (X11, XDamage, GTK/WebKit, Vulkan, Pulse,
+          # Qt 6). This ordinary package installation is the only sudo use; the
+          # build itself uses no sudo, Bubblewrap, unshare, or systemd-run.
+          scripts/ci-install-native.sh
+          if [ -d /tmp/tipsy-ci-pkgconfig ]; then
+            export PKG_CONFIG_PATH="/tmp/tipsy-ci-pkgconfig${PKG_CONFIG_PATH:+:$PKG_CONFIG_PATH}"
+          fi
+          sudo apt-get install -y --no-install-recommends libcap2-bin patchelf
+          pkg-config --exists Qt6Widgets Qt6Gui Qt6Core x11 x11-xcb xext xrandr xtst xi xdamage pangocairo pangoft2 cairo-xlib egl glesv2 libpulse libpulse-simple gtk+-3.0 webkit2gtk-4.1 vulkan
           test -f /usr/include/X11/Xlib-xcb.h
+          test -f /usr/include/X11/extensions/Xdamage.h
+          test -f /usr/include/vulkan/vulkan.h
           test -f /usr/include/pulse/error.h
           test -f /usr/include/pulse/simple.h
 

@@ -112,6 +112,12 @@ mkdir -m 0700 "$work/a" "$work/b" "$work/home"
 # job itself has only contents:read; signing and release publication happen in a
 # separate job after this process has exited. No service-manager launcher is
 # invoked here.
+# Ubuntu 22.04 qt6-base-dev omits Qt6*.pc; ci-install-native.sh synthesizes
+# them under /tmp/tipsy-ci-pkgconfig. env -i would otherwise drop that path.
+if [ -d /tmp/tipsy-ci-pkgconfig ]; then
+	export PKG_CONFIG_PATH="/tmp/tipsy-ci-pkgconfig${PKG_CONFIG_PATH:+:$PKG_CONFIG_PATH}"
+fi
+
 run_reproducible() {
 	env -i \
 		HOME="$work/home" \
@@ -126,6 +132,7 @@ run_reproducible() {
 		GOSUMDB=off \
 		GONOPROXY='*' \
 		GONOSUMDB='*' \
+		PKG_CONFIG_PATH="${PKG_CONFIG_PATH:-}" \
 		"$@"
 }
 

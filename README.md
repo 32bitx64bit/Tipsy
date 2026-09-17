@@ -519,9 +519,10 @@ Install Go from [go.dev/dl](https://go.dev/dl/) if your distro’s package is ol
 ```sh
 sudo apt-get update
 sudo apt-get install -y gcc g++ pkg-config \
-  libx11-dev libx11-xcb-dev libxext-dev libxrandr-dev libxtst-dev libxi-dev \
+  libx11-dev libx11-xcb-dev libxext-dev libxrandr-dev libxtst-dev libxi-dev libxdamage-dev \
   libegl1-mesa-dev libgles2-mesa-dev libgl1-mesa-dev libcairo2-dev \
   libpango1.0-dev libpulse-dev \
+  libgtk-3-dev libwebkit2gtk-4.1-dev libvulkan-dev \
   qt6-base-dev qt6-base-dev-tools
 ```
 
@@ -530,17 +531,18 @@ sudo apt-get install -y gcc g++ pkg-config \
 ```sh
 sudo dnf install golang gcc gcc-c++ pkgconf-pkg-config \
   qt6-qtbase-devel \
-  libX11-devel libXext-devel libXrandr-devel libXtst-devel libXi-devel \
+  libX11-devel libXext-devel libXrandr-devel libXtst-devel libXi-devel libXdamage-devel \
   mesa-libEGL-devel mesa-libGLES-devel mesa-libGL-devel \
-  pango-devel cairo-devel pulseaudio-libs-devel
+  pango-devel cairo-devel pulseaudio-libs-devel \
+  gtk3-devel webkit2gtk4.1-devel vulkan-headers vulkan-loader-devel
 ```
 
 **Arch Linux / CachyOS**
 
 ```sh
 sudo pacman -S --needed go gcc pkgconf qt6-base \
-  libx11 libxext libxrandr libxtst libxi libxcb \
-  mesa pango cairo libpulse
+  libx11 libxext libxrandr libxtst libxi libxdamage libxcb \
+  mesa pango cairo libpulse gtk3 webkit2gtk-4.1 vulkan-headers vulkan-icd-loader
 ```
 
 Optional at **runtime** (not a build dependency): a Mesa Vulkan ICD if you want
