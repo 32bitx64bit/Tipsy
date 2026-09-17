@@ -1,6 +1,6 @@
-// tipsy-perf standardizes reproducible Tipsy microbenchmark runs. It only
-// invokes benchmark entries in internal/perf's catalog; every other subsystem
-// is represented in the JSON result with its explicit availability boundary.
+// tipsy-perf standardizes reproducible Tipsy performance runs. Catalog
+// microbenchmarks stay isolated. -program profiles one linked tipsy binary so
+// hotspots can be ranked across the real process.
 package main
 
 import (
@@ -164,10 +164,12 @@ type report struct {
 	Policy              policy                       `json:"policy"`
 	CapturePlan         perf.CapturePlan             `json:"capture_plan"`
 	StartupBuildCapture perf.StartupBuildCapturePlan `json:"startup_build_capture"`
+	ProgramCapture      perf.ProgramCapturePlan      `json:"program_capture"`
 	Matrix              []perf.Entry                 `json:"matrix"`
 	Results             []result                     `json:"results"`
 	Unavailable         []unavailable                `json:"unavailable"`
 	Controls            []controlResult              `json:"controls,omitempty"`
+	Program             *programResult               `json:"program,omitempty"`
 	Comparison          []comparison                 `json:"comparison,omitempty"`
 }
 
@@ -210,23 +212,32 @@ var controlCatalog = map[string]controlSpec{
 }
 
 type options struct {
-	root             string
-	out              string
-	compare          string
-	mode             string
-	only             map[string]bool
-	warmups          int
-	samples          int
-	benchTime        string
-	profileBenchTime string
-	profiles         bool
-	list             bool
-	resume           bool
-	controls         []string
-	controlsOnly     bool
-	cliBin           string
-	guiBin           string
-	timeout          time.Duration
+	root              string
+	out               string
+	compare           string
+	mode              string
+	only              map[string]bool
+	warmups           int
+	samples           int
+	benchTime         string
+	profileBenchTime  string
+	profiles          bool
+	list              bool
+	resume            bool
+	controls          []string
+	controlsOnly      bool
+	cliBin            string
+	guiBin            string
+	timeout           time.Duration
+	program           bool
+	programOnly       bool
+	alsoMatrix        bool
+	programDuration   time.Duration
+	programFlush      time.Duration
+	programPerf       bool
+	programContention bool
+	programHotspots   int
+	programArgs       []string
 }
 
 func main() {
@@ -250,9 +261,24 @@ func main() {
 	flag.StringVar(&opt.cliBin, "cli-bin", "", "built tipsy CLI binary used by cli-version control")
 	flag.StringVar(&opt.guiBin, "gui-bin", "", "built tipsy GUI binary used by gui-help control")
 	flag.DurationVar(&opt.timeout, "timeout", 15*time.Minute, "timeout per go test invocation")
+	flag.BoolVar(&opt.program, "program", false, "profile a linked tipsy binary for whole-process hotspots")
+	flag.BoolVar(&opt.programOnly, "program-only", false, "skip catalog microbenchmarks (implied by -program unless -also-matrix)")
+	flag.BoolVar(&opt.alsoMatrix, "also-matrix", false, "run catalog microbenchmarks in addition to -program")
+	flag.DurationVar(&opt.programDuration, "program-duration", 0, "bound a long-running program capture; default 5s for the CLI surface; required for launch")
+	flag.DurationVar(&opt.programFlush, "program-flush", 0, "SIGTERM profile-flush wait before SIGKILL; 0 means 30s for launch/explicit argv and 10s for the CLI surface")
+	flag.BoolVar(&opt.programPerf, "program-perf", false, "wrap the child in userspace perf record (function names and percentages only; not an FPS result)")
+	flag.BoolVar(&opt.programContention, "program-contention", false, "also capture mutex and block profiles (instrumented arm)")
+	flag.IntVar(&opt.programHotspots, "program-hotspots", 40, "functions to keep from each pprof -top listing")
 	flag.Parse()
 	opt.only = splitSet(only)
 	opt.controls = splitList(controls)
+	opt.programArgs = flag.Args()
+	if opt.programPerf {
+		opt.program = true
+	}
+	if opt.program && !opt.alsoMatrix {
+		opt.programOnly = true
+	}
 
 	if err := validateOptions(&opt); err != nil {
 		fatal(err)
@@ -283,6 +309,7 @@ func main() {
 		Policy:              policy{Warmups: opt.warmups, Samples: opt.samples, BenchTime: opt.benchTime, ProfileBenchTime: opt.profileBenchTime, Timeout: opt.timeout.String(), GOMAXPROCS: 1, ParallelPackages: 1, Profiles: opt.profiles},
 		CapturePlan:         perf.HostOverheadCapturePlan(),
 		StartupBuildCapture: perf.StartupBuildTimingPlan(),
+		ProgramCapture:      perf.WholeProgramCapturePlan(),
 		Matrix:              perf.Catalog(),
 	}
 	if opt.resume {
@@ -312,6 +339,17 @@ func main() {
 		}
 	}
 	if opt.controlsOnly {
+		finish(&rep, opt.out)
+		return
+	}
+	if opt.program {
+		prog := runProgramCapture(context.Background(), opt)
+		rep.Program = &prog
+		if opt.out != "-" {
+			writeReport(opt.out, rep)
+		}
+	}
+	if opt.programOnly {
 		finish(&rep, opt.out)
 		return
 	}
@@ -349,6 +387,21 @@ func main() {
 func validateOptions(opt *options) error {
 	if opt.mode != "baseline" && opt.mode != "candidate" && opt.mode != "diagnostic" && opt.mode != "clean-control" {
 		return fmt.Errorf("-mode must be baseline, candidate, diagnostic, or clean-control")
+	}
+	if opt.program && opt.mode == "clean-control" {
+		return errors.New("-program is an instrumented capture and cannot use -mode=clean-control")
+	}
+	if opt.program && opt.controlsOnly {
+		return errors.New("-program cannot mix with -controls-only")
+	}
+	if opt.program && opt.out == "-" {
+		return errors.New("-program requires a file -out path for pprof artifacts")
+	}
+	if opt.program && opt.programHotspots < 1 {
+		return errors.New("-program-hotspots must be positive")
+	}
+	if opt.programFlush < 0 {
+		return errors.New("-program-flush must be non-negative; 0 selects the default grace")
 	}
 	if len(opt.controls) != 0 && opt.mode != "clean-control" {
 		return fmt.Errorf("-controls requires -mode=clean-control so it is not compared with diagnostic data")

@@ -96,6 +96,29 @@ func TestHostOverheadCapturePlanDefinesOnePercentLow(t *testing.T) {
 	t.Fatal("missing one-percent-low definition")
 }
 
+func TestHostOverheadCapturePlanDefinesNativeCPUHotspots(t *testing.T) {
+	plan := HostOverheadCapturePlan()
+	if !contains(plan.Instrumented.Prohibited, "comparing a perf-record arm to a perf-off arm as an optimization result") || !contains(plan.Instrumented.Prohibited, "claiming displayed FPS or 1% lows from perf record or pprof samples") {
+		t.Fatalf("instrumented prohibited=%#v", plan.Instrumented.Prohibited)
+	}
+	for _, measurement := range plan.Measurements {
+		if measurement.ID != NativeCPUProfileMeasurementID {
+			continue
+		}
+		if measurement.Availability != "live-workload-required" || measurement.Unit != "percent of sampled userspace CPU by symbol" {
+			t.Fatalf("native CPU measurement=%#v", measurement)
+		}
+		if !strings.Contains(measurement.Definition, "not FPS") || !strings.Contains(measurement.Definition, "perf-on versus perf-off") {
+			t.Fatalf("native CPU definition=%#v", measurement)
+		}
+		if !strings.Contains(measurement.Reason, "unavailable, not as zeros") {
+			t.Fatalf("native CPU reason=%#v", measurement)
+		}
+		return
+	}
+	t.Fatal("missing native-cpu-profile-hotspots measurement")
+}
+
 func TestHostOverheadCapturePlanKeepsReadyPumpFixtureBoundary(t *testing.T) {
 	plan := HostOverheadCapturePlan()
 	var measurement *Measurement

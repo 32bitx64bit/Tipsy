@@ -61,6 +61,8 @@ func HostOverheadCapturePlan() CapturePlan {
 			},
 			Prohibited: []string{
 				"comparing observer-enabled data to clean data as an optimization result",
+				"claiming displayed FPS or 1% lows from perf record or pprof samples",
+				"comparing a perf-record arm to a perf-off arm as an optimization result",
 				"raw input, text, account, cookie, URL, or microphone payload capture",
 			},
 		},
@@ -138,6 +140,14 @@ func HostOverheadCapturePlan() CapturePlan {
 				Availability: "owner-seam-not-exported",
 				Reason:       "The result is currently package-private; internal/perf must not parse test logs or bypass Audio ownership to manufacture a runner metric.",
 			},
+			{
+				ID:           "go-cpu-profile-hotspots",
+				Unit:         "percent of sampled CPU or allocated bytes by function",
+				Definition:   "Ranked go tool pprof -top listing from a process-wide CPU or alloc profile of one linked tipsy binary. Function names only; present-call duration is not a displayed frame.",
+				Availability: "runner-and-live",
+				Reason:       "Per-package test binaries cannot rank production process hotspots.",
+			},
+			NativeCPUProfileMeasurement(),
 			{
 				ID:           "rss",
 				Unit:         "bytes",

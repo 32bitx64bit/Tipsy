@@ -14,6 +14,9 @@ type Kind string
 const (
 	// Microbenchmark is a bounded, deterministic benchmark the runner executes.
 	Microbenchmark Kind = "microbenchmark"
+	// ProgramProfile is a whole-process capture of a linked tipsy binary.
+	// The default runner records it as unavailable; tipsy-perf -program runs it.
+	ProgramProfile Kind = "program-profile"
 	// FixtureRequired needs an input artifact or host resource that is not part
 	// of a standard, privacy-safe checkout.
 	FixtureRequired Kind = "fixture-required"
@@ -46,9 +49,11 @@ type Entry struct {
 // result comparison uses ID plus benchmark name, not package order.
 func Catalog() []Entry {
 	entries := []Entry{
-		{ID: "cli", Package: "./cmd/tipsy", Subsystem: "headless command wiring", Kind: LiveRequired, Reason: "Commands perform user-selected filesystem, package, or launch work; a synthetic loop would not model a user session."},
+		{ID: "cli", Package: "./cmd/tipsy", Subsystem: "headless command wiring", Kind: LiveRequired, Reason: "Launch, inspect, and setup perform user-selected filesystem or client work; a synthetic loop would not model a user session."},
+		{ID: "whole-program", Package: "./cmd/tipsy", Subsystem: "linked tipsy process CPU/heap profile", Kind: ProgramProfile, Reason: "Accurate hotspots require one real tipsy process. tipsy-perf -program profiles the linked binary: no extra argv loops the checkout-safe CLI surface; launch is live-workload-required and needs DISPLAY plus -program-duration."},
+		{ID: "whole-program-cli", Package: "./internal/app", RunnerPackage: "./internal/perf", Subsystem: "whole CLI dispatch in one process", Kind: Microbenchmark, Benchmark: "^BenchmarkWholeProgramCLI$", Reason: "Runs version/help/logs/config path/doctor/diagnose through app.Run in one process so a CPU profile ranks CLI and host-probe cost. It excludes APK inspect, setup, launch, and gameplay."},
 		{ID: "gui", Package: "./cmd/tipsy-gui", Subsystem: "Qt entrypoint", Kind: ExternalBoundary, Reason: "Qt event-loop and compositor timing require a visible X11 session and must not be driven by the baseline runner."},
-		{ID: "android", Package: "./internal/android", Subsystem: "Android ABI, EGL, Vulkan, asset, and thread shims", Kind: Microbenchmark, Benchmark: "^(BenchmarkVulkanPresentTiming|BenchmarkVulkanPresentStats|BenchmarkEGLSwapStats|BenchmarkOpenAssetBytes|BenchmarkGettid)$"},
+		{ID: "android", Package: "./internal/android", Subsystem: "Android ABI, EGL, Vulkan, asset, and thread shims", Kind: Microbenchmark, Benchmark: "^(BenchmarkVulkanPresentTiming|BenchmarkVulkanPresentStats|BenchmarkEGLSwapStats|BenchmarkOpenAssetBytes|BenchmarkAssetStartupOpenClose|BenchmarkGettid)$"},
 		{ID: "audio-opensl-queue", Package: "./internal/android", RunnerPackage: "./internal/perf", Subsystem: "bounded OpenSL fake-player queue ownership", Kind: Microbenchmark, Benchmark: "^BenchmarkOpenSLQueueOwnership$", Reason: "Reports fixed C bridge queue-storage/copy/callback counters only; it excludes device I/O, allocator CPU, RSS, OS wakeups, audio latency, and FPS."},
 		{ID: "audio-muted-cadence", Package: "./internal/android", RunnerPackage: "./internal/perf", Subsystem: "bounded OpenSL fake-muted recorder cadence", Kind: Microbenchmark, Benchmark: "^BenchmarkMutedCaptureCadence$", Reason: "Reports fake-host callback cadence and synchronous callback-to-requeue duration only; it excludes microphone I/O, CPU attribution, RSS, OS wakeups, end-to-end latency, and FPS."},
 		{ID: "apk", Package: "./internal/apk", Subsystem: "APK inspection and signature verification", Kind: FixtureRequired, Reason: "Meaningful cost depends on an APK's size and signing blocks; the official APK is not a test fixture in the checkout."},
@@ -77,7 +82,7 @@ func Catalog() []Entry {
 		{ID: "securitypolicy", Package: "./internal/securitypolicy", Subsystem: "signed policy validation", Kind: FixtureRequired, Reason: "Security policy is setup/control-plane work; benchmark only against fixed signed policy fixtures, never weaken validation for a loop."},
 		{ID: "setupsvc", Package: "./internal/setupsvc", Subsystem: "official package setup", Kind: FixtureRequired, Reason: "Uses user-authorized APK inputs and storage; a benchmark requires a sealed synthetic package corpus."},
 		{ID: "version", Package: "./internal/version", Subsystem: "build-version selection", Kind: SupportTool, Reason: "Constant-time build metadata access is not a client hot path."},
-		{ID: "x11", Package: "./internal/x11", Subsystem: "X11 input queue drain and callback publication", Kind: Microbenchmark, Benchmark: "^(BenchmarkDrainInputLocked|BenchmarkDrainInputLockedPointers|BenchmarkNotifyInput|BenchmarkDrainInputLockedBatch|BenchmarkDrainInputLockedText)$"},
+		{ID: "x11", Package: "./internal/x11", Subsystem: "X11 input queue drain and callback publication", Kind: Microbenchmark, Benchmark: "^(BenchmarkDrainInputLocked|BenchmarkDrainInputLockedPointers|BenchmarkNotifyInput|BenchmarkDrainInputLockedBatch|BenchmarkDrainInputLockedText|BenchmarkInputDrainDiagnosticsDisabled|BenchmarkInputDrainDiagnosticsEnabled)$"},
 		{ID: "x11probe", Package: "./internal/x11/x11probe", Subsystem: "X11 integration probe", Kind: ExternalBoundary, Reason: "Purpose-built test client sends real X11 requests and must run only in a visible integration test."},
 		{ID: "appimage", Package: "./packaging/appimage", Subsystem: "AppImage assembly and guards", Kind: BuildOnly, Reason: "Packaging is offline build work, not resident client execution."},
 		{ID: "arch-package", Package: "./packaging/arch", Subsystem: "Arch package rendering", Kind: BuildOnly, Reason: "Packaging is offline build work, not resident client execution."},

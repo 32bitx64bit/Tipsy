@@ -80,6 +80,21 @@ func TestCatalogIncludesAudioFixtures(t *testing.T) {
 	}
 }
 
+func TestCatalogIncludesWholeProgramEntries(t *testing.T) {
+	got := map[string]Entry{}
+	for _, entry := range Catalog() {
+		got[entry.ID] = entry
+	}
+	cli := got["whole-program-cli"]
+	if cli.Kind != Microbenchmark || cli.Package != "./internal/app" || cli.RunnerPackage != "./internal/perf" || cli.Benchmark != "^BenchmarkWholeProgramCLI$" {
+		t.Fatalf("whole-program-cli = %#v", cli)
+	}
+	program := got["whole-program"]
+	if program.Kind != ProgramProfile || program.Package != "./cmd/tipsy" || program.Reason == "" || program.Benchmark != "" {
+		t.Fatalf("whole-program = %#v", program)
+	}
+}
+
 func TestCatalogKeepsJNISyntheticBoundaryExplicit(t *testing.T) {
 	for _, entry := range Catalog() {
 		if entry.ID != "jni" {

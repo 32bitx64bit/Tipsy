@@ -130,6 +130,131 @@ func TestControlUsageHasSeparateRusageScope(t *testing.T) {
 	}
 }
 
+func TestProgramCaptureRequiresFileOutputAndRejectsLaunchWithoutDuration(t *testing.T) {
+	valid := options{
+		mode:             "diagnostic",
+		program:          true,
+		programHotspots:  40,
+		out:              "report.json",
+		warmups:          0,
+		samples:          1,
+		benchTime:        time.Second.String(),
+		profileBenchTime: time.Second.String(),
+	}
+	if err := validateOptions(&valid); err != nil {
+		t.Fatalf("valid program options: %v", err)
+	}
+	invalid := valid
+	invalid.out = "-"
+	if err := validateOptions(&invalid); err == nil {
+		t.Fatal("program capture with stdout was accepted")
+	}
+	if err := validateProgramArgs([]string{"launch"}, 0); err == nil {
+		t.Fatal("launch without duration was accepted")
+	}
+	if err := validateProgramArgs([]string{"setup"}, time.Second); err == nil {
+		t.Fatal("setup capture was accepted")
+	}
+	t.Setenv("DISPLAY", ":0")
+	if err := validateProgramArgs([]string{"launch"}, time.Second); err != nil {
+		t.Fatalf("launch with duration: %v", err)
+	}
+	invalid = valid
+	invalid.programFlush = -time.Second
+	if err := validateOptions(&invalid); err == nil {
+		t.Fatal("negative -program-flush was accepted")
+	}
+}
+
+func TestProgramFlushGraceDefaultsAndOverride(t *testing.T) {
+	if got := programFlushGrace(options{}, true); got != defaultCLISurfaceFlush {
+		t.Fatalf("cli surface flush=%v", got)
+	}
+	if got := programFlushGrace(options{}, false); got != defaultProgramFlush {
+		t.Fatalf("launch flush=%v", got)
+	}
+	if got := programFlushGrace(options{programFlush: 45 * time.Second}, true); got != 45*time.Second {
+		t.Fatalf("override flush=%v", got)
+	}
+}
+
+func TestProgramBackstopIncludesFlushGrace(t *testing.T) {
+	got := programBackstop(3*time.Second, 2*time.Second, 30*time.Second)
+	if got != 2*time.Second+30*time.Second+programBackstopSlack {
+		t.Fatalf("short timeout backstop=%v", got)
+	}
+	got = programBackstop(15*time.Minute, 180*time.Second, 30*time.Second)
+	if got != 15*time.Minute {
+		t.Fatalf("runner timeout should remain for a 180s launch, got %v", got)
+	}
+	if programBackstop(15*time.Minute, 0, 30*time.Second) != 15*time.Minute {
+		t.Fatal("unbounded capture changed the runner timeout")
+	}
+}
+
+func TestRunBoundedHonorsFlushGraceBeforeKill(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("process-group SIGKILL wiring is Linux-only")
+	}
+	cmd := exec.Command("sh", "-c", `trap "" TERM; while :; do sleep 1; done`)
+	start := time.Now()
+	terminated, err := runBounded(cmd, 80*time.Millisecond, 150*time.Millisecond)
+	elapsed := time.Since(start)
+	if err != nil && !terminated {
+		t.Fatalf("runBounded: terminated=%v err=%v", terminated, err)
+	}
+	if !terminated {
+		t.Fatal("expected a bounded termination")
+	}
+	if elapsed < 180*time.Millisecond {
+		t.Fatalf("SIGKILL arrived before flush grace: elapsed=%v", elapsed)
+	}
+	if elapsed > 2*time.Second {
+		t.Fatalf("flush grace hung: elapsed=%v", elapsed)
+	}
+}
+
+func TestRunBoundedReturnsWhenChildExitsOnSIGTERM(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("SIGTERM flush wiring is Linux-only")
+	}
+	cmd := exec.Command("sleep", "30")
+	start := time.Now()
+	terminated, err := runBounded(cmd, 80*time.Millisecond, 3*time.Second)
+	elapsed := time.Since(start)
+	if err != nil && !terminated {
+		t.Fatalf("runBounded: terminated=%v err=%v", terminated, err)
+	}
+	if !terminated {
+		t.Fatal("expected SIGTERM to bound the child")
+	}
+	if elapsed > 1500*time.Millisecond {
+		t.Fatalf("waited for full flush after child exited: elapsed=%v", elapsed)
+	}
+}
+
+func TestProgramEnvUsesCLISurfaceWithoutPinnedGOMAXPROCS(t *testing.T) {
+	t.Setenv("GOMAXPROCS", "1")
+	dir := t.TempDir()
+	env := programEnv(options{}, nil, dir, true)
+	joined := strings.Join(env, "\n")
+	for _, entry := range env {
+		key, _, _ := strings.Cut(entry, "=")
+		if key == "GOMAXPROCS" {
+			t.Fatalf("whole-program env pinned GOMAXPROCS: %s", joined)
+		}
+	}
+	if !strings.Contains(joined, "TIPSY_PPROF_DIR="+dir) || !strings.Contains(joined, "TIPSY_PPROF_CLI_SURFACE=1") {
+		t.Fatalf("profiler env missing: %s", joined)
+	}
+	if programWorkload(nil, true) != "cli-surface" {
+		t.Fatal("default workload is not cli-surface")
+	}
+	if programScope(nil, true) != "instrumented-linked-binary-cli-surface-not-client-hotspots" {
+		t.Fatal("cli-surface scope")
+	}
+}
+
 func TestCaptureRunnerBuildIncludesDirectBinaryDigest(t *testing.T) {
 	got := captureRunnerBuild()
 	if got.Executable == "" || got.Bytes <= 0 || len(got.SHA256) != 64 || got.GoVersion == "" {

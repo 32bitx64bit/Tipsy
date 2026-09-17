@@ -6,16 +6,24 @@
 package main
 
 import (
+	"fmt"
 	"os"
 
 	qt "github.com/mappu/miqt/qt6"
 
 	"github.com/tipsy-linux/tipsy/internal/logging"
+	"github.com/tipsy-linux/tipsy/internal/perf"
 	"github.com/tipsy-linux/tipsy/internal/version"
 )
 
 func main() {
 	logging.Init()
+	stop, err := perf.StartFromEnv()
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "tipsy-gui:", err)
+		os.Exit(2)
+	}
+	defer stop()
 
 	mode, uri, qtArgs := splitGUIArgs(os.Args)
 	app := qt.NewQApplication(qtArgs)
