@@ -237,7 +237,8 @@ void tipsy_vk_reset_present_stats(void);
 /* The last actual-surface present-mode probe. This is diagnostic capability
  * state only: it deliberately retains no Vulkan handles, client create info,
  * or application content. A non-verified status never authorizes a mode
- * rewrite; vkCreateSwapchainKHR preserves the client request. */
+ * rewrite. VSync-off MAILBOX is rewritten to IMMEDIATE only when the verified
+ * host list included IMMEDIATE (GLES interval-0 equivalent). */
 enum {
 	TIPSY_VK_PRESENT_MODE_PROBE_VERIFIED = 0,
 	TIPSY_VK_PRESENT_MODE_PROBE_UNAVAILABLE = 1,

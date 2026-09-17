@@ -4,10 +4,11 @@
  * Android libvulkan.so adapter: host Khronos-loader passthrough with
  * VK_KHR_android_surface rewritten to XCB (Xlib fallback).
  * Draw-family entry points are never wrapped. Present-mode preference is
- * expressed only by filtering the modes advertised from the actual host
- * surface; swapchain creation preserves the client's selected request.
- * The companion Vulkan output unit owns the capability-gated opaque child,
- * full-frame copy/blend, and exact same-queue presentation transaction.
+ * expressed by filtering the modes advertised from the actual host surface.
+ * VSync-off matches GLES interval 0: IMMEDIATE is advertised alone when the
+ * host lists it, and a verified MAILBOX create is rewritten to IMMEDIATE.
+ * Incomplete/malformed probes never rewrite. The companion output unit blends
+ * focused text into the guest present image on the same queue.
  */
 #include "android_bridge.h"
 #include "vulkan_output.h"
@@ -32,6 +33,8 @@ extern void GoAndroid_LogVulkanDevice(char **names, uint32_t n, int host_present
 extern void GoAndroid_LogVulkanPacingQueries(uint64_t wait_for_present,
 	uint64_t wait_for_present2, uint64_t set_present_timing_queue_size,
 	uint64_t get_past_presentation_timing);
+extern void GoAndroid_LogVulkanPresentMode(int vsync, int requested, int effective,
+	int primaryOK, int primaryError, int fallbackOK, int fallbackError);
 
 typedef void *TipsyVkInstance;
 typedef void *TipsyVkPhysicalDevice;
@@ -271,9 +274,10 @@ static unsigned long wsi_xid;
 static xcb_connection_t *wsi_xcb;
 
 static _Atomic int vk_vsync_enabled;
+static _Atomic int vk_host_has_immediate;
 /* Capability-only record of the latest actual-surface mode query. It never
- * retains a VkPhysicalDevice, VkSurfaceKHR, VkDevice, or client create info,
- * and it never controls swapchain creation. */
+ * retains a VkPhysicalDevice, VkSurfaceKHR, VkDevice, or client create info.
+ * A verified VSync-off MAILBOX→IMMEDIATE rewrite is the only create change. */
 static _Atomic int32_t vk_present_mode_probe_result = TIPSY_VK_ERROR_INITIALIZATION_FAILED;
 static _Atomic uint32_t vk_present_mode_probe_status = TIPSY_VK_PRESENT_MODE_PROBE_UNAVAILABLE;
 static _Atomic uint32_t vk_present_mode_probe_count;
@@ -811,7 +815,19 @@ static int present_mode_allowed(uint32_t mode, int vsync, int has_mailbox, int h
 	if (mode == TIPSY_VK_PRESENT_MODE_FIFO_KHR || mode == TIPSY_VK_PRESENT_MODE_FIFO_RELAXED_KHR) {
 		return !(has_mailbox || has_immediate);
 	}
+	if (mode == TIPSY_VK_PRESENT_MODE_MAILBOX_KHR) {
+		return !has_immediate;
+	}
 	return 1;
+}
+
+static int unthrottled_mailbox_rewritten_to_immediate(uint32_t requested)
+{
+	return atomic_load_explicit(&vk_vsync_enabled, memory_order_acquire) == 0 &&
+		requested == TIPSY_VK_PRESENT_MODE_MAILBOX_KHR &&
+		atomic_load_explicit(&vk_present_mode_probe_status, memory_order_acquire) ==
+			TIPSY_VK_PRESENT_MODE_PROBE_VERIFIED &&
+		atomic_load_explicit(&vk_host_has_immediate, memory_order_acquire) != 0;
 }
 
 static uint32_t present_mode_rank(uint32_t mode, int vsync)
@@ -1171,14 +1187,30 @@ static TipsyVkResult tipsy_vkCreateSwapchainKHR(TipsyVkDevice device, const Tips
 	if (pCreateInfo == NULL) {
 		return TIPSY_VK_ERROR_UNKNOWN;
 	}
-	/* The client selected this from the actual host surface list we advertised.
-	 * A probe that was unavailable, malformed, or incomplete cannot justify a
-	 * guessed replacement either, so the host receives this exact request once. */
+	/* Incomplete/malformed probes never rewrite. VSync-off MAILBOX is rewritten
+	 * to IMMEDIATE only when the verified host list included IMMEDIATE, matching
+	 * GLES eglSwapInterval(0). Every other client request is forwarded once. */
 	if (tipsy_vk_output_prepare_swapchain(device, pCreateInfo,
 		&output_clone) != 0 && output_clone.create_info != NULL) {
 		host_create_info = (const TipsyVkSwapchainCreateInfoKHR *)output_clone.create_info;
 	}
-	result = fn(device, host_create_info, pAllocator, pSwapchain);
+	{
+		TipsyVkSwapchainCreateInfoKHR mode_info;
+		uint32_t requested = pCreateInfo->presentMode;
+		uint32_t effective = requested;
+		if (unthrottled_mailbox_rewritten_to_immediate(requested)) {
+			mode_info = *host_create_info;
+			mode_info.presentMode = TIPSY_VK_PRESENT_MODE_IMMEDIATE_KHR;
+			host_create_info = &mode_info;
+			effective = TIPSY_VK_PRESENT_MODE_IMMEDIATE_KHR;
+		}
+		if (test_vkCreateSwapchainKHR == NULL) {
+			GoAndroid_LogVulkanPresentMode(
+				atomic_load_explicit(&vk_vsync_enabled, memory_order_acquire),
+				(int)requested, (int)effective, 1, 0, 0, 0);
+		}
+		result = fn(device, host_create_info, pAllocator, pSwapchain);
+	}
 	tipsy_vk_output_swapchain_created(device,
 		result == TIPSY_VK_SUCCESS && pSwapchain != NULL ? *pSwapchain : 0,
 		result, output_clone.qualified);
@@ -1330,6 +1362,11 @@ static TipsyVkResult tipsy_vkGetPhysicalDeviceSurfacePresentModesKHR(TipsyVkPhys
 			free(host);
 			return result;
 		}
+	}
+	{
+		int has_mailbox = 0, has_immediate = 0, has_fifo = 0;
+		present_mode_inventory(host, host_n, &has_mailbox, &has_immediate, &has_fifo);
+		atomic_store_explicit(&vk_host_has_immediate, has_immediate != 0, memory_order_release);
 	}
 	vsync = atomic_load_explicit(&vk_vsync_enabled, memory_order_acquire);
 	filtered = filter_present_modes(host, host_n, vsync, NULL);
@@ -2010,6 +2047,7 @@ int tipsy_test_vk_present_mode_capability(const uint32_t *host_modes, uint32_t h
 	tipsy_vkGetPresentModes_fn saved_present_modes;
 	tipsy_vkCreateSwapchain_fn saved_create_swapchain;
 	int saved_vsync;
+	int saved_host_has_immediate;
 	TipsyVkSwapchainCreateInfoKHR info;
 	uint64_t swapchain = 0;
 	uint32_t count = client_capacity;
@@ -2020,6 +2058,7 @@ int tipsy_test_vk_present_mode_capability(const uint32_t *host_modes, uint32_t h
 	saved_present_modes = host_vkGetPhysicalDeviceSurfacePresentModesKHR;
 	saved_create_swapchain = test_vkCreateSwapchainKHR;
 	saved_vsync = atomic_load_explicit(&vk_vsync_enabled, memory_order_acquire);
+	saved_host_has_immediate = atomic_load_explicit(&vk_host_has_immediate, memory_order_acquire);
 	memset(&vk_present_mode_capability_test, 0, sizeof(vk_present_mode_capability_test));
 	vk_present_mode_capability_test.modes = host_modes;
 	vk_present_mode_capability_test.mode_count = host_mode_count;
@@ -2052,6 +2091,7 @@ int tipsy_test_vk_present_mode_capability(const uint32_t *host_modes, uint32_t h
 	test_vkCreateSwapchainKHR = saved_create_swapchain;
 	host_vkGetPhysicalDeviceSurfacePresentModesKHR = saved_present_modes;
 	atomic_store_explicit(&vk_vsync_enabled, saved_vsync, memory_order_release);
+	atomic_store_explicit(&vk_host_has_immediate, saved_host_has_immediate, memory_order_release);
 	return result;
 }
 

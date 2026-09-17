@@ -84,12 +84,12 @@ func TestVulkanDrawFamilyGIPAIsHostPassthrough(t *testing.T) {
 }
 
 func TestVulkanPrivateOutputQueueQualification(t *testing.T) {
-	for _, scenario := range []uint32{0, 1} {
+	for _, scenario := range []uint32{0, 1, 3} {
 		if !testVulkanOutputQueueEligible(scenario) {
 			t.Errorf("ordinary same-family scenario %d was rejected", scenario)
 		}
 	}
-	for _, scenario := range []uint32{2, 3, 4, 5} {
+	for _, scenario := range []uint32{2, 4, 5} {
 		if testVulkanOutputQueueEligible(scenario) {
 			t.Errorf("unsupported/protected queue scenario %d was accepted", scenario)
 		}
@@ -98,24 +98,20 @@ func TestVulkanPrivateOutputQueueQualification(t *testing.T) {
 
 func TestVulkanSameQueueTransactionOrderAndCounts(t *testing.T) {
 	got := testVulkanOutputTransactionFixture(0)
-	if !slices.Equal(got.order, []uint32{1, 2, 3, 4}) ||
-		got.acquireCalls != 1 || got.compositionSubmitCalls != 1 ||
+	if !slices.Equal(got.order, []uint32{2, 3}) ||
+		got.acquireCalls != 0 || got.compositionSubmitCalls != 1 ||
 		got.acquireConsumeCalls != 0 || got.guestPresentCalls != 1 ||
-		got.outputPresentCalls != 1 || got.originalGuestForwarded ||
-		got.fullCopyCount != 1 || got.drawCount != 1 || got.uploadCount != 1 ||
+		got.outputPresentCalls != 0 || got.originalGuestForwarded ||
+		got.fullCopyCount != 0 || got.drawCount != 1 || got.uploadCount != 1 ||
 		!got.guestWaitConsumedOnce || !got.gWaitConsumedOnce ||
-		!got.oWaitConsumedOnce || got.quarantined || got.deviceTerminal ||
+		got.oWaitConsumedOnce || got.quarantined || got.deviceTerminal ||
 		got.returnedResult != 0 || got.overlayAcquireCalls != 1 ||
 		got.presentMutexLocks != 1 ||
-		got.copySrcX != 2 || got.copySrcY != 3 ||
-		got.copyDstX != 0 || got.copyDstY != 0 ||
-		got.copyWidth != 1 || got.copyHeight != 1 ||
+		got.copyWidth != 0 || got.copyHeight != 0 ||
 		got.outputCreateCalls != 0 ||
-		got.childX != 2 || got.childY != 3 ||
-		got.childWidth != 1 || got.childHeight != 1 ||
-		got.pushRect != [4]float32{-1, -1, 1, 1} ||
-		got.viewportWidth != 1 || got.viewportHeight != 1 {
-		t.Fatalf("qualified same-queue operation sequence=%+v", got)
+		got.pushRect != [4]float32{-0.5, -0.25, -0.25, 0} ||
+		got.viewportWidth != 8 || got.viewportHeight != 8 {
+		t.Fatalf("qualified same-queue in-place sequence=%+v", got)
 	}
 }
 
@@ -163,34 +159,29 @@ func TestVulkanSameQueueFailureMatrix(t *testing.T) {
 	tests := []struct {
 		scenario          uint32
 		order             []uint32
-		consume           uint32
 		guestPresents     uint32
-		outputPresents    uint32
 		originalForwarded bool
 		gConsumed         bool
-		oConsumed         bool
 		terminal          bool
 		guestResult       int32
 	}{
-		{3, []uint32{1, 2, 5, 3}, 1, 1, 0, true, false, false, false, 0},
-		{4, []uint32{1, 2}, 0, 0, 0, false, false, false, true, -4},
-		{5, []uint32{1, 2}, 0, 0, 0, false, false, false, false, -13},
-		{6, []uint32{1, 2, 3, 4}, 0, 1, 1, false, false, true, false, -1},
-		{7, []uint32{1, 2, 3}, 0, 1, 0, false, false, false, true, -4},
-		{8, []uint32{1, 2, 3, 4}, 0, 1, 1, false, true, true, false, -1000001004},
-		{9, []uint32{1, 2, 3, 4}, 0, 1, 1, false, true, false, false, 0},
-		{10, []uint32{1, 2, 3, 4}, 0, 1, 1, false, true, false, true, -4},
+		{3, []uint32{2, 3}, 1, true, false, false, 0},
+		{4, []uint32{2}, 0, false, false, true, -4},
+		{5, []uint32{2}, 0, false, false, false, -13},
+		{6, []uint32{2, 3}, 1, false, false, false, -1},
+		{7, []uint32{2, 3}, 1, false, false, true, -4},
+		{8, []uint32{2, 3}, 1, false, true, false, -1000001004},
 	}
 	for _, tt := range tests {
 		got := testVulkanOutputTransactionFixture(tt.scenario)
 		if !slices.Equal(got.order, tt.order) ||
-			got.acquireCalls != 1 || got.compositionSubmitCalls != 1 ||
-			got.acquireConsumeCalls != tt.consume ||
+			got.acquireCalls != 0 || got.compositionSubmitCalls != 1 ||
+			got.acquireConsumeCalls != 0 ||
 			got.guestPresentCalls != tt.guestPresents ||
-			got.outputPresentCalls != tt.outputPresents ||
+			got.outputPresentCalls != 0 ||
 			got.originalGuestForwarded != tt.originalForwarded ||
 			got.gWaitConsumedOnce != tt.gConsumed ||
-			got.oWaitConsumedOnce != tt.oConsumed || !got.quarantined ||
+			got.oWaitConsumedOnce || !got.quarantined ||
 			got.deviceTerminal != tt.terminal || got.returnedResult != tt.guestResult ||
 			got.overlayAcquireCalls != 1 || got.presentMutexLocks != 1 {
 			t.Errorf("failure scenario %d=%+v", tt.scenario, got)
@@ -198,32 +189,23 @@ func TestVulkanSameQueueFailureMatrix(t *testing.T) {
 	}
 }
 
-func TestVulkanOutputOverlaySubrectAndSizeDrivenRecreate(t *testing.T) {
+func TestVulkanOutputOverlayGuestNDC(t *testing.T) {
 	got := testVulkanOutputOverlayGeometryFixture()
-	if !slices.Equal(got.first.order, []uint32{1, 2, 3, 4}) ||
-		got.first.fullCopyCount != 1 || got.first.copySrcX != 1 ||
-		got.first.copySrcY != 2 || got.first.copyDstX != 0 ||
-		got.first.copyDstY != 0 || got.first.copyWidth != 1 ||
-		got.first.copyHeight != 1 || got.first.outputCreateCalls != 1 ||
-		got.first.outputCreateWidth != 1 || got.first.outputCreateHeight != 1 ||
-		got.first.childX != 1 || got.first.childY != 2 ||
-		got.first.childWidth != 1 || got.first.childHeight != 1 ||
-		got.first.pushRect != [4]float32{-1, -1, 1, 1} ||
-		got.first.viewportWidth != 1 || got.first.viewportHeight != 1 ||
+	if !slices.Equal(got.first.order, []uint32{2, 3}) ||
+		got.first.fullCopyCount != 0 || got.first.outputCreateCalls != 0 ||
+		got.first.outputPresentCalls != 0 ||
+		got.first.pushRect != [4]float32{-0.75, -0.5, -0.5, -0.25} ||
+		got.first.viewportWidth != 8 || got.first.viewportHeight != 8 ||
 		got.first.originalGuestForwarded || got.first.quarantined ||
 		got.first.returnedResult != 0 {
-		t.Fatalf("size-changing overlay present = %+v", got.first)
+		t.Fatalf("first overlay present = %+v", got.first)
 	}
-	if !slices.Equal(got.second.order, []uint32{1, 2, 3, 4}) ||
-		got.second.fullCopyCount != 1 || got.second.copySrcX != 4 ||
-		got.second.copySrcY != 5 || got.second.copyWidth != 1 ||
-		got.second.copyHeight != 1 || got.second.outputCreateCalls != 0 ||
-		got.second.childX != 4 || got.second.childY != 5 ||
-		got.second.childWidth != 1 || got.second.childHeight != 1 ||
-		got.second.pushRect != [4]float32{-1, -1, 1, 1} ||
+	if !slices.Equal(got.second.order, []uint32{2, 3}) ||
+		got.second.fullCopyCount != 0 || got.second.outputCreateCalls != 0 ||
+		got.second.pushRect != [4]float32{0, 0.25, 0.25, 0.5} ||
 		got.second.originalGuestForwarded || got.second.quarantined ||
 		got.second.returnedResult != 0 {
-		t.Fatalf("overlay move-only present = %+v", got.second)
+		t.Fatalf("moved overlay present = %+v", got.second)
 	}
 	if !slices.Equal(got.empty.order, []uint32{3}) ||
 		got.empty.fullCopyCount != 0 || got.empty.outputCreateCalls != 0 ||
@@ -277,8 +259,12 @@ func TestVulkanRewritesAndroidSurfaceToHostWSI(t *testing.T) {
 func TestVulkanPresentModeFilterFollowsVSync(t *testing.T) {
 	in := []uint32{2, 1, 0} // FIFO, MAILBOX, IMMEDIATE
 	off := testVulkanFilterPresentModes(in, false)
-	if len(off) != 2 || off[0] != 0 || off[1] != 1 {
-		t.Fatalf("VSync-off present modes=%v want IMMEDIATE then MAILBOX", off)
+	if len(off) != 1 || off[0] != 0 {
+		t.Fatalf("VSync-off present modes=%v want IMMEDIATE only", off)
+	}
+	mailboxOnly := testVulkanFilterPresentModes([]uint32{1}, false)
+	if len(mailboxOnly) != 1 || mailboxOnly[0] != 1 {
+		t.Fatalf("VSync-off with only MAILBOX must keep MAILBOX: %v", mailboxOnly)
 	}
 	on := testVulkanFilterPresentModes(in, true)
 	if len(on) != 1 || on[0] != 2 {
@@ -322,6 +308,7 @@ func TestVulkanCreateSwapchainPreservesActualSurfaceCapability(t *testing.T) {
 		{"fifo-only", []uint32{fifo}, false, fifo, []uint32{fifo}},
 		{"fifo-mailbox", []uint32{fifo, mailbox}, false, mailbox, []uint32{mailbox}},
 		{"fifo-immediate", []uint32{fifo, immediate}, false, immediate, []uint32{immediate}},
+		{"unthrottled-all", []uint32{fifo, mailbox, immediate}, false, immediate, []uint32{immediate}},
 		{"vsync-fifo", []uint32{fifo, mailbox, immediate}, true, fifo, []uint32{fifo}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -376,6 +363,27 @@ func TestVulkanCreateSwapchainPreservesActualSurfaceCapability(t *testing.T) {
 			}
 			assertCreate(t, got, tc.requested)
 		})
+	}
+}
+
+func TestVulkanUnthrottledRewritesMailboxToImmediate(t *testing.T) {
+	const (
+		immediate uint32 = 0
+		mailbox          = 1
+		fifo             = 2
+		success    int32 = 0
+		incomplete int32 = 5
+	)
+	got := testVulkanPresentModeCapability([]uint32{fifo, mailbox, immediate}, success, success, 3, false, mailbox)
+	if got.enumerateResult != success || !slices.Equal(got.advertised, []uint32{immediate}) {
+		t.Fatalf("advertised=%v enumerate=%d want IMMEDIATE only", got.advertised, got.enumerateResult)
+	}
+	if got.createResult != success || got.calls != 1 || got.firstMode != immediate {
+		t.Fatalf("create=%d calls=%d first=%d want verified MAILBOX rewritten to IMMEDIATE", got.createResult, got.calls, got.firstMode)
+	}
+	incompleteProbe := testVulkanPresentModeCapability([]uint32{fifo, mailbox, immediate}, success, incomplete, 3, false, mailbox)
+	if incompleteProbe.firstMode != mailbox || incompleteProbe.calls != 1 {
+		t.Fatalf("incomplete probe first=%d calls=%d want preserved MAILBOX", incompleteProbe.firstMode, incompleteProbe.calls)
 	}
 }
 

@@ -1,15 +1,13 @@
 /* Copyright 2026 The Tipsy Authors
  * SPDX-License-Identifier: GPL-3.0-or-later
  *
- * Compositor-independent Vulkan focused-text output.  This file owns only
- * host platform objects: one opaque X11 child and one private WSI swapchain.
- * The transaction runs synchronously on the exact ordinary guest queue passed
- * to vkQueuePresentKHR; the guest device request is never enlarged.  The guest
- * swapchain is always presented to the original window.  While a valid
- * foreground lease exists, the clipped overlay AABB of the current guest image
- * is copied into an overlay-sized opaque child and the premultiplied
- * foreground is blended there in output-local NDC.  No game pixels are mapped
- * or read back.
+ * Same-queue in-place focused-text compositor.  While a valid Pango lease
+ * exists, Tipsy records one premultiplied source-over draw into the guest
+ * swapchain image being presented, then presents that same image once.  The
+ * guest device request is never enlarged.  There is no private X11 child,
+ * extra swapchain, image copy, or second present.  Unpublished frames skip
+ * the overlay mutex.  Guest submit wrappers do not take the overlay lock
+ * unless the host reports device loss.
  */
 #define VK_USE_PLATFORM_XCB_KHR
 #define VK_USE_PLATFORM_XLIB_KHR
@@ -19,8 +17,6 @@
 
 #include <vulkan/vulkan.h>
 
-/* Ubuntu 22.04 / Debian Bookworm Khronos headers predate these create flags.
- * Spec values: VkDeviceQueueCreateFlagBits, VkPipelineCacheCreateFlagBits. */
 #ifndef VK_DEVICE_QUEUE_CREATE_INTERNALLY_SYNCHRONIZED_BIT_KHR
 #define VK_DEVICE_QUEUE_CREATE_INTERNALLY_SYNCHRONIZED_BIT_KHR 0x00000002u
 #endif
@@ -28,13 +24,9 @@
 #define VK_PIPELINE_CACHE_CREATE_EXTERNALLY_SYNCHRONIZED_BIT_EXT 0x00000001u
 #endif
 
-#include <X11/Xlib.h>
-#include <X11/Xutil.h>
-#include <X11/extensions/shape.h>
-#include <X11/Xlib-xcb.h>
-
 #include <pthread.h>
 #include <stdatomic.h>
+#include <stddef.h>
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
@@ -54,46 +46,25 @@ static const uint32_t tipsy_text_fragment_spirv[] =
 #include "vulkan_text_frag.inc"
 ;
 
-typedef struct TipsyVkOutputFrame {
-	VkCommandBuffer command;
-	VkSemaphore acquire;
-	VkFence fence;
-	uint32_t in_flight;
-} TipsyVkOutputFrame;
-
-typedef struct TipsyVkOutputImageState {
+typedef struct TipsyVkSourceImageState {
 	VkImage image;
 	VkImageView view;
 	VkFramebuffer framebuffer;
-	VkSemaphore complete;
-	uint32_t presented;
-} TipsyVkOutputImageState;
-
-typedef struct TipsyVkSourceImageState {
-	VkImage image;
-	VkSemaphore acquire;
+	VkCommandBuffer command;
 	VkSemaphore completion;
-	VkSemaphore render_signals[TIPSY_VK_OUTPUT_MAX_WAITS];
-	uint32_t render_signal_count;
-	uint32_t acquired;
-	uint32_t acquire_waited;
+	VkFence fence;
 	uint32_t completion_reusable;
+	uint32_t in_flight;
 } TipsyVkSourceImageState;
 
 typedef struct TipsyVkOutputPair {
 	uint32_t active;
 	uint32_t ready;
 	VkSwapchainKHR guest;
-	VkSwapchainKHR output;
-	VkExtent2D guest_extent;
 	VkExtent2D extent;
 	VkFormat format;
 	uint32_t source_count;
-	uint32_t output_count;
 	TipsyVkSourceImageState source[TIPSY_VK_OUTPUT_MAX_IMAGES];
-	TipsyVkOutputImageState target[TIPSY_VK_OUTPUT_MAX_IMAGES];
-	TipsyVkOutputFrame frames[TIPSY_VK_OUTPUT_MAX_IMAGES];
-	uint32_t next_frame;
 	VkQueue queue;
 
 	VkCommandPool command_pool;
@@ -121,16 +92,9 @@ typedef struct TipsyVkOutputDispatch {
 	PFN_vkGetPhysicalDeviceQueueFamilyProperties get_queue_families;
 	PFN_vkGetPhysicalDeviceSurfaceSupportKHR get_surface_support;
 	PFN_vkGetPhysicalDeviceSurfaceCapabilitiesKHR get_surface_capabilities;
-	PFN_vkGetPhysicalDeviceSurfaceFormatsKHR get_surface_formats;
-	PFN_vkGetPhysicalDeviceSurfacePresentModesKHR get_present_modes;
 	PFN_vkGetPhysicalDeviceMemoryProperties get_memory_properties;
 	PFN_vkGetPhysicalDeviceFormatProperties get_format_properties;
-	PFN_vkDestroySurfaceKHR destroy_surface;
 
-	PFN_vkCreateSwapchainKHR create_swapchain;
-	PFN_vkDestroySwapchainKHR destroy_swapchain;
-	PFN_vkGetSwapchainImagesKHR get_swapchain_images;
-	PFN_vkAcquireNextImageKHR acquire_next_image;
 	PFN_vkCreateSemaphore create_semaphore;
 	PFN_vkDestroySemaphore destroy_semaphore;
 	PFN_vkCreateFence create_fence;
@@ -177,7 +141,6 @@ typedef struct TipsyVkOutputDispatch {
 	PFN_vkMapMemory map_memory;
 	PFN_vkUnmapMemory unmap_memory;
 	PFN_vkCmdPipelineBarrier cmd_pipeline_barrier;
-	PFN_vkCmdCopyImage cmd_copy_image;
 	PFN_vkCmdCopyBufferToImage cmd_copy_buffer_to_image;
 	PFN_vkCmdBeginRenderPass cmd_begin_render_pass;
 	PFN_vkCmdEndRenderPass cmd_end_render_pass;
@@ -201,15 +164,8 @@ typedef struct TipsyVkOutputState {
 	pthread_mutex_t mutex;
 	PFN_vkGetInstanceProcAddr gipa;
 	PFN_vkGetDeviceProcAddr gdpa;
-	Display *display;
-	Window parent;
-	xcb_connection_t *xcb;
-	Window child;
-	uint32_t child_mapped;
 	VkInstance instance;
-	VkSurfaceKHR probe_surface;
 	VkSurfaceKHR source_surface;
-	VkSurfaceKHR output_surface;
 	VkPhysicalDevice physical;
 	VkDevice device;
 	uint32_t eligible_family;
@@ -220,8 +176,8 @@ typedef struct TipsyVkOutputState {
 	TipsyVkOutputQueueRecord queues[32];
 
 	uint32_t pending_swapchain_qualified;
-	VkExtent2D pending_guest_extent;
-	VkSwapchainCreateInfoKHR pending_output_info;
+	VkExtent2D pending_extent;
+	VkFormat pending_format;
 
 	TipsyVkOutputDispatch vk;
 	TipsyVkOutputPair active;
@@ -234,12 +190,8 @@ static TipsyVkOutputState tipsy_output = {
 };
 
 static _Atomic uint32_t output_route_ready;
-static _Atomic uint32_t output_child_mapped;
 static _Atomic uint32_t output_foreground_retained;
 
-/* The transaction fixture below drives the production present path through
- * content-free fake host entry points.  This pointer is non-NULL only for the
- * duration of that synchronous unit fixture. */
 static TipsyVkOutputTransactionFixture *test_transaction_fixture;
 static int test_transaction_overlay_live = 1;
 static int test_transaction_frame_x = 2;
@@ -249,8 +201,6 @@ static int test_transaction_frame_height = 1;
 
 static void tipsy_vk_output_note_overlay_retained_locked(void)
 {
-	atomic_store_explicit(&output_child_mapped,
-		tipsy_output.child_mapped != 0, memory_order_release);
 	atomic_store_explicit(&output_foreground_retained,
 		tipsy_output.active.foreground != VK_NULL_HANDLE, memory_order_release);
 }
@@ -306,108 +256,6 @@ static void tipsy_vk_output_foreground_release(uintptr_t lease)
 	(loaded) &= tipsy_output.vk.field != NULL; \
 } while (0)
 
-static void tipsy_vk_output_unmap_child_locked(void)
-{
-	if (!tipsy_output.child_mapped) {
-		return;
-	}
-	if (tipsy_output.display != NULL && tipsy_output.child != 0) {
-		XLockDisplay(tipsy_output.display);
-		XUnmapWindow(tipsy_output.display, tipsy_output.child);
-		XFlush(tipsy_output.display);
-		XUnlockDisplay(tipsy_output.display);
-	}
-	tipsy_output.child_mapped = 0;
-	tipsy_vk_output_note_overlay_retained_locked();
-}
-
-static void tipsy_vk_output_map_child_locked(void)
-{
-	if (tipsy_output.child_mapped || tipsy_output.display == NULL || tipsy_output.child == 0) {
-		return;
-	}
-	XLockDisplay(tipsy_output.display);
-	XMapRaised(tipsy_output.display, tipsy_output.child);
-	XFlush(tipsy_output.display);
-	XUnlockDisplay(tipsy_output.display);
-	tipsy_output.child_mapped = 1;
-	tipsy_vk_output_note_overlay_retained_locked();
-}
-
-static void tipsy_vk_output_destroy_child_locked(void)
-{
-	tipsy_vk_output_unmap_child_locked();
-	if (tipsy_output.display != NULL && tipsy_output.child != 0) {
-		XLockDisplay(tipsy_output.display);
-		XDestroyWindow(tipsy_output.display, tipsy_output.child);
-		XFlush(tipsy_output.display);
-		XUnlockDisplay(tipsy_output.display);
-	}
-	tipsy_output.child = 0;
-}
-
-static int tipsy_vk_output_create_child_locked(void)
-{
-	XWindowAttributes attributes;
-	XSetWindowAttributes values;
-	int shape_event = 0;
-	int shape_error = 0;
-	unsigned long mask;
-
-	if (tipsy_output.child != 0) {
-		return 1;
-	}
-	if (tipsy_output.display == NULL || tipsy_output.parent == 0 ||
-		!XShapeQueryExtension(tipsy_output.display, &shape_event, &shape_error)) {
-		return 0;
-	}
-	XLockDisplay(tipsy_output.display);
-	if (!XGetWindowAttributes(tipsy_output.display, tipsy_output.parent, &attributes)) {
-		XUnlockDisplay(tipsy_output.display);
-		return 0;
-	}
-	memset(&values, 0, sizeof(values));
-	values.background_pixel = BlackPixel(tipsy_output.display,
-		DefaultScreen(tipsy_output.display));
-	values.border_pixel = 0;
-	values.event_mask = StructureNotifyMask;
-	mask = CWBackPixel | CWBorderPixel | CWEventMask;
-	tipsy_output.child = XCreateWindow(tipsy_output.display, tipsy_output.parent,
-		0, 0, attributes.width > 0 ? (unsigned int)attributes.width : 1u,
-		attributes.height > 0 ? (unsigned int)attributes.height : 1u, 0,
-		attributes.depth, InputOutput, attributes.visual, mask, &values);
-	if (tipsy_output.child != 0) {
-		/* ShapeInput is input routing only.  The child itself remains a normal,
-		 * fully opaque X11 window and therefore needs no desktop compositor. */
-		XShapeCombineRectangles(tipsy_output.display, tipsy_output.child,
-			ShapeInput, 0, 0, NULL, 0, ShapeSet, Unsorted);
-		XFlush(tipsy_output.display);
-	}
-	XUnlockDisplay(tipsy_output.display);
-	return tipsy_output.child != 0;
-}
-
-static void tipsy_vk_output_place_child_locked(int x, int y, unsigned int width,
-	unsigned int height)
-{
-	if (test_transaction_fixture != NULL) {
-		test_transaction_fixture->child_x = x;
-		test_transaction_fixture->child_y = y;
-		test_transaction_fixture->child_width = width;
-		test_transaction_fixture->child_height = height;
-	}
-	if (tipsy_output.display == NULL || tipsy_output.child == 0 ||
-		width == 0 || height == 0) {
-		return;
-	}
-	XLockDisplay(tipsy_output.display);
-	XMoveResizeWindow(tipsy_output.display, tipsy_output.child, x, y,
-		width, height);
-	XRaiseWindow(tipsy_output.display, tipsy_output.child);
-	XSync(tipsy_output.display, False);
-	XUnlockDisplay(tipsy_output.display);
-}
-
 static int tipsy_vk_output_load_instance_dispatch_locked(void)
 {
 	int loaded = 1;
@@ -418,11 +266,8 @@ static int tipsy_vk_output_load_instance_dispatch_locked(void)
 	LOAD_INSTANCE(get_surface_support, GetPhysicalDeviceSurfaceSupportKHR, loaded);
 	LOAD_INSTANCE(get_surface_capabilities, GetPhysicalDeviceSurfaceCapabilitiesKHR,
 		loaded);
-	LOAD_INSTANCE(get_surface_formats, GetPhysicalDeviceSurfaceFormatsKHR, loaded);
-	LOAD_INSTANCE(get_present_modes, GetPhysicalDeviceSurfacePresentModesKHR, loaded);
 	LOAD_INSTANCE(get_memory_properties, GetPhysicalDeviceMemoryProperties, loaded);
 	LOAD_INSTANCE(get_format_properties, GetPhysicalDeviceFormatProperties, loaded);
-	LOAD_INSTANCE(destroy_surface, DestroySurfaceKHR, loaded);
 	return loaded;
 }
 
@@ -432,10 +277,6 @@ static int tipsy_vk_output_load_device_dispatch_locked(void)
 	if (tipsy_output.gdpa == NULL || tipsy_output.device == VK_NULL_HANDLE) {
 		return 0;
 	}
-	LOAD_DEVICE(create_swapchain, CreateSwapchainKHR, loaded);
-	LOAD_DEVICE(destroy_swapchain, DestroySwapchainKHR, loaded);
-	LOAD_DEVICE(get_swapchain_images, GetSwapchainImagesKHR, loaded);
-	LOAD_DEVICE(acquire_next_image, AcquireNextImageKHR, loaded);
 	LOAD_DEVICE(create_semaphore, CreateSemaphore, loaded);
 	LOAD_DEVICE(destroy_semaphore, DestroySemaphore, loaded);
 	LOAD_DEVICE(create_fence, CreateFence, loaded);
@@ -482,7 +323,6 @@ static int tipsy_vk_output_load_device_dispatch_locked(void)
 	LOAD_DEVICE(map_memory, MapMemory, loaded);
 	LOAD_DEVICE(unmap_memory, UnmapMemory, loaded);
 	LOAD_DEVICE(cmd_pipeline_barrier, CmdPipelineBarrier, loaded);
-	LOAD_DEVICE(cmd_copy_image, CmdCopyImage, loaded);
 	LOAD_DEVICE(cmd_copy_buffer_to_image, CmdCopyBufferToImage, loaded);
 	LOAD_DEVICE(cmd_begin_render_pass, CmdBeginRenderPass, loaded);
 	LOAD_DEVICE(cmd_end_render_pass, CmdEndRenderPass, loaded);
@@ -495,84 +335,17 @@ static int tipsy_vk_output_load_device_dispatch_locked(void)
 	return loaded;
 }
 
-static int tipsy_vk_output_create_platform_surface_locked(Window window,
-	VkSurfaceKHR *surface)
-{
-	VkResult result;
-	if (window == 0 || surface == NULL || tipsy_output.gipa == NULL ||
-		tipsy_output.instance == VK_NULL_HANDLE) {
-		return 0;
-	}
-	if (tipsy_output.xcb != NULL) {
-		PFN_vkCreateXcbSurfaceKHR create_xcb = (PFN_vkCreateXcbSurfaceKHR)
-			tipsy_output.gipa(tipsy_output.instance, "vkCreateXcbSurfaceKHR");
-		if (create_xcb != NULL) {
-			VkXcbSurfaceCreateInfoKHR info = {
-				.sType = VK_STRUCTURE_TYPE_XCB_SURFACE_CREATE_INFO_KHR,
-				.connection = tipsy_output.xcb,
-				.window = (xcb_window_t)window,
-			};
-			result = create_xcb(tipsy_output.instance, &info, NULL,
-				surface);
-			if (result == VK_SUCCESS) {
-				return 1;
-			}
-		}
-	}
-	{
-		PFN_vkCreateXlibSurfaceKHR create_xlib = (PFN_vkCreateXlibSurfaceKHR)
-			tipsy_output.gipa(tipsy_output.instance, "vkCreateXlibSurfaceKHR");
-		if (create_xlib != NULL && tipsy_output.display != NULL) {
-			VkXlibSurfaceCreateInfoKHR info = {
-				.sType = VK_STRUCTURE_TYPE_XLIB_SURFACE_CREATE_INFO_KHR,
-				.dpy = tipsy_output.display,
-				.window = window,
-			};
-			result = create_xlib(tipsy_output.instance, &info, NULL,
-				surface);
-			if (result == VK_SUCCESS) {
-				return 1;
-			}
-		}
-	}
-	return 0;
-}
-
-static int tipsy_vk_output_create_surfaces_locked(void)
-{
-	if (!tipsy_vk_output_create_child_locked()) {
-		return 0;
-	}
-	if (!tipsy_vk_output_create_platform_surface_locked(tipsy_output.child,
-		&tipsy_output.output_surface)) {
-		tipsy_vk_output_destroy_child_locked();
-		return 0;
-	}
-	/* The guest creates its Android surface after vkCreateDevice.  A temporary
-	 * surface for the same parent XID lets device qualification prove that the
-	 * unchanged guest queue family can present to both surfaces.  The probe is
-	 * destroyed as soon as the real guest surface exists. */
-	if (!tipsy_vk_output_create_platform_surface_locked(tipsy_output.parent,
-		&tipsy_output.probe_surface)) {
-		tipsy_output.vk.destroy_surface(tipsy_output.instance,
-			tipsy_output.output_surface, NULL);
-		tipsy_output.output_surface = VK_NULL_HANDLE;
-		tipsy_vk_output_destroy_child_locked();
-		return 0;
-	}
-	return 1;
-}
-
 static int tipsy_vk_output_queue_request_valid(const VkDeviceCreateInfo *info,
 	uint32_t family, const VkQueueFamilyProperties *properties,
 	VkBool32 source_supported, VkBool32 output_supported,
 	uint32_t *requested_count)
 {
 	uint32_t i;
+	(void)output_supported;
 	if (info == NULL || info->queueCreateInfoCount == 0 ||
 		info->pQueueCreateInfos == NULL || properties == NULL ||
 		(properties->queueFlags & VK_QUEUE_GRAPHICS_BIT) == 0 ||
-		!source_supported || !output_supported) {
+		!source_supported) {
 		return 0;
 	}
 	for (i = 0; i < info->queueCreateInfoCount; i++) {
@@ -602,21 +375,15 @@ void tipsy_vk_output_set_loader(void *gipa, void *gdpa)
 void tipsy_vk_output_bind_x11(uintptr_t display, unsigned long parent,
 	void *xcb_connection)
 {
-	pthread_mutex_lock(&tipsy_output.mutex);
-	tipsy_output.display = (Display *)display;
-	tipsy_output.parent = (Window)parent;
-	tipsy_output.xcb = (xcb_connection_t *)xcb_connection;
-	pthread_mutex_unlock(&tipsy_output.mutex);
+	(void)display;
+	(void)parent;
+	(void)xcb_connection;
 }
 
 void tipsy_vk_output_unbind_x11(void)
 {
 	pthread_mutex_lock(&tipsy_output.mutex);
 	atomic_store_explicit(&output_route_ready, 0, memory_order_release);
-	tipsy_vk_output_unmap_child_locked();
-	tipsy_output.display = NULL;
-	tipsy_output.parent = 0;
-	tipsy_output.xcb = NULL;
 	pthread_mutex_unlock(&tipsy_output.mutex);
 }
 
@@ -624,11 +391,11 @@ void tipsy_vk_output_instance_created(void *instance, int32_t result)
 {
 	pthread_mutex_lock(&tipsy_output.mutex);
 	if (result == VK_SUCCESS && instance != NULL &&
-		tipsy_output.instance == VK_NULL_HANDLE && tipsy_output.display != NULL &&
-		tipsy_output.parent != 0) {
+		tipsy_output.instance == VK_NULL_HANDLE) {
 		tipsy_output.instance = (VkInstance)instance;
-		if (tipsy_vk_output_load_instance_dispatch_locked()) {
-			(void)tipsy_vk_output_create_surfaces_locked();
+		if (!tipsy_vk_output_load_instance_dispatch_locked()) {
+			tipsy_output.instance = VK_NULL_HANDLE;
+			memset(&tipsy_output.vk, 0, sizeof(tipsy_output.vk));
 		}
 	}
 	pthread_mutex_unlock(&tipsy_output.mutex);
@@ -637,29 +404,11 @@ void tipsy_vk_output_instance_created(void *instance, int32_t result)
 void tipsy_vk_output_source_surface_created(void *instance, uint64_t surface,
 	int32_t result)
 {
-	VkBool32 supported = VK_FALSE;
 	pthread_mutex_lock(&tipsy_output.mutex);
 	if (result == VK_SUCCESS && instance != NULL && surface != 0 &&
 		(VkInstance)instance == tipsy_output.instance &&
 		tipsy_output.source_surface == VK_NULL_HANDLE) {
 		tipsy_output.source_surface = (VkSurfaceKHR)surface;
-		if (tipsy_output.device_ready &&
-			(tipsy_output.vk.get_surface_support == NULL ||
-			 tipsy_output.vk.get_surface_support(tipsy_output.physical,
-				tipsy_output.eligible_family, tipsy_output.source_surface,
-				&supported) != VK_SUCCESS || !supported)) {
-			/* A same-XID probe should have identical support.  Fail closed if
-			 * the real Android-surface replacement disproves that assumption. */
-			tipsy_output.device_ready = 0;
-			atomic_store_explicit(&output_route_ready, 0, memory_order_release);
-			tipsy_vk_output_unmap_child_locked();
-		}
-		if (tipsy_output.probe_surface != VK_NULL_HANDLE &&
-			tipsy_output.vk.destroy_surface != NULL) {
-			tipsy_output.vk.destroy_surface(tipsy_output.instance,
-				tipsy_output.probe_surface, NULL);
-			tipsy_output.probe_surface = VK_NULL_HANDLE;
-		}
 	}
 	pthread_mutex_unlock(&tipsy_output.mutex);
 }
@@ -680,11 +429,7 @@ void tipsy_vk_output_device_preparing(void *physical_ptr,
 	tipsy_output.eligible_family = UINT32_MAX;
 	tipsy_output.eligible_queue_count = 0;
 	if (physical == VK_NULL_HANDLE || info == NULL ||
-		tipsy_output.output_surface == VK_NULL_HANDLE ||
-		(tipsy_output.source_surface == VK_NULL_HANDLE &&
-		 tipsy_output.probe_surface == VK_NULL_HANDLE) ||
 		tipsy_output.vk.get_queue_families == NULL ||
-		tipsy_output.vk.get_surface_support == NULL ||
 		info->queueCreateInfoCount == 0 || info->pQueueCreateInfos == NULL) {
 		goto reject;
 	}
@@ -698,18 +443,8 @@ void tipsy_vk_output_device_preparing(void *physical_ptr,
 	}
 	tipsy_output.vk.get_queue_families(physical, &property_count, properties);
 	for (i = 0; i < property_count; i++) {
-		VkBool32 source_supported = VK_FALSE;
-		VkBool32 output_supported = VK_FALSE;
-		if (tipsy_output.vk.get_surface_support(physical, i,
-			tipsy_output.source_surface != VK_NULL_HANDLE ?
-				tipsy_output.source_surface : tipsy_output.probe_surface,
-			&source_supported) != VK_SUCCESS ||
-			tipsy_output.vk.get_surface_support(physical, i,
-			tipsy_output.output_surface, &output_supported) != VK_SUCCESS) {
-			continue;
-		}
 		if (tipsy_vk_output_queue_request_valid(info, i, &properties[i],
-			source_supported, output_supported, &chosen_queue_count)) {
+			VK_TRUE, VK_TRUE, &chosen_queue_count)) {
 			chosen_family = i;
 			break;
 		}
@@ -750,63 +485,6 @@ void tipsy_vk_output_device_created(void *physical, void *device, int32_t result
 	pthread_mutex_unlock(&tipsy_output.mutex);
 }
 
-static int tipsy_vk_output_surface_format_supported_locked(VkFormat format,
-	VkColorSpaceKHR color_space)
-{
-	VkSurfaceFormatKHR *formats = NULL;
-	uint32_t count = 0;
-	uint32_t i;
-	int found = 0;
-	if (tipsy_output.vk.get_surface_formats(tipsy_output.physical,
-		tipsy_output.output_surface, &count, NULL) != VK_SUCCESS || count == 0 ||
-		count > 256u) {
-		return 0;
-	}
-	formats = calloc(count, sizeof(*formats));
-	if (formats == NULL) {
-		return 0;
-	}
-	if (tipsy_output.vk.get_surface_formats(tipsy_output.physical,
-		tipsy_output.output_surface, &count, formats) == VK_SUCCESS) {
-		for (i = 0; i < count; i++) {
-			if (formats[i].format == format && formats[i].colorSpace == color_space) {
-				found = 1;
-				break;
-			}
-		}
-	}
-	free(formats);
-	return found;
-}
-
-static int tipsy_vk_output_present_mode_supported_locked(VkPresentModeKHR mode)
-{
-	VkPresentModeKHR *modes = NULL;
-	uint32_t count = 0;
-	uint32_t i;
-	int found = 0;
-	if (tipsy_output.vk.get_present_modes(tipsy_output.physical,
-		tipsy_output.output_surface, &count, NULL) != VK_SUCCESS || count == 0 ||
-		count > 256u) {
-		return 0;
-	}
-	modes = calloc(count, sizeof(*modes));
-	if (modes == NULL) {
-		return 0;
-	}
-	if (tipsy_output.vk.get_present_modes(tipsy_output.physical,
-		tipsy_output.output_surface, &count, modes) == VK_SUCCESS) {
-		for (i = 0; i < count; i++) {
-			if (modes[i] == mode) {
-				found = 1;
-				break;
-			}
-		}
-	}
-	free(modes);
-	return found;
-}
-
 static TipsyVkOutputQueueRecord *tipsy_vk_output_queue_locked(VkQueue queue)
 {
 	uint32_t i;
@@ -825,9 +503,7 @@ int tipsy_vk_output_prepare_swapchain(void *device_ptr, const void *create_info_
 		(const VkSwapchainCreateInfoKHR *)create_info_ptr;
 	VkSwapchainCreateInfoKHR *clone_info = NULL;
 	VkSurfaceCapabilitiesKHR source_caps;
-	VkSurfaceCapabilitiesKHR output_caps;
-	VkSwapchainKHR old_output = VK_NULL_HANDLE;
-	uint32_t desired_count;
+	VkBool32 present_supported = VK_FALSE;
 
 	if (clone == NULL) {
 		return 0;
@@ -837,8 +513,9 @@ int tipsy_vk_output_prepare_swapchain(void *device_ptr, const void *create_info_
 	tipsy_output.pending_swapchain_qualified = 0;
 	if (!tipsy_output.device_ready || tipsy_output.device_lost ||
 		(VkDevice)device_ptr != tipsy_output.device || info == NULL ||
-		info->surface != tipsy_output.source_surface || info->pNext != NULL ||
-		info->flags != 0 || info->imageArrayLayers != 1 ||
+		info->sType != VK_STRUCTURE_TYPE_SWAPCHAIN_CREATE_INFO_KHR ||
+		info->surface != tipsy_output.source_surface ||
+		info->imageArrayLayers != 1 ||
 		info->imageSharingMode != VK_SHARING_MODE_EXCLUSIVE ||
 		info->imageExtent.width == 0 || info->imageExtent.height == 0 ||
 		(info->oldSwapchain == VK_NULL_HANDLE && tipsy_output.active.active) ||
@@ -847,73 +524,34 @@ int tipsy_vk_output_prepare_swapchain(void *device_ptr, const void *create_info_
 			 tipsy_output.retired_count >= TIPSY_VK_OUTPUT_MAX_RETIRED))) {
 		goto reject;
 	}
+	if (tipsy_output.vk.get_surface_support == NULL ||
+		tipsy_output.vk.get_surface_capabilities == NULL) {
+		goto reject;
+	}
+	if (tipsy_output.vk.get_surface_support(tipsy_output.physical,
+		tipsy_output.eligible_family, tipsy_output.source_surface,
+		&present_supported) != VK_SUCCESS || !present_supported) {
+		goto reject;
+	}
 	memset(&source_caps, 0, sizeof(source_caps));
-	memset(&output_caps, 0, sizeof(output_caps));
 	if (tipsy_output.vk.get_surface_capabilities(tipsy_output.physical,
 		tipsy_output.source_surface, &source_caps) != VK_SUCCESS ||
-		tipsy_output.vk.get_surface_capabilities(tipsy_output.physical,
-		tipsy_output.output_surface, &output_caps) != VK_SUCCESS ||
-		(source_caps.supportedUsageFlags & VK_IMAGE_USAGE_TRANSFER_SRC_BIT) == 0 ||
-		(output_caps.supportedUsageFlags & (VK_IMAGE_USAGE_TRANSFER_DST_BIT |
-			VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT)) != (VK_IMAGE_USAGE_TRANSFER_DST_BIT |
-			VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT) ||
-		!tipsy_vk_output_surface_format_supported_locked(info->imageFormat,
-			info->imageColorSpace) ||
-		!tipsy_vk_output_present_mode_supported_locked(info->presentMode) ||
-		(output_caps.supportedTransforms & info->preTransform) == 0 ||
-		output_caps.currentTransform != info->preTransform ||
-		(output_caps.supportedCompositeAlpha & VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR) == 0) {
+		(source_caps.supportedUsageFlags & VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT) == 0) {
 		goto reject;
 	}
-	if (output_caps.currentExtent.width != UINT32_MAX &&
-		(output_caps.currentExtent.width != info->imageExtent.width ||
-		 output_caps.currentExtent.height != info->imageExtent.height)) {
-		goto reject;
+	if ((info->imageUsage & VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT) == 0) {
+		clone_info = calloc(1, sizeof(*clone_info));
+		if (clone_info == NULL) {
+			goto reject;
+		}
+		*clone_info = *info;
+		clone_info->imageUsage |= VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT;
+		clone->create_info = clone_info;
 	}
-	if (info->imageExtent.width < output_caps.minImageExtent.width ||
-		info->imageExtent.width > output_caps.maxImageExtent.width ||
-		info->imageExtent.height < output_caps.minImageExtent.height ||
-		info->imageExtent.height > output_caps.maxImageExtent.height) {
-		goto reject;
-	}
-	desired_count = info->minImageCount;
-	if (desired_count < output_caps.minImageCount) {
-		desired_count = output_caps.minImageCount;
-	}
-	if (output_caps.maxImageCount != 0 && desired_count > output_caps.maxImageCount) {
-		goto reject;
-	}
-	if (info->oldSwapchain != VK_NULL_HANDLE) {
-		old_output = tipsy_output.active.output;
-	}
-	clone_info = calloc(1, sizeof(*clone_info));
-	if (clone_info == NULL) {
-		goto reject;
-	}
-	*clone_info = *info;
-	clone_info->imageUsage |= VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
-	memset(&tipsy_output.pending_output_info, 0,
-		sizeof(tipsy_output.pending_output_info));
-	tipsy_output.pending_guest_extent = info->imageExtent;
-	tipsy_output.pending_output_info.sType = VK_STRUCTURE_TYPE_SWAPCHAIN_CREATE_INFO_KHR;
-	tipsy_output.pending_output_info.surface = tipsy_output.output_surface;
-	tipsy_output.pending_output_info.minImageCount = desired_count;
-	tipsy_output.pending_output_info.imageFormat = info->imageFormat;
-	tipsy_output.pending_output_info.imageColorSpace = info->imageColorSpace;
-	tipsy_output.pending_output_info.imageExtent = info->imageExtent;
-	tipsy_output.pending_output_info.imageArrayLayers = 1;
-	tipsy_output.pending_output_info.imageUsage = VK_IMAGE_USAGE_TRANSFER_DST_BIT |
-		VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT;
-	tipsy_output.pending_output_info.imageSharingMode = VK_SHARING_MODE_EXCLUSIVE;
-	tipsy_output.pending_output_info.preTransform = info->preTransform;
-	tipsy_output.pending_output_info.compositeAlpha = VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR;
-	tipsy_output.pending_output_info.presentMode = info->presentMode;
-	tipsy_output.pending_output_info.clipped = VK_TRUE;
-	tipsy_output.pending_output_info.oldSwapchain = old_output;
+	tipsy_output.pending_extent = info->imageExtent;
+	tipsy_output.pending_format = info->imageFormat;
 	tipsy_output.pending_swapchain_qualified = 1;
 	atomic_store_explicit(&output_route_ready, 0, memory_order_release);
-	tipsy_vk_output_unmap_child_locked();
-	clone->create_info = clone_info;
 	clone->qualified = 1;
 	pthread_mutex_unlock(&tipsy_output.mutex);
 	return 1;
@@ -961,23 +599,30 @@ static uint32_t tipsy_vk_output_memory_type_locked(uint32_t bits,
 
 static void tipsy_vk_output_destroy_foreground_locked(TipsyVkOutputPair *pair)
 {
-	if (pair->staging_map != NULL && pair->staging_memory != VK_NULL_HANDLE) {
+	if (pair == NULL) return;
+	if (pair->staging_map != NULL && pair->staging_memory != VK_NULL_HANDLE &&
+		tipsy_output.vk.unmap_memory != NULL) {
 		tipsy_output.vk.unmap_memory(tipsy_output.device, pair->staging_memory);
 	}
-	if (pair->foreground_view != VK_NULL_HANDLE) {
+	if (pair->foreground_view != VK_NULL_HANDLE &&
+		tipsy_output.vk.destroy_image_view != NULL) {
 		tipsy_output.vk.destroy_image_view(tipsy_output.device,
 			pair->foreground_view, NULL);
 	}
-	if (pair->foreground != VK_NULL_HANDLE) {
+	if (pair->foreground != VK_NULL_HANDLE &&
+		tipsy_output.vk.destroy_image != NULL) {
 		tipsy_output.vk.destroy_image(tipsy_output.device, pair->foreground, NULL);
 	}
-	if (pair->foreground_memory != VK_NULL_HANDLE) {
+	if (pair->foreground_memory != VK_NULL_HANDLE &&
+		tipsy_output.vk.free_memory != NULL) {
 		tipsy_output.vk.free_memory(tipsy_output.device, pair->foreground_memory, NULL);
 	}
-	if (pair->staging != VK_NULL_HANDLE) {
+	if (pair->staging != VK_NULL_HANDLE &&
+		tipsy_output.vk.destroy_buffer != NULL) {
 		tipsy_output.vk.destroy_buffer(tipsy_output.device, pair->staging, NULL);
 	}
-	if (pair->staging_memory != VK_NULL_HANDLE) {
+	if (pair->staging_memory != VK_NULL_HANDLE &&
+		tipsy_output.vk.free_memory != NULL) {
 		tipsy_output.vk.free_memory(tipsy_output.device, pair->staging_memory, NULL);
 	}
 	pair->staging = VK_NULL_HANDLE;
@@ -1002,65 +647,64 @@ static void tipsy_vk_output_destroy_pair_locked(TipsyVkOutputPair *pair,
 	}
 	if (destroy_vulkan) {
 		tipsy_vk_output_destroy_foreground_locked(pair);
-		if (pair->sampler != VK_NULL_HANDLE) {
+		if (pair->sampler != VK_NULL_HANDLE &&
+			tipsy_output.vk.destroy_sampler != NULL) {
 			tipsy_output.vk.destroy_sampler(tipsy_output.device, pair->sampler, NULL);
 		}
-		if (pair->descriptor_pool != VK_NULL_HANDLE) {
+		if (pair->descriptor_pool != VK_NULL_HANDLE &&
+			tipsy_output.vk.destroy_descriptor_pool != NULL) {
 			tipsy_output.vk.destroy_descriptor_pool(tipsy_output.device,
 				pair->descriptor_pool, NULL);
 		}
-		if (pair->pipeline != VK_NULL_HANDLE) {
+		if (pair->pipeline != VK_NULL_HANDLE &&
+			tipsy_output.vk.destroy_pipeline != NULL) {
 			tipsy_output.vk.destroy_pipeline(tipsy_output.device, pair->pipeline, NULL);
 		}
-		if (pair->pipeline_layout != VK_NULL_HANDLE) {
+		if (pair->pipeline_layout != VK_NULL_HANDLE &&
+			tipsy_output.vk.destroy_pipeline_layout != NULL) {
 			tipsy_output.vk.destroy_pipeline_layout(tipsy_output.device,
 				pair->pipeline_layout, NULL);
 		}
-		if (pair->descriptor_layout != VK_NULL_HANDLE) {
+		if (pair->descriptor_layout != VK_NULL_HANDLE &&
+			tipsy_output.vk.destroy_descriptor_set_layout != NULL) {
 			tipsy_output.vk.destroy_descriptor_set_layout(tipsy_output.device,
 				pair->descriptor_layout, NULL);
 		}
-		for (i = 0; i < pair->output_count; i++) {
-			if (pair->target[i].framebuffer != VK_NULL_HANDLE) {
-				tipsy_output.vk.destroy_framebuffer(tipsy_output.device,
-					pair->target[i].framebuffer, NULL);
-			}
-			if (pair->target[i].view != VK_NULL_HANDLE) {
-				tipsy_output.vk.destroy_image_view(tipsy_output.device,
-					pair->target[i].view, NULL);
-			}
-			if (pair->target[i].complete != VK_NULL_HANDLE) {
-				tipsy_output.vk.destroy_semaphore(tipsy_output.device,
-					pair->target[i].complete, NULL);
-			}
-			if (pair->frames[i].acquire != VK_NULL_HANDLE) {
-				tipsy_output.vk.destroy_semaphore(tipsy_output.device,
-					pair->frames[i].acquire, NULL);
-			}
-			if (pair->frames[i].fence != VK_NULL_HANDLE) {
-				tipsy_output.vk.destroy_fence(tipsy_output.device,
-					pair->frames[i].fence, NULL);
-			}
-		}
 		for (i = 0; i < pair->source_count; i++) {
-			if (pair->source[i].completion != VK_NULL_HANDLE) {
+			if (pair->source[i].framebuffer != VK_NULL_HANDLE &&
+				tipsy_output.vk.destroy_framebuffer != NULL) {
+				tipsy_output.vk.destroy_framebuffer(tipsy_output.device,
+					pair->source[i].framebuffer, NULL);
+			}
+			if (pair->source[i].view != VK_NULL_HANDLE &&
+				tipsy_output.vk.destroy_image_view != NULL) {
+				tipsy_output.vk.destroy_image_view(tipsy_output.device,
+					pair->source[i].view, NULL);
+			}
+			if (pair->source[i].completion != VK_NULL_HANDLE &&
+				tipsy_output.vk.destroy_semaphore != NULL) {
 				tipsy_output.vk.destroy_semaphore(tipsy_output.device,
 					pair->source[i].completion, NULL);
 			}
+			if (pair->source[i].fence != VK_NULL_HANDLE &&
+				tipsy_output.vk.destroy_fence != NULL) {
+				tipsy_output.vk.destroy_fence(tipsy_output.device,
+					pair->source[i].fence, NULL);
+			}
 		}
-		if (pair->render_pass != VK_NULL_HANDLE) {
+		if (pair->render_pass != VK_NULL_HANDLE &&
+			tipsy_output.vk.destroy_render_pass != NULL) {
 			tipsy_output.vk.destroy_render_pass(tipsy_output.device,
 				pair->render_pass, NULL);
 		}
-		if (pair->command_pool != VK_NULL_HANDLE) {
+		if (pair->command_pool != VK_NULL_HANDLE &&
+			tipsy_output.vk.destroy_command_pool != NULL) {
 			tipsy_output.vk.destroy_command_pool(tipsy_output.device,
 				pair->command_pool, NULL);
 		}
-		if (pair->output != VK_NULL_HANDLE) {
-			tipsy_output.vk.destroy_swapchain(tipsy_output.device, pair->output, NULL);
-		}
 	}
 	memset(pair, 0, sizeof(*pair));
+	tipsy_vk_output_note_overlay_retained_locked();
 }
 
 static VkResult tipsy_vk_output_create_pipeline_locked(TipsyVkOutputPair *pair)
@@ -1257,42 +901,18 @@ static VkResult tipsy_vk_output_create_pipeline_locked(TipsyVkOutputPair *pair)
 }
 
 static VkResult tipsy_vk_output_build_pair_locked(TipsyVkOutputPair *pair,
-	VkSwapchainKHR guest, VkSwapchainKHR output, const VkSwapchainCreateInfoKHR *info)
+	VkSwapchainKHR guest)
 {
 	VkCommandPoolCreateInfo pool_info;
-	VkCommandBufferAllocateInfo command_info;
-	VkSemaphoreCreateInfo semaphore_info;
-	VkFenceCreateInfo fence_info;
-	VkImageViewCreateInfo view_info;
-	VkFramebufferCreateInfo framebuffer_info;
-	VkCommandBuffer commands[TIPSY_VK_OUTPUT_MAX_IMAGES];
 	VkResult result;
-	uint32_t count = 0;
-	uint32_t i;
 
 	memset(pair, 0, sizeof(*pair));
 	pair->active = 1;
 	pair->guest = guest;
-	pair->output = output;
-	pair->guest_extent = tipsy_output.pending_guest_extent;
-	if (pair->guest_extent.width == 0 || pair->guest_extent.height == 0) {
-		pair->guest_extent = info->imageExtent;
-	}
-	pair->extent = info->imageExtent;
-	pair->format = info->imageFormat;
-	result = tipsy_output.vk.get_swapchain_images(tipsy_output.device, output,
-		&count, NULL);
-	if (result != VK_SUCCESS || count == 0 || count > TIPSY_VK_OUTPUT_MAX_IMAGES) {
-		return result == VK_SUCCESS ? VK_ERROR_INITIALIZATION_FAILED : result;
-	}
-	pair->output_count = count;
-	{
-		VkImage images[TIPSY_VK_OUTPUT_MAX_IMAGES];
-		memset(images, 0, sizeof(images));
-		result = tipsy_output.vk.get_swapchain_images(tipsy_output.device, output,
-			&count, images);
-		if (result != VK_SUCCESS || count != pair->output_count) return result;
-		for (i = 0; i < count; i++) pair->target[i].image = images[i];
+	pair->extent = tipsy_output.pending_extent;
+	pair->format = tipsy_output.pending_format;
+	if (pair->extent.width == 0 || pair->extent.height == 0) {
+		return VK_ERROR_INITIALIZATION_FAILED;
 	}
 	memset(&pool_info, 0, sizeof(pool_info));
 	pool_info.sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO;
@@ -1301,59 +921,7 @@ static VkResult tipsy_vk_output_build_pair_locked(TipsyVkOutputPair *pair,
 	result = tipsy_output.vk.create_command_pool(tipsy_output.device, &pool_info,
 		NULL, &pair->command_pool);
 	if (result != VK_SUCCESS) return result;
-	memset(&command_info, 0, sizeof(command_info));
-	command_info.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
-	command_info.commandPool = pair->command_pool;
-	command_info.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
-	command_info.commandBufferCount = pair->output_count;
-	memset(commands, 0, sizeof(commands));
-	result = tipsy_output.vk.allocate_command_buffers(tipsy_output.device,
-		&command_info, commands);
-	if (result != VK_SUCCESS) return result;
-	memset(&semaphore_info, 0, sizeof(semaphore_info));
-	semaphore_info.sType = VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO;
-	memset(&fence_info, 0, sizeof(fence_info));
-	fence_info.sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO;
-	fence_info.flags = VK_FENCE_CREATE_SIGNALED_BIT;
-	for (i = 0; i < pair->output_count; i++) {
-		pair->frames[i].command = commands[i];
-		result = tipsy_output.vk.create_semaphore(tipsy_output.device,
-			&semaphore_info, NULL, &pair->frames[i].acquire);
-		if (result != VK_SUCCESS) return result;
-		result = tipsy_output.vk.create_semaphore(tipsy_output.device,
-			&semaphore_info, NULL, &pair->target[i].complete);
-		if (result != VK_SUCCESS) return result;
-		result = tipsy_output.vk.create_fence(tipsy_output.device,
-			&fence_info, NULL, &pair->frames[i].fence);
-		if (result != VK_SUCCESS) return result;
-	}
-	result = tipsy_vk_output_create_pipeline_locked(pair);
-	if (result != VK_SUCCESS) return result;
-	for (i = 0; i < pair->output_count; i++) {
-		memset(&view_info, 0, sizeof(view_info));
-		view_info.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
-		view_info.image = pair->target[i].image;
-		view_info.viewType = VK_IMAGE_VIEW_TYPE_2D;
-		view_info.format = pair->format;
-		view_info.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
-		view_info.subresourceRange.levelCount = 1;
-		view_info.subresourceRange.layerCount = 1;
-		result = tipsy_output.vk.create_image_view(tipsy_output.device,
-			&view_info, NULL, &pair->target[i].view);
-		if (result != VK_SUCCESS) return result;
-		memset(&framebuffer_info, 0, sizeof(framebuffer_info));
-		framebuffer_info.sType = VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO;
-		framebuffer_info.renderPass = pair->render_pass;
-		framebuffer_info.attachmentCount = 1;
-		framebuffer_info.pAttachments = &pair->target[i].view;
-		framebuffer_info.width = pair->extent.width;
-		framebuffer_info.height = pair->extent.height;
-		framebuffer_info.layers = 1;
-		result = tipsy_output.vk.create_framebuffer(tipsy_output.device,
-			&framebuffer_info, NULL, &pair->target[i].framebuffer);
-		if (result != VK_SUCCESS) return result;
-	}
-	return VK_SUCCESS;
+	return tipsy_vk_output_create_pipeline_locked(pair);
 }
 
 static void tipsy_vk_output_retire_active_locked(void)
@@ -1363,16 +931,18 @@ static void tipsy_vk_output_retire_active_locked(void)
 	}
 	if (tipsy_output.retired_count < TIPSY_VK_OUTPUT_MAX_RETIRED) {
 		tipsy_output.retired[tipsy_output.retired_count++] = tipsy_output.active;
+	} else {
+		tipsy_vk_output_destroy_pair_locked(&tipsy_output.active, 1);
 	}
 	memset(&tipsy_output.active, 0, sizeof(tipsy_output.active));
+	tipsy_vk_output_note_overlay_retained_locked();
 }
 
 void tipsy_vk_output_swapchain_created(void *device_ptr,
 	uint64_t guest_swapchain, int32_t result, uint32_t qualified)
 {
-	VkSwapchainKHR output = VK_NULL_HANDLE;
-	VkResult output_result;
 	TipsyVkOutputPair pair;
+	VkResult build_result;
 	pthread_mutex_lock(&tipsy_output.mutex);
 	if (result != VK_SUCCESS || guest_swapchain == 0 || !qualified ||
 		!tipsy_output.pending_swapchain_qualified ||
@@ -1381,34 +951,14 @@ void tipsy_vk_output_swapchain_created(void *device_ptr,
 		pthread_mutex_unlock(&tipsy_output.mutex);
 		return;
 	}
-	output_result = tipsy_output.vk.create_swapchain(tipsy_output.device,
-		&tipsy_output.pending_output_info, NULL, &output);
-	if (output_result != VK_SUCCESS || output == VK_NULL_HANDLE) {
-		tipsy_vk_output_unmap_child_locked();
-		tipsy_output.pending_swapchain_qualified = 0;
-		pthread_mutex_unlock(&tipsy_output.mutex);
-		return;
-	}
-	memset(&pair, 0, sizeof(pair));
-	if (tipsy_output.pending_output_info.oldSwapchain != VK_NULL_HANDLE) {
-		/* A successful create with oldSwapchain retires that output immediately,
-		 * even if later command/pipeline allocation fails. */
+	if (tipsy_output.active.active) {
 		tipsy_vk_output_retire_active_locked();
 	}
-	output_result = tipsy_vk_output_build_pair_locked(&pair,
-		(VkSwapchainKHR)guest_swapchain, output,
-		&tipsy_output.pending_output_info);
-	if (output_result != VK_SUCCESS) {
+	memset(&pair, 0, sizeof(pair));
+	build_result = tipsy_vk_output_build_pair_locked(&pair,
+		(VkSwapchainKHR)guest_swapchain);
+	if (build_result != VK_SUCCESS) {
 		tipsy_vk_output_destroy_pair_locked(&pair, 1);
-		tipsy_vk_output_unmap_child_locked();
-		tipsy_output.pending_swapchain_qualified = 0;
-		pthread_mutex_unlock(&tipsy_output.mutex);
-		return;
-	}
-	if (tipsy_output.active.active) {
-		/* Two unrelated guest swapchains cannot share this version-one output. */
-		tipsy_vk_output_destroy_pair_locked(&pair, 1);
-		tipsy_vk_output_unmap_child_locked();
 		tipsy_output.pending_swapchain_qualified = 0;
 		pthread_mutex_unlock(&tipsy_output.mutex);
 		return;
@@ -1421,7 +971,12 @@ void tipsy_vk_output_swapchain_created(void *device_ptr,
 void tipsy_vk_output_swapchain_images(void *device_ptr, uint64_t swapchain,
 	uint32_t count, const uint64_t *images, int32_t result)
 {
+	VkCommandBufferAllocateInfo command_info;
 	VkSemaphoreCreateInfo semaphore_info;
+	VkFenceCreateInfo fence_info;
+	VkImageViewCreateInfo view_info;
+	VkFramebufferCreateInfo framebuffer_info;
+	VkCommandBuffer commands[TIPSY_VK_OUTPUT_MAX_IMAGES];
 	uint32_t i;
 	pthread_mutex_lock(&tipsy_output.mutex);
 	if (result != VK_SUCCESS || images == NULL || count == 0 ||
@@ -1433,31 +988,74 @@ void tipsy_vk_output_swapchain_images(void *device_ptr, uint64_t swapchain,
 		return;
 	}
 	if (tipsy_output.active.source_count != 0) {
-		/* vkGetSwapchainImagesKHR may return the same image list more than
-		 * once.  Completion semaphores belong to the swapchain generation and
-		 * must not be replaced while a prior present can still refer to them. */
 		if (tipsy_output.active.source_count != count) {
 			tipsy_output.active.ready = 0;
 			atomic_store_explicit(&output_route_ready, 0, memory_order_release);
-			tipsy_vk_output_unmap_child_locked();
 		}
+		pthread_mutex_unlock(&tipsy_output.mutex);
+		return;
+	}
+	memset(&command_info, 0, sizeof(command_info));
+	command_info.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
+	command_info.commandPool = tipsy_output.active.command_pool;
+	command_info.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
+	command_info.commandBufferCount = count;
+	memset(commands, 0, sizeof(commands));
+	if (tipsy_output.vk.allocate_command_buffers(tipsy_output.device,
+		&command_info, commands) != VK_SUCCESS) {
+		tipsy_output.active.ready = 0;
+		atomic_store_explicit(&output_route_ready, 0, memory_order_release);
 		pthread_mutex_unlock(&tipsy_output.mutex);
 		return;
 	}
 	memset(&semaphore_info, 0, sizeof(semaphore_info));
 	semaphore_info.sType = VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO;
-	/* Publish the count before allocation so a partial failure remains
-	 * teardown-visible and cannot leak or be retried over live handles. */
+	memset(&fence_info, 0, sizeof(fence_info));
+	fence_info.sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO;
+	fence_info.flags = VK_FENCE_CREATE_SIGNALED_BIT;
 	tipsy_output.active.source_count = count;
 	for (i = 0; i < count; i++) {
 		tipsy_output.active.source[i].image = (VkImage)images[i];
+		tipsy_output.active.source[i].command = commands[i];
 		tipsy_output.active.source[i].completion_reusable = 1;
 		if (tipsy_output.vk.create_semaphore(tipsy_output.device,
 			&semaphore_info, NULL,
-			&tipsy_output.active.source[i].completion) != VK_SUCCESS) {
+			&tipsy_output.active.source[i].completion) != VK_SUCCESS ||
+			tipsy_output.vk.create_fence(tipsy_output.device, &fence_info, NULL,
+				&tipsy_output.active.source[i].fence) != VK_SUCCESS) {
 			tipsy_output.active.ready = 0;
 			atomic_store_explicit(&output_route_ready, 0, memory_order_release);
-			tipsy_vk_output_unmap_child_locked();
+			pthread_mutex_unlock(&tipsy_output.mutex);
+			return;
+		}
+		memset(&view_info, 0, sizeof(view_info));
+		view_info.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
+		view_info.image = tipsy_output.active.source[i].image;
+		view_info.viewType = VK_IMAGE_VIEW_TYPE_2D;
+		view_info.format = tipsy_output.active.format;
+		view_info.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+		view_info.subresourceRange.levelCount = 1;
+		view_info.subresourceRange.layerCount = 1;
+		if (tipsy_output.vk.create_image_view(tipsy_output.device, &view_info,
+			NULL, &tipsy_output.active.source[i].view) != VK_SUCCESS) {
+			tipsy_output.active.ready = 0;
+			atomic_store_explicit(&output_route_ready, 0, memory_order_release);
+			pthread_mutex_unlock(&tipsy_output.mutex);
+			return;
+		}
+		memset(&framebuffer_info, 0, sizeof(framebuffer_info));
+		framebuffer_info.sType = VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO;
+		framebuffer_info.renderPass = tipsy_output.active.render_pass;
+		framebuffer_info.attachmentCount = 1;
+		framebuffer_info.pAttachments = &tipsy_output.active.source[i].view;
+		framebuffer_info.width = tipsy_output.active.extent.width;
+		framebuffer_info.height = tipsy_output.active.extent.height;
+		framebuffer_info.layers = 1;
+		if (tipsy_output.vk.create_framebuffer(tipsy_output.device,
+			&framebuffer_info, NULL,
+			&tipsy_output.active.source[i].framebuffer) != VK_SUCCESS) {
+			tipsy_output.active.ready = 0;
+			atomic_store_explicit(&output_route_ready, 0, memory_order_release);
 			pthread_mutex_unlock(&tipsy_output.mutex);
 			return;
 		}
@@ -1498,395 +1096,59 @@ void tipsy_vk_output_acquire_observed(void *device_ptr, uint64_t swapchain,
 	int32_t result)
 {
 	TipsyVkSourceImageState *source;
+	(void)semaphore;
 	(void)fence;
+	if (result != VK_ERROR_DEVICE_LOST &&
+		atomic_load_explicit(&output_route_ready, memory_order_acquire) == 0) {
+		return;
+	}
 	pthread_mutex_lock(&tipsy_output.mutex);
 	if ((result == VK_SUCCESS || result == VK_SUBOPTIMAL_KHR) && image_index != NULL &&
-		semaphore != 0 && (VkDevice)device_ptr == tipsy_output.device &&
+		(VkDevice)device_ptr == tipsy_output.device &&
 		tipsy_output.active.active && tipsy_output.active.ready &&
 		tipsy_output.active.guest == (VkSwapchainKHR)swapchain &&
 		*image_index < tipsy_output.active.source_count) {
 		source = &tipsy_output.active.source[*image_index];
-		source->acquire = (VkSemaphore)semaphore;
-		source->acquired = 1;
-		source->acquire_waited = 0;
-		source->render_signal_count = 0;
-		/* Reacquiring the same source image proves the previous WSI wait on G
-		 * has completed, so this image-indexed G may be signaled again. */
 		source->completion_reusable = 1;
 	}
 	if (result == VK_ERROR_DEVICE_LOST) {
 		tipsy_output.device_lost = 1;
-		tipsy_vk_output_unmap_child_locked();
+		atomic_store_explicit(&output_route_ready, 0, memory_order_release);
 	}
 	pthread_mutex_unlock(&tipsy_output.mutex);
-}
-
-static void tipsy_vk_output_note_submit_locked(VkQueue queue, uint32_t count,
-	const VkSubmitInfo *submits)
-{
-	TipsyVkOutputQueueRecord *queue_record = tipsy_vk_output_queue_locked(queue);
-	uint32_t image;
-	uint32_t submit;
-	uint32_t wait;
-	uint32_t signal;
-	if (queue_record == NULL || queue_record->device != tipsy_output.device ||
-		queue_record->family != tipsy_output.eligible_family ||
-		queue_record->index >= tipsy_output.eligible_queue_count ||
-		queue_record->flags != 0) return;
-	for (image = 0; image < tipsy_output.active.source_count; image++) {
-		TipsyVkSourceImageState *source = &tipsy_output.active.source[image];
-		if (!source->acquired || source->acquire == VK_NULL_HANDLE) continue;
-		for (submit = 0; submit < count; submit++) {
-			for (wait = 0; wait < submits[submit].waitSemaphoreCount; wait++) {
-				if (submits[submit].pWaitSemaphores[wait] != source->acquire) continue;
-				source->acquire_waited = 1;
-				source->render_signal_count = submits[submit].signalSemaphoreCount;
-				if (source->render_signal_count > TIPSY_VK_OUTPUT_MAX_WAITS ||
-					(source->render_signal_count > 0 &&
-					 submits[submit].pSignalSemaphores == NULL)) {
-					source->render_signal_count = 0;
-					source->acquire_waited = 0;
-					continue;
-				}
-				for (signal = 0; signal < source->render_signal_count; signal++) {
-					source->render_signals[signal] =
-						submits[submit].pSignalSemaphores[signal];
-				}
-			}
-		}
-	}
 }
 
 void tipsy_vk_output_submit_observed(void *queue, uint32_t count,
 	const void *submits_ptr, int32_t result)
 {
+	(void)queue;
+	(void)count;
+	(void)submits_ptr;
+	if (result != VK_ERROR_DEVICE_LOST) return;
 	pthread_mutex_lock(&tipsy_output.mutex);
-	if (result == VK_SUCCESS && tipsy_output.active.active && count > 0 &&
-		count <= TIPSY_VK_OUTPUT_MAX_WAITS && submits_ptr != NULL) {
-		tipsy_vk_output_note_submit_locked((VkQueue)queue, count,
-			(const VkSubmitInfo *)submits_ptr);
-	} else if (result == VK_ERROR_DEVICE_LOST) {
-		tipsy_output.device_lost = 1;
-		tipsy_vk_output_unmap_child_locked();
-	}
+	tipsy_output.device_lost = 1;
+	atomic_store_explicit(&output_route_ready, 0, memory_order_release);
 	pthread_mutex_unlock(&tipsy_output.mutex);
 }
 
 void tipsy_vk_output_submit2_observed(void *queue, uint32_t count,
 	const void *submits_ptr, int32_t result)
 {
-	const VkSubmitInfo2 *submits = (const VkSubmitInfo2 *)submits_ptr;
-	uint32_t image;
-	uint32_t submit;
-	uint32_t wait;
-	uint32_t signal;
-	pthread_mutex_lock(&tipsy_output.mutex);
-	if (result == VK_SUCCESS && tipsy_output.active.active && count > 0 &&
-		count <= TIPSY_VK_OUTPUT_MAX_WAITS && submits != NULL) {
-		TipsyVkOutputQueueRecord *queue_record =
-			tipsy_vk_output_queue_locked((VkQueue)queue);
-		if (queue_record == NULL || queue_record->device != tipsy_output.device ||
-			queue_record->family != tipsy_output.eligible_family ||
-			queue_record->index >= tipsy_output.eligible_queue_count ||
-			queue_record->flags != 0) {
-			pthread_mutex_unlock(&tipsy_output.mutex);
-			return;
-		}
-		for (image = 0; image < tipsy_output.active.source_count; image++) {
-			TipsyVkSourceImageState *source = &tipsy_output.active.source[image];
-			if (!source->acquired || source->acquire == VK_NULL_HANDLE) continue;
-			for (submit = 0; submit < count; submit++) {
-				for (wait = 0; wait < submits[submit].waitSemaphoreInfoCount; wait++) {
-					if (submits[submit].pWaitSemaphoreInfos[wait].semaphore !=
-						source->acquire) continue;
-					source->acquire_waited = 1;
-					source->render_signal_count =
-						submits[submit].signalSemaphoreInfoCount;
-					if (source->render_signal_count > TIPSY_VK_OUTPUT_MAX_WAITS ||
-						(source->render_signal_count > 0 &&
-						 submits[submit].pSignalSemaphoreInfos == NULL)) {
-						source->render_signal_count = 0;
-						source->acquire_waited = 0;
-						continue;
-					}
-					for (signal = 0; signal < source->render_signal_count; signal++) {
-						source->render_signals[signal] =
-							submits[submit].pSignalSemaphoreInfos[signal].semaphore;
-					}
-				}
-			}
-		}
-	} else if (result == VK_ERROR_DEVICE_LOST) {
-		tipsy_output.device_lost = 1;
-		tipsy_vk_output_unmap_child_locked();
-	}
-	pthread_mutex_unlock(&tipsy_output.mutex);
-}
-
-static int tipsy_vk_output_present_wait_matches_render(
-	const TipsyVkSourceImageState *source, const VkPresentInfoKHR *info)
-{
-	uint32_t wait;
-	uint32_t signal;
-	if (!source->acquired || !source->acquire_waited ||
-		source->render_signal_count == 0 || info->waitSemaphoreCount == 0 ||
-		info->pWaitSemaphores == NULL) {
-		return 0;
-	}
-	for (wait = 0; wait < info->waitSemaphoreCount; wait++) {
-		for (signal = 0; signal < source->render_signal_count; signal++) {
-			if (info->pWaitSemaphores[wait] == source->render_signals[signal]) {
-				return 1;
-			}
-		}
-	}
-	return 0;
+	tipsy_vk_output_submit_observed(queue, count, submits_ptr, result);
 }
 
 static VkResult tipsy_vk_output_wait_pair_fences_locked(TipsyVkOutputPair *pair)
 {
-	VkFence fences[TIPSY_VK_OUTPUT_MAX_IMAGES];
-	uint32_t count = 0;
-	uint32_t i;
-	for (i = 0; i < pair->output_count; i++) {
-		if (pair->frames[i].in_flight && pair->frames[i].fence != VK_NULL_HANDLE) {
-			fences[count++] = pair->frames[i].fence;
-		}
-	}
-	if (count == 0) return VK_SUCCESS;
-	return tipsy_output.vk.wait_fences(tipsy_output.device, count, fences,
-		VK_TRUE, 0);
-}
-
-static int tipsy_vk_output_clip_overlay(const struct tipsy_focused_text_frame *frame,
-	VkExtent2D guest, VkOffset2D *offset, VkExtent2D *extent)
-{
-	uint32_t x;
-	uint32_t y;
-	uint32_t width;
-	uint32_t height;
-	uint32_t max_width;
-	uint32_t max_height;
-	if (frame == NULL || offset == NULL || extent == NULL ||
-		guest.width == 0 || guest.height == 0 ||
-		frame->x < 0 || frame->y < 0 || frame->width < 1 || frame->height < 1) {
-		return 0;
-	}
-	x = (uint32_t)frame->x;
-	y = (uint32_t)frame->y;
-	if (x >= guest.width || y >= guest.height) {
-		return 0;
-	}
-	width = (uint32_t)frame->width;
-	height = (uint32_t)frame->height;
-	max_width = guest.width - x;
-	max_height = guest.height - y;
-	if (width > max_width) width = max_width;
-	if (height > max_height) height = max_height;
-	if (width == 0 || height == 0) {
-		return 0;
-	}
-	offset->x = (int32_t)x;
-	offset->y = (int32_t)y;
-	extent->width = width;
-	extent->height = height;
-	return 1;
-}
-
-static void tipsy_vk_output_destroy_output_views_into_locked(
-	TipsyVkOutputImageState *targets, uint32_t count)
-{
-	uint32_t i;
-	if (targets == NULL) return;
-	for (i = 0; i < count; i++) {
-		if (targets[i].framebuffer != VK_NULL_HANDLE &&
-			tipsy_output.vk.destroy_framebuffer != NULL) {
-			tipsy_output.vk.destroy_framebuffer(tipsy_output.device,
-				targets[i].framebuffer, NULL);
-		}
-		if (targets[i].view != VK_NULL_HANDLE &&
-			tipsy_output.vk.destroy_image_view != NULL) {
-			tipsy_output.vk.destroy_image_view(tipsy_output.device,
-				targets[i].view, NULL);
-		}
-		targets[i].framebuffer = VK_NULL_HANDLE;
-		targets[i].view = VK_NULL_HANDLE;
-		targets[i].image = VK_NULL_HANDLE;
-		targets[i].presented = 0;
-	}
-}
-
-static int tipsy_vk_output_create_output_views_into_locked(
-	TipsyVkOutputImageState *targets, uint32_t count, VkExtent2D extent,
-	VkFormat format, VkRenderPass render_pass)
-{
-	VkImageViewCreateInfo view_info;
-	VkFramebufferCreateInfo framebuffer_info;
 	uint32_t i;
 	VkResult result;
-	if (targets == NULL || count == 0 || extent.width == 0 || extent.height == 0 ||
-		render_pass == VK_NULL_HANDLE ||
-		tipsy_output.vk.create_image_view == NULL ||
-		tipsy_output.vk.create_framebuffer == NULL) {
-		return 0;
+	for (i = 0; i < pair->source_count; i++) {
+		if (pair->source[i].fence == VK_NULL_HANDLE) continue;
+		result = tipsy_output.vk.wait_fences(tipsy_output.device, 1,
+			&pair->source[i].fence, VK_TRUE, UINT64_MAX);
+		if (result != VK_SUCCESS) return result;
+		pair->source[i].in_flight = 0;
 	}
-	for (i = 0; i < count; i++) {
-		memset(&view_info, 0, sizeof(view_info));
-		view_info.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
-		view_info.image = targets[i].image;
-		view_info.viewType = VK_IMAGE_VIEW_TYPE_2D;
-		view_info.format = format;
-		view_info.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
-		view_info.subresourceRange.levelCount = 1;
-		view_info.subresourceRange.layerCount = 1;
-		result = tipsy_output.vk.create_image_view(tipsy_output.device,
-			&view_info, NULL, &targets[i].view);
-		if (result != VK_SUCCESS) return 0;
-		memset(&framebuffer_info, 0, sizeof(framebuffer_info));
-		framebuffer_info.sType = VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO;
-		framebuffer_info.renderPass = render_pass;
-		framebuffer_info.attachmentCount = 1;
-		framebuffer_info.pAttachments = &targets[i].view;
-		framebuffer_info.width = extent.width;
-		framebuffer_info.height = extent.height;
-		framebuffer_info.layers = 1;
-		result = tipsy_output.vk.create_framebuffer(tipsy_output.device,
-			&framebuffer_info, NULL, &targets[i].framebuffer);
-		if (result != VK_SUCCESS) return 0;
-		targets[i].presented = 0;
-	}
-	return 1;
-}
-
-static int tipsy_vk_output_ensure_output_extent_locked(TipsyVkOutputPair *pair,
-	VkOffset2D overlay_origin, VkExtent2D overlay_extent)
-{
-	VkSwapchainKHR created = VK_NULL_HANDLE;
-	VkSwapchainKHR old_output;
-	VkSwapchainCreateInfoKHR info;
-	VkSurfaceCapabilitiesKHR caps;
-	VkImage images[TIPSY_VK_OUTPUT_MAX_IMAGES];
-	TipsyVkOutputImageState new_targets[TIPSY_VK_OUTPUT_MAX_IMAGES];
-	uint32_t count = 0;
-	uint32_t i;
-	VkResult result;
-	VkExtent2D create_extent;
-
-	if (pair == NULL || overlay_extent.width == 0 || overlay_extent.height == 0) {
-		return 0;
-	}
-	tipsy_vk_output_place_child_locked(overlay_origin.x, overlay_origin.y,
-		overlay_extent.width, overlay_extent.height);
-	if (pair->output != VK_NULL_HANDLE &&
-		pair->extent.width == overlay_extent.width &&
-		pair->extent.height == overlay_extent.height) {
-		return 1;
-	}
-	if (tipsy_vk_output_wait_pair_fences_locked(pair) != VK_SUCCESS) {
-		return 0;
-	}
-	if (tipsy_output.vk.get_surface_capabilities == NULL ||
-		tipsy_output.vk.create_swapchain == NULL ||
-		tipsy_output.vk.get_swapchain_images == NULL ||
-		tipsy_output.vk.create_image_view == NULL ||
-		tipsy_output.vk.create_framebuffer == NULL ||
-		tipsy_output.output_surface == VK_NULL_HANDLE) {
-		return 0;
-	}
-	memset(&caps, 0, sizeof(caps));
-	if (tipsy_output.vk.get_surface_capabilities(tipsy_output.physical,
-		tipsy_output.output_surface, &caps) != VK_SUCCESS) {
-		return 0;
-	}
-	if ((caps.supportedUsageFlags & (VK_IMAGE_USAGE_TRANSFER_DST_BIT |
-		VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT)) != (VK_IMAGE_USAGE_TRANSFER_DST_BIT |
-		VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT)) {
-		return 0;
-	}
-	create_extent = overlay_extent;
-	if (caps.currentExtent.width != UINT32_MAX) {
-		if (caps.currentExtent.width != overlay_extent.width ||
-			caps.currentExtent.height != overlay_extent.height) {
-			return 0;
-		}
-		create_extent = caps.currentExtent;
-	}
-	if (create_extent.width < caps.minImageExtent.width ||
-		create_extent.width > caps.maxImageExtent.width ||
-		create_extent.height < caps.minImageExtent.height ||
-		create_extent.height > caps.maxImageExtent.height) {
-		return 0;
-	}
-	info = tipsy_output.pending_output_info;
-	if (info.sType != VK_STRUCTURE_TYPE_SWAPCHAIN_CREATE_INFO_KHR ||
-		info.surface == VK_NULL_HANDLE) {
-		return 0;
-	}
-	info.imageExtent = create_extent;
-	info.oldSwapchain = pair->output;
-	if (caps.minImageCount != 0 && info.minImageCount < caps.minImageCount) {
-		info.minImageCount = caps.minImageCount;
-	}
-	if (caps.maxImageCount != 0 && info.minImageCount > caps.maxImageCount) {
-		info.minImageCount = caps.maxImageCount;
-	}
-	result = tipsy_output.vk.create_swapchain(tipsy_output.device, &info, NULL,
-		&created);
-	if (result != VK_SUCCESS || created == VK_NULL_HANDLE) {
-		return 0;
-	}
-	if (tipsy_output.vk.get_swapchain_images(tipsy_output.device, created,
-		&count, NULL) != VK_SUCCESS || count == 0 ||
-		count > TIPSY_VK_OUTPUT_MAX_IMAGES) {
-		if (tipsy_output.vk.destroy_swapchain != NULL) {
-			tipsy_output.vk.destroy_swapchain(tipsy_output.device, created, NULL);
-		}
-		return 0;
-	}
-	memset(images, 0, sizeof(images));
-	if (tipsy_output.vk.get_swapchain_images(tipsy_output.device, created,
-		&count, images) != VK_SUCCESS) {
-		if (tipsy_output.vk.destroy_swapchain != NULL) {
-			tipsy_output.vk.destroy_swapchain(tipsy_output.device, created, NULL);
-		}
-		return 0;
-	}
-	if (pair->output_count == 0 || count != pair->output_count) {
-		if (tipsy_output.vk.destroy_swapchain != NULL) {
-			tipsy_output.vk.destroy_swapchain(tipsy_output.device, created, NULL);
-		}
-		return 0;
-	}
-	memset(new_targets, 0, sizeof(new_targets));
-	for (i = 0; i < count; i++) {
-		new_targets[i].image = images[i];
-		new_targets[i].complete = pair->target[i].complete;
-	}
-	if (!tipsy_vk_output_create_output_views_into_locked(new_targets, count,
-		create_extent, pair->format, pair->render_pass)) {
-		tipsy_vk_output_destroy_output_views_into_locked(new_targets, count);
-		if (tipsy_output.vk.destroy_swapchain != NULL) {
-			tipsy_output.vk.destroy_swapchain(tipsy_output.device, created, NULL);
-		}
-		return 0;
-	}
-	tipsy_vk_output_unmap_child_locked();
-	tipsy_vk_output_place_child_locked(overlay_origin.x, overlay_origin.y,
-		overlay_extent.width, overlay_extent.height);
-	tipsy_vk_output_destroy_output_views_into_locked(pair->target, pair->output_count);
-	old_output = pair->output;
-	pair->output = created;
-	pair->extent = create_extent;
-	for (i = 0; i < count; i++) {
-		pair->target[i] = new_targets[i];
-		pair->frames[i].in_flight = 0;
-	}
-	pair->next_frame = 0;
-	if (old_output != VK_NULL_HANDLE &&
-		tipsy_output.vk.destroy_swapchain != NULL) {
-		tipsy_output.vk.destroy_swapchain(tipsy_output.device, old_output, NULL);
-	}
-	return 1;
+	return VK_SUCCESS;
 }
 
 static VkResult tipsy_vk_output_create_foreground_locked(TipsyVkOutputPair *pair,
@@ -2007,7 +1269,7 @@ static int tipsy_vk_output_prepare_foreground_locked(TipsyVkOutputPair *pair,
 	if (frame == NULL || frame->rgba == NULL || frame->lease == 0 ||
 		frame->generation == 0 || frame->x < 0 || frame->y < 0 ||
 		frame->width < 1 || frame->height < 1 || frame->stride != frame->width * 4 ||
-		pair->guest_extent.width == 0 || pair->guest_extent.height == 0 ||
+		pair->extent.width == 0 || pair->extent.height == 0 ||
 		(size_t)frame->height > SIZE_MAX / (size_t)frame->stride) {
 		return 0;
 	}
@@ -2055,27 +1317,38 @@ static void tipsy_vk_output_barrier(VkCommandBuffer command, VkImage image,
 }
 
 static VkResult tipsy_vk_output_record_locked(TipsyVkOutputPair *pair,
-	uint32_t source_index, uint32_t output_index, uint32_t frame_index,
-	const struct tipsy_focused_text_frame *foreground, int upload,
-	VkOffset2D copy_src, VkExtent2D copy_extent)
+	uint32_t source_index, const struct tipsy_focused_text_frame *foreground,
+	int upload)
 {
-	VkCommandBuffer command = pair->frames[frame_index].command;
+	TipsyVkSourceImageState *source = &pair->source[source_index];
+	VkCommandBuffer command = source->command;
 	VkCommandBufferBeginInfo begin;
 	VkBufferImageCopy upload_region;
-	VkImageCopy copy;
 	VkRenderPassBeginInfo render;
 	VkViewport viewport;
 	VkRect2D scissor;
 	float rectangle[4];
 	VkResult result;
-	if (copy_extent.width == 0 || copy_extent.height == 0 ||
-		copy_extent.width != pair->extent.width ||
-		copy_extent.height != pair->extent.height ||
-		pair->guest_extent.width == 0 || pair->guest_extent.height == 0 ||
-		(uint32_t)copy_src.x + copy_extent.width > pair->guest_extent.width ||
-		(uint32_t)copy_src.y + copy_extent.height > pair->guest_extent.height) {
+	uint32_t scissor_w;
+	uint32_t scissor_h;
+
+	if (pair->extent.width == 0 || pair->extent.height == 0 ||
+		(uint32_t)foreground->x >= pair->extent.width ||
+		(uint32_t)foreground->y >= pair->extent.height) {
 		return VK_ERROR_INITIALIZATION_FAILED;
 	}
+	scissor_w = (uint32_t)foreground->width;
+	scissor_h = (uint32_t)foreground->height;
+	if ((uint32_t)foreground->x + scissor_w > pair->extent.width) {
+		scissor_w = pair->extent.width - (uint32_t)foreground->x;
+	}
+	if ((uint32_t)foreground->y + scissor_h > pair->extent.height) {
+		scissor_h = pair->extent.height - (uint32_t)foreground->y;
+	}
+	if (scissor_w == 0 || scissor_h == 0) {
+		return VK_ERROR_INITIALIZATION_FAILED;
+	}
+
 	memset(&begin, 0, sizeof(begin));
 	begin.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
 	begin.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
@@ -2107,44 +1380,15 @@ static VkResult tipsy_vk_output_record_locked(TipsyVkOutputPair *pair,
 			VK_ACCESS_TRANSFER_WRITE_BIT, VK_ACCESS_SHADER_READ_BIT,
 			VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT);
 	}
-	tipsy_vk_output_barrier(command, pair->source[source_index].image,
-		VK_IMAGE_LAYOUT_PRESENT_SRC_KHR, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
-		VK_ACCESS_MEMORY_WRITE_BIT, VK_ACCESS_TRANSFER_READ_BIT,
-		VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT);
-	tipsy_vk_output_barrier(command, pair->target[output_index].image,
-		pair->target[output_index].presented ? VK_IMAGE_LAYOUT_PRESENT_SRC_KHR :
-			VK_IMAGE_LAYOUT_UNDEFINED,
-		VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 0, VK_ACCESS_TRANSFER_WRITE_BIT,
-		VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT);
-	memset(&copy, 0, sizeof(copy));
-	copy.srcSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
-	copy.srcSubresource.layerCount = 1;
-	copy.dstSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
-	copy.dstSubresource.layerCount = 1;
-	copy.srcOffset.x = copy_src.x;
-	copy.srcOffset.y = copy_src.y;
-	copy.dstOffset.x = 0;
-	copy.dstOffset.y = 0;
-	copy.extent.width = copy_extent.width;
-	copy.extent.height = copy_extent.height;
-	copy.extent.depth = 1;
-	tipsy_output.vk.cmd_copy_image(command, pair->source[source_index].image,
-		VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, pair->target[output_index].image,
-		VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &copy);
-	tipsy_vk_output_barrier(command, pair->source[source_index].image,
-		VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, VK_IMAGE_LAYOUT_PRESENT_SRC_KHR,
-		VK_ACCESS_TRANSFER_READ_BIT, 0, VK_PIPELINE_STAGE_TRANSFER_BIT,
-		VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT);
-	tipsy_vk_output_barrier(command, pair->target[output_index].image,
-		VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
-		VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
-		VK_ACCESS_TRANSFER_WRITE_BIT,
+	tipsy_vk_output_barrier(command, source->image,
+		VK_IMAGE_LAYOUT_PRESENT_SRC_KHR, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+		VK_ACCESS_MEMORY_WRITE_BIT,
 		VK_ACCESS_COLOR_ATTACHMENT_READ_BIT | VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT,
-		VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT);
+		VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT);
 	memset(&render, 0, sizeof(render));
 	render.sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO;
 	render.renderPass = pair->render_pass;
-	render.framebuffer = pair->target[output_index].framebuffer;
+	render.framebuffer = source->framebuffer;
 	render.renderArea.extent = pair->extent;
 	tipsy_output.vk.cmd_begin_render_pass(command, &render,
 		VK_SUBPASS_CONTENTS_INLINE);
@@ -2154,18 +1398,17 @@ static VkResult tipsy_vk_output_record_locked(TipsyVkOutputPair *pair,
 	viewport.width = (float)pair->extent.width;
 	viewport.height = (float)pair->extent.height;
 	viewport.maxDepth = 1.0f;
-	scissor.offset.x = 0;
-	scissor.offset.y = 0;
-	scissor.extent = pair->extent;
+	scissor.offset.x = foreground->x;
+	scissor.offset.y = foreground->y;
+	scissor.extent.width = scissor_w;
+	scissor.extent.height = scissor_h;
 	tipsy_output.vk.cmd_set_viewport(command, 0, 1, &viewport);
 	tipsy_output.vk.cmd_set_scissor(command, 0, 1, &scissor);
-	rectangle[0] = (2.0f * (float)(foreground->x - copy_src.x) /
+	rectangle[0] = (2.0f * (float)foreground->x / (float)pair->extent.width) - 1.0f;
+	rectangle[1] = (2.0f * (float)foreground->y / (float)pair->extent.height) - 1.0f;
+	rectangle[2] = (2.0f * (float)(foreground->x + foreground->width) /
 		(float)pair->extent.width) - 1.0f;
-	rectangle[1] = (2.0f * (float)(foreground->y - copy_src.y) /
-		(float)pair->extent.height) - 1.0f;
-	rectangle[2] = (2.0f * (float)(foreground->x - copy_src.x + foreground->width) /
-		(float)pair->extent.width) - 1.0f;
-	rectangle[3] = (2.0f * (float)(foreground->y - copy_src.y + foreground->height) /
+	rectangle[3] = (2.0f * (float)(foreground->y + foreground->height) /
 		(float)pair->extent.height) - 1.0f;
 	tipsy_output.vk.cmd_push_constants(command, pair->pipeline_layout,
 		VK_SHADER_STAGE_VERTEX_BIT, 0, sizeof(rectangle), rectangle);
@@ -2174,7 +1417,7 @@ static VkResult tipsy_vk_output_record_locked(TipsyVkOutputPair *pair,
 		&pair->descriptor, 0, NULL);
 	tipsy_output.vk.cmd_draw(command, 4, 1, 0, 0);
 	tipsy_output.vk.cmd_end_render_pass(command);
-	tipsy_vk_output_barrier(command, pair->target[output_index].image,
+	tipsy_vk_output_barrier(command, source->image,
 		VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, VK_IMAGE_LAYOUT_PRESENT_SRC_KHR,
 		VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT, 0,
 		VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
@@ -2201,20 +1444,6 @@ static void tipsy_vk_output_quarantine_locked(TipsyVkOutputPair *pair)
 {
 	if (pair != NULL) pair->ready = 0;
 	atomic_store_explicit(&output_route_ready, 0, memory_order_release);
-	tipsy_vk_output_unmap_child_locked();
-}
-
-static VkResult tipsy_vk_output_consume_acquire_locked(VkQueue queue,
-	VkSemaphore semaphore)
-{
-	VkPipelineStageFlags stage = VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT;
-	VkSubmitInfo submit;
-	memset(&submit, 0, sizeof(submit));
-	submit.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
-	submit.waitSemaphoreCount = 1;
-	submit.pWaitSemaphores = &semaphore;
-	submit.pWaitDstStageMask = &stage;
-	return tipsy_output.vk.queue_submit(queue, 1, &submit, VK_NULL_HANDLE);
 }
 
 int tipsy_vk_output_present(void *queue_ptr, const void *present_info_ptr,
@@ -2225,45 +1454,33 @@ int tipsy_vk_output_present(void *queue_ptr, const void *present_info_ptr,
 	struct tipsy_focused_text_frame foreground;
 	TipsyVkOutputPair *pair;
 	TipsyVkSourceImageState *source;
-	TipsyVkOutputFrame *frame = NULL;
 	TipsyVkOutputQueueRecord *queue_record;
-	VkSemaphore waits[TIPSY_VK_OUTPUT_MAX_WAITS + 1u];
-	VkPipelineStageFlags stages[TIPSY_VK_OUTPUT_MAX_WAITS + 1u];
-	VkSemaphore signals[2];
+	VkSemaphore waits[TIPSY_VK_OUTPUT_MAX_WAITS];
+	VkPipelineStageFlags stages[TIPSY_VK_OUTPUT_MAX_WAITS];
 	VkSubmitInfo submit;
 	VkPresentInfoKHR guest;
-	VkPresentInfoKHR output_present;
-	VkSwapchainKHR output_swapchain;
-	VkResult output_individual = VK_SUCCESS;
-	VkResult guest_individual = VK_SUCCESS;
-	VkResult output_result = VK_SUCCESS;
-	VkResult real_guest_result = VK_SUCCESS;
+	VkResult submit_result = VK_SUCCESS;
+	VkResult present_result = VK_SUCCESS;
 	VkResult failure_result = VK_SUCCESS;
+	VkResult fence_ready;
 	uint32_t source_index;
-	uint32_t output_index = 0;
-	uint32_t frame_index = 0;
 	uint32_t i;
 	int acquired = 0;
 	int upload = 0;
-	int safe_to_map = 0;
-	int frame_ready = 0;
-	VkOffset2D clip_offset;
-	VkExtent2D clip_extent;
 
 	if (guest_result == NULL || host_present == NULL || queue_ptr == NULL) return 0;
 	if (atomic_load_explicit(&output_route_ready, memory_order_acquire) == 0) {
 		return 0;
 	}
 	if (!tipsy_vk_output_overlay_live()) {
-		if (atomic_load_explicit(&output_child_mapped, memory_order_acquire) == 0 &&
-			atomic_load_explicit(&output_foreground_retained, memory_order_acquire) == 0) {
+		if (atomic_load_explicit(&output_foreground_retained,
+			memory_order_acquire) == 0) {
 			return 0;
 		}
 		if (test_transaction_fixture != NULL) {
 			test_transaction_fixture->present_mutex_locks++;
 		}
 		pthread_mutex_lock(&tipsy_output.mutex);
-		tipsy_vk_output_unmap_child_locked();
 		if (tipsy_output.active.active) {
 			tipsy_vk_output_clear_foreground_locked(&tipsy_output.active);
 		}
@@ -2281,14 +1498,13 @@ int tipsy_vk_output_present(void *queue_ptr, const void *present_info_ptr,
 	pthread_mutex_lock(&tipsy_output.mutex);
 	pair = &tipsy_output.active;
 	if (acquired != 1) {
-		tipsy_vk_output_unmap_child_locked();
 		if (pair->active) tipsy_vk_output_clear_foreground_locked(pair);
 		pthread_mutex_unlock(&tipsy_output.mutex);
 		return 0;
 	}
 	if (!tipsy_output.device_ready || tipsy_output.device_lost || !pair->active ||
 		!pair->ready || info == NULL || info->sType != VK_STRUCTURE_TYPE_PRESENT_INFO_KHR ||
-		info->pNext != NULL || info->swapchainCount != 1 ||
+		info->swapchainCount != 1 ||
 		info->pSwapchains == NULL || info->pImageIndices == NULL ||
 		info->pSwapchains[0] != pair->guest || info->waitSemaphoreCount == 0 ||
 		info->waitSemaphoreCount > TIPSY_VK_OUTPUT_MAX_WAITS ||
@@ -2306,159 +1522,80 @@ int tipsy_vk_output_present(void *queue_ptr, const void *present_info_ptr,
 	source_index = info->pImageIndices[0];
 	if (source_index >= pair->source_count) goto direct;
 	source = &pair->source[source_index];
-	if (!source->completion_reusable ||
-		!tipsy_vk_output_present_wait_matches_render(source, info)) {
+	if (!source->completion_reusable || source->framebuffer == VK_NULL_HANDLE ||
+		source->command == VK_NULL_HANDLE || source->completion == VK_NULL_HANDLE) {
 		goto direct;
 	}
-	/* A busy frame is a direct-frame condition, not permission to block the
-	 * guest present path. Scan each private frame once with a zero timeout. */
-	for (i = 0; i < pair->output_count; i++) {
-		VkResult ready;
-		frame_index = (pair->next_frame + i) % pair->output_count;
-		frame = &pair->frames[frame_index];
-		ready = tipsy_output.vk.wait_fences(tipsy_output.device, 1,
-			&frame->fence, VK_TRUE, 0);
-		if (ready == VK_SUCCESS) {
-			frame_ready = 1;
-			frame->in_flight = 0;
-			pair->next_frame = (frame_index + 1u) % pair->output_count;
-			break;
-		}
-		if (ready != VK_TIMEOUT) {
-			failure_result = ready;
-			tipsy_vk_output_quarantine_locked(pair);
-			if (ready == VK_ERROR_DEVICE_LOST) goto device_lost;
-			goto direct;
-		}
-	}
-	if (!frame_ready) goto direct;
-	memset(&clip_offset, 0, sizeof(clip_offset));
-	memset(&clip_extent, 0, sizeof(clip_extent));
-	if (!tipsy_vk_output_clip_overlay(&foreground, pair->guest_extent,
-		&clip_offset, &clip_extent)) {
+	if ((uint32_t)foreground.x >= pair->extent.width ||
+		(uint32_t)foreground.y >= pair->extent.height) {
 		goto direct;
 	}
+	fence_ready = tipsy_output.vk.wait_fences(tipsy_output.device, 1,
+		&source->fence, VK_TRUE, 0);
+	if (fence_ready == VK_TIMEOUT) goto direct;
+	if (fence_ready != VK_SUCCESS) {
+		failure_result = fence_ready;
+		tipsy_vk_output_quarantine_locked(pair);
+		if (fence_ready == VK_ERROR_DEVICE_LOST) goto device_lost;
+		goto direct;
+	}
+	source->in_flight = 0;
 	if (!tipsy_vk_output_prepare_foreground_locked(pair, &foreground, &upload)) {
 		goto direct;
 	}
-	if (!tipsy_vk_output_ensure_output_extent_locked(pair, clip_offset, clip_extent)) {
+	if (tipsy_vk_output_record_locked(pair, source_index, &foreground,
+		upload) != VK_SUCCESS) {
 		goto direct;
-	}
-	output_result = tipsy_output.vk.acquire_next_image(tipsy_output.device,
-		pair->output, 0, frame->acquire, VK_NULL_HANDLE, &output_index);
-	if (output_result == VK_NOT_READY || output_result == VK_TIMEOUT) goto direct;
-	if (output_result == VK_SUBOPTIMAL_KHR ||
-		(output_result == VK_SUCCESS && output_index >= pair->output_count)) {
-		goto consume_output_acquire_and_direct;
-	}
-	if (output_result != VK_SUCCESS) {
-		failure_result = output_result;
-		tipsy_vk_output_quarantine_locked(pair);
-		if (output_result == VK_ERROR_DEVICE_LOST) goto device_lost;
-		goto direct;
-	}
-	safe_to_map = pair->target[output_index].presented != 0;
-	if (tipsy_vk_output_record_locked(pair, source_index, output_index,
-		frame_index, &foreground, upload, clip_offset, clip_extent) != VK_SUCCESS) {
-		goto consume_output_acquire_and_direct;
 	}
 	for (i = 0; i < info->waitSemaphoreCount; i++) {
 		waits[i] = info->pWaitSemaphores[i];
-		stages[i] = VK_PIPELINE_STAGE_TRANSFER_BIT;
+		stages[i] = VK_PIPELINE_STAGE_ALL_COMMANDS_BIT;
 	}
-	waits[info->waitSemaphoreCount] = frame->acquire;
-	stages[info->waitSemaphoreCount] = VK_PIPELINE_STAGE_TRANSFER_BIT;
-	signals[0] = source->completion;
-	signals[1] = pair->target[output_index].complete;
 	memset(&submit, 0, sizeof(submit));
 	submit.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
-	submit.waitSemaphoreCount = info->waitSemaphoreCount + 1u;
+	submit.waitSemaphoreCount = info->waitSemaphoreCount;
 	submit.pWaitSemaphores = waits;
 	submit.pWaitDstStageMask = stages;
 	submit.commandBufferCount = 1;
-	submit.pCommandBuffers = &frame->command;
-	submit.signalSemaphoreCount = 2;
-	submit.pSignalSemaphores = signals;
-	output_result = tipsy_output.vk.reset_fences(tipsy_output.device, 1,
-		&frame->fence);
-	if (output_result != VK_SUCCESS) {
-		failure_result = output_result;
-		if (output_result == VK_ERROR_DEVICE_LOST) goto device_lost;
-		goto consume_output_acquire_and_direct;
+	submit.pCommandBuffers = &source->command;
+	submit.signalSemaphoreCount = 1;
+	submit.pSignalSemaphores = &source->completion;
+	submit_result = tipsy_output.vk.reset_fences(tipsy_output.device, 1,
+		&source->fence);
+	if (submit_result != VK_SUCCESS) {
+		failure_result = submit_result;
+		if (submit_result == VK_ERROR_DEVICE_LOST) goto device_lost;
+		goto direct;
 	}
 	if (pair->queue == VK_NULL_HANDLE) pair->queue = (VkQueue)queue_ptr;
-	output_result = tipsy_output.vk.queue_submit((VkQueue)queue_ptr,
-		1, &submit, frame->fence);
-	if (output_result != VK_SUCCESS) {
-		failure_result = output_result;
+	submit_result = tipsy_output.vk.queue_submit((VkQueue)queue_ptr,
+		1, &submit, source->fence);
+	if (submit_result != VK_SUCCESS) {
+		failure_result = submit_result;
 		tipsy_vk_output_quarantine_locked(pair);
-		if (output_result == VK_ERROR_DEVICE_LOST) goto device_lost;
-		if (tipsy_vk_output_is_oom(output_result)) {
-			goto consume_output_acquire_and_direct;
+		if (submit_result == VK_ERROR_DEVICE_LOST) goto device_lost;
+		if (tipsy_vk_output_is_oom(submit_result)) {
+			goto direct;
 		}
 		goto handled_failure;
 	}
-	frame->in_flight = 1;
+	source->in_flight = 1;
 	source->completion_reusable = 0;
-	source->acquired = 0;
-	source->acquire_waited = 0;
-	source->render_signal_count = 0;
 	guest = *info;
 	guest.waitSemaphoreCount = 1;
 	guest.pWaitSemaphores = &source->completion;
-	real_guest_result = host_present((VkQueue)queue_ptr, &guest);
-	if (real_guest_result == VK_ERROR_DEVICE_LOST) {
-		failure_result = real_guest_result;
+	present_result = host_present((VkQueue)queue_ptr, &guest);
+	if (present_result == VK_ERROR_DEVICE_LOST) {
+		failure_result = present_result;
 		goto device_lost;
 	}
-	if ((real_guest_result == VK_SUCCESS || real_guest_result == VK_SUBOPTIMAL_KHR) &&
-		info->pResults != NULL) {
-		guest_individual = info->pResults[0];
-	} else {
-		guest_individual = real_guest_result;
-	}
-	/* Even an OOM guest-present result leaves G unaffected. The generation is
-	 * quarantined, but O must still receive its one output-present wait. */
-	memset(&output_present, 0, sizeof(output_present));
-	output_present.sType = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR;
-	output_present.waitSemaphoreCount = 1;
-	output_present.pWaitSemaphores = &pair->target[output_index].complete;
-	output_present.swapchainCount = 1;
-	output_swapchain = pair->output;
-	output_present.pSwapchains = &output_swapchain;
-	output_present.pImageIndices = &output_index;
-	output_present.pResults = &output_individual;
-	output_result = host_present((VkQueue)queue_ptr, &output_present);
-	if (output_result == VK_ERROR_DEVICE_LOST) {
-		failure_result = output_result;
-		goto device_lost;
-	}
-	pair->target[output_index].presented = output_result == VK_SUCCESS &&
-		output_individual == VK_SUCCESS;
-	if (real_guest_result != VK_SUCCESS || guest_individual != VK_SUCCESS ||
-		output_result != VK_SUCCESS || output_individual != VK_SUCCESS) {
+	if (present_result != VK_SUCCESS && present_result != VK_SUBOPTIMAL_KHR) {
 		tipsy_vk_output_quarantine_locked(pair);
-	} else if (safe_to_map) {
-		tipsy_vk_output_map_child_locked();
 	}
-	*guest_result = real_guest_result;
+	*guest_result = present_result;
 	pthread_mutex_unlock(&tipsy_output.mutex);
 	tipsy_vk_output_foreground_release(foreground.lease);
 	return 1;
-
-consume_output_acquire_and_direct:
-	tipsy_vk_output_quarantine_locked(pair);
-	output_result = tipsy_vk_output_consume_acquire_locked((VkQueue)queue_ptr,
-		frame->acquire);
-	if (output_result == VK_ERROR_DEVICE_LOST) {
-		failure_result = output_result;
-		goto device_lost;
-	}
-	if (output_result != VK_SUCCESS && !tipsy_vk_output_is_oom(output_result)) {
-		failure_result = output_result;
-		goto handled_failure;
-	}
-	goto direct;
 
 device_lost:
 	(void)failure_result;
@@ -2477,7 +1614,6 @@ handled_failure:
 	return 1;
 
 direct:
-	tipsy_vk_output_unmap_child_locked();
 	pthread_mutex_unlock(&tipsy_output.mutex);
 	tipsy_vk_output_foreground_release(foreground.lease);
 	return 0;
@@ -2485,13 +1621,34 @@ direct:
 
 void tipsy_vk_output_swapchain_destroying(void *device_ptr, uint64_t swapchain)
 {
+	uint32_t i;
 	pthread_mutex_lock(&tipsy_output.mutex);
 	if ((VkDevice)device_ptr == tipsy_output.device) {
 		if (tipsy_output.active.active &&
 			tipsy_output.active.guest == (VkSwapchainKHR)swapchain) {
 			tipsy_output.active.ready = 0;
 			atomic_store_explicit(&output_route_ready, 0, memory_order_release);
-			tipsy_vk_output_unmap_child_locked();
+			if (!tipsy_output.device_lost) {
+				tipsy_vk_output_destroy_pair_locked(&tipsy_output.active, 1);
+			} else {
+				memset(&tipsy_output.active, 0, sizeof(tipsy_output.active));
+				tipsy_vk_output_note_overlay_retained_locked();
+			}
+		}
+		for (i = 0; i < tipsy_output.retired_count; ) {
+			if (tipsy_output.retired[i].guest == (VkSwapchainKHR)swapchain) {
+				if (!tipsy_output.device_lost) {
+					tipsy_vk_output_destroy_pair_locked(&tipsy_output.retired[i], 1);
+				} else {
+					memset(&tipsy_output.retired[i], 0, sizeof(tipsy_output.retired[i]));
+				}
+				tipsy_output.retired[i] = tipsy_output.retired[tipsy_output.retired_count - 1u];
+				memset(&tipsy_output.retired[tipsy_output.retired_count - 1u], 0,
+					sizeof(tipsy_output.retired[0]));
+				tipsy_output.retired_count--;
+			} else {
+				i++;
+			}
 		}
 	}
 	pthread_mutex_unlock(&tipsy_output.mutex);
@@ -2503,7 +1660,6 @@ void tipsy_vk_output_device_destroying(void *device_ptr)
 	pthread_mutex_lock(&tipsy_output.mutex);
 	if ((VkDevice)device_ptr == tipsy_output.device) {
 		atomic_store_explicit(&output_route_ready, 0, memory_order_release);
-		tipsy_vk_output_unmap_child_locked();
 		if (!tipsy_output.device_lost) {
 			tipsy_vk_output_destroy_pair_locked(&tipsy_output.active, 1);
 			for (i = 0; i < tipsy_output.retired_count; i++) {
@@ -2521,9 +1677,9 @@ void tipsy_vk_output_device_destroying(void *device_ptr)
 		tipsy_output.eligible_queue_count = 0;
 		tipsy_output.device_lost = 0;
 		memset(tipsy_output.queues, 0, sizeof(tipsy_output.queues));
-		memset(&tipsy_output.vk.create_swapchain, 0,
+		memset(&tipsy_output.vk.create_semaphore, 0,
 			sizeof(TipsyVkOutputDispatch) -
-			offsetof(TipsyVkOutputDispatch, create_swapchain));
+			offsetof(TipsyVkOutputDispatch, create_semaphore));
 	}
 	pthread_mutex_unlock(&tipsy_output.mutex);
 }
@@ -2534,15 +1690,6 @@ void tipsy_vk_output_source_surface_destroying(void *instance_ptr, uint64_t surf
 	if ((VkInstance)instance_ptr == tipsy_output.instance &&
 		(VkSurfaceKHR)surface == tipsy_output.source_surface) {
 		atomic_store_explicit(&output_route_ready, 0, memory_order_release);
-		tipsy_vk_output_unmap_child_locked();
-		if (tipsy_output.device == VK_NULL_HANDLE &&
-			tipsy_output.output_surface != VK_NULL_HANDLE &&
-			tipsy_output.vk.destroy_surface != NULL) {
-			tipsy_output.vk.destroy_surface(tipsy_output.instance,
-				tipsy_output.output_surface, NULL);
-			tipsy_output.output_surface = VK_NULL_HANDLE;
-			tipsy_vk_output_destroy_child_locked();
-		}
 		tipsy_output.source_surface = VK_NULL_HANDLE;
 	}
 	pthread_mutex_unlock(&tipsy_output.mutex);
@@ -2553,24 +1700,9 @@ void tipsy_vk_output_instance_destroying(void *instance_ptr)
 	pthread_mutex_lock(&tipsy_output.mutex);
 	if ((VkInstance)instance_ptr == tipsy_output.instance) {
 		atomic_store_explicit(&output_route_ready, 0, memory_order_release);
-		tipsy_vk_output_unmap_child_locked();
-		if (tipsy_output.device == VK_NULL_HANDLE &&
-			tipsy_output.probe_surface != VK_NULL_HANDLE &&
-			tipsy_output.vk.destroy_surface != NULL) {
-			tipsy_output.vk.destroy_surface(tipsy_output.instance,
-				tipsy_output.probe_surface, NULL);
-		}
-		if (tipsy_output.device == VK_NULL_HANDLE &&
-			tipsy_output.output_surface != VK_NULL_HANDLE &&
-			tipsy_output.vk.destroy_surface != NULL) {
-			tipsy_output.vk.destroy_surface(tipsy_output.instance,
-				tipsy_output.output_surface, NULL);
-		}
-		tipsy_output.probe_surface = VK_NULL_HANDLE;
-		tipsy_output.output_surface = VK_NULL_HANDLE;
-		tipsy_output.source_surface = VK_NULL_HANDLE;
 		tipsy_output.instance = VK_NULL_HANDLE;
-		tipsy_vk_output_destroy_child_locked();
+		tipsy_output.source_surface = VK_NULL_HANDLE;
+		memset(&tipsy_output.vk, 0, sizeof(tipsy_output.vk));
 	}
 	pthread_mutex_unlock(&tipsy_output.mutex);
 }
@@ -2619,8 +1751,6 @@ static const VkDevice test_transaction_device = (VkDevice)(uintptr_t)0x41;
 static const VkQueue test_transaction_queue = (VkQueue)(uintptr_t)0x42;
 static const VkSwapchainKHR test_transaction_guest =
 	(VkSwapchainKHR)(uintptr_t)0x43;
-static const VkSwapchainKHR test_transaction_output =
-	(VkSwapchainKHR)(uintptr_t)0x44;
 static const VkSemaphore test_transaction_original_wait =
 	(VkSemaphore)(uintptr_t)0x45;
 static const VkSemaphore test_transaction_g = (VkSemaphore)(uintptr_t)0x46;
@@ -2637,21 +1767,6 @@ static VKAPI_ATTR VkResult VKAPI_CALL tipsy_vk_output_fixture_wait_fences(
 	if (test_transaction_scenario == TIPSY_VK_OUTPUT_TX_FRAME_BUSY) {
 		return VK_TIMEOUT;
 	}
-	return VK_SUCCESS;
-}
-
-static VKAPI_ATTR VkResult VKAPI_CALL tipsy_vk_output_fixture_acquire(
-	VkDevice device, VkSwapchainKHR swapchain, uint64_t timeout,
-	VkSemaphore semaphore, VkFence fence, uint32_t *image_index)
-{
-	(void)device;
-	(void)swapchain;
-	(void)timeout;
-	(void)semaphore;
-	(void)fence;
-	tipsy_vk_output_fixture_operation(test_transaction_fixture, 1);
-	test_transaction_fixture->acquire_calls++;
-	if (image_index != NULL) *image_index = 0;
 	return VK_SUCCESS;
 }
 
@@ -2715,26 +1830,7 @@ static VKAPI_ATTR VkResult VKAPI_CALL tipsy_vk_output_fixture_submit(
 static VKAPI_ATTR VkResult VKAPI_CALL tipsy_vk_output_fixture_present(
 	VkQueue queue, const VkPresentInfoKHR *info)
 {
-	int output;
 	(void)queue;
-	output = info != NULL && info->swapchainCount == 1 &&
-		info->pSwapchains != NULL &&
-		info->pSwapchains[0] != VK_NULL_HANDLE &&
-		info->pSwapchains[0] != test_transaction_guest;
-	if (output) {
-		tipsy_vk_output_fixture_operation(test_transaction_fixture, 4);
-		test_transaction_fixture->output_present_calls++;
-		if (test_transaction_scenario == TIPSY_VK_OUTPUT_TX_OUTPUT_PRESENT_OOM) {
-			return VK_ERROR_OUT_OF_HOST_MEMORY;
-		}
-		if (test_transaction_scenario ==
-			TIPSY_VK_OUTPUT_TX_OUTPUT_PRESENT_DEVICE_LOST) {
-			return VK_ERROR_DEVICE_LOST;
-		}
-		test_transaction_fixture->o_wait_consumed_once = 1;
-		if (info->pResults != NULL) info->pResults[0] = VK_SUCCESS;
-		return VK_SUCCESS;
-	}
 	tipsy_vk_output_fixture_operation(test_transaction_fixture, 3);
 	test_transaction_fixture->guest_present_calls++;
 	if (info != NULL && info->waitSemaphoreCount == 1 &&
@@ -2776,27 +1872,6 @@ static VKAPI_ATTR void VKAPI_CALL tipsy_vk_output_fixture_pipeline_barrier(
 	(void)buffers;
 	(void)image_count;
 	(void)images;
-}
-
-static VKAPI_ATTR void VKAPI_CALL tipsy_vk_output_fixture_copy_image(
-	VkCommandBuffer command, VkImage source, VkImageLayout source_layout,
-	VkImage destination, VkImageLayout destination_layout, uint32_t count,
-	const VkImageCopy *regions)
-{
-	(void)command;
-	(void)source;
-	(void)source_layout;
-	(void)destination;
-	(void)destination_layout;
-	if (count == 1 && regions != NULL) {
-		test_transaction_fixture->copy_src_x = (uint32_t)regions[0].srcOffset.x;
-		test_transaction_fixture->copy_src_y = (uint32_t)regions[0].srcOffset.y;
-		test_transaction_fixture->copy_dst_x = (uint32_t)regions[0].dstOffset.x;
-		test_transaction_fixture->copy_dst_y = (uint32_t)regions[0].dstOffset.y;
-		test_transaction_fixture->copy_width = regions[0].extent.width;
-		test_transaction_fixture->copy_height = regions[0].extent.height;
-	}
-	test_transaction_fixture->full_copy_count++;
 }
 
 static VKAPI_ATTR void VKAPI_CALL tipsy_vk_output_fixture_upload(
@@ -2900,6 +1975,63 @@ static VKAPI_ATTR void VKAPI_CALL tipsy_vk_output_fixture_draw(
 	test_transaction_fixture->draw_count++;
 }
 
+static void tipsy_vk_output_fixture_install_dispatch(void)
+{
+	tipsy_output.vk.wait_fences = tipsy_vk_output_fixture_wait_fences;
+	tipsy_output.vk.reset_fences = tipsy_vk_output_fixture_reset_fences;
+	tipsy_output.vk.reset_command_buffer = tipsy_vk_output_fixture_reset_command;
+	tipsy_output.vk.begin_command_buffer = tipsy_vk_output_fixture_begin_command;
+	tipsy_output.vk.end_command_buffer = tipsy_vk_output_fixture_end_command;
+	tipsy_output.vk.queue_submit = tipsy_vk_output_fixture_submit;
+	tipsy_output.vk.cmd_pipeline_barrier =
+		tipsy_vk_output_fixture_pipeline_barrier;
+	tipsy_output.vk.cmd_copy_buffer_to_image = tipsy_vk_output_fixture_upload;
+	tipsy_output.vk.cmd_begin_render_pass =
+		tipsy_vk_output_fixture_begin_render_pass;
+	tipsy_output.vk.cmd_end_render_pass = tipsy_vk_output_fixture_end_render_pass;
+	tipsy_output.vk.cmd_bind_pipeline = tipsy_vk_output_fixture_bind_pipeline;
+	tipsy_output.vk.cmd_bind_descriptor_sets =
+		tipsy_vk_output_fixture_bind_descriptors;
+	tipsy_output.vk.cmd_set_viewport = tipsy_vk_output_fixture_set_viewport;
+	tipsy_output.vk.cmd_set_scissor = tipsy_vk_output_fixture_set_scissor;
+	tipsy_output.vk.cmd_push_constants =
+		tipsy_vk_output_fixture_push_constants;
+	tipsy_output.vk.cmd_draw = tipsy_vk_output_fixture_draw;
+}
+
+static void tipsy_vk_output_fixture_arm_pair(uint8_t *staging)
+{
+	tipsy_output.device = test_transaction_device;
+	tipsy_output.device_ready = 1;
+	tipsy_output.eligible_family = 3;
+	tipsy_output.eligible_queue_count = 1;
+	tipsy_output.queues[0].device = test_transaction_device;
+	tipsy_output.queues[0].queue = test_transaction_queue;
+	tipsy_output.queues[0].family = 3;
+	tipsy_output.active.active = 1;
+	tipsy_output.active.ready = 1;
+	tipsy_output.active.guest = test_transaction_guest;
+	tipsy_output.active.extent.width = 8;
+	tipsy_output.active.extent.height = 8;
+	tipsy_output.active.source_count = 1;
+	tipsy_output.active.source[0].image = (VkImage)(uintptr_t)0x47;
+	tipsy_output.active.source[0].view = (VkImageView)(uintptr_t)0x54;
+	tipsy_output.active.source[0].framebuffer = (VkFramebuffer)(uintptr_t)0x4a;
+	tipsy_output.active.source[0].command = (VkCommandBuffer)(uintptr_t)0x4b;
+	tipsy_output.active.source[0].completion = test_transaction_g;
+	tipsy_output.active.source[0].fence = (VkFence)(uintptr_t)0x4d;
+	tipsy_output.active.source[0].completion_reusable = 1;
+	tipsy_output.active.pipeline = (VkPipeline)(uintptr_t)0x4e;
+	tipsy_output.active.pipeline_layout = (VkPipelineLayout)(uintptr_t)0x4f;
+	tipsy_output.active.descriptor = (VkDescriptorSet)(uintptr_t)0x50;
+	tipsy_output.active.staging_map = staging;
+	tipsy_output.active.foreground = (VkImage)(uintptr_t)0x51;
+	tipsy_output.active.foreground_width = 1;
+	tipsy_output.active.foreground_height = 1;
+	tipsy_output.active.foreground_initialized = 1;
+	tipsy_vk_output_fixture_install_dispatch();
+}
+
 void tipsy_test_vk_output_transaction_fixture(uint32_t scenario,
 	TipsyVkOutputTransactionFixture *out)
 {
@@ -2912,6 +2044,7 @@ void tipsy_test_vk_output_transaction_fixture(uint32_t scenario,
 		(VkSwapchainKHR)(uintptr_t)0x52};
 	uint32_t image_indices[2] = {0, 0};
 	VkPresentInfoKHR present;
+	VkApplicationInfo present_pnext;
 	VkResult individual[2] = {VK_SUCCESS, VK_SUCCESS};
 	int32_t result = VK_ERROR_INITIALIZATION_FAILED;
 	uint32_t saved_route_ready;
@@ -2925,66 +2058,7 @@ void tipsy_test_vk_output_transaction_fixture(uint32_t scenario,
 		sizeof(saved_state));
 	memset((unsigned char *)&tipsy_output + state_offset, 0,
 		sizeof(saved_state));
-	tipsy_output.device = test_transaction_device;
-	tipsy_output.device_ready = 1;
-	tipsy_output.eligible_family = 3;
-	tipsy_output.eligible_queue_count = 1;
-	tipsy_output.queues[0].device = test_transaction_device;
-	tipsy_output.queues[0].queue = test_transaction_queue;
-	tipsy_output.queues[0].family = 3;
-	tipsy_output.active.active = 1;
-	tipsy_output.active.ready = 1;
-	tipsy_output.active.guest = test_transaction_guest;
-	tipsy_output.active.output = test_transaction_output;
-	tipsy_output.active.guest_extent.width = 8;
-	tipsy_output.active.guest_extent.height = 8;
-	tipsy_output.active.extent.width = 1;
-	tipsy_output.active.extent.height = 1;
-	tipsy_output.active.source_count = 1;
-	tipsy_output.active.output_count = 1;
-	tipsy_output.active.source[0].image = (VkImage)(uintptr_t)0x47;
-	tipsy_output.active.source[0].completion = test_transaction_g;
-	tipsy_output.active.source[0].render_signals[0] = original_wait;
-	tipsy_output.active.source[0].render_signal_count = 1;
-	tipsy_output.active.source[0].acquired = 1;
-	tipsy_output.active.source[0].acquire_waited = 1;
-	tipsy_output.active.source[0].completion_reusable = 1;
-	tipsy_output.active.target[0].image = (VkImage)(uintptr_t)0x48;
-	tipsy_output.active.target[0].complete = (VkSemaphore)(uintptr_t)0x49;
-	tipsy_output.active.target[0].framebuffer = (VkFramebuffer)(uintptr_t)0x4a;
-	tipsy_output.active.frames[0].command = (VkCommandBuffer)(uintptr_t)0x4b;
-	tipsy_output.active.frames[0].acquire = (VkSemaphore)(uintptr_t)0x4c;
-	tipsy_output.active.frames[0].fence = (VkFence)(uintptr_t)0x4d;
-	tipsy_output.active.pipeline = (VkPipeline)(uintptr_t)0x4e;
-	tipsy_output.active.pipeline_layout = (VkPipelineLayout)(uintptr_t)0x4f;
-	tipsy_output.active.descriptor = (VkDescriptorSet)(uintptr_t)0x50;
-	tipsy_output.active.staging_map = staging;
-	tipsy_output.active.foreground = (VkImage)(uintptr_t)0x51;
-	tipsy_output.active.foreground_width = 1;
-	tipsy_output.active.foreground_height = 1;
-	tipsy_output.active.foreground_initialized = 1;
-	tipsy_output.vk.acquire_next_image = tipsy_vk_output_fixture_acquire;
-	tipsy_output.vk.wait_fences = tipsy_vk_output_fixture_wait_fences;
-	tipsy_output.vk.reset_fences = tipsy_vk_output_fixture_reset_fences;
-	tipsy_output.vk.reset_command_buffer = tipsy_vk_output_fixture_reset_command;
-	tipsy_output.vk.begin_command_buffer = tipsy_vk_output_fixture_begin_command;
-	tipsy_output.vk.end_command_buffer = tipsy_vk_output_fixture_end_command;
-	tipsy_output.vk.queue_submit = tipsy_vk_output_fixture_submit;
-	tipsy_output.vk.cmd_pipeline_barrier =
-		tipsy_vk_output_fixture_pipeline_barrier;
-	tipsy_output.vk.cmd_copy_image = tipsy_vk_output_fixture_copy_image;
-	tipsy_output.vk.cmd_copy_buffer_to_image = tipsy_vk_output_fixture_upload;
-	tipsy_output.vk.cmd_begin_render_pass =
-		tipsy_vk_output_fixture_begin_render_pass;
-	tipsy_output.vk.cmd_end_render_pass = tipsy_vk_output_fixture_end_render_pass;
-	tipsy_output.vk.cmd_bind_pipeline = tipsy_vk_output_fixture_bind_pipeline;
-	tipsy_output.vk.cmd_bind_descriptor_sets =
-		tipsy_vk_output_fixture_bind_descriptors;
-	tipsy_output.vk.cmd_set_viewport = tipsy_vk_output_fixture_set_viewport;
-	tipsy_output.vk.cmd_set_scissor = tipsy_vk_output_fixture_set_scissor;
-	tipsy_output.vk.cmd_push_constants =
-		tipsy_vk_output_fixture_push_constants;
-	tipsy_output.vk.cmd_draw = tipsy_vk_output_fixture_draw;
+	tipsy_vk_output_fixture_arm_pair(staging);
 	test_transaction_scenario = scenario;
 	test_transaction_fixture = out;
 	test_transaction_overlay_live = 1;
@@ -2995,20 +2069,23 @@ void tipsy_test_vk_output_transaction_fixture(uint32_t scenario,
 	if (scenario == TIPSY_VK_OUTPUT_TX_UNPUBLISHED ||
 		scenario == TIPSY_VK_OUTPUT_TX_UNPUBLISHED_TEARDOWN) {
 		test_transaction_overlay_live = 0;
-		tipsy_output.active.foreground = VK_NULL_HANDLE;
-		tipsy_output.active.staging_map = NULL;
-		tipsy_output.active.foreground_width = 0;
-		tipsy_output.active.foreground_height = 0;
-		tipsy_output.active.foreground_initialized = 0;
-		tipsy_output.child_mapped =
-			scenario == TIPSY_VK_OUTPUT_TX_UNPUBLISHED_TEARDOWN ? 1u : 0u;
+		if (scenario == TIPSY_VK_OUTPUT_TX_UNPUBLISHED) {
+			tipsy_output.active.foreground = VK_NULL_HANDLE;
+			tipsy_output.active.staging_map = NULL;
+			tipsy_output.active.foreground_width = 0;
+			tipsy_output.active.foreground_height = 0;
+			tipsy_output.active.foreground_initialized = 0;
+		}
 	}
 	tipsy_vk_output_note_overlay_retained_locked();
 	atomic_store_explicit(&output_route_ready, 1, memory_order_release);
 	pthread_mutex_unlock(&tipsy_output.mutex);
 
 	memset(&present, 0, sizeof(present));
+	memset(&present_pnext, 0, sizeof(present_pnext));
+	present_pnext.sType = VK_STRUCTURE_TYPE_APPLICATION_INFO;
 	present.sType = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR;
+	present.pNext = &present_pnext;
 	present.waitSemaphoreCount = 1;
 	present.pWaitSemaphores = &original_wait;
 	present.swapchainCount = scenario == TIPSY_VK_OUTPUT_TX_DIRECT_GATE ? 2u : 1u;
@@ -3046,122 +2123,9 @@ void tipsy_test_vk_output_transaction_fixture(uint32_t scenario,
 	pthread_mutex_unlock(&tipsy_output.mutex);
 }
 
-static VKAPI_ATTR VkResult VKAPI_CALL tipsy_vk_output_fixture_get_caps(
-	VkPhysicalDevice physical, VkSurfaceKHR surface,
-	VkSurfaceCapabilitiesKHR *caps)
-{
-	(void)physical;
-	(void)surface;
-	if (caps == NULL) return VK_ERROR_INITIALIZATION_FAILED;
-	memset(caps, 0, sizeof(*caps));
-	caps->minImageCount = 1;
-	caps->maxImageCount = 8;
-	caps->currentExtent.width = UINT32_MAX;
-	caps->currentExtent.height = UINT32_MAX;
-	caps->minImageExtent.width = 1;
-	caps->minImageExtent.height = 1;
-	caps->maxImageExtent.width = 4096;
-	caps->maxImageExtent.height = 4096;
-	caps->maxImageArrayLayers = 1;
-	caps->supportedTransforms = VK_SURFACE_TRANSFORM_IDENTITY_BIT_KHR;
-	caps->currentTransform = VK_SURFACE_TRANSFORM_IDENTITY_BIT_KHR;
-	caps->supportedCompositeAlpha = VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR;
-	caps->supportedUsageFlags = VK_IMAGE_USAGE_TRANSFER_DST_BIT |
-		VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT;
-	return VK_SUCCESS;
-}
-
-static VKAPI_ATTR VkResult VKAPI_CALL tipsy_vk_output_fixture_create_swapchain(
-	VkDevice device, const VkSwapchainCreateInfoKHR *info,
-	const VkAllocationCallbacks *allocator, VkSwapchainKHR *swapchain)
-{
-	(void)device;
-	(void)allocator;
-	if (test_transaction_fixture != NULL) {
-		test_transaction_fixture->output_create_calls++;
-		if (info != NULL) {
-			test_transaction_fixture->output_create_width = info->imageExtent.width;
-			test_transaction_fixture->output_create_height = info->imageExtent.height;
-		}
-	}
-	if (swapchain == NULL) return VK_ERROR_INITIALIZATION_FAILED;
-	*swapchain = (VkSwapchainKHR)(uintptr_t)0x71;
-	return VK_SUCCESS;
-}
-
-static VKAPI_ATTR VkResult VKAPI_CALL tipsy_vk_output_fixture_get_images(
-	VkDevice device, VkSwapchainKHR swapchain, uint32_t *count, VkImage *images)
-{
-	(void)device;
-	(void)swapchain;
-	if (count == NULL) return VK_ERROR_INITIALIZATION_FAILED;
-	if (images == NULL) {
-		*count = 1;
-		return VK_SUCCESS;
-	}
-	if (*count < 1) return VK_INCOMPLETE;
-	images[0] = (VkImage)(uintptr_t)0x72;
-	*count = 1;
-	return VK_SUCCESS;
-}
-
-static VKAPI_ATTR VkResult VKAPI_CALL tipsy_vk_output_fixture_create_view(
-	VkDevice device, const VkImageViewCreateInfo *info,
-	const VkAllocationCallbacks *allocator, VkImageView *view)
-{
-	(void)device;
-	(void)info;
-	(void)allocator;
-	if (view == NULL) return VK_ERROR_INITIALIZATION_FAILED;
-	*view = (VkImageView)(uintptr_t)0x73;
-	return VK_SUCCESS;
-}
-
-static VKAPI_ATTR VkResult VKAPI_CALL tipsy_vk_output_fixture_create_fb(
-	VkDevice device, const VkFramebufferCreateInfo *info,
-	const VkAllocationCallbacks *allocator, VkFramebuffer *framebuffer)
-{
-	(void)device;
-	(void)info;
-	(void)allocator;
-	if (framebuffer == NULL) return VK_ERROR_INITIALIZATION_FAILED;
-	*framebuffer = (VkFramebuffer)(uintptr_t)0x74;
-	return VK_SUCCESS;
-}
-
-static VKAPI_ATTR void VKAPI_CALL tipsy_vk_output_fixture_destroy_view(
-	VkDevice device, VkImageView view, const VkAllocationCallbacks *allocator)
-{
-	(void)device;
-	(void)view;
-	(void)allocator;
-}
-
-static VKAPI_ATTR void VKAPI_CALL tipsy_vk_output_fixture_destroy_fb(
-	VkDevice device, VkFramebuffer framebuffer,
-	const VkAllocationCallbacks *allocator)
-{
-	(void)device;
-	(void)framebuffer;
-	(void)allocator;
-}
-
-static VKAPI_ATTR void VKAPI_CALL tipsy_vk_output_fixture_destroy_swapchain(
-	VkDevice device, VkSwapchainKHR swapchain,
-	const VkAllocationCallbacks *allocator)
-{
-	(void)device;
-	(void)swapchain;
-	(void)allocator;
-}
-
-static void tipsy_vk_output_fixture_rearm_source_locked(VkSemaphore original_wait)
+static void tipsy_vk_output_fixture_rearm_source_locked(void)
 {
 	tipsy_output.active.source[0].completion_reusable = 1;
-	tipsy_output.active.source[0].acquired = 1;
-	tipsy_output.active.source[0].acquire_waited = 1;
-	tipsy_output.active.source[0].render_signal_count = 1;
-	tipsy_output.active.source[0].render_signals[0] = original_wait;
 }
 
 static void tipsy_vk_output_fixture_drive_present(VkPresentInfoKHR *present,
@@ -3197,94 +2161,7 @@ void tipsy_test_vk_output_overlay_geometry_fixture(
 		sizeof(saved_state));
 	memset((unsigned char *)&tipsy_output + state_offset, 0,
 		sizeof(saved_state));
-	tipsy_output.device = test_transaction_device;
-	tipsy_output.device_ready = 1;
-	tipsy_output.physical = (VkPhysicalDevice)(uintptr_t)0x40;
-	tipsy_output.output_surface = (VkSurfaceKHR)(uintptr_t)0x3f;
-	tipsy_output.eligible_family = 3;
-	tipsy_output.eligible_queue_count = 1;
-	tipsy_output.queues[0].device = test_transaction_device;
-	tipsy_output.queues[0].queue = test_transaction_queue;
-	tipsy_output.queues[0].family = 3;
-	tipsy_output.active.active = 1;
-	tipsy_output.active.ready = 1;
-	tipsy_output.active.guest = test_transaction_guest;
-	tipsy_output.active.output = test_transaction_output;
-	tipsy_output.active.guest_extent.width = 8;
-	tipsy_output.active.guest_extent.height = 8;
-	tipsy_output.active.extent.width = 2;
-	tipsy_output.active.extent.height = 2;
-	tipsy_output.active.format = VK_FORMAT_B8G8R8A8_UNORM;
-	tipsy_output.active.render_pass = (VkRenderPass)(uintptr_t)0x53;
-	tipsy_output.active.source_count = 1;
-	tipsy_output.active.output_count = 1;
-	tipsy_output.active.source[0].image = (VkImage)(uintptr_t)0x47;
-	tipsy_output.active.source[0].completion = test_transaction_g;
-	tipsy_output.active.source[0].render_signals[0] = original_wait;
-	tipsy_output.active.source[0].render_signal_count = 1;
-	tipsy_output.active.source[0].acquired = 1;
-	tipsy_output.active.source[0].acquire_waited = 1;
-	tipsy_output.active.source[0].completion_reusable = 1;
-	tipsy_output.active.target[0].image = (VkImage)(uintptr_t)0x48;
-	tipsy_output.active.target[0].view = (VkImageView)(uintptr_t)0x54;
-	tipsy_output.active.target[0].complete = (VkSemaphore)(uintptr_t)0x49;
-	tipsy_output.active.target[0].framebuffer = (VkFramebuffer)(uintptr_t)0x4a;
-	tipsy_output.active.frames[0].command = (VkCommandBuffer)(uintptr_t)0x4b;
-	tipsy_output.active.frames[0].acquire = (VkSemaphore)(uintptr_t)0x4c;
-	tipsy_output.active.frames[0].fence = (VkFence)(uintptr_t)0x4d;
-	tipsy_output.active.pipeline = (VkPipeline)(uintptr_t)0x4e;
-	tipsy_output.active.pipeline_layout = (VkPipelineLayout)(uintptr_t)0x4f;
-	tipsy_output.active.descriptor = (VkDescriptorSet)(uintptr_t)0x50;
-	tipsy_output.active.staging_map = staging;
-	tipsy_output.active.foreground = (VkImage)(uintptr_t)0x51;
-	tipsy_output.active.foreground_width = 1;
-	tipsy_output.active.foreground_height = 1;
-	tipsy_output.active.foreground_initialized = 1;
-	memset(&tipsy_output.pending_output_info, 0,
-		sizeof(tipsy_output.pending_output_info));
-	tipsy_output.pending_output_info.sType = VK_STRUCTURE_TYPE_SWAPCHAIN_CREATE_INFO_KHR;
-	tipsy_output.pending_output_info.surface = tipsy_output.output_surface;
-	tipsy_output.pending_output_info.minImageCount = 1;
-	tipsy_output.pending_output_info.imageFormat = VK_FORMAT_B8G8R8A8_UNORM;
-	tipsy_output.pending_output_info.imageColorSpace = VK_COLOR_SPACE_SRGB_NONLINEAR_KHR;
-	tipsy_output.pending_output_info.imageArrayLayers = 1;
-	tipsy_output.pending_output_info.imageUsage = VK_IMAGE_USAGE_TRANSFER_DST_BIT |
-		VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT;
-	tipsy_output.pending_output_info.imageSharingMode = VK_SHARING_MODE_EXCLUSIVE;
-	tipsy_output.pending_output_info.preTransform = VK_SURFACE_TRANSFORM_IDENTITY_BIT_KHR;
-	tipsy_output.pending_output_info.compositeAlpha = VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR;
-	tipsy_output.pending_output_info.presentMode = VK_PRESENT_MODE_FIFO_KHR;
-	tipsy_output.pending_output_info.clipped = VK_TRUE;
-	tipsy_output.vk.acquire_next_image = tipsy_vk_output_fixture_acquire;
-	tipsy_output.vk.wait_fences = tipsy_vk_output_fixture_wait_fences;
-	tipsy_output.vk.reset_fences = tipsy_vk_output_fixture_reset_fences;
-	tipsy_output.vk.reset_command_buffer = tipsy_vk_output_fixture_reset_command;
-	tipsy_output.vk.begin_command_buffer = tipsy_vk_output_fixture_begin_command;
-	tipsy_output.vk.end_command_buffer = tipsy_vk_output_fixture_end_command;
-	tipsy_output.vk.queue_submit = tipsy_vk_output_fixture_submit;
-	tipsy_output.vk.cmd_pipeline_barrier =
-		tipsy_vk_output_fixture_pipeline_barrier;
-	tipsy_output.vk.cmd_copy_image = tipsy_vk_output_fixture_copy_image;
-	tipsy_output.vk.cmd_copy_buffer_to_image = tipsy_vk_output_fixture_upload;
-	tipsy_output.vk.cmd_begin_render_pass =
-		tipsy_vk_output_fixture_begin_render_pass;
-	tipsy_output.vk.cmd_end_render_pass = tipsy_vk_output_fixture_end_render_pass;
-	tipsy_output.vk.cmd_bind_pipeline = tipsy_vk_output_fixture_bind_pipeline;
-	tipsy_output.vk.cmd_bind_descriptor_sets =
-		tipsy_vk_output_fixture_bind_descriptors;
-	tipsy_output.vk.cmd_set_viewport = tipsy_vk_output_fixture_set_viewport;
-	tipsy_output.vk.cmd_set_scissor = tipsy_vk_output_fixture_set_scissor;
-	tipsy_output.vk.cmd_push_constants =
-		tipsy_vk_output_fixture_push_constants;
-	tipsy_output.vk.cmd_draw = tipsy_vk_output_fixture_draw;
-	tipsy_output.vk.get_surface_capabilities = tipsy_vk_output_fixture_get_caps;
-	tipsy_output.vk.create_swapchain = tipsy_vk_output_fixture_create_swapchain;
-	tipsy_output.vk.get_swapchain_images = tipsy_vk_output_fixture_get_images;
-	tipsy_output.vk.create_image_view = tipsy_vk_output_fixture_create_view;
-	tipsy_output.vk.create_framebuffer = tipsy_vk_output_fixture_create_fb;
-	tipsy_output.vk.destroy_image_view = tipsy_vk_output_fixture_destroy_view;
-	tipsy_output.vk.destroy_framebuffer = tipsy_vk_output_fixture_destroy_fb;
-	tipsy_output.vk.destroy_swapchain = tipsy_vk_output_fixture_destroy_swapchain;
+	tipsy_vk_output_fixture_arm_pair(staging);
 	test_transaction_scenario = TIPSY_VK_OUTPUT_TX_SUCCESS;
 	test_transaction_overlay_live = 1;
 	test_transaction_frame_width = 1;
@@ -3311,7 +2188,7 @@ void tipsy_test_vk_output_overlay_geometry_fixture(
 	out->first.quarantined = !tipsy_output.active.ready;
 	out->first.device_terminal = tipsy_output.device_lost;
 	out->first.returned_result = result;
-	tipsy_vk_output_fixture_rearm_source_locked(original_wait);
+	tipsy_vk_output_fixture_rearm_source_locked();
 	pthread_mutex_unlock(&tipsy_output.mutex);
 
 	test_transaction_frame_x = 4;
@@ -3324,7 +2201,7 @@ void tipsy_test_vk_output_overlay_geometry_fixture(
 	out->second.quarantined = !tipsy_output.active.ready;
 	out->second.device_terminal = tipsy_output.device_lost;
 	out->second.returned_result = result;
-	tipsy_vk_output_fixture_rearm_source_locked(original_wait);
+	tipsy_vk_output_fixture_rearm_source_locked();
 	pthread_mutex_unlock(&tipsy_output.mutex);
 
 	test_transaction_frame_x = 8;

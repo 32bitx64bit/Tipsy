@@ -6,10 +6,9 @@
 
 #include <stdint.h>
 
-/* The Vulkan output backend is kept in a separate translation unit so it can
- * use the Khronos headers while vulkan.c retains its deliberately small ABI
- * declarations.  All public parameters are opaque ABI-compatible handles or
- * pointers to standard Vulkan structures. */
+/* Same-queue in-place focused-text compositor. Khronos headers live here;
+ * vulkan.c keeps its small ABI. Overlay draws into the guest swapchain image
+ * being presented; there is no private child, copy, or second present. */
 typedef struct TipsyVkOutputSwapchainClone {
 	void *create_info;
 	uint32_t qualified;
@@ -48,10 +47,9 @@ void tipsy_vk_output_submit_observed(void *queue, uint32_t count,
 void tipsy_vk_output_submit2_observed(void *queue, uint32_t count,
 	const void *submits, int32_t result);
 
-/* Returns one when the caller must not forward the original present. This
- * includes a completed private transaction and any failure after guest waits
- * may have been consumed; guest_result is the exact result to return. Zero
- * means the caller must forward the original pointer exactly once. */
+/* Returns one when the caller must not forward the original present.
+ * guest_result is the exact result to return. Zero means forward the original
+ * pointer exactly once. */
 int tipsy_vk_output_present(void *queue, const void *present_info,
 	void *host_present, int32_t *guest_result);
 

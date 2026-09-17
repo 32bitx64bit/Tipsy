@@ -97,9 +97,11 @@ func vulkanPresentModeName(mode int) string {
 	}
 }
 
-// SetVulkanVSync controls only the order/filtering of actual-surface present
-// modes advertised by the Android Vulkan adapter. Swapchain creation preserves
-// the client's selected request and leaves host validation authoritative.
+// SetVulkanVSync controls the modes advertised by the Android Vulkan adapter.
+// VSync off advertises IMMEDIATE alone when the host lists it (MAILBOX is the
+// fallback if IMMEDIATE is absent), matching GLES eglSwapInterval(0). A
+// verified MAILBOX create is rewritten to IMMEDIATE in that case; incomplete
+// or malformed probes still never rewrite.
 func SetVulkanVSync(enabled bool) {
 	value := C.int(0)
 	if enabled {
