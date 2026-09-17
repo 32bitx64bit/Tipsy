@@ -5,25 +5,25 @@
   Tipsy
 </h1>
 
-**Open-source Linux compatibility runtime for the official unmodified Roblox Android client.**
+**Play official Roblox on Linux.**
 
-You supply a legitimate Android x86-64 package. Tipsy verifies it, extracts it into XDG directories, and runs it in a native X11 window — with enough Android / JNI / GameActivity compatibility for login, Home, and public experiences.
+Tipsy runs the **unmodified Android x86-64 Roblox client** in a native X11 window.
+You provide a legitimate package. Tipsy verifies it, extracts it, and supplies the
+Android / JNI / GameActivity compatibility the client needs.
 
-Roblox itself is proprietary and is **never** redistributed, patched, or committed here.
+Roblox is not included, not patched, and not redistributed.
 
 <br>
 
 [![Website](https://img.shields.io/badge/Website-tipsyhq.org-2d6bff?style=for-the-badge)](https://tipsyhq.org)
-[![Download latest release](https://img.shields.io/github/v/release/32bitx64bit/Tipsy?style=for-the-badge&label=Download%20latest%20release&color=2d6bff)](https://github.com/32bitx64bit/Tipsy/releases/latest)
-[![License: GPL-3.0-or-later](https://img.shields.io/badge/License-GPL--3.0--or--later-227d48?style=for-the-badge)](LICENSE)
-[![Go 1.27](https://img.shields.io/badge/Go-1.27-00ADD8?style=for-the-badge&logo=go&logoColor=white)](https://go.dev/dl/)
-[![Linux x86_64](https://img.shields.io/badge/Linux-x86__64-black?style=for-the-badge&logo=linux&logoColor=white)](#requirements)
+[![Download](https://img.shields.io/github/v/release/32bitx64bit/Tipsy?style=for-the-badge&label=Latest%20release&color=2d6bff)](https://github.com/32bitx64bit/Tipsy/releases/latest)
+[![License](https://img.shields.io/badge/License-GPL--3.0--or--later-227d48?style=for-the-badge)](LICENSE)
+[![Discord](https://img.shields.io/badge/Discord-community-5865F2?style=for-the-badge&logo=discord&logoColor=white)](https://discord.gg/YQkZx8JT6R)
 
 [Website](https://tipsyhq.org)
-· [Latest release](https://github.com/32bitx64bit/Tipsy/releases/latest)
-· [AppImage](https://github.com/32bitx64bit/Tipsy/releases/latest)
+· [Download](https://github.com/32bitx64bit/Tipsy/releases/latest)
 · [Discord](https://discord.gg/YQkZx8JT6R)
-· [Compile from source](#compile-from-source)
+· [Contributing](CONTRIBUTING.md)
 
 </div>
 
@@ -31,169 +31,105 @@ Roblox itself is proprietary and is **never** redistributed, patched, or committ
 
 ## Contents
 
-- [Install](#install)
-- [Start here](#start-here)
-- [Requirements](#requirements)
-- [Install the Roblox client](#install-the-roblox-client)
-- [Play](#playing)
+- [Get started](#get-started)
+- [What you need](#what-you-need)
 - [What works today](#what-works-today)
-- [How Tipsy works](#how-tipsy-works)
-- [Architecture](#architecture)
-- [Compile from source](#compile-from-source)
-- [Settings](#settings)
-- [Command line](#command-line)
-- [Logs and data](#logs-and-data)
-- [What Tipsy is not](#what-tipsy-is-not)
-- [Packaging](#packaging)
-- [License](#license)
+- [Everyday use](#everyday-use)
+- [Not supported](#not-supported)
+- [Developers and power users](#developers-and-power-users)
+  - [How it works](#how-it-works)
+  - [Command line](#command-line)
+  - [Logs, config, and data](#logs-config-and-data)
+  - [Compile from source](#compile-from-source)
+  - [Packaging](#packaging)
+  - [License](#license)
 
 ---
 
-## Install
+## Get started
 
-One command detects your distribution, adds the official signed repository,
-and installs Tipsy:
+Three steps. Roblox is installed **inside Tipsy**, never shipped with it.
+
+### 1. Install Tipsy
+
+**Package (recommended)** — one command detects Debian/Ubuntu, Fedora/RHEL,
+Arch/CachyOS, or Flatpak:
 
 ```sh
 curl -fsSL https://32bitx64bit.github.io/Tipsy-repo/install.sh | sudo bash
 ```
 
-Supported automatically: **Debian/Ubuntu** (APT), **Fedora/RHEL** (DNF),
-**Arch/CachyOS/EndeavourOS** (pacman), and **Flatpak** (when installed) on any
-other distribution. Afterwards open **Tipsy - Settings** and run the setup
-assistant to install the official Roblox client (never included).
-
-Prefer to set the repository up by hand, or want to review each step first?
-The equivalent per-distro commands live in the
+Prefer to review the steps first? See the
 [repository install guide](https://github.com/32bitx64bit/Tipsy-repo/blob/main/docs/INSTALL.md).
 
-**AppImage (no repository, any distro)**
+**AppImage** — no repository, any distro:
 
-```sh
-# Download Tipsy-<version>-x86_64.AppImage from
-# https://github.com/32bitx64bit/Tipsy-repo/releases/latest
-chmod +x Tipsy-*-x86_64.AppImage
-./Tipsy-*-x86_64.AppImage
-```
-
-Updates arrive through your package manager (`apt upgrade`, `dnf upgrade`,
-`pacman -Syu`, `flatpak update`). Only AppImage updates itself inside the app.
-
----
-
-## Start here
-
-> [!IMPORTANT]
-> Tipsy does not include Roblox. Download Tipsy, then install an **official Android x86-64** `com.roblox.client` package through the setup assistant. ARM-only packages, Windows Roblox, and Roblox Studio are out of scope.
-
-<table>
-<tr>
-<td width="50%" valign="top">
-
-**New users — AppImage**
-
-1. Download the latest **AppImage** from [Releases](https://github.com/32bitx64bit/Tipsy/releases/latest).
-2. Mark it executable and run it.
-3. First launch opens **Settings** when no client is installed.
-4. Finish the setup assistant, then use **Tipsy - Play**.
+1. Download `Tipsy-<version>-x86_64.AppImage` from
+   [Releases](https://github.com/32bitx64bit/Tipsy/releases/latest).
+2. Make it executable and run it:
 
 ```sh
 chmod +x Tipsy-*-x86_64.AppImage
 ./Tipsy-*-x86_64.AppImage
 ```
 
-The image never contains Roblox bytes. Use the in-app assistant, then Play.
+Official builds need a CPU with **AVX2** (Intel Haswell 2013+, AMD Excavator 2015+
+or Zen). If the AppImage exits immediately, that is the usual cause.
 
-</td>
-<td width="50%" valign="top">
+### 2. Install the Roblox client
 
-**At a glance**
+Open **Tipsy - Settings**. First launch does this automatically when no client is
+installed.
 
-- **Platform:** Linux x86_64-v3 (AVX2), native X11
-- **Client:** official Android x86-64 Roblox
-- **Window:** native X11, not a full Android OS
-- **Graphics:** OpenGL ES via EGL; Vulkan when Auto can probe a complete host path
-- **Audio:** PulseAudio or PipeWire’s Pulse server
-- **Credentials:** sign in inside Roblox’s own UI. Tipsy never asks for or logs passwords, cookies, or `.ROBLOSECURITY`
+1. Run the setup assistant.
+2. Choose **automatic download** or **local files** you obtained lawfully
+   (Play-enabled device backup, XAPK, and similar).
+3. Wait while Tipsy verifies the official x86-64 package and extracts it.
 
-Prefer building it yourself? Jump to [Compile from source](#compile-from-source).
+Only a cryptographically verified `com.roblox.client` with
+`lib/x86_64/libroblox.so` is accepted. ARM-only packages, Windows Roblox,
+Studio, and store installer APKs fail closed.
 
-</td>
-</tr>
-</table>
-
-Two desktop launchers after install:
-
-| Launcher | What it does |
-| --- | --- |
-| **Tipsy - Play** | Starts the official client. Owns `roblox:` / `roblox-player:` website Play URIs. |
-| **Tipsy - Settings** | Setup wizard, renderer, FPS, VSync, display, and diagnostics. |
-
-Installed more than one way (say a Flatpak plus an AppImage)? One install owns
-the launcher and the `roblox:` links at a time. An AppImage only adds itself
-to the menu when nothing else provides Tipsy; **Settings → Desktop integration**
-shows which install your menu opens and offers a one-click switch, and
-`tipsy desktop status|adopt|release` does the same from a terminal. Builds from
-source (`--mode developer` AppImages, `CHANNEL=dev` installs) appear separately
-as **Tipsy-Dev - Play** / **Tipsy-Dev - Settings** and never take over the
-launcher or URI handler of your real Tipsy install.
-
----
-
-## Requirements
-
-| Need | Detail |
-| --- | --- |
-| CPU / OS | Linux **x86_64-v3** (AVX2: Intel Haswell 2013+, AMD Excavator 2015+ or Zen). Official packages use `GOAMD64=v3`. |
-| Display | Native **X11** (`DISPLAY` set). Tipsy is X11-first, not a Wayland client. |
-| GPU | Mesa (or equivalent) EGL / OpenGL ES. Vulkan is used when Auto can probe a complete host path (loader, physical device, xcb/xlib WSI). |
-| Audio | PulseAudio or PipeWire’s Pulse server |
-| Roblox | Official Android **x86-64** client (`com.roblox.client` with `lib/x86_64/libroblox.so`). Not included. |
-
-ARM-only packages, Windows Roblox, and Roblox Studio are out of scope.
-
----
-
-## Install the Roblox client
-
-Setup only accepts an official x86-64 package it can cryptographically verify. Tampered or ARM-only archives fail closed.
-
-1. Open **Tipsy - Settings** (`tipsy-gui`).
-2. Run the setup assistant.
-3. Choose **automatic download** (APKPure listing, then the same signature + ABI checks) or **local files** you obtained lawfully (Play-enabled device backup, XAPK, and similar).
-4. Wait for extraction into the XDG data directory.
-
-CLI equivalent for a package you already have:
+Already have a package on disk?
 
 ```sh
 tipsy setup /path/to/com.roblox.client.xapk
 tipsy doctor
 ```
 
-Installer APKs that are not Roblox (for example a store’s own downloader) are rejected. Extra language/ARM splits in a multi-ABI bundle are dropped; an ARM-only archive is not accepted.
-
 Updating the client does not replace separately stored account data.
+
+### 3. Play
+
+- **Tipsy - Play** starts the client.
+- Or click Play on [roblox.com](https://www.roblox.com) once the Play launcher
+  owns `roblox:` / `roblox-player:` (the install script registers this).
+- Sign in **inside Roblox’s own UI**. Tipsy never asks for a password, cookie,
+  or `.ROBLOSECURITY`.
+
+```sh
+tipsy-gui          # Settings / first-run setup
+tipsy launch       # official client on X11
+```
 
 ---
 
-## Playing
+## What you need
 
-```sh
-tipsy-gui                 # Settings / first-run setup
-tipsy launch              # official client on X11
-tipsy launch --probe      # load + JNI_OnLoad only (no game loop)
-tipsy launch 'roblox-player:1+launchmode:play+...'
-```
-
-Clicking Play on roblox.com can start Tipsy when the Play desktop file owns `roblox` / `roblox-player` (the install script registers this). Studio URIs are rejected. Joining a second place while the client is already running is not wired yet.
-
-Sign in inside the official UI. Do not paste cookies into Tipsy.
+| | |
+| --- | --- |
+| **OS** | Linux on **x86_64-v3** (AVX2) |
+| **Display** | Native **X11** (`DISPLAY` set). Tipsy is not a Wayland client; an Xwayland session can work. |
+| **GPU** | Mesa (or equivalent) EGL / OpenGL ES. Vulkan is used when Auto can see a complete host path. |
+| **Audio** | PulseAudio or PipeWire’s Pulse server |
+| **Roblox** | Official Android **x86-64** client — not included |
 
 ---
 
 ## What works today
 
-Tipsy is under active development. The following is user-visible on Linux X11 with a current official x86-64 client.
+Tipsy is under active development. This is what is user-visible on Linux X11
+with a current official x86-64 client.
 
 <table>
 <tr>
@@ -201,19 +137,20 @@ Tipsy is under active development. The following is user-visible on Linux X11 wi
 
 **Play**
 
-- Official login screen on a native X11 window
+- Official login on a native X11 window
 - Sign-in through Roblox’s own UI
 - Session kept across quit and relaunch the way the Android client would
-- Join public experiences with rendering, keyboard, mouse, networking, and audio
-- Website Play: `roblox-player:`, `roblox://`, and `https://www.roblox.com/games/...` URIs
+- Public experiences: rendering, keyboard, mouse, networking, audio
+- Website Play: `roblox-player:`, `roblox://`, and `https://www.roblox.com/games/...`
 - Dual launchers: **Play** skips the menu; **Settings** is setup and configuration
 
 **Graphics and window**
 
 - OpenGL ES via EGL on X11
 - Vulkan when the host loader, a physical device, and xcb/xlib WSI are present (Auto prefers Vulkan)
-- Resize, EWMH fullscreen, DPI-aware placement, and a default-monitor setting
-- Frame-rate modes: Auto, Limited (30–240), or Unlimited (experimental uncapped request)
+- Focused text (login, Home search, in-experience chat) on the official keyboard path, including compositor-off Vulkan
+- Resize, EWMH fullscreen, DPI-aware placement, default-monitor setting
+- Frame rate: Auto, Limited (30–240), or Unlimited (uncapped *request*, not a guaranteed FPS)
 - Independent VSync (off by default)
 - High-quality textures by default; optional low-texture mode to save memory
 
@@ -224,16 +161,18 @@ Tipsy is under active development. The following is user-visible on Linux X11 wi
 
 - Keyboard, including held-key repeat
 - Mouse, including captured relative look (RMB / shift-lock)
-- Committed text in login, Home search, and in-experience chat (official `RbxKeyboard` path)
+- Typed text in login, search, and chat
+- Gamepads / controllers over evdev (Xbox, DualShock, DualSense, Switch Pro, 8BitDo, and similar; Bluetooth pairing is the desktop’s job)
 - Game audio through PulseAudio or PipeWire
+- Voice chat for eligible accounts (hear and talk)
 - Optional Discord Rich Presence (off by default)
 
-**Setup and tooling**
+**Setup**
 
 - Qt 6 setup wizard and settings window
 - Cryptographic APK / signing-identity checks
 - Local APK, APKM, XAPK, APKS, ZIP, or split sets
-- Optional automatic download from APKPure as unofficial transport, then the same official-package verification
+- Optional APKPure download as transport, then the same official-package verification
 - CLI inspect, compare, doctor, and launch tools
 
 </td>
@@ -242,26 +181,115 @@ Tipsy is under active development. The following is user-visible on Linux X11 wi
 
 ---
 
-## How Tipsy works
+## Everyday use
 
-Tipsy is **not** a reimplementation of Roblox, a Wine wrapper, or a full Android emulator. It is a **compatibility runtime**: the same official Android x86-64 `libroblox.so` that Google Play ships, running as a native Linux process.
+### Launchers
 
-That split is the whole design.
+| Launcher | What it does |
+| --- | --- |
+| **Tipsy - Play** | Starts the official client. Owns `roblox:` / `roblox-player:` website Play URIs. |
+| **Tipsy - Settings** | Setup wizard, renderer, FPS, VSync, display, controllers, and diagnostics. |
 
-| Layer | Who owns it | What it does |
-| --- | --- | --- |
-| **Host UI** | Tipsy | Qt 6 Settings / Play, XDG paths, diagnostics. No game logic. |
-| **Package gate** | Tipsy | Inspects APK / XAPK / splits, checks the Roblox signing identity and x86-64 ABI, then extracts into `~/.local/share/tipsy/`. |
-| **Window & GPU** | Tipsy | Creates a real X11 window, binds EGL/GLES or translates Android Vulkan WSI onto xcb/xlib. |
-| **Loader** | Tipsy | Maps the unmodified ELF (`PT_LOAD`, RELA, APS2 packed RELA) and resolves `DT_NEEDED` Android sonames to host shims. |
-| **Android / JNI** | Tipsy | Enough bionic, JNI, and GameActivity behavior for the official client to start, log in, and present. Missing APIs fail honestly. |
-| **Roblox** | Roblox | Login, Home, networking, experiences. Tipsy does not patch `libroblox.so` and does not ship it. |
+### Settings that need a Roblox restart
 
-Packages built by GitHub Actions — the AppImage, the Flatpak, and the `.deb`/`.rpm`/pacman package from the signed repository — are treated as a verified Tipsy release. A **local build of any medium is not**: `build-appdir.sh`, `build-deb.sh`, `build-rpm.sh`, `build-pacman.sh`, `build-flatpak.sh` and `install-desktop.sh` all default to a `development-unrestricted` marker, and only the publish workflow passes `--mode official`. The first `tipsy launch` / GUI Play from something you built yourself asks for explicit `--development` consent (or the Settings confirmation dialog). That records DevelopmentUnrestricted in owner-private config. It never claims OfficialVerified, and it still verifies the Roblox package.
+These live in **Tipsy - Settings** and in `~/.config/tipsy/client-settings.json`.
+
+| Setting | Behavior |
+| --- | --- |
+| Renderer | Auto (Vulkan when the full path exists, otherwise OpenGL), OpenGL, or Vulkan |
+| Frame rate | Auto, Limited 30–240, Unlimited (not a guaranteed FPS) |
+| VSync | Off by default; independent of the FPS cap |
+| Low texture mode | Off by default (high quality); on saves memory/VRAM |
+| Default monitor | Main monitor, a named output, or follow-mouse placement |
+| Start fullscreen | Tipsy-owned window request at map time; not Roblox’s in-app fullscreen toggle |
+| Discord Rich Presence | Off by default; optional join button stays off unless enabled |
+
+### Controllers
+
+Most pads just work on a local graphical login (logind `uaccess` on
+`/dev/input`). If the client sees no controller:
+
+1. Plug in or pair the pad in the desktop Bluetooth settings.
+2. Run `tipsy diagnose gamepad` (or **Settings** diagnostics).
+3. If you see permission errors: log in locally (not a bare `ssh` session), or
+   `sudo usermod -aG input "$USER"` and **relogin**. Never run Tipsy as root.
+
+Flatpak needs device access (`--device=all` on Flatpak 1.14). Existing installs
+can opt in with Flatseal or:
+
+```sh
+flatpak override --user --device=all io.github.tipsy_linux.Tipsy
+```
+
+### Microphone / voice chat
+
+Unmute **Roblox microphone** in `pavucontrol` (or your desktop mixer) if the
+game cannot hear you. The in-game device list only offers the host default;
+pick the source on the desktop, or pin it with `TIPSY_MICROPHONE_SOURCE`.
+
+### More than one install
+
+A Flatpak plus an AppImage can coexist. **One** install owns the menu and
+`roblox:` links at a time. An AppImage only adds itself to the menu when
+nothing else provides Tipsy. **Settings → Desktop integration** shows which
+install your menu opens; `tipsy desktop status|adopt|release` does the same
+from a terminal.
+
+Source builds and `--mode developer` AppImages appear as **Tipsy-Dev** and
+never take over the launcher of an official Tipsy install.
+
+Updates: `apt upgrade`, `dnf upgrade`, `pacman -Syu`, or `flatpak update`.
+AppImage updates itself inside the app.
 
 ---
 
-## Architecture
+## Not supported
+
+| | |
+| --- | --- |
+| Windows Roblox, Wine, or Roblox Studio | Out of scope |
+| ARM-only or tampered packages | Rejected |
+| Native Wayland | X11-first; use an X11 session or Xwayland |
+| Cheats, injectors, executors, anti-cheat bypass | Never |
+| Shipping Roblox APKs / `.so` files | Never |
+| Joining a second place while the client is already running | Not wired yet |
+| Horizontal mouse wheel | Captured; the current Android client only consumes vertical scroll |
+| `tipsy repair` | Use `tipsy setup` to re-extract |
+
+Performance comparisons versus other Linux Roblox runtimes are out of scope
+until they are measured. Tipsy does not collect Roblox credentials.
+
+---
+
+## Developers and power users
+
+[Contributing](CONTRIBUTING.md) is the engineering contract. The rest of this
+page is how the runtime is structured, how to build it, and how to drive it
+from a terminal.
+
+### How it works
+
+Tipsy is **not** a Roblox reimplementation, a Wine wrapper, or a full Android
+emulator. It is a **compatibility runtime**: the same official Android x86-64
+`libroblox.so` that Google Play ships, running as a native Linux process.
+
+| Layer | Owner | Role |
+| --- | --- | --- |
+| Host UI | Tipsy | Qt 6 Settings / Play, XDG paths, diagnostics. No game logic. |
+| Package gate | Tipsy | Inspects APK / XAPK / splits, checks the Roblox signing identity and x86-64 ABI, extracts into `~/.local/share/tipsy/`. |
+| Window and GPU | Tipsy | Real X11 window; EGL/GLES or Android Vulkan WSI on xcb/xlib. |
+| Loader | Tipsy | Maps the unmodified ELF (`PT_LOAD`, RELA, APS2 packed RELA) and resolves `DT_NEEDED` Android sonames to host shims. |
+| Android / JNI | Tipsy | Enough bionic, JNI, and GameActivity for the official client to start, log in, and present. Missing APIs fail honestly. |
+| Roblox | Roblox | Login, Home, networking, experiences. Tipsy does not patch `libroblox.so` and does not ship it. |
+
+GitHub Actions packages (AppImage, Flatpak, `.deb` / `.rpm` / pacman from the
+signed repository) present as a verified Tipsy release. A **local build of any
+medium is not**. `build-appdir.sh` and the distro packagers default to
+`development-unrestricted`; only the publish workflow passes `--mode official`.
+The first `tipsy launch` / GUI Play from something you built yourself asks for
+`--development` (or the Settings confirmation). That records
+DevelopmentUnrestricted in owner-private config. It never claims
+OfficialVerified, and it still verifies the Roblox package.
 
 ```mermaid
 flowchart TB
@@ -314,28 +342,116 @@ flowchart TB
   so --> net
 ```
 
-**Call stack, in order, on a normal Play:**
+**Call stack on a normal Play**
 
 1. **Authority** — GitHub-built AppImage, Flatpak, or repository package, or explicit development consent for a local build.
-2. **Generation** — a previously verified extract; `tipsy setup` creates it.
+2. **Generation** — a previously verified extract (`tipsy setup`).
 3. **X11** — map the window (optional start-fullscreen) before any guest code runs.
 4. **Graphics** — EGL-on-X11, or Vulkan Auto when the complete WSI path exists.
 5. **Load** — map official `libroblox.so`, run constructors, `JNI_OnLoad`.
 6. **GameActivity** — `initializeNativeCode` and the official start path.
 7. **Present** — Roblox draws; Tipsy pumps X11, input, and audio around it.
 
-The GUI (`cmd/tipsy-gui`) is presentation only. Package provenance, extraction, client settings, and launch live in shared Go packages used by both `tipsy` and `tipsy-gui`.
+The GUI (`cmd/tipsy-gui`) is presentation only. Package provenance, extraction,
+client settings, and launch live in shared Go packages used by both `tipsy` and
+`tipsy-gui`.
 
----
+### Command line
 
-## Compile from source
+```
+tipsy doctor              Host overview (OS, X11, GPU, audio, Qt, gamepad, install)
+tipsy inspect <apk...>    Inspect official APKs / splits
+tipsy setup <apk...>      Verify and install
+tipsy launch [--probe] [uri]
+tipsy diagnose [subsystem]
+tipsy diagnose-native <lib.so>
+tipsy compare-roblox <old> <new>
+tipsy report <apk...>
+tipsy config              Show or edit XDG config
+tipsy desktop             status | adopt | release | render
+tipsy logs                Log directory and TIPSY_LOG help
+tipsy version
+```
+
+Source-build flags: `tipsy setup --development`, `tipsy launch --development`.
+
+`tipsy diagnose` subsystems: `x11`, `graphics`, `audio`, `jni`, `loader`,
+`roblox`, `auth`, `gamepad` (aliases `pad`, `controller`).
+
+Machine-readable: `tipsy inspect --json`, `tipsy report --json`,
+`tipsy doctor --json`.
+
+```sh
+tipsy launch --probe
+tipsy launch 'roblox-player:1+launchmode:play+...'
+DISPLAY=:0 tipsy launch --development
+```
+
+`--probe` loads + `JNI_OnLoad` only (no game loop). Studio URIs are rejected.
+A website Play URI that includes an official authentication ticket signs the
+Android session in through the same private cookie store as in-app login.
+Ticket and cookie values are never logged.
+
+One-launch OpenGL visual test (does not persist renderer settings):
+
+```sh
+TIPSY_TEST_RENDERER=opengl tipsy launch
+```
+
+### Logs, config, and data
+
+XDG layout (override with the usual `XDG_*_HOME` variables):
+
+| Path | Typical location |
+| --- | --- |
+| Config | `~/.config/tipsy/` (`config.json`, `client-settings.json`) |
+| Client install | `~/.local/share/tipsy/` |
+| Logs | `~/.local/state/tipsy/` |
+
+```sh
+TIPSY_LOG=all TIPSY_LOG_LEVEL=debug tipsy launch
+```
+
+`TIPSY_LOG` is a comma-separated category list or `all`. Categories include
+`apk`, `loader`, `elf`, `android`, `jni`, `gameactivity`, `x11`, `graphics`,
+`input`, `audio`, `network`, `auth`, `filesystem`, `qt`, and `runtime`.
+
+Diagnostics never print passwords, cookies, tokens, or `.ROBLOSECURITY`.
+
+<details>
+<summary>Controller and microphone environment (optional)</summary>
+
+Env wins over the matching section in the settings file. Missing JSON uses defaults.
+
+```
+TIPSY_GAMEPAD=0                    Whole subsystem off
+TIPSY_GAMEPAD_DEADZONE=0.0-0.5     Stick deadzone floor
+TIPSY_GAMEPAD_INVERT_Y=1           Invert both stick Y axes
+TIPSY_GAMEPAD_RUMBLE=0|1           Rumble preference
+TIPSY_GAMEPAD_DEBUG=1              Per-event logging (off by default)
+
+TIPSY_MICROPHONE=0                 Capture off
+TIPSY_MICROPHONE=1                 Force on
+TIPSY_MICROPHONE_SOURCE=<name>     Pin a Pulse source (unset = host default)
+```
+
+`tipsy diagnose` never prints Pulse source names or input values.
+
+</details>
+
+### Compile from source
 
 > [!NOTE]
-> Target is **Linux x86_64-v3** (`GOAMD64=v3`, AVX2). The CLI is Go-first. The GUI uses Qt 6 through [MIQT](https://github.com/mappu/miqt). Both binaries use cgo against X11, EGL/GLES, Pango/Cairo, and PulseAudio. Vulkan development headers are **not** required; the Vulkan path `dlopen`s the host loader at runtime.
+> Target is **Linux x86_64-v3** (`GOAMD64=v3`, AVX2). The CLI is Go-first. The
+> GUI uses Qt 6 through [MIQT](https://github.com/mappu/miqt). Both binaries use
+> cgo against X11, EGL/GLES, Pango/Cairo, and PulseAudio. Vulkan development
+> headers are **not** required; the Vulkan path `dlopen`s the host loader at
+> runtime.
 
-### 1. Toolchain
-
-GitHub Actions runs `gofmt`, then `go vet`, the full `go test` suite under Xvfb, and CLI/GUI builds on Ubuntu 22.04, Ubuntu 24.04, Debian Bookworm, and Fedora 43. Ubuntu 22.04’s `qt6-base-dev` 6.2.4 ships no Qt 6 pkg-config files; CI synthesizes them from `qmake6`.
+GitHub Actions runs `gofmt`, `go vet`, the full `go test` suite under Xvfb, and
+CLI/GUI builds on Ubuntu 22.04, Ubuntu 24.04, Debian Bookworm, and Fedora 43.
+Ubuntu 22.04’s `qt6-base-dev` 6.2.4 ships no Qt 6 pkg-config files; CI
+synthesizes them from `qmake6`.
 
 | Tool | Version |
 | --- | --- |
@@ -345,7 +461,8 @@ GitHub Actions runs `gofmt`, then `go vet`, the full `go test` suite under Xvfb,
 
 Install Go from [go.dev/dl](https://go.dev/dl/) if your distro’s package is older.
 
-### 2. Distribution packages
+<details>
+<summary>Distribution packages</summary>
 
 **Debian / Ubuntu** (same set CI uses):
 
@@ -376,9 +493,10 @@ sudo pacman -S --needed go gcc pkgconf qt6-base \
   mesa pango cairo libpulse
 ```
 
-Optional at **runtime** (not a build dependency): a Mesa Vulkan ICD if you want Auto to prefer Vulkan.
+Optional at **runtime** (not a build dependency): a Mesa Vulkan ICD if you want
+Auto to prefer Vulkan.
 
-### 3. Clone, check, build
+</details>
 
 ```sh
 git clone https://github.com/32bitx64bit/Tipsy.git
@@ -390,9 +508,9 @@ GOAMD64=v3 go build -o bin/tipsy ./cmd/tipsy
 GOAMD64=v3 go build -o bin/tipsy-gui ./cmd/tipsy-gui
 ```
 
-`bootstrap.sh` never fails with a one-liner: it reports Go, architecture, AVX2, Qt, X11, and a C compiler, then tells you what is missing. On a CPU without AVX2, `GOAMD64=v2` still compiles a local fallback; that is not an official release target.
-
-### 4. Install launchers (optional)
+`bootstrap.sh` reports Go, architecture, AVX2, Qt, X11, and a C compiler, then
+tells you what is missing. On a CPU without AVX2, `GOAMD64=v2` still compiles a
+local fallback; that is not an official release target.
 
 Install binaries and desktop files into `~/.local` (override with `PREFIX`):
 
@@ -400,30 +518,30 @@ Install binaries and desktop files into `~/.local` (override with `PREFIX`):
 ./scripts/install-desktop.sh
 ```
 
-That also registers `roblox` / `roblox-player` URI handling on the Play desktop file when `xdg-mime` is available. Put `~/.local/bin` on `PATH` if it is not already.
+That also registers `roblox` / `roblox-player` URI handling on the Play desktop
+file when `xdg-mime` is available. Put `~/.local/bin` on `PATH` if it is not
+already.
 
-### 5. First launch from a source tree
-
-A GitHub-built AppImage, Flatpak, or repository package can present as an official Tipsy release. Anything you built yourself cannot. Consent is explicit and sticky:
+A GitHub-built AppImage, Flatpak, or repository package can present as an
+official Tipsy release. Anything you built yourself cannot. Consent is explicit
+and sticky:
 
 ```sh
-# Settings / wizard (GUI will prompt once)
 bin/tipsy-gui
-
-# or CLI
 bin/tipsy setup --development /path/to/com.roblox.client.xapk
-bin/tipsy launch --development
-```
-
-`--development` records DevelopmentUnrestricted in `~/.config/tipsy/config.json`. It does **not** skip Roblox APK verification and must not be described as OfficialVerified.
-
-```sh
 DISPLAY=:0 bin/tipsy launch --development
 ```
 
-### 6. AppImage from source (optional)
+`--development` records DevelopmentUnrestricted in `~/.config/tipsy/config.json`.
+It does **not** skip Roblox APK verification and must not be described as
+OfficialVerified.
 
-Release AppImages are built by CI with a **pinned local** `appimagetool` (never downloaded implicitly) and do not contain APKs, `libroblox.so`, or Roblox fonts.
+### Packaging
+
+`scripts/build-appdir.sh` produces a versioned AppDir and archive with bundled
+Qt/XCB runtime libraries and license notices. `scripts/build-appimage.sh` wraps
+that AppDir with a **pinned local** `appimagetool`. Payloads are guarded: no APK,
+`libroblox.so`, or Roblox fonts.
 
 ```sh
 # Developer wrap used during packaging work:
@@ -433,117 +551,20 @@ Release AppImages are built by CI with a **pinned local** `appimagetool` (never 
 #   scripts/release-build.sh --version X.Y.Z --output-dir dist --mode github-signed ...
 ```
 
-For everyday use, prefer the [published AppImage](https://github.com/32bitx64bit/Tipsy/releases/latest). Building a signed image needs the locked release inputs, a pinned `appimagetool`, and a clean tree; see `scripts/build-appimage.sh --help` and `.github/workflows/release.yml`.
-
----
-
-## Settings
-
-All of these live in **Tipsy - Settings** and in `~/.config/tipsy/client-settings.json`. Renderer, FPS, VSync, and texture quality need a Roblox restart.
-
-| Setting | Behavior |
-| --- | --- |
-| Renderer | Auto (Vulkan when the full path exists, otherwise OpenGL), OpenGL, or Vulkan |
-| Frame rate | Auto, Limited 30–240, Unlimited (not a guaranteed FPS) |
-| VSync | Off by default; independent of the FPS cap |
-| Low texture mode | Off by default (high quality); on saves memory/VRAM |
-| Default monitor | Main monitor, a named output, or follow-mouse placement |
-| Start fullscreen | Tipsy-owned window request at map time; not Roblox’s in-app fullscreen toggle |
-| Discord Rich Presence | Off by default; optional join button stays off unless enabled |
-
----
-
-## Command line
-
-```
-tipsy doctor              Host overview (OS, X11, GPU, audio, Qt, install)
-tipsy inspect <apk...>    Inspect official APKs / splits
-tipsy setup <apk...>      Verify and install
-tipsy launch [--probe] [uri]
-tipsy diagnose [subsystem]
-tipsy diagnose-native <lib.so>
-tipsy compare-roblox <old> <new>
-tipsy report <apk...>
-tipsy config              Show or edit XDG config
-tipsy logs                Log directory and TIPSY_LOG help
-tipsy version
-```
-
-Source-build flags: `tipsy setup --development`, `tipsy launch --development`.
-
-Subsystems for `tipsy diagnose`: `x11`, `graphics`, `audio`, `jni`, `loader`, `roblox`, `auth`.
-
-Machine-readable flags: `tipsy inspect --json`, `tipsy report --json`, `tipsy doctor --json`.
-
----
-
-## Logs and data
-
-XDG layout (override the usual `XDG_*_HOME` variables):
-
-| Path | Typical location |
-| --- | --- |
-| Config | `~/.config/tipsy/` (`config.json`, `client-settings.json`) |
-| Client install | `~/.local/share/tipsy/` |
-| Logs | `~/.local/state/tipsy/` |
-
-```sh
-TIPSY_LOG=all TIPSY_LOG_LEVEL=debug tipsy launch
-```
-
-`TIPSY_LOG` is a comma-separated category list or `all`. Categories include `apk`, `loader`, `elf`, `android`, `jni`, `gameactivity`, `x11`, `graphics`, `input`, `audio`, `network`, `auth`, `filesystem`, `qt`, and `runtime`.
-
-Diagnostics never print passwords, cookies, tokens, or `.ROBLOSECURITY`.
-
----
-
-## What Tipsy is not
-
-<table>
-<tr>
-<td width="50%" valign="top">
-
-**Not**
-
-- A source of Roblox APKs, `.so` files, or assets
-- A cheat, injector, executor, or anti-cheat bypass
-- A Windows-Roblox / Wine wrapper
-- A complete Android OS
-- Roblox Studio
-
-</td>
-<td width="50%" valign="top">
-
-**Still limited or unverified**
-
-- In-experience voice chat works (hear and talk) for voice-eligible accounts; the in-game Input Device list only offers the host default microphone — pick the source on the desktop or with `TIPSY_MICROPHONE_SOURCE`
-- Gamepads / controllers are not implemented
-- Native Wayland is not the display target
-- In-experience join while a session is already running is not wired
-- Horizontal mouse wheel is captured but the current Android client only consumes vertical scroll
-- `tipsy repair` is not implemented; use `tipsy setup` to re-extract
-
-</td>
-</tr>
-</table>
-
-Performance claims versus other Linux Roblox runtimes are out of scope until they are measured.
-
----
-
-## Packaging
-
-`scripts/build-appdir.sh` produces a versioned AppDir and archive with bundled Qt/XCB runtime libraries and license notices. `scripts/build-appimage.sh` wraps that AppDir with a **pinned local** `appimagetool`. Payloads are guarded: no APK, `libroblox.so`, or Roblox fonts.
+For everyday use, prefer the
+[published AppImage](https://github.com/32bitx64bit/Tipsy/releases/latest).
+Building a signed image needs the locked release inputs, a pinned
+`appimagetool`, and a clean tree; see `scripts/build-appimage.sh --help` and
+`.github/workflows/release.yml`.
 
 `packaging/deb`, `packaging/rpm`, `packaging/arch`, and `packaging/flatpak`
 build the native packages and the Flatpak bundle (KDE 6.10 runtime, Go from the
 Flathub SDK extension) that every publish pushes to the self-hosted
 APT/RPM/pacman/Flatpak repositories. Native packages never replace AppImage.
 
----
-
-## License
+### License
 
 Tipsy is [GPL-3.0-or-later](LICENSE). See [NOTICE](NOTICE) for third-party notes.
 
-Roblox is copyright Roblox Corporation and is not part of this project. Users must obtain official packages through legitimate channels.
+Roblox is copyright Roblox Corporation and is not part of this project. Users
+must obtain official packages through legitimate channels.
