@@ -11,6 +11,11 @@ Tipsy runs the **unmodified Android x86-64 Roblox client** in a native X11 windo
 You provide a legitimate package. Tipsy verifies it, extracts it, and supplies the
 Android / JNI / GameActivity compatibility the client needs.
 
+The runtime is **ours** — loader, JNI, GameActivity, X11, graphics, input, and
+audio — written for this project, not lifted from another stack.
+**Stable releases** are playtested by the maintainer against everything listed
+as working.
+
 Roblox is not included, not patched, and not redistributed.
 
 <br>
@@ -31,6 +36,7 @@ Roblox is not included, not patched, and not redistributed.
 
 ## Contents
 
+- [Why Tipsy](#why-tipsy)
 - [Get started](#get-started)
 - [What you need](#what-you-need)
 - [What works today](#what-works-today)
@@ -43,6 +49,50 @@ Roblox is not included, not patched, and not redistributed.
   - [Compile from source](#compile-from-source)
   - [Packaging](#packaging)
   - [License](#license)
+
+---
+
+## Why Tipsy
+
+Other Linux Roblox projects exist. Tipsy is a different kind of stack: a
+from-scratch compatibility runtime around the **official** Android client, with
+releases that have actually been played.
+
+<table>
+<tr>
+<td width="33%" valign="top">
+
+**Built in-house**
+
+ELF loader, JavaVM/JNI, GameActivity, native X11, EGL and Vulkan, input, and
+audio are Tipsy code. GPL-3.0-or-later. You can read it. We do not vendor or
+re-skin another project's internals.
+
+</td>
+<td width="33%" valign="top">
+
+**Official client, unmodified**
+
+The same `libroblox.so` Google Play ships. Tipsy does not patch the engine,
+does not ship Roblox bytes, and does not ask you to run a Windows build under
+a wrapper.
+
+</td>
+<td width="33%" valign="top">
+
+**Stable means playtested**
+
+Tagged stable releases are run through real sessions by the maintainer:
+login, Home, public experiences, text, input, audio, and the rest of
+[what works today](#what-works-today). If it is on that list, that build is
+meant to do it. Nightlies and source trees are development.
+
+</td>
+</tr>
+</table>
+
+Go-first host, Qt only for Settings/Play, X11-first on the desktop. Compatibility
+is added from observed client failures — not a speculative Android reimplementation.
 
 ---
 
