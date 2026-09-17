@@ -489,7 +489,21 @@ func (p *provider) Lookup(lib, sym string) (uintptr, error) {
 	return addr, err
 }
 
+func lookupEGL(sym string) (uintptr, error) {
+	if addr := androidLookup("libEGL.so", sym); addr != 0 {
+		return addr, nil
+	}
+	return 0, missingSymbol(sym)
+}
+
 func (p *provider) lookupUncached(lib, sym string) (uintptr, error) {
+	// libroblox.so imports unversioned egl* and lists libm.so before libEGL.so.
+	// libc/libm lookup uses RTLD_DEFAULT, which already contains host Mesa from
+	// Tipsy's linked EGL. Binding those host pointers skips the Android
+	// ANativeWindow wrappers, so every egl* reloc must take the EGL surface.
+	if strings.HasPrefix(sym, "egl") {
+		return lookupEGL(sym)
+	}
 	switch lib {
 	case "libc.so", "libm.so", "libz.so":
 		return lookupLibc(lib, sym)

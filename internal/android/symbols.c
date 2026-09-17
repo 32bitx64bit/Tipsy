@@ -490,6 +490,11 @@ void *tipsy_android_lookup(const char *lib, const char *name)
 		return tipsy_egl_dlsym(name);
 	}
 	if (lib != NULL && strcmp(lib, "libGLESv2.so") == 0) {
+		/* Mesa's GLES GetProcAddress also returns EGL entry points. Window
+		 * surfaces must unwrap ANativeWindow; never bind host EGL here. */
+		if (name[0] == 'e' && name[1] == 'g' && name[2] == 'l') {
+			return tipsy_egl_dlsym(name);
+		}
 		return tipsy_gles_dlsym(name);
 	}
 	if (lib != NULL && (strcmp(lib, "libvulkan.so") == 0 || strcmp(lib, "libvulkan.so.1") == 0)) {
