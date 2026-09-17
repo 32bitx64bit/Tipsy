@@ -45,24 +45,6 @@ func TestSetFullscreenRejectsClosedWindow(t *testing.T) {
 	}
 }
 
-func TestEmbeddedWindowIcon(t *testing.T) {
-	t.Parallel()
-	icon, err := windowIconARGB()
-	if err != nil {
-		t.Fatalf("windowIconARGB: %v", err)
-	}
-	if len(icon) < 3 {
-		t.Fatalf("icon item count = %d, want width + height + pixels", len(icon))
-	}
-	width, height := int(icon[0]), int(icon[1])
-	if width != 512 || height != 512 {
-		t.Fatalf("icon dimensions = %dx%d, want canonical 512x512 branding", width, height)
-	}
-	if got, want := len(icon), 2+width*height; got != want {
-		t.Fatalf("icon item count = %d, want %d", got, want)
-	}
-}
-
 func TestOpenPlacesOnPrimaryAndLeavesPointerUnforced(t *testing.T) {
 	ensureDisplay(t)
 	requireProbe(t)
@@ -168,9 +150,9 @@ func TestRobloxWindowBrandingProperties(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read _NET_WM_ICON: %v", err)
 	}
-	if width != 512 || height != 512 || items != 2+width*height {
-		t.Fatalf("_NET_WM_ICON = %dx%d, %d items; want 512x512, %d items",
-			width, height, items, 2+uint64(512*512))
+	if width != windowIconMaxEdge || height != windowIconMaxEdge || items != 2+width*height {
+		t.Fatalf("_NET_WM_ICON = %dx%d, %d items; want %dx%d, %d items",
+			width, height, items, windowIconMaxEdge, windowIconMaxEdge, 2+uint64(windowIconMaxEdge*windowIconMaxEdge))
 	}
 }
 

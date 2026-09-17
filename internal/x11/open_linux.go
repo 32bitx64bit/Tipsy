@@ -17,11 +17,44 @@ import "C"
 import (
 	"fmt"
 	"os"
+	"sync"
 	"time"
 	"unsafe"
 
 	"github.com/tipsy-linux/tipsy/internal/logging"
 )
+
+// Xlib format=32 uses one native unsigned long per CARD32. On Tipsy's
+// Linux amd64 ABI that is 8 bytes, so the packed []uint32 EWMH payload
+// cannot be passed through as *C.ulong.
+var _ [8]struct{} = [unsafe.Sizeof(C.ulong(0))]struct{}{}
+
+var (
+	iconNativeOnce sync.Once
+	iconNative     []C.ulong
+	iconNativeErr  error
+)
+
+// windowIconNative returns the process-lifetime Xlib _NET_WM_ICON buffer.
+// It is a Once-widened copy of the small packed CARD32 image, not a
+// per-Open clone and not a second PNG decode.
+func windowIconNative() ([]C.ulong, error) {
+	iconNativeOnce.Do(func() {
+		icon32, err := windowIconARGB()
+		if err != nil {
+			iconNativeErr = err
+			return
+		}
+		iconNative = make([]C.ulong, len(icon32))
+		for i, value := range icon32 {
+			iconNative[i] = C.ulong(value)
+		}
+	})
+	if iconNativeErr != nil {
+		return nil, iconNativeErr
+	}
+	return iconNative, nil
+}
 
 const maxListedOutputs = 32
 
@@ -154,13 +187,9 @@ func OpenOnDisplay(title string, width, height int, display string) (*Window, er
 	}
 	ctitle := C.CString(title)
 	defer C.free(unsafe.Pointer(ctitle))
-	icon32, err := windowIconARGB()
+	icon, err := windowIconNative()
 	if err != nil {
 		return nil, err
-	}
-	icon := make([]C.ulong, len(icon32))
-	for i, value := range icon32 {
-		icon[i] = C.ulong(value)
 	}
 	var iconPtr *C.ulong
 	if len(icon) != 0 {
