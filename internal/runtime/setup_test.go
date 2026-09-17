@@ -14,6 +14,7 @@ import (
 	"strings"
 	"testing"
 	"time"
+	"unsafe"
 
 	"github.com/tipsy-linux/tipsy/internal/apk"
 	"github.com/tipsy-linux/tipsy/internal/clientsettings"
@@ -178,6 +179,9 @@ func TestApplicationSettingsFromResponse(t *testing.T) {
 	if !strings.Contains(got, `"ClientAppSettings"`) || !strings.Contains(got, `"applicationSettings"`) {
 		t.Fatalf("missing JSON keys: %s", got)
 	}
+	if strings.Count(got, `"FFlagFoo":"True"`) != 2 || strings.Count(got, `"FIntBar":"1"`) != 2 {
+		t.Fatalf("dual-key envelope did not serialize both maps: %s", got)
+	}
 	if !strings.Contains(got, `"ShadowFValuesEnabled":"True"`) {
 		t.Fatalf("missing commit-gate overlay: %s", got)
 	}
@@ -282,6 +286,20 @@ func TestLoadAndroidAppOverridesLeavesOrdinaryLaunchInertAndTestOverrideTransien
 	}
 	if _, err := os.Stat(clientsettings.New().Path); !os.IsNotExist(err) {
 		t.Fatalf("process-only renderer override wrote settings: err=%v", err)
+	}
+}
+
+func TestSettingsJSONStringAliasesMarshalBacking(t *testing.T) {
+	raw := []byte(`{"applicationSettings":{},"ClientAppSettings":{}}`)
+	got := settingsJSONString(raw)
+	if unsafe.StringData(got) != unsafe.SliceData(raw) {
+		t.Fatal("settingsJSONString copied Marshal backing")
+	}
+	if got != string(raw) {
+		t.Fatalf("got %q", got)
+	}
+	if settingsJSONString(nil) != "" || settingsJSONString([]byte{}) != "" {
+		t.Fatal("empty backing")
 	}
 }
 

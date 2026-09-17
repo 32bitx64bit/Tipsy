@@ -14,6 +14,7 @@ import (
 	"strings"
 	"time"
 	"unicode"
+	"unsafe"
 
 	"github.com/tipsy-linux/tipsy/internal/clientsettings"
 	"github.com/tipsy-linux/tipsy/internal/logging"
@@ -86,6 +87,11 @@ func applicationSettingsFromResponseWithOverrides(body []byte, overrides map[str
 	// set the byte in time; launch pokes it. JNI nativeGetFFlag still reads
 	// a different map (store+0x1a8).
 	m["ShadowFValuesEnabled"] = "True"
+	// Dual-key envelope is required: ClientAppSettings-only JSON sets ingest
+	// 73db040=1, skips extract, and nativeInitClientSettings returns 1 with an
+	// empty apply (launch-init.md). Both keys serialize the same map, so the
+	// live JNI string is about twice the inner object. That backing is interned
+	// on the NewString local and released after native init / post-init.
 	raw, err := json.Marshal(map[string]any{
 		"applicationSettings": m,
 		"ClientAppSettings":   m,
@@ -93,7 +99,18 @@ func applicationSettingsFromResponseWithOverrides(body []byte, overrides map[str
 	if err != nil {
 		return "", 0, err
 	}
-	return string(raw), n, nil
+	return settingsJSONString(raw), n, nil
+}
+
+// settingsJSONString aliases json.Marshal's buffer as a string. The []byte is
+// never mutated after Marshal returns. JNI NewString stores the same Go string
+// on o.str for the native-init local lifetime, so the backing stays reachable
+// without a second copy of the envelope.
+func settingsJSONString(raw []byte) string {
+	if len(raw) == 0 {
+		return ""
+	}
+	return unsafe.String(unsafe.SliceData(raw), len(raw))
 }
 
 func cloneFlagMap(m map[string]any) map[string]any {

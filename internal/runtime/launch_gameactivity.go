@@ -907,6 +907,22 @@ func androidClientSettingsInitArgs(settings, rendererOverrides string) [3]string
 	return [3]string{settings, rendererOverrides, androidAppSettingsGroup}
 }
 
+func newClientSettingsInitLocals(env *jni.Env, args [3]string) [3]uintptr {
+	if env == nil {
+		return [3]uintptr{}
+	}
+	return [3]uintptr{env.NewString(args[0]), env.NewString(args[1]), env.NewString(args[2])}
+}
+
+func releaseClientSettingsInitLocals(env *jni.Env, locals [3]uintptr) {
+	if env == nil {
+		return
+	}
+	for _, obj := range locals {
+		env.DeleteLocalRef(obj)
+	}
+}
+
 // runMainGameActivityOnCreateBoundary preserves the APK's MainGameActivity
 // order: a non-empty external override is preloaded before the
 // GameActivity.super.onCreate equivalent initializes native code. Ordinary
@@ -934,8 +950,14 @@ func startRobloxApp(ctx context.Context, mod *loader.Module, env *jni.Env, activ
 		gl = activity
 	}
 	initArgs := androidClientSettingsInitArgs(flags, overrides.renderer)
-	settingsStatus := callRobloxJNI(mod, env.Raw(), gl, "Java_com_roblox_engine_jni_NativeGLInterface_nativeInitClientSettings", env.NewString(initArgs[0]), env.NewString(initArgs[1]), env.NewString(initArgs[2]))
+	initLocals := newClientSettingsInitLocals(env, initArgs)
+	settingsStatus := callRobloxJNI(mod, env.Raw(), gl, "Java_com_roblox_engine_jni_NativeGLInterface_nativeInitClientSettings", initLocals[0], initLocals[1], initLocals[2])
 	callRobloxJNI(mod, env.Raw(), gl, "Java_com_roblox_engine_jni_NativeGLInterface_nativePostClientSettingsLoadedInitialization3", env.NewArrayList())
+	// nativeInitClientSettings copies the dual-key JSON into the C++ store
+	// (launch-init.md ingest/extract/commit). Inverted JNI does not auto-drop
+	// the NewString locals a Java caller would release when the native method
+	// returns; that would pin interned o.str for the whole Main thread.
+	releaseClientSettingsInitLocals(env, initLocals)
 	// Complete the APK Java setup phase which owns CookieProtocol construction.
 	if int32(settingsStatus) == 0 {
 		env.CompleteAuthCookieInitialization()

@@ -95,6 +95,37 @@ func TestAndroidClientSettingsInitArgsMatchOfficialAPK(t *testing.T) {
 	}
 }
 
+func TestClientSettingsInitLocalsReleaseAfterNativeInit(t *testing.T) {
+	vm, err := jni.NewVM()
+	if err != nil {
+		t.Fatal(err)
+	}
+	env := vm.Env()
+	args := androidClientSettingsInitArgs(`{"applicationSettings":{"Official":"kept"},"ClientAppSettings":{"Official":"kept"}}`, "")
+	locals := newClientSettingsInitLocals(env, args)
+	for i, obj := range locals {
+		if obj == 0 {
+			t.Fatalf("arg %d NewString returned NULL", i)
+		}
+		got, err := env.GetStringUTFChars(obj)
+		if err != nil || got != args[i] {
+			t.Fatalf("arg %d = %q err=%v want %q", i, got, err, args[i])
+		}
+	}
+	releaseClientSettingsInitLocals(env, locals)
+	releaseClientSettingsInitLocals(nil, locals)
+	env.DeleteLocalRef(0)
+	for i, obj := range locals {
+		if args[i] == "" {
+			continue
+		}
+		got, err := env.GetStringUTFChars(obj)
+		if got != "" || err != nil {
+			t.Fatalf("arg %d survived DeleteLocalRef: %q err=%v", i, got, err)
+		}
+	}
+}
+
 func TestRendererPreloadPrecedesGameActivitySuperAndOrdinaryIsInert(t *testing.T) {
 	var order []string
 	runMainGameActivityOnCreateBoundary(`{"renderer":"opengl"}`, func(payload string) {
