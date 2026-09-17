@@ -400,48 +400,111 @@ func testVulkanOutputQueueEligible(scenario uint32) bool {
 }
 
 type vulkanOutputTransactionFixture struct {
-	order                  []uint32
-	acquireCalls           uint32
-	compositionSubmitCalls uint32
-	acquireConsumeCalls    uint32
-	guestPresentCalls      uint32
-	outputPresentCalls     uint32
-	originalGuestForwarded bool
-	fullCopyCount          uint32
-	drawCount              uint32
-	uploadCount            uint32
-	guestWaitConsumedOnce  bool
-	gWaitConsumedOnce      bool
-	oWaitConsumedOnce      bool
-	quarantined            bool
-	deviceTerminal         bool
-	returnedResult         int32
+	order                         []uint32
+	acquireCalls                  uint32
+	compositionSubmitCalls        uint32
+	acquireConsumeCalls           uint32
+	guestPresentCalls             uint32
+	outputPresentCalls            uint32
+	originalGuestForwarded        bool
+	fullCopyCount                 uint32
+	drawCount                     uint32
+	uploadCount                   uint32
+	guestWaitConsumedOnce         bool
+	gWaitConsumedOnce             bool
+	oWaitConsumedOnce             bool
+	quarantined                   bool
+	deviceTerminal                bool
+	returnedResult                int32
+	overlayAcquireCalls           uint32
+	presentMutexLocks             uint32
+	unpublishedFollowupMutexLocks uint32
+	copySrcX                      uint32
+	copySrcY                      uint32
+	copyDstX                      uint32
+	copyDstY                      uint32
+	copyWidth                     uint32
+	copyHeight                    uint32
+	outputCreateCalls             uint32
+	outputCreateWidth             uint32
+	outputCreateHeight            uint32
+	childX                        int32
+	childY                        int32
+	childWidth                    uint32
+	childHeight                   uint32
+	pushRect                      [4]float32
+	viewportWidth                 uint32
+	viewportHeight                uint32
 }
 
 func testVulkanOutputTransactionFixture(scenario uint32) vulkanOutputTransactionFixture {
 	var raw C.TipsyVkOutputTransactionFixture
 	C.tipsy_test_vk_output_transaction_fixture(C.uint32_t(scenario), &raw)
+	return testVulkanOutputTransactionFromRaw(raw)
+}
+
+type vulkanOutputGeometryFixture struct {
+	first  vulkanOutputTransactionFixture
+	second vulkanOutputTransactionFixture
+	empty  vulkanOutputTransactionFixture
+}
+
+func testVulkanOutputTransactionFromRaw(raw C.TipsyVkOutputTransactionFixture) vulkanOutputTransactionFixture {
 	order := make([]uint32, int(raw.order_count))
 	for i := range order {
 		order[i] = uint32(raw.order[i])
 	}
 	return vulkanOutputTransactionFixture{
-		order:                  order,
-		acquireCalls:           uint32(raw.acquire_calls),
-		compositionSubmitCalls: uint32(raw.composition_submit_calls),
-		acquireConsumeCalls:    uint32(raw.acquire_consume_calls),
-		guestPresentCalls:      uint32(raw.guest_present_calls),
-		outputPresentCalls:     uint32(raw.output_present_calls),
-		originalGuestForwarded: raw.original_guest_forwarded != 0,
-		fullCopyCount:          uint32(raw.full_copy_count),
-		drawCount:              uint32(raw.draw_count),
-		uploadCount:            uint32(raw.upload_count),
-		guestWaitConsumedOnce:  raw.guest_wait_consumed_once != 0,
-		gWaitConsumedOnce:      raw.g_wait_consumed_once != 0,
-		oWaitConsumedOnce:      raw.o_wait_consumed_once != 0,
-		quarantined:            raw.quarantined != 0,
-		deviceTerminal:         raw.device_terminal != 0,
-		returnedResult:         int32(raw.returned_result),
+		order:                         order,
+		acquireCalls:                  uint32(raw.acquire_calls),
+		compositionSubmitCalls:        uint32(raw.composition_submit_calls),
+		acquireConsumeCalls:           uint32(raw.acquire_consume_calls),
+		guestPresentCalls:             uint32(raw.guest_present_calls),
+		outputPresentCalls:            uint32(raw.output_present_calls),
+		originalGuestForwarded:        raw.original_guest_forwarded != 0,
+		fullCopyCount:                 uint32(raw.full_copy_count),
+		drawCount:                     uint32(raw.draw_count),
+		uploadCount:                   uint32(raw.upload_count),
+		guestWaitConsumedOnce:         raw.guest_wait_consumed_once != 0,
+		gWaitConsumedOnce:             raw.g_wait_consumed_once != 0,
+		oWaitConsumedOnce:             raw.o_wait_consumed_once != 0,
+		quarantined:                   raw.quarantined != 0,
+		deviceTerminal:                raw.device_terminal != 0,
+		returnedResult:                int32(raw.returned_result),
+		overlayAcquireCalls:           uint32(raw.overlay_acquire_calls),
+		presentMutexLocks:             uint32(raw.present_mutex_locks),
+		unpublishedFollowupMutexLocks: uint32(raw.unpublished_followup_mutex_locks),
+		copySrcX:                      uint32(raw.copy_src_x),
+		copySrcY:                      uint32(raw.copy_src_y),
+		copyDstX:                      uint32(raw.copy_dst_x),
+		copyDstY:                      uint32(raw.copy_dst_y),
+		copyWidth:                     uint32(raw.copy_width),
+		copyHeight:                    uint32(raw.copy_height),
+		outputCreateCalls:             uint32(raw.output_create_calls),
+		outputCreateWidth:             uint32(raw.output_create_width),
+		outputCreateHeight:            uint32(raw.output_create_height),
+		childX:                        int32(raw.child_x),
+		childY:                        int32(raw.child_y),
+		childWidth:                    uint32(raw.child_width),
+		childHeight:                   uint32(raw.child_height),
+		pushRect: [4]float32{
+			float32(raw.push_rect[0]),
+			float32(raw.push_rect[1]),
+			float32(raw.push_rect[2]),
+			float32(raw.push_rect[3]),
+		},
+		viewportWidth:  uint32(raw.viewport_width),
+		viewportHeight: uint32(raw.viewport_height),
+	}
+}
+
+func testVulkanOutputOverlayGeometryFixture() vulkanOutputGeometryFixture {
+	var raw C.TipsyVkOutputGeometryFixture
+	C.tipsy_test_vk_output_overlay_geometry_fixture(&raw)
+	return vulkanOutputGeometryFixture{
+		first:  testVulkanOutputTransactionFromRaw(raw.first),
+		second: testVulkanOutputTransactionFromRaw(raw.second),
+		empty:  testVulkanOutputTransactionFromRaw(raw.empty),
 	}
 }
 

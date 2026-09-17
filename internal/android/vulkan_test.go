@@ -85,7 +85,16 @@ func TestVulkanSameQueueTransactionOrderAndCounts(t *testing.T) {
 		got.fullCopyCount != 1 || got.drawCount != 1 || got.uploadCount != 1 ||
 		!got.guestWaitConsumedOnce || !got.gWaitConsumedOnce ||
 		!got.oWaitConsumedOnce || got.quarantined || got.deviceTerminal ||
-		got.returnedResult != 0 {
+		got.returnedResult != 0 || got.overlayAcquireCalls != 1 ||
+		got.presentMutexLocks != 1 ||
+		got.copySrcX != 2 || got.copySrcY != 3 ||
+		got.copyDstX != 0 || got.copyDstY != 0 ||
+		got.copyWidth != 1 || got.copyHeight != 1 ||
+		got.outputCreateCalls != 0 ||
+		got.childX != 2 || got.childY != 3 ||
+		got.childWidth != 1 || got.childHeight != 1 ||
+		got.pushRect != [4]float32{-1, -1, 1, 1} ||
+		got.viewportWidth != 1 || got.viewportHeight != 1 {
 		t.Fatalf("qualified same-queue operation sequence=%+v", got)
 	}
 }
@@ -98,9 +107,35 @@ func TestVulkanSameQueueDirectGatesHaveNoPrivateOperations(t *testing.T) {
 			got.guestPresentCalls != 1 || got.outputPresentCalls != 0 ||
 			!got.originalGuestForwarded || got.fullCopyCount != 0 ||
 			got.drawCount != 0 || got.uploadCount != 0 || got.quarantined ||
-			got.deviceTerminal || got.returnedResult != 0 {
+			got.deviceTerminal || got.returnedResult != 0 ||
+			got.overlayAcquireCalls != 1 || got.presentMutexLocks != 1 ||
+			got.copyWidth != 0 || got.copyHeight != 0 ||
+			got.outputCreateCalls != 0 {
 			t.Errorf("direct scenario %d performed private work: %+v", scenario, got)
 		}
+	}
+}
+
+func TestVulkanUnpublishedPresentSkipsOverlayAcquireAndMutex(t *testing.T) {
+	idle := testVulkanOutputTransactionFixture(11)
+	if !slices.Equal(idle.order, []uint32{3}) || idle.acquireCalls != 0 ||
+		idle.compositionSubmitCalls != 0 || idle.guestPresentCalls != 1 ||
+		idle.outputPresentCalls != 0 || !idle.originalGuestForwarded ||
+		idle.fullCopyCount != 0 || idle.drawCount != 0 || idle.uploadCount != 0 ||
+		idle.overlayAcquireCalls != 0 || idle.presentMutexLocks != 0 ||
+		idle.unpublishedFollowupMutexLocks != 0 || idle.quarantined ||
+		idle.deviceTerminal || idle.returnedResult != 0 ||
+		idle.copyWidth != 0 || idle.outputCreateCalls != 0 {
+		t.Fatalf("unpublished idle present = %+v", idle)
+	}
+	teardown := testVulkanOutputTransactionFixture(12)
+	if !slices.Equal(teardown.order, []uint32{3}) || teardown.overlayAcquireCalls != 0 ||
+		teardown.presentMutexLocks != 1 || teardown.unpublishedFollowupMutexLocks != 0 ||
+		!teardown.originalGuestForwarded || teardown.fullCopyCount != 0 ||
+		teardown.drawCount != 0 || teardown.guestPresentCalls != 1 ||
+		teardown.outputPresentCalls != 0 || teardown.quarantined ||
+		teardown.deviceTerminal || teardown.returnedResult != 0 {
+		t.Fatalf("unpublished teardown present = %+v", teardown)
 	}
 }
 
@@ -136,9 +171,45 @@ func TestVulkanSameQueueFailureMatrix(t *testing.T) {
 			got.originalGuestForwarded != tt.originalForwarded ||
 			got.gWaitConsumedOnce != tt.gConsumed ||
 			got.oWaitConsumedOnce != tt.oConsumed || !got.quarantined ||
-			got.deviceTerminal != tt.terminal || got.returnedResult != tt.guestResult {
+			got.deviceTerminal != tt.terminal || got.returnedResult != tt.guestResult ||
+			got.overlayAcquireCalls != 1 || got.presentMutexLocks != 1 {
 			t.Errorf("failure scenario %d=%+v", tt.scenario, got)
 		}
+	}
+}
+
+func TestVulkanOutputOverlaySubrectAndSizeDrivenRecreate(t *testing.T) {
+	got := testVulkanOutputOverlayGeometryFixture()
+	if !slices.Equal(got.first.order, []uint32{1, 2, 3, 4}) ||
+		got.first.fullCopyCount != 1 || got.first.copySrcX != 1 ||
+		got.first.copySrcY != 2 || got.first.copyDstX != 0 ||
+		got.first.copyDstY != 0 || got.first.copyWidth != 1 ||
+		got.first.copyHeight != 1 || got.first.outputCreateCalls != 1 ||
+		got.first.outputCreateWidth != 1 || got.first.outputCreateHeight != 1 ||
+		got.first.childX != 1 || got.first.childY != 2 ||
+		got.first.childWidth != 1 || got.first.childHeight != 1 ||
+		got.first.pushRect != [4]float32{-1, -1, 1, 1} ||
+		got.first.viewportWidth != 1 || got.first.viewportHeight != 1 ||
+		got.first.originalGuestForwarded || got.first.quarantined ||
+		got.first.returnedResult != 0 {
+		t.Fatalf("size-changing overlay present = %+v", got.first)
+	}
+	if !slices.Equal(got.second.order, []uint32{1, 2, 3, 4}) ||
+		got.second.fullCopyCount != 1 || got.second.copySrcX != 4 ||
+		got.second.copySrcY != 5 || got.second.copyWidth != 1 ||
+		got.second.copyHeight != 1 || got.second.outputCreateCalls != 0 ||
+		got.second.childX != 4 || got.second.childY != 5 ||
+		got.second.childWidth != 1 || got.second.childHeight != 1 ||
+		got.second.pushRect != [4]float32{-1, -1, 1, 1} ||
+		got.second.originalGuestForwarded || got.second.quarantined ||
+		got.second.returnedResult != 0 {
+		t.Fatalf("overlay move-only present = %+v", got.second)
+	}
+	if !slices.Equal(got.empty.order, []uint32{3}) ||
+		got.empty.fullCopyCount != 0 || got.empty.outputCreateCalls != 0 ||
+		got.empty.outputPresentCalls != 0 || !got.empty.originalGuestForwarded ||
+		got.empty.drawCount != 0 || got.empty.returnedResult != 0 {
+		t.Fatalf("empty clipped overlay present = %+v", got.empty)
 	}
 }
 

@@ -6,9 +6,10 @@
  * The transaction runs synchronously on the exact ordinary guest queue passed
  * to vkQueuePresentKHR; the guest device request is never enlarged.  The guest
  * swapchain is always presented to the original window.  While a valid
- * foreground lease exists, its complete current image is copied to the opaque
- * child and the premultiplied foreground is blended there.  No game pixels are
- * mapped or read back.
+ * foreground lease exists, the clipped overlay AABB of the current guest image
+ * is copied into an overlay-sized opaque child and the premultiplied
+ * foreground is blended there in output-local NDC.  No game pixels are mapped
+ * or read back.
  */
 #define VK_USE_PLATFORM_XCB_KHR
 #define VK_USE_PLATFORM_XLIB_KHR
@@ -31,6 +32,7 @@
 
 #pragma weak tipsy_focused_text_frame_acquire
 #pragma weak tipsy_focused_text_frame_release
+#pragma weak tipsy_focused_text_overlay_live
 
 #define TIPSY_VK_OUTPUT_MAX_IMAGES 16u
 #define TIPSY_VK_OUTPUT_MAX_WAITS 16u
@@ -74,6 +76,7 @@ typedef struct TipsyVkOutputPair {
 	uint32_t ready;
 	VkSwapchainKHR guest;
 	VkSwapchainKHR output;
+	VkExtent2D guest_extent;
 	VkExtent2D extent;
 	VkFormat format;
 	uint32_t source_count;
@@ -208,6 +211,7 @@ typedef struct TipsyVkOutputState {
 	TipsyVkOutputQueueRecord queues[32];
 
 	uint32_t pending_swapchain_qualified;
+	VkExtent2D pending_guest_extent;
 	VkSwapchainCreateInfoKHR pending_output_info;
 
 	TipsyVkOutputDispatch vk;
@@ -221,22 +225,51 @@ static TipsyVkOutputState tipsy_output = {
 };
 
 static _Atomic uint32_t output_route_ready;
+static _Atomic uint32_t output_child_mapped;
+static _Atomic uint32_t output_foreground_retained;
 
 /* The transaction fixture below drives the production present path through
  * content-free fake host entry points.  This pointer is non-NULL only for the
  * duration of that synchronous unit fixture. */
 static TipsyVkOutputTransactionFixture *test_transaction_fixture;
+static int test_transaction_overlay_live = 1;
+static int test_transaction_frame_x = 2;
+static int test_transaction_frame_y = 3;
+static int test_transaction_frame_width = 1;
+static int test_transaction_frame_height = 1;
+
+static void tipsy_vk_output_note_overlay_retained_locked(void)
+{
+	atomic_store_explicit(&output_child_mapped,
+		tipsy_output.child_mapped != 0, memory_order_release);
+	atomic_store_explicit(&output_foreground_retained,
+		tipsy_output.active.foreground != VK_NULL_HANDLE, memory_order_release);
+}
+
+static int tipsy_vk_output_overlay_live(void)
+{
+	if (test_transaction_fixture != NULL) {
+		return test_transaction_overlay_live != 0;
+	}
+	if (tipsy_focused_text_overlay_live == NULL) {
+		return 0;
+	}
+	return tipsy_focused_text_overlay_live() != 0;
+}
 
 static int tipsy_vk_output_foreground_acquire(
 	struct tipsy_focused_text_frame *frame)
 {
 	static const uint8_t test_pixel[4] = {0xff, 0xff, 0xff, 0xff};
 	if (test_transaction_fixture != NULL) {
+		test_transaction_fixture->overlay_acquire_calls++;
 		memset(frame, 0, sizeof(*frame));
 		frame->rgba = test_pixel;
-		frame->width = 1;
-		frame->height = 1;
-		frame->stride = 4;
+		frame->x = test_transaction_frame_x;
+		frame->y = test_transaction_frame_y;
+		frame->width = test_transaction_frame_width;
+		frame->height = test_transaction_frame_height;
+		frame->stride = frame->width * 4;
 		frame->generation = 1;
 		frame->lease = 1;
 		return 1;
@@ -266,14 +299,17 @@ static void tipsy_vk_output_foreground_release(uintptr_t lease)
 
 static void tipsy_vk_output_unmap_child_locked(void)
 {
-	if (!tipsy_output.child_mapped || tipsy_output.display == NULL || tipsy_output.child == 0) {
+	if (!tipsy_output.child_mapped) {
 		return;
 	}
-	XLockDisplay(tipsy_output.display);
-	XUnmapWindow(tipsy_output.display, tipsy_output.child);
-	XFlush(tipsy_output.display);
-	XUnlockDisplay(tipsy_output.display);
+	if (tipsy_output.display != NULL && tipsy_output.child != 0) {
+		XLockDisplay(tipsy_output.display);
+		XUnmapWindow(tipsy_output.display, tipsy_output.child);
+		XFlush(tipsy_output.display);
+		XUnlockDisplay(tipsy_output.display);
+	}
 	tipsy_output.child_mapped = 0;
+	tipsy_vk_output_note_overlay_retained_locked();
 }
 
 static void tipsy_vk_output_map_child_locked(void)
@@ -286,6 +322,7 @@ static void tipsy_vk_output_map_child_locked(void)
 	XFlush(tipsy_output.display);
 	XUnlockDisplay(tipsy_output.display);
 	tipsy_output.child_mapped = 1;
+	tipsy_vk_output_note_overlay_retained_locked();
 }
 
 static void tipsy_vk_output_destroy_child_locked(void)
@@ -341,17 +378,24 @@ static int tipsy_vk_output_create_child_locked(void)
 	return tipsy_output.child != 0;
 }
 
-static void tipsy_vk_output_resize_child_locked(VkExtent2D extent)
+static void tipsy_vk_output_place_child_locked(int x, int y, unsigned int width,
+	unsigned int height)
 {
+	if (test_transaction_fixture != NULL) {
+		test_transaction_fixture->child_x = x;
+		test_transaction_fixture->child_y = y;
+		test_transaction_fixture->child_width = width;
+		test_transaction_fixture->child_height = height;
+	}
 	if (tipsy_output.display == NULL || tipsy_output.child == 0 ||
-		extent.width == 0 || extent.height == 0) {
+		width == 0 || height == 0) {
 		return;
 	}
 	XLockDisplay(tipsy_output.display);
-	XMoveResizeWindow(tipsy_output.display, tipsy_output.child, 0, 0,
-		extent.width, extent.height);
+	XMoveResizeWindow(tipsy_output.display, tipsy_output.child, x, y,
+		width, height);
 	XRaiseWindow(tipsy_output.display, tipsy_output.child);
-	XFlush(tipsy_output.display);
+	XSync(tipsy_output.display, False);
 	XUnlockDisplay(tipsy_output.display);
 }
 
@@ -841,6 +885,7 @@ int tipsy_vk_output_prepare_swapchain(void *device_ptr, const void *create_info_
 	clone_info->imageUsage |= VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
 	memset(&tipsy_output.pending_output_info, 0,
 		sizeof(tipsy_output.pending_output_info));
+	tipsy_output.pending_guest_extent = info->imageExtent;
 	tipsy_output.pending_output_info.sType = VK_STRUCTURE_TYPE_SWAPCHAIN_CREATE_INFO_KHR;
 	tipsy_output.pending_output_info.surface = tipsy_output.output_surface;
 	tipsy_output.pending_output_info.minImageCount = desired_count;
@@ -859,7 +904,6 @@ int tipsy_vk_output_prepare_swapchain(void *device_ptr, const void *create_info_
 	tipsy_output.pending_swapchain_qualified = 1;
 	atomic_store_explicit(&output_route_ready, 0, memory_order_release);
 	tipsy_vk_output_unmap_child_locked();
-	tipsy_vk_output_resize_child_locked(info->imageExtent);
 	clone->create_info = clone_info;
 	clone->qualified = 1;
 	pthread_mutex_unlock(&tipsy_output.mutex);
@@ -937,6 +981,7 @@ static void tipsy_vk_output_destroy_foreground_locked(TipsyVkOutputPair *pair)
 	pair->foreground_height = 0;
 	pair->foreground_generation = 0;
 	pair->foreground_initialized = 0;
+	tipsy_vk_output_note_overlay_retained_locked();
 }
 
 static void tipsy_vk_output_destroy_pair_locked(TipsyVkOutputPair *pair,
@@ -1220,6 +1265,10 @@ static VkResult tipsy_vk_output_build_pair_locked(TipsyVkOutputPair *pair,
 	pair->active = 1;
 	pair->guest = guest;
 	pair->output = output;
+	pair->guest_extent = tipsy_output.pending_guest_extent;
+	if (pair->guest_extent.width == 0 || pair->guest_extent.height == 0) {
+		pair->guest_extent = info->imageExtent;
+	}
 	pair->extent = info->imageExtent;
 	pair->format = info->imageFormat;
 	result = tipsy_output.vk.get_swapchain_images(tipsy_output.device, output,
@@ -1600,6 +1649,237 @@ static VkResult tipsy_vk_output_wait_pair_fences_locked(TipsyVkOutputPair *pair)
 		VK_TRUE, 0);
 }
 
+static int tipsy_vk_output_clip_overlay(const struct tipsy_focused_text_frame *frame,
+	VkExtent2D guest, VkOffset2D *offset, VkExtent2D *extent)
+{
+	uint32_t x;
+	uint32_t y;
+	uint32_t width;
+	uint32_t height;
+	uint32_t max_width;
+	uint32_t max_height;
+	if (frame == NULL || offset == NULL || extent == NULL ||
+		guest.width == 0 || guest.height == 0 ||
+		frame->x < 0 || frame->y < 0 || frame->width < 1 || frame->height < 1) {
+		return 0;
+	}
+	x = (uint32_t)frame->x;
+	y = (uint32_t)frame->y;
+	if (x >= guest.width || y >= guest.height) {
+		return 0;
+	}
+	width = (uint32_t)frame->width;
+	height = (uint32_t)frame->height;
+	max_width = guest.width - x;
+	max_height = guest.height - y;
+	if (width > max_width) width = max_width;
+	if (height > max_height) height = max_height;
+	if (width == 0 || height == 0) {
+		return 0;
+	}
+	offset->x = (int32_t)x;
+	offset->y = (int32_t)y;
+	extent->width = width;
+	extent->height = height;
+	return 1;
+}
+
+static void tipsy_vk_output_destroy_output_views_into_locked(
+	TipsyVkOutputImageState *targets, uint32_t count)
+{
+	uint32_t i;
+	if (targets == NULL) return;
+	for (i = 0; i < count; i++) {
+		if (targets[i].framebuffer != VK_NULL_HANDLE &&
+			tipsy_output.vk.destroy_framebuffer != NULL) {
+			tipsy_output.vk.destroy_framebuffer(tipsy_output.device,
+				targets[i].framebuffer, NULL);
+		}
+		if (targets[i].view != VK_NULL_HANDLE &&
+			tipsy_output.vk.destroy_image_view != NULL) {
+			tipsy_output.vk.destroy_image_view(tipsy_output.device,
+				targets[i].view, NULL);
+		}
+		targets[i].framebuffer = VK_NULL_HANDLE;
+		targets[i].view = VK_NULL_HANDLE;
+		targets[i].image = VK_NULL_HANDLE;
+		targets[i].presented = 0;
+	}
+}
+
+static int tipsy_vk_output_create_output_views_into_locked(
+	TipsyVkOutputImageState *targets, uint32_t count, VkExtent2D extent,
+	VkFormat format, VkRenderPass render_pass)
+{
+	VkImageViewCreateInfo view_info;
+	VkFramebufferCreateInfo framebuffer_info;
+	uint32_t i;
+	VkResult result;
+	if (targets == NULL || count == 0 || extent.width == 0 || extent.height == 0 ||
+		render_pass == VK_NULL_HANDLE ||
+		tipsy_output.vk.create_image_view == NULL ||
+		tipsy_output.vk.create_framebuffer == NULL) {
+		return 0;
+	}
+	for (i = 0; i < count; i++) {
+		memset(&view_info, 0, sizeof(view_info));
+		view_info.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
+		view_info.image = targets[i].image;
+		view_info.viewType = VK_IMAGE_VIEW_TYPE_2D;
+		view_info.format = format;
+		view_info.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+		view_info.subresourceRange.levelCount = 1;
+		view_info.subresourceRange.layerCount = 1;
+		result = tipsy_output.vk.create_image_view(tipsy_output.device,
+			&view_info, NULL, &targets[i].view);
+		if (result != VK_SUCCESS) return 0;
+		memset(&framebuffer_info, 0, sizeof(framebuffer_info));
+		framebuffer_info.sType = VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO;
+		framebuffer_info.renderPass = render_pass;
+		framebuffer_info.attachmentCount = 1;
+		framebuffer_info.pAttachments = &targets[i].view;
+		framebuffer_info.width = extent.width;
+		framebuffer_info.height = extent.height;
+		framebuffer_info.layers = 1;
+		result = tipsy_output.vk.create_framebuffer(tipsy_output.device,
+			&framebuffer_info, NULL, &targets[i].framebuffer);
+		if (result != VK_SUCCESS) return 0;
+		targets[i].presented = 0;
+	}
+	return 1;
+}
+
+static int tipsy_vk_output_ensure_output_extent_locked(TipsyVkOutputPair *pair,
+	VkOffset2D overlay_origin, VkExtent2D overlay_extent)
+{
+	VkSwapchainKHR created = VK_NULL_HANDLE;
+	VkSwapchainKHR old_output;
+	VkSwapchainCreateInfoKHR info;
+	VkSurfaceCapabilitiesKHR caps;
+	VkImage images[TIPSY_VK_OUTPUT_MAX_IMAGES];
+	TipsyVkOutputImageState new_targets[TIPSY_VK_OUTPUT_MAX_IMAGES];
+	uint32_t count = 0;
+	uint32_t i;
+	VkResult result;
+	VkExtent2D create_extent;
+
+	if (pair == NULL || overlay_extent.width == 0 || overlay_extent.height == 0) {
+		return 0;
+	}
+	tipsy_vk_output_place_child_locked(overlay_origin.x, overlay_origin.y,
+		overlay_extent.width, overlay_extent.height);
+	if (pair->output != VK_NULL_HANDLE &&
+		pair->extent.width == overlay_extent.width &&
+		pair->extent.height == overlay_extent.height) {
+		return 1;
+	}
+	if (tipsy_vk_output_wait_pair_fences_locked(pair) != VK_SUCCESS) {
+		return 0;
+	}
+	if (tipsy_output.vk.get_surface_capabilities == NULL ||
+		tipsy_output.vk.create_swapchain == NULL ||
+		tipsy_output.vk.get_swapchain_images == NULL ||
+		tipsy_output.vk.create_image_view == NULL ||
+		tipsy_output.vk.create_framebuffer == NULL ||
+		tipsy_output.output_surface == VK_NULL_HANDLE) {
+		return 0;
+	}
+	memset(&caps, 0, sizeof(caps));
+	if (tipsy_output.vk.get_surface_capabilities(tipsy_output.physical,
+		tipsy_output.output_surface, &caps) != VK_SUCCESS) {
+		return 0;
+	}
+	if ((caps.supportedUsageFlags & (VK_IMAGE_USAGE_TRANSFER_DST_BIT |
+		VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT)) != (VK_IMAGE_USAGE_TRANSFER_DST_BIT |
+		VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT)) {
+		return 0;
+	}
+	create_extent = overlay_extent;
+	if (caps.currentExtent.width != UINT32_MAX) {
+		if (caps.currentExtent.width != overlay_extent.width ||
+			caps.currentExtent.height != overlay_extent.height) {
+			return 0;
+		}
+		create_extent = caps.currentExtent;
+	}
+	if (create_extent.width < caps.minImageExtent.width ||
+		create_extent.width > caps.maxImageExtent.width ||
+		create_extent.height < caps.minImageExtent.height ||
+		create_extent.height > caps.maxImageExtent.height) {
+		return 0;
+	}
+	info = tipsy_output.pending_output_info;
+	if (info.sType != VK_STRUCTURE_TYPE_SWAPCHAIN_CREATE_INFO_KHR ||
+		info.surface == VK_NULL_HANDLE) {
+		return 0;
+	}
+	info.imageExtent = create_extent;
+	info.oldSwapchain = pair->output;
+	if (caps.minImageCount != 0 && info.minImageCount < caps.minImageCount) {
+		info.minImageCount = caps.minImageCount;
+	}
+	if (caps.maxImageCount != 0 && info.minImageCount > caps.maxImageCount) {
+		info.minImageCount = caps.maxImageCount;
+	}
+	result = tipsy_output.vk.create_swapchain(tipsy_output.device, &info, NULL,
+		&created);
+	if (result != VK_SUCCESS || created == VK_NULL_HANDLE) {
+		return 0;
+	}
+	if (tipsy_output.vk.get_swapchain_images(tipsy_output.device, created,
+		&count, NULL) != VK_SUCCESS || count == 0 ||
+		count > TIPSY_VK_OUTPUT_MAX_IMAGES) {
+		if (tipsy_output.vk.destroy_swapchain != NULL) {
+			tipsy_output.vk.destroy_swapchain(tipsy_output.device, created, NULL);
+		}
+		return 0;
+	}
+	memset(images, 0, sizeof(images));
+	if (tipsy_output.vk.get_swapchain_images(tipsy_output.device, created,
+		&count, images) != VK_SUCCESS) {
+		if (tipsy_output.vk.destroy_swapchain != NULL) {
+			tipsy_output.vk.destroy_swapchain(tipsy_output.device, created, NULL);
+		}
+		return 0;
+	}
+	if (pair->output_count == 0 || count != pair->output_count) {
+		if (tipsy_output.vk.destroy_swapchain != NULL) {
+			tipsy_output.vk.destroy_swapchain(tipsy_output.device, created, NULL);
+		}
+		return 0;
+	}
+	memset(new_targets, 0, sizeof(new_targets));
+	for (i = 0; i < count; i++) {
+		new_targets[i].image = images[i];
+		new_targets[i].complete = pair->target[i].complete;
+	}
+	if (!tipsy_vk_output_create_output_views_into_locked(new_targets, count,
+		create_extent, pair->format, pair->render_pass)) {
+		tipsy_vk_output_destroy_output_views_into_locked(new_targets, count);
+		if (tipsy_output.vk.destroy_swapchain != NULL) {
+			tipsy_output.vk.destroy_swapchain(tipsy_output.device, created, NULL);
+		}
+		return 0;
+	}
+	tipsy_vk_output_unmap_child_locked();
+	tipsy_vk_output_place_child_locked(overlay_origin.x, overlay_origin.y,
+		overlay_extent.width, overlay_extent.height);
+	tipsy_vk_output_destroy_output_views_into_locked(pair->target, pair->output_count);
+	old_output = pair->output;
+	pair->output = created;
+	pair->extent = create_extent;
+	for (i = 0; i < count; i++) {
+		pair->target[i] = new_targets[i];
+		pair->frames[i].in_flight = 0;
+	}
+	pair->next_frame = 0;
+	if (old_output != VK_NULL_HANDLE &&
+		tipsy_output.vk.destroy_swapchain != NULL) {
+		tipsy_output.vk.destroy_swapchain(tipsy_output.device, old_output, NULL);
+	}
+	return 1;
+}
+
 static VkResult tipsy_vk_output_create_foreground_locked(TipsyVkOutputPair *pair,
 	const struct tipsy_focused_text_frame *frame)
 {
@@ -1669,6 +1949,7 @@ static VkResult tipsy_vk_output_create_foreground_locked(TipsyVkOutputPair *pair
 	result = tipsy_output.vk.create_image(tipsy_output.device, &image_info,
 		NULL, &pair->foreground);
 	if (result != VK_SUCCESS) return result;
+	tipsy_vk_output_note_overlay_retained_locked();
 	tipsy_output.vk.get_image_memory_requirements(tipsy_output.device,
 		pair->foreground, &image_requirements);
 	memory_type = tipsy_vk_output_memory_type_locked(image_requirements.memoryTypeBits,
@@ -1717,8 +1998,7 @@ static int tipsy_vk_output_prepare_foreground_locked(TipsyVkOutputPair *pair,
 	if (frame == NULL || frame->rgba == NULL || frame->lease == 0 ||
 		frame->generation == 0 || frame->x < 0 || frame->y < 0 ||
 		frame->width < 1 || frame->height < 1 || frame->stride != frame->width * 4 ||
-		(uint32_t)frame->x + (uint32_t)frame->width > pair->extent.width ||
-		(uint32_t)frame->y + (uint32_t)frame->height > pair->extent.height ||
+		pair->guest_extent.width == 0 || pair->guest_extent.height == 0 ||
 		(size_t)frame->height > SIZE_MAX / (size_t)frame->stride) {
 		return 0;
 	}
@@ -1767,7 +2047,8 @@ static void tipsy_vk_output_barrier(VkCommandBuffer command, VkImage image,
 
 static VkResult tipsy_vk_output_record_locked(TipsyVkOutputPair *pair,
 	uint32_t source_index, uint32_t output_index, uint32_t frame_index,
-	const struct tipsy_focused_text_frame *foreground, int upload)
+	const struct tipsy_focused_text_frame *foreground, int upload,
+	VkOffset2D copy_src, VkExtent2D copy_extent)
 {
 	VkCommandBuffer command = pair->frames[frame_index].command;
 	VkCommandBufferBeginInfo begin;
@@ -1778,6 +2059,14 @@ static VkResult tipsy_vk_output_record_locked(TipsyVkOutputPair *pair,
 	VkRect2D scissor;
 	float rectangle[4];
 	VkResult result;
+	if (copy_extent.width == 0 || copy_extent.height == 0 ||
+		copy_extent.width != pair->extent.width ||
+		copy_extent.height != pair->extent.height ||
+		pair->guest_extent.width == 0 || pair->guest_extent.height == 0 ||
+		(uint32_t)copy_src.x + copy_extent.width > pair->guest_extent.width ||
+		(uint32_t)copy_src.y + copy_extent.height > pair->guest_extent.height) {
+		return VK_ERROR_INITIALIZATION_FAILED;
+	}
 	memset(&begin, 0, sizeof(begin));
 	begin.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
 	begin.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
@@ -1823,8 +2112,12 @@ static VkResult tipsy_vk_output_record_locked(TipsyVkOutputPair *pair,
 	copy.srcSubresource.layerCount = 1;
 	copy.dstSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
 	copy.dstSubresource.layerCount = 1;
-	copy.extent.width = pair->extent.width;
-	copy.extent.height = pair->extent.height;
+	copy.srcOffset.x = copy_src.x;
+	copy.srcOffset.y = copy_src.y;
+	copy.dstOffset.x = 0;
+	copy.dstOffset.y = 0;
+	copy.extent.width = copy_extent.width;
+	copy.extent.height = copy_extent.height;
 	copy.extent.depth = 1;
 	tipsy_output.vk.cmd_copy_image(command, pair->source[source_index].image,
 		VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, pair->target[output_index].image,
@@ -1857,13 +2150,13 @@ static VkResult tipsy_vk_output_record_locked(TipsyVkOutputPair *pair,
 	scissor.extent = pair->extent;
 	tipsy_output.vk.cmd_set_viewport(command, 0, 1, &viewport);
 	tipsy_output.vk.cmd_set_scissor(command, 0, 1, &scissor);
-	rectangle[0] = (2.0f * (float)foreground->x /
+	rectangle[0] = (2.0f * (float)(foreground->x - copy_src.x) /
 		(float)pair->extent.width) - 1.0f;
-	rectangle[1] = (2.0f * (float)foreground->y /
+	rectangle[1] = (2.0f * (float)(foreground->y - copy_src.y) /
 		(float)pair->extent.height) - 1.0f;
-	rectangle[2] = (2.0f * (float)(foreground->x + foreground->width) /
+	rectangle[2] = (2.0f * (float)(foreground->x - copy_src.x + foreground->width) /
 		(float)pair->extent.width) - 1.0f;
-	rectangle[3] = (2.0f * (float)(foreground->y + foreground->height) /
+	rectangle[3] = (2.0f * (float)(foreground->y - copy_src.y + foreground->height) /
 		(float)pair->extent.height) - 1.0f;
 	tipsy_output.vk.cmd_push_constants(command, pair->pipeline_layout,
 		VK_SHADER_STAGE_VERTEX_BIT, 0, sizeof(rectangle), rectangle);
@@ -1945,15 +2238,36 @@ int tipsy_vk_output_present(void *queue_ptr, const void *present_info_ptr,
 	int upload = 0;
 	int safe_to_map = 0;
 	int frame_ready = 0;
+	VkOffset2D clip_offset;
+	VkExtent2D clip_extent;
 
 	if (guest_result == NULL || host_present == NULL || queue_ptr == NULL) return 0;
 	if (atomic_load_explicit(&output_route_ready, memory_order_acquire) == 0) {
+		return 0;
+	}
+	if (!tipsy_vk_output_overlay_live()) {
+		if (atomic_load_explicit(&output_child_mapped, memory_order_acquire) == 0 &&
+			atomic_load_explicit(&output_foreground_retained, memory_order_acquire) == 0) {
+			return 0;
+		}
+		if (test_transaction_fixture != NULL) {
+			test_transaction_fixture->present_mutex_locks++;
+		}
+		pthread_mutex_lock(&tipsy_output.mutex);
+		tipsy_vk_output_unmap_child_locked();
+		if (tipsy_output.active.active) {
+			tipsy_vk_output_clear_foreground_locked(&tipsy_output.active);
+		}
+		pthread_mutex_unlock(&tipsy_output.mutex);
 		return 0;
 	}
 	memset(&foreground, 0, sizeof(foreground));
 	if (tipsy_focused_text_frame_release != NULL ||
 		test_transaction_fixture != NULL) {
 		acquired = tipsy_vk_output_foreground_acquire(&foreground);
+	}
+	if (test_transaction_fixture != NULL) {
+		test_transaction_fixture->present_mutex_locks++;
 	}
 	pthread_mutex_lock(&tipsy_output.mutex);
 	pair = &tipsy_output.active;
@@ -2009,7 +2323,16 @@ int tipsy_vk_output_present(void *queue_ptr, const void *present_info_ptr,
 		}
 	}
 	if (!frame_ready) goto direct;
+	memset(&clip_offset, 0, sizeof(clip_offset));
+	memset(&clip_extent, 0, sizeof(clip_extent));
+	if (!tipsy_vk_output_clip_overlay(&foreground, pair->guest_extent,
+		&clip_offset, &clip_extent)) {
+		goto direct;
+	}
 	if (!tipsy_vk_output_prepare_foreground_locked(pair, &foreground, &upload)) {
+		goto direct;
+	}
+	if (!tipsy_vk_output_ensure_output_extent_locked(pair, clip_offset, clip_extent)) {
 		goto direct;
 	}
 	output_result = tipsy_output.vk.acquire_next_image(tipsy_output.device,
@@ -2027,7 +2350,7 @@ int tipsy_vk_output_present(void *queue_ptr, const void *present_info_ptr,
 	}
 	safe_to_map = pair->target[output_index].presented != 0;
 	if (tipsy_vk_output_record_locked(pair, source_index, output_index,
-		frame_index, &foreground, upload) != VK_SUCCESS) {
+		frame_index, &foreground, upload, clip_offset, clip_extent) != VK_SUCCESS) {
 		goto consume_output_acquire_and_direct;
 	}
 	for (i = 0; i < info->waitSemaphoreCount; i++) {
@@ -2180,6 +2503,7 @@ void tipsy_vk_output_device_destroying(void *device_ptr)
 		} else {
 			memset(&tipsy_output.active, 0, sizeof(tipsy_output.active));
 			memset(tipsy_output.retired, 0, sizeof(tipsy_output.retired));
+			tipsy_vk_output_note_overlay_retained_locked();
 		}
 		tipsy_output.retired_count = 0;
 		tipsy_output.device = VK_NULL_HANDLE;
@@ -2386,7 +2710,8 @@ static VKAPI_ATTR VkResult VKAPI_CALL tipsy_vk_output_fixture_present(
 	(void)queue;
 	output = info != NULL && info->swapchainCount == 1 &&
 		info->pSwapchains != NULL &&
-		info->pSwapchains[0] == test_transaction_output;
+		info->pSwapchains[0] != VK_NULL_HANDLE &&
+		info->pSwapchains[0] != test_transaction_guest;
 	if (output) {
 		tipsy_vk_output_fixture_operation(test_transaction_fixture, 4);
 		test_transaction_fixture->output_present_calls++;
@@ -2454,8 +2779,14 @@ static VKAPI_ATTR void VKAPI_CALL tipsy_vk_output_fixture_copy_image(
 	(void)source_layout;
 	(void)destination;
 	(void)destination_layout;
-	(void)count;
-	(void)regions;
+	if (count == 1 && regions != NULL) {
+		test_transaction_fixture->copy_src_x = (uint32_t)regions[0].srcOffset.x;
+		test_transaction_fixture->copy_src_y = (uint32_t)regions[0].srcOffset.y;
+		test_transaction_fixture->copy_dst_x = (uint32_t)regions[0].dstOffset.x;
+		test_transaction_fixture->copy_dst_y = (uint32_t)regions[0].dstOffset.y;
+		test_transaction_fixture->copy_width = regions[0].extent.width;
+		test_transaction_fixture->copy_height = regions[0].extent.height;
+	}
 	test_transaction_fixture->full_copy_count++;
 }
 
@@ -2518,8 +2849,10 @@ static VKAPI_ATTR void VKAPI_CALL tipsy_vk_output_fixture_set_viewport(
 {
 	(void)command;
 	(void)first;
-	(void)count;
-	(void)viewports;
+	if (count == 1 && viewports != NULL) {
+		test_transaction_fixture->viewport_width = (uint32_t)viewports[0].width;
+		test_transaction_fixture->viewport_height = (uint32_t)viewports[0].height;
+	}
 }
 
 static VKAPI_ATTR void VKAPI_CALL tipsy_vk_output_fixture_set_scissor(
@@ -2541,8 +2874,9 @@ static VKAPI_ATTR void VKAPI_CALL tipsy_vk_output_fixture_push_constants(
 	(void)layout;
 	(void)stages;
 	(void)offset;
-	(void)size;
-	(void)values;
+	if (size >= sizeof(float) * 4u && values != NULL) {
+		memcpy(test_transaction_fixture->push_rect, values, sizeof(float) * 4u);
+	}
 }
 
 static VKAPI_ATTR void VKAPI_CALL tipsy_vk_output_fixture_draw(
@@ -2593,6 +2927,8 @@ void tipsy_test_vk_output_transaction_fixture(uint32_t scenario,
 	tipsy_output.active.ready = 1;
 	tipsy_output.active.guest = test_transaction_guest;
 	tipsy_output.active.output = test_transaction_output;
+	tipsy_output.active.guest_extent.width = 8;
+	tipsy_output.active.guest_extent.height = 8;
 	tipsy_output.active.extent.width = 1;
 	tipsy_output.active.extent.height = 1;
 	tipsy_output.active.source_count = 1;
@@ -2642,6 +2978,23 @@ void tipsy_test_vk_output_transaction_fixture(uint32_t scenario,
 	tipsy_output.vk.cmd_draw = tipsy_vk_output_fixture_draw;
 	test_transaction_scenario = scenario;
 	test_transaction_fixture = out;
+	test_transaction_overlay_live = 1;
+	test_transaction_frame_x = 2;
+	test_transaction_frame_y = 3;
+	test_transaction_frame_width = 1;
+	test_transaction_frame_height = 1;
+	if (scenario == TIPSY_VK_OUTPUT_TX_UNPUBLISHED ||
+		scenario == TIPSY_VK_OUTPUT_TX_UNPUBLISHED_TEARDOWN) {
+		test_transaction_overlay_live = 0;
+		tipsy_output.active.foreground = VK_NULL_HANDLE;
+		tipsy_output.active.staging_map = NULL;
+		tipsy_output.active.foreground_width = 0;
+		tipsy_output.active.foreground_height = 0;
+		tipsy_output.active.foreground_initialized = 0;
+		tipsy_output.child_mapped =
+			scenario == TIPSY_VK_OUTPUT_TX_UNPUBLISHED_TEARDOWN ? 1u : 0u;
+	}
+	tipsy_vk_output_note_overlay_retained_locked();
 	atomic_store_explicit(&output_route_ready, 1, memory_order_release);
 	pthread_mutex_unlock(&tipsy_output.mutex);
 
@@ -2657,6 +3010,13 @@ void tipsy_test_vk_output_transaction_fixture(uint32_t scenario,
 		(void *)tipsy_vk_output_fixture_present, &result);
 	if (!handled) result = tipsy_vk_output_fixture_present(test_transaction_queue,
 		&present);
+	if (scenario == TIPSY_VK_OUTPUT_TX_UNPUBLISHED_TEARDOWN) {
+		uint32_t first_locks = out->present_mutex_locks;
+		(void)tipsy_vk_output_present(test_transaction_queue, &present,
+			(void *)tipsy_vk_output_fixture_present, &result);
+		out->unpublished_followup_mutex_locks =
+			out->present_mutex_locks - first_locks;
+	}
 
 	pthread_mutex_lock(&tipsy_output.mutex);
 	out->quarantined = !tipsy_output.active.ready;
@@ -2664,8 +3024,320 @@ void tipsy_test_vk_output_transaction_fixture(uint32_t scenario,
 	out->returned_result = result;
 	test_transaction_fixture = NULL;
 	test_transaction_scenario = 0;
+	test_transaction_overlay_live = 1;
+	test_transaction_frame_x = 2;
+	test_transaction_frame_y = 3;
+	test_transaction_frame_width = 1;
+	test_transaction_frame_height = 1;
 	memcpy((unsigned char *)&tipsy_output + state_offset, saved_state,
 		sizeof(saved_state));
+	tipsy_vk_output_note_overlay_retained_locked();
+	atomic_store_explicit(&output_route_ready, saved_route_ready,
+		memory_order_release);
+	pthread_mutex_unlock(&tipsy_output.mutex);
+}
+
+static VKAPI_ATTR VkResult VKAPI_CALL tipsy_vk_output_fixture_get_caps(
+	VkPhysicalDevice physical, VkSurfaceKHR surface,
+	VkSurfaceCapabilitiesKHR *caps)
+{
+	(void)physical;
+	(void)surface;
+	if (caps == NULL) return VK_ERROR_INITIALIZATION_FAILED;
+	memset(caps, 0, sizeof(*caps));
+	caps->minImageCount = 1;
+	caps->maxImageCount = 8;
+	caps->currentExtent.width = UINT32_MAX;
+	caps->currentExtent.height = UINT32_MAX;
+	caps->minImageExtent.width = 1;
+	caps->minImageExtent.height = 1;
+	caps->maxImageExtent.width = 4096;
+	caps->maxImageExtent.height = 4096;
+	caps->maxImageArrayLayers = 1;
+	caps->supportedTransforms = VK_SURFACE_TRANSFORM_IDENTITY_BIT_KHR;
+	caps->currentTransform = VK_SURFACE_TRANSFORM_IDENTITY_BIT_KHR;
+	caps->supportedCompositeAlpha = VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR;
+	caps->supportedUsageFlags = VK_IMAGE_USAGE_TRANSFER_DST_BIT |
+		VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT;
+	return VK_SUCCESS;
+}
+
+static VKAPI_ATTR VkResult VKAPI_CALL tipsy_vk_output_fixture_create_swapchain(
+	VkDevice device, const VkSwapchainCreateInfoKHR *info,
+	const VkAllocationCallbacks *allocator, VkSwapchainKHR *swapchain)
+{
+	(void)device;
+	(void)allocator;
+	if (test_transaction_fixture != NULL) {
+		test_transaction_fixture->output_create_calls++;
+		if (info != NULL) {
+			test_transaction_fixture->output_create_width = info->imageExtent.width;
+			test_transaction_fixture->output_create_height = info->imageExtent.height;
+		}
+	}
+	if (swapchain == NULL) return VK_ERROR_INITIALIZATION_FAILED;
+	*swapchain = (VkSwapchainKHR)(uintptr_t)0x71;
+	return VK_SUCCESS;
+}
+
+static VKAPI_ATTR VkResult VKAPI_CALL tipsy_vk_output_fixture_get_images(
+	VkDevice device, VkSwapchainKHR swapchain, uint32_t *count, VkImage *images)
+{
+	(void)device;
+	(void)swapchain;
+	if (count == NULL) return VK_ERROR_INITIALIZATION_FAILED;
+	if (images == NULL) {
+		*count = 1;
+		return VK_SUCCESS;
+	}
+	if (*count < 1) return VK_INCOMPLETE;
+	images[0] = (VkImage)(uintptr_t)0x72;
+	*count = 1;
+	return VK_SUCCESS;
+}
+
+static VKAPI_ATTR VkResult VKAPI_CALL tipsy_vk_output_fixture_create_view(
+	VkDevice device, const VkImageViewCreateInfo *info,
+	const VkAllocationCallbacks *allocator, VkImageView *view)
+{
+	(void)device;
+	(void)info;
+	(void)allocator;
+	if (view == NULL) return VK_ERROR_INITIALIZATION_FAILED;
+	*view = (VkImageView)(uintptr_t)0x73;
+	return VK_SUCCESS;
+}
+
+static VKAPI_ATTR VkResult VKAPI_CALL tipsy_vk_output_fixture_create_fb(
+	VkDevice device, const VkFramebufferCreateInfo *info,
+	const VkAllocationCallbacks *allocator, VkFramebuffer *framebuffer)
+{
+	(void)device;
+	(void)info;
+	(void)allocator;
+	if (framebuffer == NULL) return VK_ERROR_INITIALIZATION_FAILED;
+	*framebuffer = (VkFramebuffer)(uintptr_t)0x74;
+	return VK_SUCCESS;
+}
+
+static VKAPI_ATTR void VKAPI_CALL tipsy_vk_output_fixture_destroy_view(
+	VkDevice device, VkImageView view, const VkAllocationCallbacks *allocator)
+{
+	(void)device;
+	(void)view;
+	(void)allocator;
+}
+
+static VKAPI_ATTR void VKAPI_CALL tipsy_vk_output_fixture_destroy_fb(
+	VkDevice device, VkFramebuffer framebuffer,
+	const VkAllocationCallbacks *allocator)
+{
+	(void)device;
+	(void)framebuffer;
+	(void)allocator;
+}
+
+static VKAPI_ATTR void VKAPI_CALL tipsy_vk_output_fixture_destroy_swapchain(
+	VkDevice device, VkSwapchainKHR swapchain,
+	const VkAllocationCallbacks *allocator)
+{
+	(void)device;
+	(void)swapchain;
+	(void)allocator;
+}
+
+static void tipsy_vk_output_fixture_rearm_source_locked(VkSemaphore original_wait)
+{
+	tipsy_output.active.source[0].completion_reusable = 1;
+	tipsy_output.active.source[0].acquired = 1;
+	tipsy_output.active.source[0].acquire_waited = 1;
+	tipsy_output.active.source[0].render_signal_count = 1;
+	tipsy_output.active.source[0].render_signals[0] = original_wait;
+}
+
+static void tipsy_vk_output_fixture_drive_present(VkPresentInfoKHR *present,
+	int32_t *result)
+{
+	int handled = tipsy_vk_output_present(test_transaction_queue, present,
+		(void *)tipsy_vk_output_fixture_present, result);
+	if (!handled) {
+		*result = tipsy_vk_output_fixture_present(test_transaction_queue, present);
+	}
+}
+
+void tipsy_test_vk_output_overlay_geometry_fixture(
+	TipsyVkOutputGeometryFixture *out)
+{
+	const size_t state_offset = offsetof(TipsyVkOutputState, gipa);
+	unsigned char saved_state[sizeof(TipsyVkOutputState) -
+		offsetof(TipsyVkOutputState, gipa)];
+	uint8_t staging[4] = {0, 0, 0, 0};
+	VkSemaphore original_wait = test_transaction_original_wait;
+	VkSwapchainKHR guest_swapchain = test_transaction_guest;
+	uint32_t image_index = 0;
+	VkPresentInfoKHR present;
+	VkResult individual = VK_SUCCESS;
+	int32_t result = VK_ERROR_INITIALIZATION_FAILED;
+	uint32_t saved_route_ready;
+	if (out == NULL) return;
+	memset(out, 0, sizeof(*out));
+	pthread_mutex_lock(&tipsy_output.mutex);
+	saved_route_ready = atomic_load_explicit(&output_route_ready,
+		memory_order_acquire);
+	memcpy(saved_state, (unsigned char *)&tipsy_output + state_offset,
+		sizeof(saved_state));
+	memset((unsigned char *)&tipsy_output + state_offset, 0,
+		sizeof(saved_state));
+	tipsy_output.device = test_transaction_device;
+	tipsy_output.device_ready = 1;
+	tipsy_output.physical = (VkPhysicalDevice)(uintptr_t)0x40;
+	tipsy_output.output_surface = (VkSurfaceKHR)(uintptr_t)0x3f;
+	tipsy_output.eligible_family = 3;
+	tipsy_output.eligible_queue_count = 1;
+	tipsy_output.queues[0].device = test_transaction_device;
+	tipsy_output.queues[0].queue = test_transaction_queue;
+	tipsy_output.queues[0].family = 3;
+	tipsy_output.active.active = 1;
+	tipsy_output.active.ready = 1;
+	tipsy_output.active.guest = test_transaction_guest;
+	tipsy_output.active.output = test_transaction_output;
+	tipsy_output.active.guest_extent.width = 8;
+	tipsy_output.active.guest_extent.height = 8;
+	tipsy_output.active.extent.width = 2;
+	tipsy_output.active.extent.height = 2;
+	tipsy_output.active.format = VK_FORMAT_B8G8R8A8_UNORM;
+	tipsy_output.active.render_pass = (VkRenderPass)(uintptr_t)0x53;
+	tipsy_output.active.source_count = 1;
+	tipsy_output.active.output_count = 1;
+	tipsy_output.active.source[0].image = (VkImage)(uintptr_t)0x47;
+	tipsy_output.active.source[0].completion = test_transaction_g;
+	tipsy_output.active.source[0].render_signals[0] = original_wait;
+	tipsy_output.active.source[0].render_signal_count = 1;
+	tipsy_output.active.source[0].acquired = 1;
+	tipsy_output.active.source[0].acquire_waited = 1;
+	tipsy_output.active.source[0].completion_reusable = 1;
+	tipsy_output.active.target[0].image = (VkImage)(uintptr_t)0x48;
+	tipsy_output.active.target[0].view = (VkImageView)(uintptr_t)0x54;
+	tipsy_output.active.target[0].complete = (VkSemaphore)(uintptr_t)0x49;
+	tipsy_output.active.target[0].framebuffer = (VkFramebuffer)(uintptr_t)0x4a;
+	tipsy_output.active.frames[0].command = (VkCommandBuffer)(uintptr_t)0x4b;
+	tipsy_output.active.frames[0].acquire = (VkSemaphore)(uintptr_t)0x4c;
+	tipsy_output.active.frames[0].fence = (VkFence)(uintptr_t)0x4d;
+	tipsy_output.active.pipeline = (VkPipeline)(uintptr_t)0x4e;
+	tipsy_output.active.pipeline_layout = (VkPipelineLayout)(uintptr_t)0x4f;
+	tipsy_output.active.descriptor = (VkDescriptorSet)(uintptr_t)0x50;
+	tipsy_output.active.staging_map = staging;
+	tipsy_output.active.foreground = (VkImage)(uintptr_t)0x51;
+	tipsy_output.active.foreground_width = 1;
+	tipsy_output.active.foreground_height = 1;
+	tipsy_output.active.foreground_initialized = 1;
+	memset(&tipsy_output.pending_output_info, 0,
+		sizeof(tipsy_output.pending_output_info));
+	tipsy_output.pending_output_info.sType = VK_STRUCTURE_TYPE_SWAPCHAIN_CREATE_INFO_KHR;
+	tipsy_output.pending_output_info.surface = tipsy_output.output_surface;
+	tipsy_output.pending_output_info.minImageCount = 1;
+	tipsy_output.pending_output_info.imageFormat = VK_FORMAT_B8G8R8A8_UNORM;
+	tipsy_output.pending_output_info.imageColorSpace = VK_COLOR_SPACE_SRGB_NONLINEAR_KHR;
+	tipsy_output.pending_output_info.imageArrayLayers = 1;
+	tipsy_output.pending_output_info.imageUsage = VK_IMAGE_USAGE_TRANSFER_DST_BIT |
+		VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT;
+	tipsy_output.pending_output_info.imageSharingMode = VK_SHARING_MODE_EXCLUSIVE;
+	tipsy_output.pending_output_info.preTransform = VK_SURFACE_TRANSFORM_IDENTITY_BIT_KHR;
+	tipsy_output.pending_output_info.compositeAlpha = VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR;
+	tipsy_output.pending_output_info.presentMode = VK_PRESENT_MODE_FIFO_KHR;
+	tipsy_output.pending_output_info.clipped = VK_TRUE;
+	tipsy_output.vk.acquire_next_image = tipsy_vk_output_fixture_acquire;
+	tipsy_output.vk.wait_fences = tipsy_vk_output_fixture_wait_fences;
+	tipsy_output.vk.reset_fences = tipsy_vk_output_fixture_reset_fences;
+	tipsy_output.vk.reset_command_buffer = tipsy_vk_output_fixture_reset_command;
+	tipsy_output.vk.begin_command_buffer = tipsy_vk_output_fixture_begin_command;
+	tipsy_output.vk.end_command_buffer = tipsy_vk_output_fixture_end_command;
+	tipsy_output.vk.queue_submit = tipsy_vk_output_fixture_submit;
+	tipsy_output.vk.cmd_pipeline_barrier =
+		tipsy_vk_output_fixture_pipeline_barrier;
+	tipsy_output.vk.cmd_copy_image = tipsy_vk_output_fixture_copy_image;
+	tipsy_output.vk.cmd_copy_buffer_to_image = tipsy_vk_output_fixture_upload;
+	tipsy_output.vk.cmd_begin_render_pass =
+		tipsy_vk_output_fixture_begin_render_pass;
+	tipsy_output.vk.cmd_end_render_pass = tipsy_vk_output_fixture_end_render_pass;
+	tipsy_output.vk.cmd_bind_pipeline = tipsy_vk_output_fixture_bind_pipeline;
+	tipsy_output.vk.cmd_bind_descriptor_sets =
+		tipsy_vk_output_fixture_bind_descriptors;
+	tipsy_output.vk.cmd_set_viewport = tipsy_vk_output_fixture_set_viewport;
+	tipsy_output.vk.cmd_set_scissor = tipsy_vk_output_fixture_set_scissor;
+	tipsy_output.vk.cmd_push_constants =
+		tipsy_vk_output_fixture_push_constants;
+	tipsy_output.vk.cmd_draw = tipsy_vk_output_fixture_draw;
+	tipsy_output.vk.get_surface_capabilities = tipsy_vk_output_fixture_get_caps;
+	tipsy_output.vk.create_swapchain = tipsy_vk_output_fixture_create_swapchain;
+	tipsy_output.vk.get_swapchain_images = tipsy_vk_output_fixture_get_images;
+	tipsy_output.vk.create_image_view = tipsy_vk_output_fixture_create_view;
+	tipsy_output.vk.create_framebuffer = tipsy_vk_output_fixture_create_fb;
+	tipsy_output.vk.destroy_image_view = tipsy_vk_output_fixture_destroy_view;
+	tipsy_output.vk.destroy_framebuffer = tipsy_vk_output_fixture_destroy_fb;
+	tipsy_output.vk.destroy_swapchain = tipsy_vk_output_fixture_destroy_swapchain;
+	test_transaction_scenario = TIPSY_VK_OUTPUT_TX_SUCCESS;
+	test_transaction_overlay_live = 1;
+	test_transaction_frame_width = 1;
+	test_transaction_frame_height = 1;
+	tipsy_vk_output_note_overlay_retained_locked();
+	atomic_store_explicit(&output_route_ready, 1, memory_order_release);
+	pthread_mutex_unlock(&tipsy_output.mutex);
+
+	memset(&present, 0, sizeof(present));
+	present.sType = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR;
+	present.waitSemaphoreCount = 1;
+	present.pWaitSemaphores = &original_wait;
+	present.swapchainCount = 1;
+	present.pSwapchains = &guest_swapchain;
+	present.pImageIndices = &image_index;
+	present.pResults = &individual;
+
+	test_transaction_frame_x = 1;
+	test_transaction_frame_y = 2;
+	test_transaction_fixture = &out->first;
+	result = VK_ERROR_INITIALIZATION_FAILED;
+	tipsy_vk_output_fixture_drive_present(&present, &result);
+	pthread_mutex_lock(&tipsy_output.mutex);
+	out->first.quarantined = !tipsy_output.active.ready;
+	out->first.device_terminal = tipsy_output.device_lost;
+	out->first.returned_result = result;
+	tipsy_vk_output_fixture_rearm_source_locked(original_wait);
+	pthread_mutex_unlock(&tipsy_output.mutex);
+
+	test_transaction_frame_x = 4;
+	test_transaction_frame_y = 5;
+	test_transaction_fixture = &out->second;
+	result = VK_ERROR_INITIALIZATION_FAILED;
+	individual = VK_SUCCESS;
+	tipsy_vk_output_fixture_drive_present(&present, &result);
+	pthread_mutex_lock(&tipsy_output.mutex);
+	out->second.quarantined = !tipsy_output.active.ready;
+	out->second.device_terminal = tipsy_output.device_lost;
+	out->second.returned_result = result;
+	tipsy_vk_output_fixture_rearm_source_locked(original_wait);
+	pthread_mutex_unlock(&tipsy_output.mutex);
+
+	test_transaction_frame_x = 8;
+	test_transaction_frame_y = 0;
+	test_transaction_fixture = &out->empty;
+	result = VK_ERROR_INITIALIZATION_FAILED;
+	individual = VK_SUCCESS;
+	tipsy_vk_output_fixture_drive_present(&present, &result);
+	pthread_mutex_lock(&tipsy_output.mutex);
+	out->empty.quarantined = !tipsy_output.active.ready;
+	out->empty.device_terminal = tipsy_output.device_lost;
+	out->empty.returned_result = result;
+	test_transaction_fixture = NULL;
+	test_transaction_scenario = 0;
+	test_transaction_overlay_live = 1;
+	test_transaction_frame_x = 2;
+	test_transaction_frame_y = 3;
+	test_transaction_frame_width = 1;
+	test_transaction_frame_height = 1;
+	memcpy((unsigned char *)&tipsy_output + state_offset, saved_state,
+		sizeof(saved_state));
+	tipsy_vk_output_note_overlay_retained_locked();
 	atomic_store_explicit(&output_route_ready, saved_route_ready,
 		memory_order_release);
 	pthread_mutex_unlock(&tipsy_output.mutex);
