@@ -59,6 +59,17 @@ func (e *Env) NewString(s string) uintptr {
 	return uintptr(idToJobject(o.id))
 }
 
+// DeleteLocalRef drops a JNI local created by this Env. NULL env or NULL
+// jobject is a no-op. Immortal objects and global refs stay alive, matching
+// JNI. Inverted-JNI callers (Tipsy calling Roblox natives) must release
+// NewString locals the Java caller would drop when the native method returns.
+func (e *Env) DeleteLocalRef(obj uintptr) {
+	if e == nil || e.vm == nil || obj == 0 {
+		return
+	}
+	e.vm.deleteLocalRef(e.raw, jobjectToID(obj))
+}
+
 // GetStringUTFChars returns the Go UTF-8 text for a jstring created by this
 // VM. JNI exposes Modified UTF-8 at this boundary, so decode it before handing
 // it to Go callers.
