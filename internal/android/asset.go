@@ -327,9 +327,10 @@ func (c *assetCache) retire() {
 }
 
 // dropRetiredCachesLocked returns an archive that is safe to close. The caller
-// must hold c.mu. Native pins retain their Go slices independently, while this
-// source generation remains alive only until its in-flight reads finish; an
-// AAsset close cannot extend an APK reader's source lifetime.
+// must hold c.mu. Native pins retain heap slices or directory mappings
+// independently, while this source generation remains alive only until its
+// in-flight reads finish; an AAsset close cannot extend an APK reader's
+// source lifetime.
 func (c *assetCache) dropRetiredCachesLocked() *zip.ReadCloser {
 	if !c.retired || c.activeLoads != 0 {
 		return nil
@@ -337,6 +338,9 @@ func (c *assetCache) dropRetiredCachesLocked() *zip.ReadCloser {
 	clear(c.nameCache)
 	clear(c.pathOK)
 	clear(c.zipBlobCache)
+	for key := range c.blobs {
+		releaseMappedDirAssetFromCache(key)
+	}
 	clear(c.blobs)
 	clear(c.negativeNames)
 	c.inactiveBlobs = list.List{}
@@ -699,6 +703,9 @@ func (c *assetCache) removeBlobLocked(key uintptr, blob assetBlob) {
 		c.borrowedCacheBytes -= blob.bytes
 	}
 	delete(c.blobs, key)
+	// Native AAsset pins keep the mapping alive even after this generation
+	// drops aliases. LRU eviction of an inactive mmap blob Munmaps here.
+	releaseMappedDirAssetFromCache(key)
 }
 
 func (c *assetCache) makeBlobEvictableLocked(key uintptr) {
@@ -806,6 +813,9 @@ func (c *assetCache) publishPath(path string, data []byte, load *assetLoad) []by
 	defer c.mu.Unlock()
 	if existing, ok := c.pathOK[path]; ok {
 		c.protectLoadBlobLocked(load, existing)
+		if assetBlobKey(existing) != assetBlobKey(data) {
+			discardMappedDirAsset(data)
+		}
 		return existing
 	}
 	if !c.retired {
@@ -840,8 +850,10 @@ func (c *assetCache) readDirAsset(name string, load *assetLoad) ([]byte, bool, e
 			return data, true, nil
 		}
 
-		// Directory I/O is intentionally outside every cache mutex.
-		data, err := os.ReadFile(path)
+		// Directory I/O is intentionally outside every cache mutex. Map the
+		// file instead of os.ReadFile so the measured Go inuse_space retain
+		// is not a heap copy. ZIP inflate remains a separate heap path.
+		data, err := mapDirAssetFile(path)
 		if err != nil {
 			if !errors.Is(err, os.ErrNotExist) {
 				return nil, false, err
@@ -935,6 +947,7 @@ func (c *assetCache) recordBlobLocked(data []byte) uintptr {
 	c.blobs[key] = blob
 	c.cachedBytes += blob.bytes
 	c.makeBlobEvictableLocked(key)
+	adoptMappedDirAsset(key)
 	return key
 }
 
@@ -1042,10 +1055,15 @@ func acquireAssetBorrow(data []byte) (unsafe.Pointer, int64, func()) {
 	if !exists {
 		pin.bytes = int64(len(data))
 		if len(data) != 0 {
-			pin.pinner = new(runtime.Pinner)
-			pin.pinner.Pin(pointer)
-			assetPinTotals.pinnedBlobs++
-			assetPinTotals.pinnedBytes += pin.bytes
+			// mmap pages are not Go objects; runtime.Pinner.Pin panics on
+			// them. A live AAsset still holds mappedDirAsset.pins so eviction
+			// cannot Munmap to meet the byte budget.
+			if !retainMappedDirAssetPin(key) {
+				pin.pinner = new(runtime.Pinner)
+				pin.pinner.Pin(pointer)
+				assetPinTotals.pinnedBlobs++
+				assetPinTotals.pinnedBytes += pin.bytes
+			}
 		}
 	}
 	pin.activeHandles++
@@ -1104,6 +1122,7 @@ func releaseAssetBorrowedPin(key uintptr) {
 	if pin.tracksCache && pin.cache != nil {
 		pin.cache.endNativeBorrow(pin.cacheKey)
 	}
+	releaseMappedDirAssetPin(key)
 }
 
 func (c *assetCache) beginNativeBorrow(key uintptr) bool {

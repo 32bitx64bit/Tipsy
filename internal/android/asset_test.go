@@ -260,6 +260,9 @@ func TestOpenAssetBytesDirPathCacheAcrossAliases(t *testing.T) {
 	if unsafe.SliceData(b) != unsafe.SliceData(again) {
 		t.Fatal("content/ alias should share the same blob as the short name")
 	}
+	if !dirAssetIsMappedForTest(b) || !dirAssetIsMappedForTest(again) {
+		t.Fatal("directory asset must remain a file mapping across alias opens")
+	}
 	snapshot := assetCacheSnapshotForTest()
 	assertAssetCacheAccounting(t, snapshot)
 	if snapshot.NameEntries != 2 || snapshot.PositiveEntries != 2 || snapshot.PathEntries != 1 || snapshot.ZipEntries != 0 || snapshot.BlobCount != 1 || snapshot.CachedBytes != int64(len(b)) || snapshot.BorrowedCacheBytes != 0 || snapshot.EvictableCacheBytes != int64(len(b)) {
@@ -283,6 +286,9 @@ func TestOpenAssetBytesAPKIndexAndContentPrefix(t *testing.T) {
 	}
 	if string(b) != "from-zip" {
 		t.Fatalf("apk hello=%q", b)
+	}
+	if dirAssetIsMappedForTest(b) {
+		t.Fatal("ZIP inflate must stay a heap blob, not a directory mmap")
 	}
 	first := assetsForOpen()
 	if snapshot := first.snapshot(); !snapshot.ArchiveOpen {

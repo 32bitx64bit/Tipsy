@@ -201,6 +201,9 @@ func TestAssetStartupNativeCloseUnderBudgetPressure(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	if !dirAssetIsMappedForTest(loaded) {
+		t.Fatal("directory asset must be file-mapped, not a ReadFile heap copy")
+	}
 	cache := assetsForOpen()
 
 	assets := make([]unsafe.Pointer, 0, 16)
@@ -229,6 +232,9 @@ func TestAssetStartupNativeCloseUnderBudgetPressure(t *testing.T) {
 	assertAssetStartupCacheInvariants(t, cache)
 	if snapshot := cache.snapshot(); snapshot.CachedBytes != 0 || snapshot.BlobCount != 0 || snapshot.ActiveHandles != 0 || snapshot.PinnedBytes != 0 {
 		t.Fatalf("last real C close did not release/evict under pressure: %+v", snapshot)
+	}
+	if dirAssetIsMappedForTest(loaded) {
+		t.Fatal("budget eviction left the directory mapping registered")
 	}
 }
 
