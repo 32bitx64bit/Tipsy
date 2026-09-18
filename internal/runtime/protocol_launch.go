@@ -67,11 +67,11 @@ func callProtocolLaunch(mod *loader.Module, env *jni.Env, activity uintptr, clas
 }
 
 func startWebsiteGame(mod *loader.Module, env *jni.Env, gl, activity, platform, device, surface uintptr, req rbxuri.Request) {
-	if req.PlaceID == 0 || env == nil {
+	if env == nil || (req.PlaceID == 0 && req.UserID == 0) {
 		return
 	}
 	params := makeStartGameParams(env, activity, platform, device, surface, req)
-	logging.Logger(logging.CatRuntime).Info("starting website experience", "request", req.Summary())
+	logging.Logger(logging.CatRuntime).Info("starting website experience", "request", req.Summary(), "joinType", req.JoinRequestType())
 	callRobloxJNI(mod, env.Raw(), gl, startGameSym, params)
 }
 
@@ -84,7 +84,7 @@ func makeStartGameParams(env *jni.Env, activity, platform, device, surface uintp
 	for k, v := range map[string]any{
 		"surface": surface, "platformParams": platform, "deviceParams": device,
 		"placeId": req.PlaceID, "userId": req.UserID, "conversationId": int64(0),
-		"referredByPlayerId": req.ReferredByPlayerID, "isUnder13": false, "joinRequestType": int32(0),
+		"referredByPlayerId": req.ReferredByPlayerID, "isUnder13": false, "joinRequestType": req.JoinRequestType(),
 		"username": "", "accessCode": req.AccessCode, "callId": "", "eventId": "",
 		"gameId": req.GameInstanceID, "gameIdToExclude": "", "gameJoinContext": "",
 		"isoContext": "", "joinAttemptId": "", "joinAttemptOrigin": origin,

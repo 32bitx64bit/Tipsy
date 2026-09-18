@@ -91,6 +91,29 @@ func TestSpecificServerJoinKeepsJobInStartGameRequest(t *testing.T) {
 	if got := req.WebLoginURI(); !strings.Contains(got, "gameInstanceId="+fakeJob) || !strings.Contains(got, "placeId=1818") || strings.Contains(got, "gameinfo:") {
 		t.Fatalf("redeemed uri=%q", got)
 	}
+	if req.JoinRequestType() != rbxuri.JoinRequestGameInstance {
+		t.Fatalf("joinType=%d, want specific instance", req.JoinRequestType())
+	}
+}
+
+func TestFollowUserJoinKeepsUserInStartGameRequest(t *testing.T) {
+	req, err := rbxuri.Parse("roblox-player:1+launchmode:play+gameinfo:SYNTHETIC-TICKET+placelauncherurl:https%3A%2F%2Fassetgame.roblox.com%2Fgame%2FPlaceLauncher.ashx%3Frequest%3DRequestFollowUser%26userId%3D123456")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if req.PlaceID != 0 || req.UserID != 123456 {
+		t.Fatalf("place=%d user=%d", req.PlaceID, req.UserID)
+	}
+	if got := appStarterPlace(req); got != "" {
+		t.Fatalf("appStarterPlace=%q, follow-user has no place", got)
+	}
+	req.TicketRedeemed = true
+	if got := req.WebLoginURI(); got != "roblox://experiences/start?userId=123456" {
+		t.Fatalf("redeemed uri=%q", got)
+	}
+	if req.JoinRequestType() != rbxuri.JoinRequestFollowUser {
+		t.Fatalf("joinType=%d, want follow user", req.JoinRequestType())
+	}
 }
 
 func TestPrivateServerShareUsesOfficialNavigationHandoff(t *testing.T) {

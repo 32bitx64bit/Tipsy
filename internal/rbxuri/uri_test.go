@@ -144,7 +144,68 @@ func TestParseSpecificServerJoinPreservesJobIdentity(t *testing.T) {
 			if !strings.Contains(req.Summary(), "instance=present") || !strings.Contains(req.Summary(), "place=1818") {
 				t.Fatalf("summary=%s", req.Summary())
 			}
+			if req.JoinRequestType() != JoinRequestGameInstance {
+				t.Fatalf("joinType=%d, want specific instance", req.JoinRequestType())
+			}
 		})
+	}
+}
+
+func TestParseFollowUserJoinPreservesUserIdentity(t *testing.T) {
+	t.Parallel()
+	const fakeUser int64 = 123456
+	cases := []struct {
+		name string
+		raw  string
+	}{
+		{
+			name: "website player RequestFollowUser",
+			raw:  "roblox-player:1+launchmode:play+gameinfo:SYNTHETIC-TICKET+placelauncherurl:https%3A%2F%2Fassetgame.roblox.com%2Fgame%2FPlaceLauncher.ashx%3Frequest%3DRequestFollowUser%26userId%3D123456",
+		},
+		{
+			name: "android userId deep link",
+			raw:  "roblox://experiences/start?userId=123456",
+		},
+		{
+			name: "android opaque userId",
+			raw:  "roblox://userId=123456",
+		},
+		{
+			name: "website games start userId",
+			raw:  "https://www.roblox.com/games/start?userId=123456",
+		},
+	}
+	wantHandoff := "roblox://experiences/start?userId=123456"
+	for _, test := range cases {
+		t.Run(test.name, func(t *testing.T) {
+			req, err := Parse(test.raw)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if req.UserID != fakeUser || req.PlaceID != 0 {
+				t.Fatalf("user=%d place=%d", req.UserID, req.PlaceID)
+			}
+			if got := req.AndroidDeepLink; got != wantHandoff {
+				t.Fatalf("handoff=%q want %q", got, wantHandoff)
+			}
+			if req.JoinRequestType() != JoinRequestFollowUser {
+				t.Fatalf("joinType=%d, want follow user", req.JoinRequestType())
+			}
+			if strings.Contains(req.Summary(), "123456") {
+				t.Fatalf("summary leaked user id: %s", req.Summary())
+			}
+			if !strings.Contains(req.Summary(), "follow=present") {
+				t.Fatalf("summary=%s", req.Summary())
+			}
+		})
+	}
+}
+
+func TestJoinRequestTypeOrdinals(t *testing.T) {
+	t.Parallel()
+	if JoinRequestPlace != 0 || JoinRequestFollowUser != 1 || JoinRequestPrivateServer != 2 || JoinRequestGameInstance != 3 {
+		t.Fatalf("StartGameParams joinRequestType ordinals drifted: place=%d follow=%d private=%d instance=%d",
+			JoinRequestPlace, JoinRequestFollowUser, JoinRequestPrivateServer, JoinRequestGameInstance)
 	}
 }
 
@@ -269,6 +330,9 @@ func TestParseEmptyAndLooksLike(t *testing.T) {
 	}
 	if !LooksLike("https://www.roblox.com/share?code=SYNTHETIC-PRIVATE-SERVER-CODE&type=Server") || !LooksLike("roblox://navigation/share_links?code=SYNTHETIC-PRIVATE-SERVER-CODE&type=Server") {
 		t.Fatal("LooksLike rejected an official private-server URI")
+	}
+	if !LooksLike("https://www.roblox.com/games/start?userId=123456") || !LooksLike("roblox://experiences/start?userId=123456") {
+		t.Fatal("LooksLike rejected an official follow-user URI")
 	}
 }
 

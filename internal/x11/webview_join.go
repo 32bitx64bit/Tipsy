@@ -259,7 +259,7 @@ func ParseWebViewJoinURI(raw string) (rbxuri.Request, bool) {
 		return rbxuri.Request{}, false
 	}
 	req, err := rbxuri.Parse(n)
-	if err != nil || req.PlaceID == 0 {
+	if err != nil || (req.PlaceID == 0 && req.UserID == 0) {
 		return rbxuri.Request{}, false
 	}
 	return req, true
@@ -318,6 +318,7 @@ type hybridLaunchParams struct {
 type hybridLaunchRequest struct {
 	RequestType    string          `json:"requestType"`
 	PlaceID        json.RawMessage `json:"placeId"`
+	UserID         json.RawMessage `json:"userId"`
 	GameInstanceID string          `json:"gameInstanceId"`
 }
 
@@ -353,18 +354,33 @@ func parseHybridLaunchGame(params json.RawMessage) (rbxuri.Request, bool) {
 		return rbxuri.Request{}, false
 	}
 	rt := strings.TrimSpace(p.Request.RequestType)
-	if rt != "" && rt != "RequestGame" && rt != "RequestGameJob" {
+	if rt != "" && !isHybridJoinRequestType(rt) {
 		return rbxuri.Request{}, false
 	}
 	place := parseHybridPlaceID(p.Request.PlaceID)
-	if place == 0 {
+	user := parseHybridPlaceID(p.Request.UserID)
+	if strings.EqualFold(rt, "RequestFollowUser") {
+		if user == 0 {
+			return rbxuri.Request{}, false
+		}
+	} else if place == 0 {
 		return rbxuri.Request{}, false
 	}
 	return rbxuri.Request{
 		Scheme:         "roblox",
 		PlaceID:        place,
+		UserID:         user,
 		GameInstanceID: p.Request.GameInstanceID,
 	}, true
+}
+
+func isHybridJoinRequestType(rt string) bool {
+	switch strings.ToLower(rt) {
+	case "requestgame", "requestgamejob", "requestfollowuser":
+		return true
+	default:
+		return false
+	}
 }
 
 func parseHybridPlaceID(raw json.RawMessage) int64 {

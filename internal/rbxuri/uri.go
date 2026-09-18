@@ -38,6 +38,16 @@ type Request struct {
 	hasWebsiteLaunch   bool
 }
 
+// StartGameParams.joinRequestType integers used by
+// nativeAppBridgeV2StartGameWithParam. These are the official Android JNI
+// AutoValue ordinals (place, follow-user, private server, specific instance).
+const (
+	JoinRequestPlace         int32 = 0
+	JoinRequestFollowUser    int32 = 1
+	JoinRequestPrivateServer int32 = 2
+	JoinRequestGameInstance  int32 = 3
+)
+
 var (
 	errUnsupported  = errors.New("unsupported Roblox URI")
 	errStudio       = errors.New("Roblox Studio URIs are not supported")
@@ -158,10 +168,26 @@ func (r Request) Summary() string {
 	if r.GameInstanceID != "" {
 		b.WriteString(" instance=present")
 	}
+	if r.UserID != 0 {
+		b.WriteString(" follow=present")
+	}
 	if r.AccessCode != "" || r.ReservedServerCode != "" || r.LinkCode != "" || r.ShareCode != "" {
 		b.WriteString(" private-server=present")
 	}
 	return b.String()
+}
+
+// JoinRequestType is the StartGameParams.joinRequestType for this launch.
+// Specific-server jobs and profile follows must not fall through to a
+// place-only RequestGame (ordinal 0): that matchmakes a random instance.
+func (r Request) JoinRequestType() int32 {
+	if r.GameInstanceID != "" {
+		return JoinRequestGameInstance
+	}
+	if r.UserID != 0 {
+		return JoinRequestFollowUser
+	}
+	return JoinRequestPlace
 }
 
 func isRobloxWebURL(u *url.URL) bool {
@@ -237,7 +263,8 @@ func parseRobloxDeepLink(raw string) (Request, error) {
 		return privateServerShareRequest("roblox", q)
 	case host == "experiences" && (path == "start" || strings.HasPrefix(path, "start/")):
 	case path == "experiences/start" || strings.HasPrefix(path, "experiences/start/"):
-	case strings.Contains(host, "placeid=") || strings.HasPrefix(opaque, "placeid="):
+	case strings.Contains(host, "placeid=") || strings.HasPrefix(opaque, "placeid=") ||
+		strings.Contains(host, "userid=") || strings.HasPrefix(opaque, "userid="):
 		combined := u.Host
 		if combined == "" {
 			combined = u.Opaque
@@ -260,7 +287,7 @@ func parseRobloxDeepLink(raw string) (Request, error) {
 	req.LinkCode = firstQuery(q, "linkcode", "linkCode", "privateserverlinkcode", "privateServerLinkCode")
 	req.LaunchData = firstQuery(q, "launchdata", "launchData")
 	req.ReferralPage = firstQuery(q, "referralpage", "referralPage")
-	if req.PlaceID == 0 {
+	if req.PlaceID == 0 && req.UserID == 0 {
 		return Request{}, errMissingPlace
 	}
 	req.AndroidDeepLink = req.androidDeepLink()
@@ -274,6 +301,7 @@ func parseWebURL(u *url.URL) (Request, error) {
 	req := Request{Scheme: "https", LaunchMode: "play", hasWebsiteLaunch: true}
 	q := u.Query()
 	req.PlaceID, _ = parseInt64(firstQuery(q, "placeid", "placeId"))
+	req.UserID, _ = parseInt64(firstQuery(q, "userid", "userId"))
 	req.GameInstanceID = instanceIDFromQuery(q)
 	req.AccessCode = firstQuery(q, "accesscode", "accessCode")
 	req.ReservedServerCode = firstQuery(q, "reservedserveraccesscode", "reservedServerAccessCode")
@@ -282,7 +310,7 @@ func parseWebURL(u *url.URL) (Request, error) {
 	if req.PlaceID == 0 {
 		req.PlaceID = placeIDFromPath(u.Path)
 	}
-	if req.PlaceID == 0 {
+	if req.PlaceID == 0 && req.UserID == 0 {
 		return Request{}, errMissingPlace
 	}
 	req.AndroidDeepLink = req.androidDeepLink()
@@ -312,6 +340,11 @@ func (r Request) androidDeepLink() string {
 		q.Set("type", "Server")
 		return "roblox://navigation/share_links?" + q.Encode()
 	}
+	if r.JoinRequestType() == JoinRequestFollowUser {
+		q := url.Values{}
+		q.Set("userId", strconv.FormatInt(r.UserID, 10))
+		return "roblox://experiences/start?" + q.Encode()
+	}
 	if r.PlaceID == 0 {
 		return ""
 	}
@@ -331,9 +364,6 @@ func (r Request) androidDeepLink() string {
 	}
 	if r.LaunchData != "" {
 		q.Set("launchData", r.LaunchData)
-	}
-	if r.UserID != 0 {
-		q.Set("userId", strconv.FormatInt(r.UserID, 10))
 	}
 	if r.ReferredByPlayerID != 0 {
 		q.Set("referredByPlayerId", strconv.FormatInt(r.ReferredByPlayerID, 10))

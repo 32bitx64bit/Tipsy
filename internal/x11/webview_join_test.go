@@ -81,6 +81,21 @@ func TestHandleWebViewPolicyURIJoinCallsStartGame(t *testing.T) {
 	}
 }
 
+func TestHandleWebViewPolicyURIFollowUserCallsStartGame(t *testing.T) {
+	var got rbxuri.Request
+	SetWebViewStartGame(func(req rbxuri.Request) { got = req })
+	t.Cleanup(func() { SetWebViewStartGame(nil) })
+	if !HandleWebViewPolicyURI("roblox://experiences/start?userId=123456") {
+		t.Fatal("follow-user join should be handled")
+	}
+	if got.UserID != 123456 || got.PlaceID != 0 {
+		t.Fatalf("started %+v", got)
+	}
+	if got.JoinRequestType() != rbxuri.JoinRequestFollowUser {
+		t.Fatalf("joinType=%d", got.JoinRequestType())
+	}
+}
+
 func TestHandoffWebViewJoinClosesBeforeStartGame(t *testing.T) {
 	var sequence []string
 	want := rbxuri.Request{PlaceID: 1818}
@@ -120,6 +135,59 @@ func TestHandleHybridExecuteRobloxLaunchGame(t *testing.T) {
 	}
 	if strings.Contains(got.Summary(), fakeJob) {
 		t.Fatalf("summary leaked job: %s", got.Summary())
+	}
+	if got.JoinRequestType() != rbxuri.JoinRequestGameInstance {
+		t.Fatalf("joinType=%d, want specific instance", got.JoinRequestType())
+	}
+}
+
+func TestParseWebViewJoinURIFollowUser(t *testing.T) {
+	req, ok := ParseWebViewJoinURI("roblox://experiences/start?userId=123456")
+	if !ok || req.UserID != 123456 || req.PlaceID != 0 {
+		t.Fatalf("req=%+v ok=%v", req, ok)
+	}
+	if req.JoinRequestType() != rbxuri.JoinRequestFollowUser {
+		t.Fatalf("joinType=%d", req.JoinRequestType())
+	}
+	req, ok = ParseWebViewJoinURI("https://www.roblox.com/games/start?userId=123456")
+	if !ok || req.UserID != 123456 {
+		t.Fatalf("https follow req=%+v ok=%v", req, ok)
+	}
+}
+
+func TestHandleHybridExecuteRobloxFollowUser(t *testing.T) {
+	var got rbxuri.Request
+	SetWebViewStartGame(func(req rbxuri.Request) { got = req })
+	t.Cleanup(func() { SetWebViewStartGame(nil) })
+	raw := `{"moduleID":"Game","functionName":"launchGame","params":{"request":{"requestType":"RequestFollowUser","userId":123456}}}`
+	if !HandleHybridExecuteRoblox(raw) {
+		t.Fatal("hybrid followUser should be handled")
+	}
+	if got.UserID != 123456 || got.PlaceID != 0 {
+		t.Fatalf("started %+v", got)
+	}
+	if got.JoinRequestType() != rbxuri.JoinRequestFollowUser {
+		t.Fatalf("joinType=%d, want follow user", got.JoinRequestType())
+	}
+	if strings.Contains(got.Summary(), "123456") {
+		t.Fatalf("summary leaked user id: %s", got.Summary())
+	}
+}
+
+func TestHandleHybridExecuteRobloxRequestGameJob(t *testing.T) {
+	const fakeJob = "SYNTHETIC-JOB-ID"
+	var got rbxuri.Request
+	SetWebViewStartGame(func(req rbxuri.Request) { got = req })
+	t.Cleanup(func() { SetWebViewStartGame(nil) })
+	raw := `{"moduleID":"Game","functionName":"launchGame","params":{"request":{"requestType":"RequestGameJob","placeId":1818,"gameInstanceId":"` + fakeJob + `"}}}`
+	if !HandleHybridExecuteRoblox(raw) {
+		t.Fatal("hybrid RequestGameJob should be handled")
+	}
+	if got.PlaceID != 1818 || got.GameInstanceID != fakeJob {
+		t.Fatalf("started %+v", got)
+	}
+	if got.JoinRequestType() != rbxuri.JoinRequestGameInstance {
+		t.Fatalf("joinType=%d, want specific instance", got.JoinRequestType())
 	}
 }
 
