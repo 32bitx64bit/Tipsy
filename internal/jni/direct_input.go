@@ -740,15 +740,6 @@ func pointerViewportCenter() (float32, float32) {
 	return float32(directInputTarget.clampW / 2), float32(directInputTarget.clampH / 2)
 }
 
-// PointerViewportCenter returns the live viewport center, the logical origin
-// the zoom-lock grab seeds. The surface tracks the X11 window, so it is also
-// the host pointer's anchor after SetPointerLockAtCenter.
-func PointerViewportCenter() (x, y float32) {
-	directInputTarget.mu.RLock()
-	defer directInputTarget.mu.RUnlock()
-	return pointerViewportCenter()
-}
-
 // robloxDirectLastPosition returns the ordinary direct dispatcher's last
 // delivered origin. The centered LockCenter path accumulates from it; a
 // wheel detent while centered reports it so zoom UI follows the look cursor.
