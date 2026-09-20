@@ -718,7 +718,8 @@ var rmbPointerFallback atomic.Bool
 
 // pointerLockSticky remembers a live first-person/host grab across Alt-Tab.
 // Roblox's getter often goes false after GameActivity focus loss, so FocusIn
-// must recapture without waiting for another click.
+// must recapture without waiting for another click. It is the LockCenter half
+// of the engine authority; the LockCurrentPosition half is engineAnchorLock.
 var pointerLockSticky atomic.Bool
 
 // pointerLockSetter is a test seam for the host boundary. Production never
@@ -751,10 +752,10 @@ const leftAltKeyCode = 57
 // pointer and integrates the same unbounded logical cursor as the held-RMB
 // fallback, so look keeps working; buttons and wheel are points and clamp to
 // the live surface at dispatch so clicks and zoom always land on-view. The
-// engine getter stays the stays the
-// sole LockCenter authority: a getter-true transition converts this grab to
-// the centered sticky grab in place. Mutually exclusive with
-// rmbPointerFallback; at most one anchored mode holds the X11 grab.
+// engine getter stays the sole LockCenter authority: a getter-true transition
+// converts this grab to the centered sticky grab in place, and an enum read of
+// LockCurrentPosition hands it to engineAnchorLock instead. Mutually exclusive
+// with rmbPointerFallback; at most one anchored mode holds the X11 grab.
 var persistentPointerCapture atomic.Bool
 
 // engineLock is the last observed value of the engine's own lock authority:
@@ -770,24 +771,79 @@ var engineLock struct {
 	locked atomic.Bool
 }
 
+// engineBehavior tracks the last observed full Enum.MouseBehavior, alongside
+// engineLock's boolean. The exported getter is `cmpl $0x1`, so it collapses
+// LockCurrentPosition into "not locked" and that value is invisible without
+// this. Tracking it separately is what gives the anchored grab an edge to
+// engage and release on, and what makes the third value legible in a trace.
+var engineBehavior struct {
+	known atomic.Bool
+	value atomic.Uint32
+}
+
+// engineLockObservation is one observation of the engine's lock authority: the
+// exported boolean and, when the read-only enum authority is live, the full
+// Enum.MouseBehavior behind it.
+type engineLockObservation struct {
+	locked     bool
+	available  bool
+	behavior   MouseBehavior
+	behaviorOK bool
+}
+
+// wantsCenter reports LockCenter: the engine froze its cursor at the viewport
+// center, so the host grab warps there and is sticky. With the enum authority
+// unavailable this is exactly the exported boolean, unchanged.
+func (o engineLockObservation) wantsCenter() bool {
+	return o.locked || (o.behaviorOK && o.behavior == MouseBehaviorLockCenter)
+}
+
+// wantsAnchor reports LockCurrentPosition: the engine froze its cursor exactly
+// where it already was, so the host grab is anchored at that same point and
+// nothing warps. The exported boolean reports this value as "not locked",
+// which is the whole reason the enum authority exists.
+func (o engineLockObservation) wantsAnchor() bool {
+	return o.behaviorOK && o.behavior == MouseBehaviorLockCurrentPosition
+}
+
 // observeEngineLock probes the engine getter, records it and logs every
 // transition exactly once. It never grabs, never releases and never touches a
 // capture flag: callers decide what to do with the answer. Every getter probe
 // in this file goes through it so no observation is lost.
-func observeEngineLock() (locked, available bool) {
-	locked, available = RobloxMainWindowMouseLocked()
+func observeEngineLock() engineLockObservation {
+	locked, available := RobloxMainWindowMouseLocked()
 	if !available {
 		if engineLock.known.Swap(false) {
 			logging.Logger(logging.CatJNI).Info("[jni] engine mouse lock authority gone")
 		}
-		return false, false
+		return engineLockObservation{}
 	}
 	first := !engineLock.known.Swap(true)
 	if changed := engineLock.locked.Swap(locked) != locked; first || changed {
 		logging.Logger(logging.CatJNI).Info("[jni] engine mouse lock",
 			"locked", locked, "first", first)
 	}
-	return locked, true
+	obs := engineLockObservation{locked: locked, available: true}
+	// The read-only enum authority is read here and only here, at exactly the
+	// cadence the boolean already had: no new thread, no polling loop, no
+	// timer, and nothing is written anywhere in the engine's address space.
+	behavior, ok := engineMouseBehaviorProbe()
+	if !ok {
+		return obs
+	}
+	// The engine's own boolean polices the read. One straddled transition is
+	// tolerated; three in a row disable the authority and hand the decision
+	// back to the boolean, loudly.
+	if !engineMouseBehaviorAgrees(behavior, locked) {
+		return obs
+	}
+	obs.behavior, obs.behaviorOK = behavior, true
+	if seenFirst := !engineBehavior.known.Swap(true); seenFirst ||
+		engineBehavior.value.Swap(uint32(behavior)) != uint32(behavior) {
+		logging.Logger(logging.CatJNI).Info("[jni] engine MouseBehavior",
+			"behavior", behavior.String(), "value", uint8(behavior), "first", seenFirst)
+	}
+	return obs
 }
 
 // noteEngineStickyEngaged records that the engine's own LockCenter authority
@@ -799,6 +855,295 @@ func observeEngineLock() (locked, available bool) {
 func noteEngineStickyEngaged(edge string, converted bool) {
 	logging.Logger(logging.CatJNI).Info("[jni] engine lock: centered sticky grab engaged",
 		"edge", edge, "converted", converted)
+}
+
+// engineAnchorLock is the engine's own LockCurrentPosition authority. The
+// exported boolean cannot see that value, so it owns a state of its own: the
+// engine froze its cursor exactly where it already was, and the host grab
+// that mirrors it is anchored at that same logical point instead of being
+// warped to the window center. Like pointerLockSticky it is engine state, so
+// focus loss and the operator's LeftAlt release suppress the *grab* but never
+// the state, and the re-acquire point is remembered so the next focus gain or
+// Alt re-arm takes the grab where the host pointer is instead of waiting for a
+// motion sample. Unlike the heuristic it is never disarmed by motion: the
+// engine, not a guess, owns it. Mutually exclusive with pointerLockSticky and
+// persistentPointerCapture.
+//
+// It remembers two different points, and the difference is the whole release
+// contract:
+//
+//   - x, y is where the host grab was last taken, which is where the desktop
+//     pointer sits while the grab holds. A focus gain or an Alt re-arm
+//     re-acquires there so the logical pair and the host pointer agree. It is
+//     deliberately not advanced by captured motion: the X11 grab's anchor does
+//     not move when the integrator drifts, so following the drift would make
+//     the remembered point disagree with the host pointer.
+//   - originX, originY is the engage-time frozen origin: the point the engine
+//     froze its cursor at when it entered LockCurrentPosition, and therefore
+//     the point its cursor reappears at when MouseBehavior returns to Default.
+//     It never moves while the engine holds the value, so it is the release
+//     restore point; the integrator's drift is a Tipsy-side device to keep
+//     deltas flowing and says nothing about where the engine's cursor is.
+var engineAnchorLock struct {
+	mu               sync.Mutex
+	active           bool
+	x, y             float32
+	originX, originY float32
+	// releaseAtCenter inverts the restore point for the deferred release.
+	// LockCurrentPosition's own semantic is "the cursor reappears where it
+	// was frozen", so the origin is the default and the viewport center is
+	// the exception: only a first-person zoom-out earns it, and the wheel
+	// path marks it when the engine's value lags the detent that caused it.
+	releaseAtCenter bool
+}
+
+func engineAnchorActive() bool {
+	engineAnchorLock.mu.Lock()
+	defer engineAnchorLock.mu.Unlock()
+	return engineAnchorLock.active
+}
+
+// storeEngineAnchorLock latches or clears the authority, remembering the point
+// the host grab was taken at while it is active. Clearing also forgets the
+// frozen origin, which belongs to a live lock.
+func storeEngineAnchorLock(active bool, x, y float32) {
+	engineAnchorLock.mu.Lock()
+	engineAnchorLock.active, engineAnchorLock.x, engineAnchorLock.y = active, x, y
+	// A release, and equally a fresh take, drops a stale restore mark: it
+	// belongs to one ending gesture and is consumed by the next sample.
+	engineAnchorLock.releaseAtCenter = false
+	if !active {
+		engineAnchorLock.originX, engineAnchorLock.originY = 0, 0
+	}
+	engineAnchorLock.mu.Unlock()
+}
+
+// rememberEngineAnchorOrigin records the engage-time frozen origin. Only a
+// fresh engagement calls it: a re-acquire after a focus flap or an Alt toggle
+// is the same engine lock, whose frozen origin has not moved.
+func rememberEngineAnchorOrigin(x, y float32) {
+	engineAnchorLock.mu.Lock()
+	engineAnchorLock.originX, engineAnchorLock.originY = x, y
+	engineAnchorLock.mu.Unlock()
+}
+
+// engineAnchorFrozenOrigin reports the engage-time frozen origin, the point the
+// engine's cursor reappears at when LockCurrentPosition ends. ok is false when
+// no such lock is latched.
+func engineAnchorFrozenOrigin() (float32, float32, bool) {
+	engineAnchorLock.mu.Lock()
+	defer engineAnchorLock.mu.Unlock()
+	if !engineAnchorLock.active {
+		return 0, 0, false
+	}
+	return engineAnchorLock.originX, engineAnchorLock.originY, true
+}
+
+// markEngineAnchorReleaseAtCenter records that the gesture ending this
+// LockCurrentPosition lock is a first-person zoom-out, so its deferred release
+// centers both cursors instead of restoring the engine's frozen origin. The
+// engine's MouseBehavior lags the input that changes it (26-42 ms measured in
+// place 79966250354565), so a zoom-out detent can still probe as
+// LockCurrentPosition and leave the actual release to the next motion sample.
+// Without this mark that deferred release cannot tell a zoom-out from an RMB
+// camera-look release, and centering both is what teleported the pointer to
+// the middle of the window on the first pixel after every RMB release.
+func markEngineAnchorReleaseAtCenter() {
+	engineAnchorLock.mu.Lock()
+	if engineAnchorLock.active {
+		engineAnchorLock.releaseAtCenter = true
+	}
+	engineAnchorLock.mu.Unlock()
+}
+
+// engineAnchorReleasesAtCenter reports whether the pending release was marked
+// as a first-person zoom-out. False -- the default -- means the frozen origin,
+// which is LockCurrentPosition's own contract.
+func engineAnchorReleasesAtCenter() bool {
+	engineAnchorLock.mu.Lock()
+	defer engineAnchorLock.mu.Unlock()
+	return engineAnchorLock.releaseAtCenter
+}
+
+// engineAnchorOrigin reports the remembered point the host grab was taken at,
+// the last-resort re-acquire anchor. ok is false before the first engagement
+// or after a release.
+func engineAnchorOrigin() (float32, float32, bool) {
+	engineAnchorLock.mu.Lock()
+	defer engineAnchorLock.mu.Unlock()
+	if !engineAnchorLock.active {
+		return 0, 0, false
+	}
+	return engineAnchorLock.x, engineAnchorLock.y, true
+}
+
+// engineAnchorPoint reports the logical position the engine's frozen cursor is
+// at, and therefore where the host grab must anchor and seed. prefer is the
+// event's own pointer coordinate when that event carries a real position (an
+// absolute move, a button edge, a wheel detent); havePrefer is false for a
+// captured relative sample, whose X/Y is the grab anchor rather than a
+// position, and for the focus and Alt edges, which carry no coordinates at
+// all. ok is false when no source has established a position yet, and the
+// caller then takes no grab: waiting one sample for a real origin beats
+// inventing one the engine never had.
+func engineAnchorPoint(preferX, preferY float32, havePrefer bool) (float32, float32, bool) {
+	if havePrefer {
+		return preferX, preferY, true
+	}
+	if x, y, ok := RobloxDirectFallbackPosition(); ok {
+		return x, y, true
+	}
+	if x, y, ok := robloxDirectLastPosition(); ok {
+		return x, y, true
+	}
+	return engineAnchorOrigin()
+}
+
+// engageEngineAnchorLock mirrors the engine's LockCurrentPosition on the host,
+// taking the cursor-anchored grab. The engine froze its cursor where it already
+// was, so the grab is anchored at that same logical point: nothing warps, and
+// centering here would desync the engine's frozen origin from the host pointer
+// so the first absolute sample teleported by the whole distance. The integrator
+// keeps running from the frozen origin exactly as the held-RMB fallback does,
+// so look keeps working and buttons and wheel still land on the engine cursor.
+// Returns false when no honest anchor point exists yet, or when the host
+// refused the grab.
+func engageEngineAnchorLock(edge string, preferX, preferY float32, havePrefer bool) bool {
+	return takeEngineAnchorLock(edge, preferX, preferY, havePrefer, true)
+}
+
+// adoptEngineAnchorLock hands an already-held cursor-anchored grab to the
+// engine without re-taking it. It is the button-edge path: the persistent
+// stream already holds exactly the grab LockCurrentPosition wants, so the
+// press, drag and release keep their logical coordinates and no host call is
+// made.
+func adoptEngineAnchorLock(edge string) bool {
+	return takeEngineAnchorLock(edge, 0, 0, false, false)
+}
+
+func takeEngineAnchorLock(edge string, preferX, preferY float32, havePrefer, reacquire bool) bool {
+	x, y, ok := engineAnchorPoint(preferX, preferY, havePrefer)
+	if !ok {
+		return false
+	}
+	// A guess that was already right is not re-guessed: the heuristic's or the
+	// held-RMB fallback's cursor-anchored grab is exactly the grab this value
+	// wants, so the engine takes ownership of it in place instead of re-taking
+	// it.
+	converted := persistentPointerCapture.Swap(false) || rmbPointerFallback.Swap(false)
+	if converted {
+		// The engine owns the lock from here; the wheel guess is retired.
+		resetZoomLock()
+	}
+	// LockCenter and LockCurrentPosition are mutually exclusive engine
+	// states, so the centered request never stays armed underneath.
+	pointerLockSticky.Store(false)
+	if reacquire {
+		if _, err := pointerLockAtCursorSetter(true); err != nil {
+			storeEngineAnchorLock(false, 0, 0)
+			return false
+		}
+	}
+	BeginRobloxDirectPointerFallback(x, y)
+	engaged := !engineAnchorActive()
+	storeEngineAnchorLock(true, x, y)
+	if engaged {
+		// A fresh engagement means the engine has just entered
+		// LockCurrentPosition, so x, y is the point it froze its cursor at.
+		// Remember it separately: the integrator drifts from here for the rest
+		// of the lock, and a release that restored at the drifted point would
+		// teleport the engine cursor by the whole look.
+		rememberEngineAnchorOrigin(x, y)
+	}
+	pointerCursorSetter(false)
+	if engaged {
+		noteEngineAnchorEngaged(edge, converted)
+	}
+	return true
+}
+
+// noteEngineAnchorEngaged records that the engine's own LockCurrentPosition
+// authority took the anchored grab. It is the sibling of
+// noteEngineStickyEngaged and exists for the same reason: the value the
+// exported boolean reports as "not locked" otherwise leaves no trace at all.
+func noteEngineAnchorEngaged(edge string, converted bool) {
+	logging.Logger(logging.CatJNI).Info("[jni] engine lock: anchored sticky grab engaged",
+		"edge", edge, "converted", converted,
+		"behavior", MouseBehaviorLockCurrentPosition.String())
+}
+
+// releaseEngineLockAtCenter frees an engine-authoritative grab when
+// MouseBehavior returns to Default and puts both cursors back together at the
+// viewport center. The engine cursor reappears there, so the logical pair is
+// re-seeded to meet it (SeedRobloxDirectPointerAtCenter) and the host pointer
+// is warped to the same point by the same X11 re-anchor
+// releasePersistentCaptureAtCenter uses. Two cursors that agree make the first
+// absolute sample continuous instead of a teleport.
+//
+// This is the release for the states that really did freeze the engine cursor
+// at the viewport center -- LockCenter (pointerLockSticky) and the wheel
+// heuristic's own releasePersistentCaptureAtCenter -- and for the camera-driven
+// edges of a first-person lock, where the long-standing contract is that the
+// cursor comes back in the middle when first person ends.
+// releaseEngineLockAtOrigin is its sibling for LockCurrentPosition.
+func releaseEngineLockAtCenter(edge string) {
+	storeEngineAnchorLock(false, 0, 0)
+	pointerLockSticky.Store(false)
+	rmbPointerFallback.Store(false)
+	persistentPointerCapture.Store(false)
+	SeedRobloxDirectPointerAtCenter()
+	ClearRobloxDirectPointerFallbackKeepLast()
+	_, _ = pointerLockAtCenterSetter(true)
+	_, _ = pointerLockAtCenterSetter(false)
+	logging.Logger(logging.CatJNI).Info("[jni] engine lock released; pointer free", "edge", edge)
+}
+
+// releaseEngineLockAtOrigin frees the engine's own LockCurrentPosition grab on
+// the edge that ends it and puts both cursors back at the engage-time frozen
+// origin. LockCurrentPosition froze the engine cursor exactly where it already
+// was, so that point is where it reappears when MouseBehavior returns to
+// Default; restoring anywhere else -- the viewport center in particular --
+// teleports it by the whole distance and breaks the long-standing held-RMB
+// contract that RMB camera look unlocks where the operator clicked
+// (status §217/§245). The integrator's drift says nothing about where the
+// engine's cursor is, which is why the origin is remembered at engage time
+// rather than read back from the live integrator.
+//
+// The host side needs no warp: the anchored grab was taken at the frozen origin
+// and tipsy_pointer_unlock deliberately leaves the desktop pointer at the grab
+// anchor, so the ungrab alone leaves it exactly there. Only the logical pair is
+// re-seeded, which is the same release-at-grab-anchor in logical space that
+// EndRobloxDirectCapturedSecondary implements for the persistent stream.
+//
+// The engine's lock and Tipsy's own desktop capture policy are separate
+// decisions. When the policy still wants the pointer confined (the always
+// policy, or an armed zoom lock) the grab it already holds is simply handed
+// back to it, exactly as an RMB gesture inside a captured stream never broke
+// confinement before the authority existed, and the policy's own release path
+// frees the pointer later. Otherwise the pointer goes free on this edge.
+func releaseEngineLockAtOrigin(edge string) {
+	x, y, ok := engineAnchorFrozenOrigin()
+	storeEngineAnchorLock(false, 0, 0)
+	pointerLockSticky.Store(false)
+	rmbPointerFallback.Store(false)
+	if ok {
+		SeedRobloxDirectPointerAt(x, y)
+	}
+	// The captured-secondary gesture is over; keep the restored origin as the
+	// ordinary dispatcher's seed exactly as the center release does.
+	ClearRobloxDirectPointerFallbackKeepLast()
+	if ok && persistentAcquireWanted() && inExperience() {
+		BeginRobloxDirectPointerFallback(x, y)
+		persistentPointerCapture.Store(true)
+		logging.Logger(logging.CatJNI).Info("[jni] engine lock released at the frozen origin; desktop capture retained",
+			"edge", edge, "policy", pointerCapturePolicyName(),
+			"behavior", MouseBehaviorLockCurrentPosition.String())
+		return
+	}
+	persistentPointerCapture.Store(false)
+	_, _ = pointerLockAtCursorSetter(false)
+	logging.Logger(logging.CatJNI).Info("[jni] engine lock released at the frozen origin; pointer free",
+		"edge", edge, "behavior", MouseBehaviorLockCurrentPosition.String())
 }
 
 // zoomLock is the wheel-driven first-person heuristic for persistent
@@ -815,6 +1160,13 @@ func noteEngineStickyEngaged(edge string, converted bool) {
 // .MouseBehavior, and RobloxMainWindowMouseLocked reads that property
 // directly, so a real engine lock is the getter-true path and owns centering
 // itself (pointerLockSticky, and the anchored->centered conversion).
+//
+// The heuristic is gated on the read-only enum authority being *unavailable*
+// (see engineBehaviorAuthoritative). Once the engine is answering for real,
+// Tipsy never guesses: the wheel run is retired at its gate rather than
+// deleted, so an experience whose MouseBehavior the authority cannot read at
+// all -- no object yet, a decode failure, or three disagreements with the
+// exported boolean -- still gets it as the honest fallback.
 //
 // The zoom-out detents that leave first person do re-seed the logical cursor
 // to the viewport center, because there the engine cursor becomes visible
@@ -1100,6 +1452,9 @@ func SetPointerCapturePolicyForTest(enabled, always bool) {
 func resetPointerCaptureState() {
 	engineLock.known.Store(false)
 	engineLock.locked.Store(false)
+	engineBehavior.known.Store(false)
+	engineBehavior.value.Store(0)
+	storeEngineAnchorLock(false, 0, 0)
 	persistentPointerCapture.Store(false)
 	pointerCaptureReleased.Store(false)
 	altToggleConsumed.Store(false)
@@ -1322,6 +1677,10 @@ func handleX11InputEvent(ev x11.InputEvent) {
 			// visible even if a sticky centered request is pending. Toggling
 			// back re-arms capture on the next motion.
 			pointerCursorSetter(true)
+		} else if engineAnchorActive() {
+			// The engine still holds LockCurrentPosition, so X11's focus-loss
+			// ungrab is re-acquired here, anchored at the frozen origin.
+			engageEngineAnchorLock("focus re-acquire", 0, 0, false)
 		} else if pointerLockSticky.Load() {
 			rmbPointerFallback.Store(false)
 			persistentPointerCapture.Store(false)
@@ -1329,10 +1688,13 @@ func handleX11InputEvent(ev x11.InputEvent) {
 			_, _ = pointerLockSetter(true)
 		} else {
 			pointerCursorSetter(false)
-			locked, available := observeEngineLock()
-			if available && locked {
+			obs := observeEngineLock()
+			switch {
+			case obs.wantsCenter():
 				pointerLockSticky.Store(true)
 				_, _ = pointerLockSetter(true)
+			case obs.wantsAnchor():
+				engageEngineAnchorLock("focus re-acquire", 0, 0, false)
 			}
 		}
 		DispatchGameActivityFocus(ev.FocusGained)
@@ -1358,17 +1720,26 @@ func handleX11InputEvent(ev x11.InputEvent) {
 						// grab on the toggle itself rather than leaving the
 						// engine unheeded until the next motion sample. The
 						// state is available because the release suppressed
-						// grabbing, never observing.
-						if locked, available := observeEngineLock(); available && locked {
+						// grabbing, never observing. LockCurrentPosition is
+						// honoured the same way, anchored at the frozen origin.
+						obs := observeEngineLock()
+						switch {
+						case obs.wantsCenter():
 							pointerLockSticky.Store(true)
 							_, _ = pointerLockSetter(true)
 							noteEngineStickyEngaged("alt re-arm", false)
+						case obs.wantsAnchor():
+							engageEngineAnchorLock("alt re-arm", 0, 0, false)
 						}
 					} else {
 						pointerCaptureReleased.Store(true)
 						pointerLockSticky.Store(false)
 						rmbPointerFallback.Store(false)
 						persistentPointerCapture.Store(false)
+						// engineAnchorLock is deliberately kept: the engine still
+						// holds LockCurrentPosition, and the toggle suppresses the
+						// grab, never the engine's own state. The re-arm above
+						// re-acquires it on the toggle itself.
 						ClearRobloxDirectPointerFallback()
 						_, _ = pointerLockSetter(false)
 						pointerCursorSetter(true)
@@ -1467,48 +1838,102 @@ func handleX11InputEvent(ev x11.InputEvent) {
 					rmbPointerFallback.Store(false)
 					ClearRobloxDirectPointerFallback()
 					pointerLockSticky.Store(false)
+					storeEngineAnchorLock(false, 0, 0)
 					_, _ = pointerLockSetter(false)
 					if ev.Relative {
 						return
 					}
 				}
-				locked, available := observeEngineLock()
-				if available && locked && !pointerCaptureReleased.Load() {
-					// Getter-true converts any anchored mode (held-RMB or
-					// persistent) to the centered sticky grab. The persistent
-					// origin is preserved so centered deltas continue from the
-					// established logical cursor.
-					converting := false
-					if persistentPointerCapture.Swap(false) {
-						ClearRobloxDirectPointerFallbackKeepLast()
-						converting = true
-					}
-					if rmbPointerFallback.Swap(false) {
-						ClearRobloxDirectPointerFallback()
-						converting = true
-					}
-					if !ev.Relative {
-						// This is the official generic-listener order: observe the
-						// true getter, request capture, consume this transition move,
-						// then deliver later captured relative-axis events.
-						engaged := !pointerLockSticky.Swap(true)
-						_, _ = pointerLockSetter(true)
-						pointerCursorSetter(false)
-						if engaged {
-							noteEngineStickyEngaged("absolute move", converting)
+				obs := observeEngineLock()
+				if !pointerCaptureReleased.Load() && obs.available {
+					switch {
+					case obs.wantsCenter():
+						// Getter-true converts any anchored mode (held-RMB or
+						// persistent) to the centered sticky grab. The persistent
+						// origin is preserved so centered deltas continue from the
+						// established logical cursor.
+						converting := false
+						if persistentPointerCapture.Swap(false) {
+							ClearRobloxDirectPointerFallbackKeepLast()
+							converting = true
+						}
+						if rmbPointerFallback.Swap(false) {
+							ClearRobloxDirectPointerFallback()
+							converting = true
+						}
+						if !ev.Relative {
+							// This is the official generic-listener order: observe the
+							// true getter, request capture, consume this transition move,
+							// then deliver later captured relative-axis events.
+							engaged := !pointerLockSticky.Swap(true)
+							_, _ = pointerLockSetter(true)
+							pointerCursorSetter(false)
+							if engaged {
+								noteEngineStickyEngaged("absolute move", converting)
+							}
+							return
+						}
+						if converting {
+							engaged := !pointerLockSticky.Swap(true)
+							_, _ = pointerLockSetter(true)
+							pointerCursorSetter(false)
+							if engaged {
+								noteEngineStickyEngaged("captured motion", converting)
+							}
+						}
+						DispatchRobloxDirectPointerDelta(ev.X, ev.Y, ev.DeltaX, ev.DeltaY)
+						return
+					case obs.wantsAnchor():
+						// LockCurrentPosition: the engine froze its cursor where it
+						// already was, so the grab is anchored at that point and the
+						// captured stream continues from it. Nothing is
+						// center-converted; warping here would desync the engine's
+						// frozen origin from the host pointer.
+						edge := "captured motion"
+						if !ev.Relative {
+							// The transition sample is consumed exactly like the
+							// official capture request above.
+							engageEngineAnchorLock("absolute move", ev.X, ev.Y, true)
+							return
+						}
+						if !engineAnchorActive() {
+							engageEngineAnchorLock(edge, 0, 0, false)
+						} else if _, _, held := RobloxDirectFallbackPosition(); !held {
+							// The integrator was cleared (focus loss, a target
+							// re-wire) while the engine's state survived it; re-seed
+							// it at the frozen origin so the stream keeps integrating.
+							if x, y, ok := engineAnchorPoint(0, 0, false); ok {
+								BeginRobloxDirectPointerFallback(x, y)
+							}
+						}
+						// The anchored stream advances the same unbounded logical
+						// pair the held-RMB fallback does, so the engine cursor
+						// stays where the engine froze it while look continues. The
+						// remembered re-acquire point is deliberately left alone:
+						// the X11 grab's anchor does not move when the integrator
+						// drifts, so a focus flap or an Alt re-arm must keep taking
+						// the grab where the host pointer is, and the frozen origin
+						// is fixed by the engine for the whole lock.
+						DispatchRobloxDirectPointerFallbackDelta(ev.DeltaX, ev.DeltaY)
+						return
+					case engineAnchorActive():
+						// The engine left LockCurrentPosition for Default and the edge
+						// that ended it did not release synchronously, so the release
+						// lands on this transition sample, which is consumed. Where the
+						// cursor belongs depends on which gesture ended: a first-person
+						// zoom-out centers (the wheel path marks it), and everything
+						// else -- an RMB camera-look release above all -- restores the
+						// engine's own frozen origin, because that is where its cursor
+						// reappears. Centering unconditionally here teleported the
+						// pointer to the middle of the window on the first pixel of
+						// motion after every RMB release.
+						if engineAnchorReleasesAtCenter() {
+							releaseEngineLockAtCenter("captured motion")
+						} else {
+							releaseEngineLockAtOrigin("captured motion")
 						}
 						return
 					}
-					if converting {
-						engaged := !pointerLockSticky.Swap(true)
-						_, _ = pointerLockSetter(true)
-						pointerCursorSetter(false)
-						if engaged {
-							noteEngineStickyEngaged("captured motion", converting)
-						}
-					}
-					DispatchRobloxDirectPointerDelta(ev.X, ev.Y, ev.DeltaX, ev.DeltaY)
-					return
 				}
 				if ev.Relative && rmbPointerFallback.Load() {
 					if pointerCaptureReleased.Load() {
@@ -1577,35 +2002,57 @@ func handleX11InputEvent(ev x11.InputEvent) {
 				// logical cursor on-view and anchors it, the drag integrates
 				// from that point, and the release restores it so the engine
 				// cursor comes back to where the operator clicked. No second
-				// grab; the stream is retained.
-				if persistentPointerCapture.Load() {
+				// grab; the stream is retained. The engine's own anchored lock
+				// is the same captured stream, so it takes the same contract.
+				if persistentPointerCapture.Load() || engineAnchorActive() {
 					if _, _, ok := BeginRobloxDirectCapturedSecondary(); ok {
 						DispatchRobloxDirectButtonCaptured(ev.PointerAction, ev.Button)
 					} else {
 						DispatchRobloxDirectPointer(ev.PointerAction, ev.X, ev.Y, ev.Button)
 					}
-					locked, available := observeEngineLock()
-					if available && locked && !pointerCaptureReleased.Load() {
-						if persistentPointerCapture.Swap(false) {
-							ClearRobloxDirectPointerFallbackKeepLast()
+					obs := observeEngineLock()
+					if !pointerCaptureReleased.Load() {
+						switch {
+						case obs.wantsCenter():
+							if persistentPointerCapture.Swap(false) {
+								ClearRobloxDirectPointerFallbackKeepLast()
+							}
+							rmbPointerFallback.Store(false)
+							pointerLockSticky.Store(true)
+							_, _ = pointerLockSetter(true)
+							pointerCursorSetter(false)
+						case obs.wantsAnchor():
+							// The engine already froze the cursor at the press
+							// point, so the persistent stream simply becomes
+							// engine-owned. The remembered secondary anchor is the
+							// frozen origin and is preserved.
+							rmbPointerFallback.Store(false)
+							adoptEngineAnchorLock("secondary down")
 						}
-						rmbPointerFallback.Store(false)
-						pointerLockSticky.Store(true)
-						_, _ = pointerLockSetter(true)
-						pointerCursorSetter(false)
 					}
 					break
 				}
 				DispatchRobloxDirectPointer(ev.PointerAction, ev.X, ev.Y, ev.Button)
-				locked, available := observeEngineLock()
+				obs := observeEngineLock()
 				logging.Logger(logging.CatJNI).Info("[jni] pointer lock after secondary down",
-					"available", available, "locked", locked)
-				if available && locked && !pointerCaptureReleased.Load() {
+					"available", obs.available, "locked", obs.locked)
+				switch {
+				case obs.wantsCenter() && !pointerCaptureReleased.Load():
 					rmbPointerFallback.Store(false)
 					pointerLockSticky.Store(true)
 					_, _ = pointerLockSetter(true)
 					pointerCursorSetter(false)
-				} else if available && !locked && !pointerCaptureReleased.Load() {
+				case obs.wantsAnchor() && !pointerCaptureReleased.Load():
+					// The engine already froze the cursor at the click, so no
+					// held-RMB host fallback is needed: that would be a guess on
+					// top of a fact. The click is also pinned as the captured
+					// secondary's press anchor, so the matching release lands back
+					// at it exactly as it does inside a captured stream.
+					rmbPointerFallback.Store(false)
+					if engageEngineAnchorLock("secondary down", ev.X, ev.Y, true) {
+						BeginRobloxDirectCapturedSecondary()
+					}
+				case obs.available && !obs.locked && !pointerCaptureReleased.Load():
 					// The observed in-experience client leaves the exact lock getter
 					// false for ordinary RMB camera look. Deliver the edge first,
 					// then use one held-RMB host capture anchored at the click so
@@ -1630,7 +2077,7 @@ func handleX11InputEvent(ev x11.InputEvent) {
 				// anchor and re-seeds the integrator there (the old fallback's
 				// release-at-grab-anchor, in logical space); the stream
 				// continues. Only a getter-true edge converts it to centered.
-				if persistentPointerCapture.Load() {
+				if persistentPointerCapture.Load() || engineAnchorActive() {
 					if _, _, ok := EndRobloxDirectCapturedSecondary(); ok {
 						DispatchRobloxDirectButtonCaptured(ev.PointerAction, ev.Button)
 					} else if _, _, ok := RobloxDirectFallbackPosition(); ok {
@@ -1638,14 +2085,29 @@ func handleX11InputEvent(ev x11.InputEvent) {
 					} else {
 						DispatchRobloxDirectPointer(ev.PointerAction, ev.X, ev.Y, ev.Button)
 					}
-					locked, available := observeEngineLock()
-					if available && locked && !pointerCaptureReleased.Load() {
-						if persistentPointerCapture.Swap(false) {
-							ClearRobloxDirectPointerFallbackKeepLast()
+					obs := observeEngineLock()
+					if !pointerCaptureReleased.Load() {
+						switch {
+						case obs.wantsCenter():
+							if persistentPointerCapture.Swap(false) {
+								ClearRobloxDirectPointerFallbackKeepLast()
+							}
+							pointerLockSticky.Store(true)
+							_, _ = pointerLockSetter(true)
+							pointerCursorSetter(false)
+						case obs.wantsAnchor():
+							// The engine still owns the frozen cursor; the release
+							// is an ordinary button edge inside the anchored stream.
+							adoptEngineAnchorLock("secondary up")
+						case engineAnchorActive():
+							// The engine left LockCurrentPosition for Default on
+							// the release itself, which is the gesture its own
+							// RMB camera look ties the lock to. Both cursors go
+							// back to the engage-time frozen origin on this edge;
+							// deferring the release to the next motion sample
+							// would instead release at the center.
+							releaseEngineLockAtOrigin("secondary up")
 						}
-						pointerLockSticky.Store(true)
-						_, _ = pointerLockSetter(true)
-						pointerCursorSetter(false)
 					}
 					break
 				}
@@ -1667,13 +2129,21 @@ func handleX11InputEvent(ev x11.InputEvent) {
 				// Re-read after delivering the edge, matching the engine-owned
 				// handshake. Ordinary RMB camera look turns false and releases at
 				// the anchor; first-person/shift-lock remains captured.
-				locked, available := observeEngineLock()
+				obs := observeEngineLock()
 				rmbPointerFallback.Store(false)
-				if !available || !locked {
+				switch {
+				case obs.wantsCenter():
+					pointerCursorSetter(false)
+				case obs.wantsAnchor():
+					engageEngineAnchorLock("secondary up", ev.X, ev.Y, true)
+				case engineAnchorActive():
+					// The engine left LockCurrentPosition for Default on this edge.
+					// Its cursor reappears at the frozen origin, so both cursors are
+					// restored there, not at the viewport center.
+					releaseEngineLockAtOrigin("secondary up")
+				default:
 					pointerLockSticky.Store(false)
 					_, _ = pointerLockSetter(false)
-				} else {
-					pointerCursorSetter(false)
 				}
 			default:
 				// Captured primary (and other) button edges land at the logical
@@ -1687,14 +2157,19 @@ func handleX11InputEvent(ev x11.InputEvent) {
 					} else {
 						DispatchRobloxDirectPointer(ev.PointerAction, ev.X, ev.Y, ev.Button)
 					}
-					locked, available := observeEngineLock()
-					if available && locked && !pointerCaptureReleased.Load() {
-						if persistentPointerCapture.Swap(false) {
-							ClearRobloxDirectPointerFallbackKeepLast()
+					obs := observeEngineLock()
+					if !pointerCaptureReleased.Load() {
+						switch {
+						case obs.wantsCenter():
+							if persistentPointerCapture.Swap(false) {
+								ClearRobloxDirectPointerFallbackKeepLast()
+							}
+							pointerLockSticky.Store(true)
+							_, _ = pointerLockSetter(true)
+							pointerCursorSetter(false)
+						case obs.wantsAnchor():
+							adoptEngineAnchorLock("captured button")
 						}
-						pointerLockSticky.Store(true)
-						_, _ = pointerLockSetter(true)
-						pointerCursorSetter(false)
 					}
 					break
 				}
@@ -1714,6 +2189,12 @@ func handleX11InputEvent(ev x11.InputEvent) {
 		// cursor. Centered LockCenter detents report the look origin. Under
 		// persistent capture the dead-center heuristic may re-seed the logical
 		// cursor first (see zoomLock); the detent is then delivered there.
+		//
+		// The heuristic is gated on the enum authority being *unavailable*.
+		// While the engine is answering for real, Tipsy never guesses: the
+		// wheel run is retired, not deleted, so an experience whose behavior
+		// the authority cannot read at all still gets it as the honest
+		// fallback.
 		wx, wy := ev.X, ev.Y
 		if persistentPointerCapture.Load() || rmbPointerFallback.Load() {
 			if fx, fy, ok := RobloxDirectFallbackPosition(); ok {
@@ -1724,7 +2205,8 @@ func handleX11InputEvent(ev x11.InputEvent) {
 				wx, wy = lx, ly
 			}
 		}
-		if !pointerLockSticky.Load() && persistentEngageAllowed() {
+		if !pointerLockSticky.Load() && !engineAnchorActive() &&
+			!engineBehaviorAuthoritative() && persistentEngageAllowed() {
 			if cx, cy, ok := zoomLockWheel(ev.X, ev.Y, ev.ScrollY); ok {
 				wx, wy = cx, cy
 			}
@@ -1737,6 +2219,9 @@ func handleX11InputEvent(ev x11.InputEvent) {
 		// on the detent itself. Getter-false from an anchored stream preserves
 		// that stream: persistent capture is the deliberate desktop fallback
 		// and must stay confined even when the engine never reports LockCenter.
+		// LockCurrentPosition is the same idea one level down: the engine froze
+		// its cursor where it was, so the detent is already delivered at that
+		// point and the grab is anchored there rather than centered.
 		//
 		// The probe runs before the LeftAlt gate on purpose. Suppressing the
 		// *grab* while the operator has toggled capture off is correct;
@@ -1744,11 +2229,12 @@ func handleX11InputEvent(ev x11.InputEvent) {
 		// (window switching) then costs every scroll probe in the session and
 		// leaves the engine's authority untracked until the next motion. Only
 		// the acting half below is gated.
-		locked, available := observeEngineLock()
-		if pointerCaptureReleased.Load() || !available {
+		obs := observeEngineLock()
+		if pointerCaptureReleased.Load() || !obs.available {
 			break
 		}
-		if locked {
+		switch {
+		case obs.wantsCenter():
 			if pointerLockSticky.Load() {
 				break
 			}
@@ -1764,13 +2250,38 @@ func handleX11InputEvent(ev x11.InputEvent) {
 			_, _ = pointerLockSetter(true)
 			pointerCursorSetter(false)
 			noteEngineStickyEngaged("wheel detent", true)
-		} else if pointerLockSticky.Load() {
-			pointerLockSticky.Store(false)
+		case obs.wantsAnchor():
+			// Treat the engine as locked, but anchored: the detent is already
+			// delivered at wx,wy, which is the logical cursor the engine
+			// froze, so no move and no centering is needed here at all.
+			if engineAnchorActive() {
+				if ev.ScrollY < 0 {
+					// A zoom-out detent is the first-person exit gesture, but
+					// the engine's value lags it, so this probe can still read
+					// LockCurrentPosition and the real release lands on the
+					// next motion sample. Mark it so that deferred release
+					// centers exactly like the synchronous one below.
+					markEngineAnchorReleaseAtCenter()
+				}
+				break
+			}
+			if persistentPointerCapture.Swap(false) {
+				// The engine owns the lock from here; the wheel guess is
+				// retired.
+				resetZoomLock()
+			}
 			rmbPointerFallback.Store(false)
-			persistentPointerCapture.Store(false)
-			ClearRobloxDirectPointerFallback()
-			_, _ = pointerLockSetter(false)
-			logging.Logger(logging.CatJNI).Info("[jni] pointer lock released after scroll")
+			engageEngineAnchorLock("wheel detent", wx, wy, true)
+		case engineAnchorActive():
+			// The engine left LockCurrentPosition for Default: its cursor
+			// reappears at the center, so both cursors go back there together
+			// on the detent itself.
+			releaseEngineLockAtCenter("wheel detent")
+		case pointerLockSticky.Load():
+			// LockCenter back to Default. The engine cursor reappears at the
+			// center, so both cursors go back there together rather than the
+			// host pointer springing back to wherever the grab was taken.
+			releaseEngineLockAtCenter("wheel detent")
 		}
 	}
 }

@@ -39,7 +39,82 @@ func wireRecordingDirectTarget(t *testing.T, env, class uintptr) {
 	if !SetRobloxDirectInputTarget(env, class, testDirectRecordButtonFn(), testDirectRecordMoveFn(), testDirectRecordWheelFn(), testDirectRecordMouseLockedFn()) {
 		t.Fatal("recording direct target did not wire")
 	}
+	// The read-only enum authority decodes the *engine's* exported getter
+	// bytes. The recording target is a C function inside this test binary,
+	// so a real decode is meaningless (and would log a decode failure on
+	// every wire). Substitute an unavailable probe here; a test that wants
+	// the authority installs its own after this call, because the last
+	// installation wins.
+	stubEngineMouseBehaviorUnavailable(t)
 	t.Cleanup(ClearRobloxDirectInputTarget)
+}
+
+// installEngineMouseBehaviorProbe substitutes the enum authority for one test.
+// It is the documented test seam: production always calls EngineMouseBehavior
+// and never replaces the probe. Installing also drops the authority's latches
+// so one test's decode or disable cannot leak into the next.
+func installEngineMouseBehaviorProbe(t *testing.T, fn func() (MouseBehavior, bool)) {
+	t.Helper()
+	old := engineMouseBehaviorProbe
+	engineMouseBehaviorProbe = fn
+	resetEngineMouseBehavior()
+	t.Cleanup(func() {
+		engineMouseBehaviorProbe = old
+		resetEngineMouseBehavior()
+	})
+}
+
+// stubEngineMouseBehaviorUnavailable makes the read-only enum authority
+// answer "unavailable" for one test, which is the byte-identical behaviour
+// of every path that only ever had the exported boolean.
+func stubEngineMouseBehaviorUnavailable(t *testing.T) {
+	t.Helper()
+	installEngineMouseBehaviorProbe(t, func() (MouseBehavior, bool) {
+		return MouseBehaviorDefault, false
+	})
+}
+
+// mouseBehaviorUnavailable is a scripted step that answers "unavailable",
+// which is what the authority does before the engine's object pointer exists,
+// after a decode failure, or once the validator has disabled it.
+const mouseBehaviorUnavailable MouseBehavior = 0xff
+
+// scriptedEngineMouseBehavior answers a fixed sequence of reads and repeats
+// the last step forever, which is how an engine transition is driven without a
+// live client. Advance it with next().
+type scriptedEngineMouseBehavior struct {
+	values []MouseBehavior
+	at     int
+}
+
+func (s *scriptedEngineMouseBehavior) read() (MouseBehavior, bool) {
+	if len(s.values) == 0 {
+		return MouseBehaviorDefault, false
+	}
+	if s.at >= len(s.values) {
+		s.at = len(s.values) - 1
+	}
+	value := s.values[s.at]
+	if value > MouseBehaviorLockCurrentPosition {
+		return MouseBehaviorDefault, false
+	}
+	// Emulate the latch EngineMouseBehavior sets on a valid read, so the
+	// retirement gate under test sees an authority that answered for real.
+	mouseBehaviorAuthority.seen.Store(true)
+	return value, true
+}
+
+// next advances the scripted read to the following value.
+func (s *scriptedEngineMouseBehavior) next() { s.at++ }
+
+// stubEngineMouseBehavior installs a scripted enum authority and returns the
+// script. Install it after wireRecordingDirectTarget so it is the last
+// installation to win.
+func stubEngineMouseBehavior(t *testing.T, values ...MouseBehavior) *scriptedEngineMouseBehavior {
+	t.Helper()
+	script := &scriptedEngineMouseBehavior{values: values}
+	installEngineMouseBehaviorProbe(t, script.read)
+	return script
 }
 
 func wireRecordingDirectKeyTarget(t *testing.T, env, class uintptr) {
@@ -1599,14 +1674,24 @@ func TestWheelSequencePreservesFallbackThenConvertsAndReappliesCursorPolicy(t *t
 			t.Fatalf("cursor calls=%v, want always hidden (no release in this sequence)", calls.visible)
 		}
 	}
-	// Zoom back out: getter-false from centered releases on the detent.
+	// Zoom back out: getter-false from centered releases on the detent. The
+	// release now re-centres *both* cursors together, so it goes through the
+	// same X11 re-anchor the zoom-lock unlock uses rather than the plain
+	// centered ungrab, and it re-seeds the logical pair to the centre where
+	// the engine cursor reappears.
 	testDirectRecSetMouseLocked(false)
 	handleX11InputEvent(x11.InputEvent{Kind: x11.InputScroll, X: 640, Y: 360, ScrollY: 1})
 	if pointerLockSticky.Load() {
 		t.Fatal("zoom-out scroll did not release centered sticky")
 	}
-	if len(calls.center) != 2 || calls.center[1] {
-		t.Fatalf("release center calls=%v, want [true false]", calls.center)
+	if len(calls.center) != 1 || !calls.center[0] {
+		t.Fatalf("conversion center calls=%v, want [true]", calls.center)
+	}
+	if len(calls.zoom) != 2 || !calls.zoom[0] || calls.zoom[1] {
+		t.Fatalf("release re-anchor calls=%v, want SetPointerLockAtCenter(true) then (false)", calls.zoom)
+	}
+	if lx, ly, ok := robloxDirectLastPosition(); !ok || lx != 640 || ly != 360 {
+		t.Fatalf("last origin after release=(%v,%v,%v), want center (640,360,true)", lx, ly, ok)
 	}
 	for _, v := range calls.visible {
 		if v {
@@ -2438,5 +2523,816 @@ func TestZoomLockClearsWhenCaptureDrops(t *testing.T) {
 	}
 	if zoomLockArmed() {
 		t.Fatal("centered sticky conversion left the zoom lock armed")
+	}
+}
+
+// --- Engine MouseBehavior authority wired into the lock decision ---
+//
+// Project 12 [BODY CAM!] holds Enum.MouseBehavior == LockCurrentPosition (2)
+// for the whole time it is in first person while the exported boolean reports
+// false on every probe. The tests below pin what the authority now does with
+// that value, and that the LockCenter path and the wheel fallback are
+// unchanged. Every one of them installs its authority *after*
+// wireRecordingDirectTarget, so the probe it installs is the last to win.
+
+// TestEngineLockCurrentPositionEngagesAnAnchoredGrabAndMovesNoCursor is the
+// reported bug: getter-false, engine locked. The engine froze its cursor where
+// it already was, so the host grab is anchored at that point and nothing is
+// center-converted -- warping here would desync the engine's frozen origin
+// from the host pointer.
+func TestEngineLockCurrentPositionEngagesAnAnchoredGrabAndMovesNoCursor(t *testing.T) {
+	selectPointerPath(t, "direct")
+	wireRecordingDirectTarget(t, 0x1234, 0x5678)
+	calls := stubCaptureSeams(t)
+	vm := newCaptureVM(t)
+	enterExperienceForTest(t, vm, 79966250354565)
+	script := stubEngineMouseBehavior(t, MouseBehaviorDefault, MouseBehaviorLockCurrentPosition)
+	testDirectRecSetMouseLocked(false)
+	fakeZoomClock(t)
+
+	// Third person: the engine answers Default, the boolean agrees, and the
+	// pointer is free under the default zoom policy.
+	moveAbsolute(900, 220)
+	if engineAnchorActive() || calls.grabs() != 0 || persistentPointerCapture.Load() {
+		t.Fatalf("Default engaged a grab: anchor=%t calls=%+v", engineAnchorActive(), calls)
+	}
+	if x, y := testDirectRecMoveFloat(0), testDirectRecMoveFloat(1); x != 900 || y != 220 {
+		t.Fatalf("free motion=(%v,%v), want absolute (900,220)", x, y)
+	}
+
+	// First person. The exported getter still says false -- that is exactly
+	// the measured blindness -- and the enum says 2.
+	script.next()
+	if locked, _ := RobloxMainWindowMouseLocked(); locked {
+		t.Fatal("setup: the exported getter must stay false for LockCurrentPosition")
+	}
+	movesBefore := RobloxDirectInputStats().MoveDelivered
+	lookRelative(5, 3)
+
+	if !engineAnchorActive() {
+		t.Fatal("LockCurrentPosition did not take the engine's anchored grab")
+	}
+	if pointerLockSticky.Load() || persistentPointerCapture.Load() || rmbPointerFallback.Load() {
+		t.Fatalf("anchor engaged alongside another mode: sticky=%t persistent=%t rmb=%t",
+			pointerLockSticky.Load(), persistentPointerCapture.Load(), rmbPointerFallback.Load())
+	}
+	if len(calls.cursor) != 1 || !calls.cursor[0] {
+		t.Fatalf("anchored acquire calls=%+v, want exactly one SetPointerLockAtCursor(true)", calls)
+	}
+	if len(calls.center) != 0 || len(calls.zoom) != 0 {
+		t.Fatalf("engaged with a centering grab: %+v", calls)
+	}
+	if fx, fy, ok := RobloxDirectFallbackPosition(); !ok || fx != 905 || fy != 223 {
+		t.Fatalf("integrator=(%v,%v,%v), want the frozen origin advanced by the sample (905,223)", fx, fy, ok)
+	}
+	if x, y, dx, dy := testDirectRecMoveFloat(0), testDirectRecMoveFloat(1), testDirectRecMoveFloat(2), testDirectRecMoveFloat(3); x != 905 || y != 223 || dx != 5 || dy != 3 {
+		t.Fatalf("captured motion=(%v,%v,%v,%v), want (905,223,5,3)", x, y, dx, dy)
+	}
+	if got := RobloxDirectInputStats().MoveDelivered - movesBefore; got != 1 {
+		t.Fatalf("engaged with %d moves, want 1 (the sample itself, no synthetic announce)", got)
+	}
+	if n := len(calls.visible); n == 0 || calls.visible[n-1] {
+		t.Fatalf("cursor calls=%v, want hidden last", calls.visible)
+	}
+	if zoomLockArmed() {
+		t.Fatal("the wheel heuristic armed while the engine was answering")
+	}
+
+	// Sustained first-person look: unbounded travel, no further grabs, and
+	// the heuristic never disarms what the engine owns.
+	lookRelative(500, 0)
+	if !engineAnchorActive() || calls.grabs() != 1 {
+		t.Fatalf("sustained look: anchor=%t calls=%+v", engineAnchorActive(), calls)
+	}
+	if fx, fy, _ := RobloxDirectFallbackPosition(); fx != 1405 || fy != 223 {
+		t.Fatalf("integrator=(%v,%v), want unbounded (1405,223)", fx, fy)
+	}
+	if zoomLockArmed() {
+		t.Fatal("motion disarmed the engine's anchored lock")
+	}
+}
+
+// TestEngineLockCurrentPositionReleaseReCentersBothCursors pins the other half:
+// leaving LockCurrentPosition for Default releases the grab and re-centres the
+// logical pair and the host pointer together, so the first absolute sample is
+// continuous with the engine cursor that reappeared at the center.
+func TestEngineLockCurrentPositionReleaseRestoresFrozenOrigin(t *testing.T) {
+	selectPointerPath(t, "direct")
+	wireRecordingDirectTarget(t, 0x1234, 0x5678)
+	calls := stubCaptureSeams(t)
+	vm := newCaptureVM(t)
+	enterExperienceForTest(t, vm, 79966250354565)
+	script := stubEngineMouseBehavior(t,
+		MouseBehaviorDefault, MouseBehaviorLockCurrentPosition, MouseBehaviorDefault)
+	testDirectRecSetMouseLocked(false)
+	fakeZoomClock(t)
+
+	moveAbsolute(900, 220)
+	script.next()
+	lookRelative(5, 3)
+	if !engineAnchorActive() {
+		t.Fatal("setup: LockCurrentPosition did not engage")
+	}
+	if x, y, ok := engineAnchorFrozenOrigin(); !ok || x != 900 || y != 220 {
+		t.Fatalf("setup: frozen origin=(%v,%v,%v), want (900,220,true)", x, y, ok)
+	}
+	lookRelative(400, 100) // camera look; the logical pair drifts to (1305,323)
+
+	// Back to Default with no zoom-out anywhere in the gesture. This is the
+	// deferred release of an RMB-style camera look, so the engine's cursor
+	// reappears at the point it froze -- not in the middle of the window.
+	script.next()
+	movesBefore := RobloxDirectInputStats().MoveDelivered
+	lookRelative(2, -1)
+	if engineAnchorActive() {
+		t.Fatal("Default did not release the engine's anchored grab")
+	}
+	if pointerLockSticky.Load() || persistentPointerCapture.Load() || rmbPointerFallback.Load() {
+		t.Fatalf("release left a mode armed: sticky=%t persistent=%t rmb=%t",
+			pointerLockSticky.Load(), persistentPointerCapture.Load(), rmbPointerFallback.Load())
+	}
+	if len(calls.zoom) != 0 {
+		t.Fatalf("release warped the host pointer to the center (calls=%v); "+
+			"LockCurrentPosition unlocks at the frozen origin", calls.zoom)
+	}
+	if lx, ly, ok := robloxDirectLastPosition(); !ok || lx != 900 || ly != 220 {
+		t.Fatalf("last origin after release=(%v,%v,%v), want the frozen origin (900,220,true)", lx, ly, ok)
+	}
+	if got := RobloxDirectInputStats().MoveDelivered - movesBefore; got != 0 {
+		t.Fatalf("release sample delivered %d moves, want 0 (it is the transition)", got)
+	}
+	// tipsy_pointer_unlock leaves the desktop pointer at the grab anchor and
+	// the logical pair was restored to the same point, so the next free sample
+	// is continuous instead of teleporting to the middle of the window.
+	moveAbsolute(902, 219)
+	if x, y, dx, dy := testDirectRecMoveFloat(0), testDirectRecMoveFloat(1), testDirectRecMoveFloat(2), testDirectRecMoveFloat(3); x != 902 || y != 219 || dx != 2 || dy != -1 {
+		t.Fatalf("post-release motion=(%v,%v,%v,%v), want (902,219,2,-1)", x, y, dx, dy)
+	}
+	if engineAnchorActive() {
+		t.Fatalf("free pointer grabbed again: calls=%+v", calls)
+	}
+}
+
+func TestEngineLockCurrentPositionZoomOutReleaseCentersBothCursors(t *testing.T) {
+	selectPointerPath(t, "direct")
+	wireRecordingDirectTarget(t, 0x1234, 0x5678)
+	calls := stubCaptureSeams(t)
+	vm := newCaptureVM(t)
+	enterExperienceForTest(t, vm, 79966250354565)
+	script := stubEngineMouseBehavior(t,
+		MouseBehaviorDefault, MouseBehaviorLockCurrentPosition, MouseBehaviorDefault)
+	testDirectRecSetMouseLocked(false)
+	fakeZoomClock(t)
+
+	moveAbsolute(900, 220)
+	script.next()
+	lookRelative(5, 3)
+	if !engineAnchorActive() {
+		t.Fatal("setup: LockCurrentPosition did not engage")
+	}
+	lookRelative(400, 100)
+
+	// A zoom-out detent is the first-person exit gesture, and the owner's
+	// contract is that the cursor comes back in the middle when first person
+	// ends. The engine's MouseBehavior lags the input that changes it, so this
+	// probe still reads LockCurrentPosition and the release is deferred to the
+	// next motion sample; the detent marks it as a zoom-out exit so that
+	// deferred release centers instead of restoring the frozen origin.
+	handleX11InputEvent(x11.InputEvent{Kind: x11.InputScroll, X: 100, Y: 200, ScrollY: -1})
+	if !engineAnchorActive() {
+		t.Fatal("a stale-value zoom-out detent released the lock early")
+	}
+
+	script.next()
+	lookRelative(2, -1)
+	if engineAnchorActive() {
+		t.Fatal("Default did not release the engine's anchored grab")
+	}
+	if len(calls.zoom) != 2 || !calls.zoom[0] || calls.zoom[1] {
+		t.Fatalf("zoom-out release re-anchor calls=%v, want SetPointerLockAtCenter(true) then (false)", calls.zoom)
+	}
+	if lx, ly, ok := robloxDirectLastPosition(); !ok || lx != 640 || ly != 360 {
+		t.Fatalf("last origin after zoom-out release=(%v,%v,%v), want center (640,360,true)", lx, ly, ok)
+	}
+}
+
+// TestEngineLockCenterStillCenterConvertsWithTheAuthorityLive pins that the
+// new authority did not disturb the LockCenter path it was derived from: the
+// centered sticky grab, the anchored->centered conversion, and the release.
+func TestEngineLockCenterStillCenterConvertsWithTheAuthorityLive(t *testing.T) {
+	selectPointerPath(t, "direct")
+	selectMouseCapture(t, "always")
+	wireRecordingDirectTarget(t, 0x1234, 0x5678)
+	calls := stubCaptureSeams(t)
+	vm := newCaptureVM(t)
+	enterExperienceForTest(t, vm, 155615604)
+	script := stubEngineMouseBehavior(t, MouseBehaviorDefault, MouseBehaviorLockCenter, MouseBehaviorDefault)
+	testDirectRecSetMouseLocked(false)
+	fakeZoomClock(t)
+
+	// Third person under the always policy: the anchored persistent grab.
+	moveAbsolute(900, 220)
+	if !persistentPointerCapture.Load() || engineAnchorActive() {
+		t.Fatalf("setup: persistent=%t anchor=%t", persistentPointerCapture.Load(), engineAnchorActive())
+	}
+
+	// The engine enters LockCenter; the boolean follows it in the same
+	// instant, which is the agreement the validator requires. The conversion
+	// lands on the absolute transition sample, exactly like the official
+	// capture request, and converts the anchored grab in place.
+	script.next()
+	testDirectRecSetMouseLocked(true)
+	movesBefore := RobloxDirectInputStats().MoveDelivered
+	moveAbsolute(901, 221)
+	if got := RobloxDirectInputStats().MoveDelivered - movesBefore; got != 0 {
+		t.Fatalf("the LockCenter transition sample delivered %d moves, want 0 (consumed)", got)
+	}
+	if !pointerLockSticky.Load() || engineAnchorActive() {
+		t.Fatalf("LockCenter did not take the centered sticky grab: sticky=%t anchor=%t",
+			pointerLockSticky.Load(), engineAnchorActive())
+	}
+	if len(calls.center) != 1 || !calls.center[0] {
+		t.Fatalf("center calls=%+v, want [true]", calls.center)
+	}
+	if len(calls.cursor) != 1 || !calls.cursor[0] || len(calls.zoom) != 0 {
+		t.Fatalf("LockCenter used an unexpected grab: %+v", calls)
+	}
+	lookRelative(5, 3)
+	if x, y, dx, dy := testDirectRecMoveFloat(0), testDirectRecMoveFloat(1), testDirectRecMoveFloat(2), testDirectRecMoveFloat(3); x != 905 || y != 223 || dx != 5 || dy != 3 {
+		t.Fatalf("centered motion=(%v,%v,%v,%v), want (905,223,5,3) from the origin the transition left", x, y, dx, dy)
+	}
+
+	// Leaving LockCenter for Default releases on the detent itself, at the
+	// center, with both cursors together -- the same release the anchored
+	// path uses.
+	script.next()
+	testDirectRecSetMouseLocked(false)
+	zoomDetent(-1)
+	if pointerLockSticky.Load() {
+		t.Fatal("Default did not release the centered sticky grab")
+	}
+	if len(calls.zoom) != 2 || !calls.zoom[0] || calls.zoom[1] {
+		t.Fatalf("release re-anchor calls=%v, want SetPointerLockAtCenter(true) then (false)", calls.zoom)
+	}
+	if lx, ly, ok := robloxDirectLastPosition(); !ok || lx != 640 || ly != 360 {
+		t.Fatalf("last origin after release=(%v,%v,%v), want center (640,360,true)", lx, ly, ok)
+	}
+	if n := len(calls.visible); n == 0 || calls.visible[n-1] {
+		t.Fatalf("cursor visibility after release=%v, want hidden last", calls.visible)
+	}
+}
+
+// TestZoomHeuristicRetiredWhileTheEngineAnswers pins the retirement gate. The
+// heuristic is not deleted: with the authority unavailable the very same
+// detents still arm, which is what every pre-authority test in this file
+// already pins.
+func TestZoomHeuristicRetiredWhileTheEngineAnswers(t *testing.T) {
+	selectPointerPath(t, "direct")
+	wireRecordingDirectTarget(t, 0x1234, 0x5678)
+	calls := stubCaptureSeams(t)
+	vm := newCaptureVM(t)
+	enterExperienceForTest(t, vm, 79966250354565)
+	stubEngineMouseBehavior(t, MouseBehaviorDefault)
+	testDirectRecSetMouseLocked(false)
+	fakeZoomClock(t)
+
+	moveAbsolute(111, 193)
+	// A deliberate spin the engine never asked for: three notches inside the
+	// run window used to arm the lock.
+	for i := 0; i < zoomLockArmDetents+2; i++ {
+		zoomDetent(1)
+	}
+	if zoomLockArmed() {
+		t.Fatal("the wheel heuristic armed while the engine was answering for real")
+	}
+	if calls.grabs() != 0 || persistentPointerCapture.Load() {
+		t.Fatalf("retired heuristic still grabbed: calls=%+v", calls)
+	}
+	if _, _, ok := RobloxDirectFallbackPosition(); ok {
+		t.Fatal("a retired heuristic left a captured integrator behind")
+	}
+	if x, y := testDirectRecWheelFloat(0), testDirectRecWheelFloat(1); x != 100 || y != 200 {
+		t.Fatalf("wheel=(%v,%v), want the pointer the detent carried (100,200)", x, y)
+	}
+
+	// The fallback is intact: with the authority unavailable a run of detents
+	// arms exactly as before.
+	stubEngineMouseBehaviorUnavailable(t)
+	for i := 0; i < zoomLockArmDetents; i++ {
+		zoomDetent(1)
+	}
+	if !zoomLockArmed() {
+		t.Fatal("the heuristic did not come back when the authority stopped answering")
+	}
+	if len(calls.cursor) != 1 || !calls.cursor[0] {
+		t.Fatalf("fallback arming calls=%+v, want one SetPointerLockAtCursor(true)", calls)
+	}
+}
+
+// TestEngineAnchorLockSurvivesAltToggleAndFocusFlap pins that the operator's
+// LeftAlt and a focus flap suppress the *grab* without losing the engine's own
+// state, and that both re-acquire the anchored grab from the remembered frozen
+// origin instead of waiting for a motion sample.
+func TestEngineAnchorLockSurvivesAltToggleAndFocusFlap(t *testing.T) {
+	selectPointerPath(t, "direct")
+	wireRecordingDirectTarget(t, 0x1234, 0x5678)
+	calls := stubCaptureSeams(t)
+	vm := newCaptureVM(t)
+	enterExperienceForTest(t, vm, 79966250354565)
+	stubEngineMouseBehavior(t, MouseBehaviorLockCurrentPosition)
+	testDirectRecSetMouseLocked(false)
+	fakeZoomClock(t)
+
+	moveAbsolute(900, 220)
+	lookRelative(5, 3)
+	if !engineAnchorActive() || len(calls.cursor) != 1 {
+		t.Fatalf("setup: anchor=%t calls=%+v", engineAnchorActive(), calls)
+	}
+
+	// LeftAlt release: the grab goes, the engine state does not.
+	handleX11InputEvent(x11.InputEvent{Kind: x11.InputKey, KeyPressed: true, KeyCode: leftAltKeyCode, ScanCode: 64})
+	if !pointerCaptureReleased.Load() {
+		t.Fatal("Alt toggle did not release capture")
+	}
+	if !engineAnchorActive() {
+		t.Fatal("the Alt toggle dropped the engine's own LockCurrentPosition state")
+	}
+	if len(calls.center) != 1 || calls.center[0] {
+		t.Fatalf("Alt release center calls=%+v, want one ungrab", calls.center)
+	}
+	if len(calls.zoom) != 0 {
+		t.Fatalf("Alt release re-anchored at the center: %+v", calls.zoom)
+	}
+	// Released capture takes no grab and delivers absolutely.
+	grabsBefore := calls.grabs()
+	moveAbsolute(950, 240)
+	if calls.grabs() != grabsBefore {
+		t.Fatalf("released capture grabbed: %+v", calls)
+	}
+	if x, y := testDirectRecMoveFloat(0), testDirectRecMoveFloat(1); x != 950 || y != 240 {
+		t.Fatalf("released motion=(%v,%v), want absolute (950,240)", x, y)
+	}
+
+	// Alt re-arm: the engine is still authoritative, so the anchored grab is
+	// re-established on the toggle itself rather than on the next motion.
+	handleX11InputEvent(x11.InputEvent{Kind: x11.InputKey, KeyPressed: true, KeyCode: leftAltKeyCode, ScanCode: 64})
+	if pointerCaptureReleased.Load() {
+		t.Fatal("Alt re-arm did not re-arm capture")
+	}
+	if !engineAnchorActive() {
+		t.Fatal("Alt re-arm lost the engine's anchored lock")
+	}
+	if n := len(calls.cursor); n != 2 || !calls.cursor[n-1] {
+		t.Fatalf("re-arm cursor calls=%+v, want one more SetPointerLockAtCursor(true)", calls.cursor)
+	}
+	if n := len(calls.visible); n == 0 || calls.visible[n-1] {
+		t.Fatalf("re-arm cursor visibility=%v, want hidden last", calls.visible)
+	}
+
+	// Close the re-arm gesture, so the focus flap below is an ordinary focus
+	// change rather than Alt-Tab chord evidence.
+	handleX11InputEvent(x11.InputEvent{Kind: x11.InputKey, KeyPressed: false, KeyCode: leftAltKeyCode, ScanCode: 64})
+	if altToggleConsumed.Load() {
+		t.Fatal("the Alt release did not close the re-arm gesture")
+	}
+
+	// Focus flap: X11 drops the grab, the engine state survives it, and focus
+	// gain re-acquires the anchored grab from the remembered origin.
+	handleX11InputEvent(x11.InputEvent{Kind: x11.InputFocus, FocusGained: false})
+	if !engineAnchorActive() {
+		t.Fatal("focus loss dropped the engine's LockCurrentPosition state")
+	}
+	handleX11InputEvent(x11.InputEvent{Kind: x11.InputFocus, FocusGained: true})
+	if !engineAnchorActive() {
+		t.Fatal("focus gain did not keep the engine's anchored lock")
+	}
+	if n := len(calls.cursor); n != 3 || !calls.cursor[n-1] {
+		t.Fatalf("focus-gain cursor calls=%+v, want one more SetPointerLockAtCursor(true)", calls.cursor)
+	}
+	// The re-acquired stream continues from the frozen origin, so look keeps
+	// working without a teleport.
+	lookRelative(-4, 6)
+	if x, y, dx, dy := testDirectRecMoveFloat(0), testDirectRecMoveFloat(1), testDirectRecMoveFloat(2), testDirectRecMoveFloat(3); x != 946 || y != 246 || dx != -4 || dy != 6 {
+		t.Fatalf("post-focus motion=(%v,%v,%v,%v), want (946,246,-4,6) from the remembered origin", x, y, dx, dy)
+	}
+}
+
+// TestEngineAnchorLockConvertsAnExistingHeuristicGrabInPlace pins the handoff:
+// a wheel-armed grab that the engine then confirms is not re-guessed, it is
+// simply taken over, so no cursor moves at the moment the engine answers.
+func TestEngineAnchorLockConvertsAnExistingHeuristicGrabInPlace(t *testing.T) {
+	selectPointerPath(t, "direct")
+	wireRecordingDirectTarget(t, 0x1234, 0x5678)
+	calls := stubCaptureSeams(t)
+	vm := newCaptureVM(t)
+	enterExperienceForTest(t, vm, 79966250354565)
+	script := stubEngineMouseBehavior(t, mouseBehaviorUnavailable, MouseBehaviorLockCurrentPosition)
+	testDirectRecSetMouseLocked(false)
+	fakeZoomClock(t)
+
+	// The heuristic arms first, exactly as it did before the authority
+	// existed, because the engine has not answered yet: the object pointer is
+	// still NULL this early in a session.
+	moveAbsolute(900, 220)
+	for i := 0; i < zoomLockArmDetents; i++ {
+		zoomDetent(1)
+	}
+	if !zoomLockArmed() || !persistentPointerCapture.Load() || len(calls.cursor) != 1 {
+		t.Fatalf("arming state: armed=%t persistent=%t calls=%+v",
+			zoomLockArmed(), persistentPointerCapture.Load(), calls)
+	}
+	if engineBehaviorAuthoritative() {
+		t.Fatal("an authority that never answered reported itself authoritative")
+	}
+
+	// The engine then answers 2. The grab it wants is the grab already held,
+	// so nothing is re-taken and nothing moves.
+	script.next()
+	movesBefore := RobloxDirectInputStats().MoveDelivered
+	lookRelative(7, -2)
+	if !engineAnchorActive() {
+		t.Fatal("the engine did not take over the armed grab")
+	}
+	if persistentPointerCapture.Load() || zoomLockArmed() {
+		t.Fatalf("takeover left the heuristic state behind: persistent=%t armed=%t",
+			persistentPointerCapture.Load(), zoomLockArmed())
+	}
+	// The takeover re-asserts the grab it already holds (the X11 layer reports
+	// "unchanged" and logs nothing); what matters is that it never took a
+	// centered or re-anchoring one.
+	if len(calls.center) != 0 || len(calls.zoom) != 0 {
+		t.Fatalf("takeover used a centering grab: %+v", calls)
+	}
+	if n := len(calls.cursor); n != 2 || !calls.cursor[n-1] {
+		t.Fatalf("takeover cursor calls=%+v, want the armed grab re-asserted", calls.cursor)
+	}
+	if got := RobloxDirectInputStats().MoveDelivered - movesBefore; got != 1 {
+		t.Fatalf("takeover delivered %d moves, want 1 (the sample itself)", got)
+	}
+	if x, y, dx, dy := testDirectRecMoveFloat(0), testDirectRecMoveFloat(1), testDirectRecMoveFloat(2), testDirectRecMoveFloat(3); x != 107 || y != 198 || dx != 7 || dy != -2 {
+		t.Fatalf("takeover motion=(%v,%v,%v,%v), want (107,198,7,-2) from the armed origin", x, y, dx, dy)
+	}
+}
+
+// TestEngineBehaviorTransitionIsLoggedOnce pins the observability contract: a
+// value that never changes is logged once, and every change is logged again.
+// It is the same shape as the engineLock pins, applied to the enum.
+func TestEngineBehaviorTransitionIsLoggedOnce(t *testing.T) {
+	selectPointerPath(t, "direct")
+	wireRecordingDirectTarget(t, 0x1234, 0x5678)
+	stubCaptureSeams(t)
+	vm := newCaptureVM(t)
+	enterExperienceForTest(t, vm, 79966250354565)
+	script := stubEngineMouseBehavior(t,
+		MouseBehaviorDefault, MouseBehaviorLockCurrentPosition,
+		MouseBehaviorLockCurrentPosition, MouseBehaviorDefault)
+	testDirectRecSetMouseLocked(false)
+	fakeZoomClock(t)
+
+	moveAbsolute(100, 100)
+	if !engineBehavior.known.Load() || engineBehavior.value.Load() != uint32(MouseBehaviorDefault) {
+		t.Fatalf("tracked behavior=(%d, known=%t), want (0, true)",
+			engineBehavior.value.Load(), engineBehavior.known.Load())
+	}
+	// An unchanged value is not a new transition, so the tracked state stays
+	// put and no second announce is possible.
+	script.next()
+	moveAbsolute(101, 101)
+	if got := engineBehavior.value.Load(); got != uint32(MouseBehaviorLockCurrentPosition) {
+		t.Fatalf("tracked behavior=%d, want %d", got, uint32(MouseBehaviorLockCurrentPosition))
+	}
+	if !engineAnchorActive() {
+		t.Fatal("LockCurrentPosition did not engage on the observing sample")
+	}
+	// The same value again is not a new transition and changes nothing.
+	script.next()
+	lookRelative(1, 1)
+	if !engineAnchorActive() {
+		t.Fatal("an unchanged LockCurrentPosition released the anchored grab")
+	}
+	// Back to Default releases and forgets the value.
+	script.next()
+	lookRelative(2, 2)
+	if engineAnchorActive() {
+		t.Fatal("Default did not release the anchored grab")
+	}
+	if got := engineBehavior.value.Load(); got != uint32(MouseBehaviorDefault) {
+		t.Fatalf("tracked behavior=%d after release, want %d", got, uint32(MouseBehaviorDefault))
+	}
+}
+
+// TestEngineAuthorityGoneFallsBackToTheBoolean pins the honest failure: with
+// the enum authority unavailable mid-session the decision is handed back to
+// the exported boolean and the paths behave exactly as they did before.
+func TestEngineAuthorityGoneFallsBackToTheBoolean(t *testing.T) {
+	selectPointerPath(t, "direct")
+	wireRecordingDirectTarget(t, 0x1234, 0x5678)
+	calls := stubCaptureSeams(t)
+	vm := newCaptureVM(t)
+	enterExperienceForTest(t, vm, 155615604)
+	stubEngineMouseBehavior(t, MouseBehaviorDefault)
+	testDirectRecSetMouseLocked(false)
+	fakeZoomClock(t)
+
+	moveAbsolute(900, 220)
+	// The authority stops answering (a decode failure, a NULL object, or three
+	// disagreements with the exported boolean) while the engine is in
+	// LockCenter. The boolean alone must still take the centered grab.
+	installEngineMouseBehaviorProbe(t, func() (MouseBehavior, bool) {
+		return MouseBehaviorDefault, false
+	})
+	testDirectRecSetMouseLocked(true)
+	moveAbsolute(901, 221)
+	if !pointerLockSticky.Load() {
+		t.Fatal("the exported boolean alone did not take the centered sticky grab")
+	}
+	if len(calls.center) != 1 || !calls.center[0] {
+		t.Fatalf("center calls=%+v, want [true]", calls.center)
+	}
+	if engineAnchorActive() {
+		t.Fatal("an unavailable authority left the anchored grab engaged")
+	}
+}
+
+// TestEngineAnchorLockKeepsTheSecondaryPressAnchor pins the button edges under
+// LockCurrentPosition: the engine already froze the cursor, so no held-RMB
+// host fallback is guessed on top of the fact, and the remembered press anchor
+// survives as the frozen origin.
+func TestEngineAnchorLockKeepsTheSecondaryPressAnchor(t *testing.T) {
+	selectPointerPath(t, "direct")
+	selectMouseCapture(t, "always")
+	wireRecordingDirectTarget(t, 0x1234, 0x5678)
+	calls := stubCaptureSeams(t)
+	vm := newCaptureVM(t)
+	enterExperienceForTest(t, vm, 79966250354565)
+	stubEngineMouseBehavior(t, MouseBehaviorLockCurrentPosition)
+	testDirectRecSetMouseLocked(false)
+	fakeZoomClock(t)
+
+	// The engine freezes the cursor where it is; the anchored grab is taken
+	// on the absolute transition sample.
+	moveAbsolute(400, 300)
+	if !engineAnchorActive() || persistentPointerCapture.Load() {
+		t.Fatalf("setup: anchor=%t persistent=%t", engineAnchorActive(), persistentPointerCapture.Load())
+	}
+	lookRelative(11, -7)
+	grabsBefore := calls.grabs()
+
+	// RMB down under the engine's lock pins the logical cursor on-view and
+	// anchors it, exactly as the persistent stream does, and takes no second
+	// grab and no held-RMB fallback.
+	handleX11InputEvent(x11.InputEvent{Kind: x11.InputPointer, PointerAction: x11.PointerDown, Button: 3, X: 400, Y: 300})
+	if x, y := testDirectRecButtonFloat(0), testDirectRecButtonFloat(1); x != 411 || y != 293 {
+		t.Fatalf("captured RMB down=(%v,%v), want the logical cursor (411,293)", x, y)
+	}
+	if calls.grabs() != grabsBefore || rmbPointerFallback.Load() {
+		t.Fatalf("RMB down took another grab: calls=%+v rmb=%t", calls, rmbPointerFallback.Load())
+	}
+	if !engineAnchorActive() {
+		t.Fatal("RMB down dropped the engine's anchored lock")
+	}
+	// The drag integrates from the press anchor with exact deltas.
+	handleX11InputEvent(x11.InputEvent{Kind: x11.InputPointer, PointerAction: x11.PointerMove, Relative: true, X: 400, Y: 300, DeltaX: -5, DeltaY: 4})
+	if x, y, dx, dy := testDirectRecMoveFloat(0), testDirectRecMoveFloat(1), testDirectRecMoveFloat(2), testDirectRecMoveFloat(3); x != 406 || y != 297 || dx != -5 || dy != 4 {
+		t.Fatalf("held RMB motion=(%v,%v,%v,%v), want (406,297,-5,4)", x, y, dx, dy)
+	}
+	// The release lands back at the press anchor, and the engine still owns
+	// the stream afterwards.
+	handleX11InputEvent(x11.InputEvent{Kind: x11.InputPointer, PointerAction: x11.PointerUp, Button: 3, X: 400, Y: 300})
+	if x, y := testDirectRecButtonFloat(0), testDirectRecButtonFloat(1); x != 411 || y != 293 {
+		t.Fatalf("captured RMB up=(%v,%v), want the press anchor (411,293)", x, y)
+	}
+	if !engineAnchorActive() || calls.grabs() != grabsBefore {
+		t.Fatalf("RMB up: anchor=%t calls=%+v", engineAnchorActive(), calls)
+	}
+}
+
+// TestThirdPersonRMBCameraLookRestoresBothCursorsAtTheClick pins the owner's
+// test28 regression and the long-standing held-RMB contract (status §217/§245)
+// under the engine authority: an experience that ties MouseBehavior =
+// LockCurrentPosition to the held right button locks the look, and releasing
+// RMB must bring both cursors back to the click -- not warp them to the
+// viewport center, and not defer the release to the next motion sample.
+func TestThirdPersonRMBCameraLookRestoresBothCursorsAtTheClick(t *testing.T) {
+	selectPointerPath(t, "direct")
+	// The production default capture policy: nothing is confined in third
+	// person, which is the state the owner's report came from.
+	selectMouseCapture(t, "")
+	wireRecordingDirectTarget(t, 0x1234, 0x5678)
+	calls := stubCaptureSeams(t)
+	vm := newCaptureVM(t)
+	enterExperienceForTest(t, vm, 79966250354565)
+	// Default in third person, LockCurrentPosition for the held gesture,
+	// Default again on the release. The exported getter is false for all of
+	// it -- that is exactly the measured blindness.
+	script := stubEngineMouseBehavior(t,
+		MouseBehaviorDefault, MouseBehaviorLockCurrentPosition, MouseBehaviorDefault)
+	testDirectRecSetMouseLocked(false)
+	fakeZoomClock(t)
+
+	// Third person: the engine answers Default and the pointer is free.
+	moveAbsolute(900, 220)
+	if engineAnchorActive() || calls.grabs() != 0 {
+		t.Fatalf("third person engaged a grab: anchor=%t calls=%+v", engineAnchorActive(), calls)
+	}
+
+	// The press. The engine has entered LockCurrentPosition by the time Tipsy
+	// probes after delivering the edge, so the authority takes the anchored
+	// grab at the click: no warp, no center.
+	script.next()
+	handleX11InputEvent(x11.InputEvent{Kind: x11.InputPointer, PointerAction: x11.PointerDown, Button: 3, X: 900, Y: 220})
+	if !engineAnchorActive() {
+		t.Fatal("the press did not engage the engine's anchored grab")
+	}
+	if len(calls.cursor) != 1 || !calls.cursor[0] || len(calls.center) != 0 || len(calls.zoom) != 0 {
+		t.Fatalf("press grab calls=%+v, want exactly one anchored acquire at the click", calls)
+	}
+	if rmbPointerFallback.Load() || persistentPointerCapture.Load() {
+		t.Fatalf("press left a fallback or persistent stream: rmb=%t persistent=%t",
+			rmbPointerFallback.Load(), persistentPointerCapture.Load())
+	}
+	if x, y := testDirectRecButtonFloat(0), testDirectRecButtonFloat(1); x != 900 || y != 220 {
+		t.Fatalf("RMB down=(%v,%v), want the click (900,220)", x, y)
+	}
+	if fx, fy, ok := RobloxDirectFallbackPosition(); !ok || fx != 900 || fy != 220 {
+		t.Fatalf("press integrator=(%v,%v,%v), want the click (900,220)", fx, fy, ok)
+	}
+
+	// The drag integrates from the click with exact deltas; nothing re-grabs.
+	handleX11InputEvent(x11.InputEvent{Kind: x11.InputPointer, PointerAction: x11.PointerMove, Relative: true, X: 900, Y: 220, DeltaX: 40, DeltaY: -25})
+	if x, y, dx, dy := testDirectRecMoveFloat(0), testDirectRecMoveFloat(1), testDirectRecMoveFloat(2), testDirectRecMoveFloat(3); x != 940 || y != 195 || dx != 40 || dy != -25 {
+		t.Fatalf("held RMB motion=(%v,%v,%v,%v), want (940,195,40,-25)", x, y, dx, dy)
+	}
+	if calls.grabs() != 1 {
+		t.Fatalf("drag re-grabbed: %+v", calls)
+	}
+
+	// The release: the engine returns to Default, so the cursors come back to
+	// the click on the button edge itself.
+	script.next()
+	handleX11InputEvent(x11.InputEvent{Kind: x11.InputPointer, PointerAction: x11.PointerUp, Button: 3, X: 900, Y: 220})
+	if engineAnchorActive() {
+		t.Fatal("the 2->0 transition did not release on the secondary-up edge")
+	}
+	if pointerLockSticky.Load() || rmbPointerFallback.Load() || persistentPointerCapture.Load() {
+		t.Fatalf("release left a mode armed: sticky=%t rmb=%t persistent=%t",
+			pointerLockSticky.Load(), rmbPointerFallback.Load(), persistentPointerCapture.Load())
+	}
+	if len(calls.zoom) != 0 {
+		t.Fatalf("release re-anchored at the center: %+v", calls.zoom)
+	}
+	if n := len(calls.cursor); n != 2 || calls.cursor[n-1] {
+		t.Fatalf("release cursor calls=%+v, want the anchored ungrab (false) on the edge", calls.cursor)
+	}
+	if x, y := testDirectRecButtonFloat(0), testDirectRecButtonFloat(1); x != 900 || y != 220 {
+		t.Fatalf("RMB up=(%v,%v), want the click (900,220)", x, y)
+	}
+	if lx, ly, ok := robloxDirectLastPosition(); !ok || lx != 900 || ly != 220 {
+		t.Fatalf("logical pair after release=(%v,%v,%v), want the click (900,220)", lx, ly, ok)
+	}
+	// The next free absolute sample is continuous with the click: no teleport,
+	// and the free pointer is not re-confined by the retired heuristic.
+	handleX11InputEvent(x11.InputEvent{Kind: x11.InputPointer, PointerAction: x11.PointerMove, X: 905, Y: 217})
+	if x, y, dx, dy := testDirectRecMoveFloat(0), testDirectRecMoveFloat(1), testDirectRecMoveFloat(2), testDirectRecMoveFloat(3); x != 905 || y != 217 || dx != 5 || dy != -3 {
+		t.Fatalf("post-release motion=(%v,%v,%v,%v), want (905,217,5,-3) continuous with the click", x, y, dx, dy)
+	}
+	if calls.grabs() != 2 || zoomLockArmed() {
+		t.Fatalf("post-release grabs=%+v armed=%t, want none", calls, zoomLockArmed())
+	}
+}
+
+// TestEngineAnchorLockReleasesOnTheSecondaryUpEdgeUnderPersistentCapture pins
+// the second half of the same defect: while the desktop persistent stream holds
+// the grab, the 2->0 transition used to match no case in the secondary-up
+// switch, so the grab stayed held and the center release was deferred to the
+// next motion sample. It now releases on the button edge, at the frozen origin.
+func TestEngineAnchorLockReleasesOnTheSecondaryUpEdgeUnderPersistentCapture(t *testing.T) {
+	selectPointerPath(t, "direct")
+	selectMouseCapture(t, "always")
+	wireRecordingDirectTarget(t, 0x1234, 0x5678)
+	calls := stubCaptureSeams(t)
+	vm := newCaptureVM(t)
+	enterExperienceForTest(t, vm, 79966250354565)
+	// The engine has not answered yet, so the desktop policy takes the
+	// persistent grab; the engine then enters LockCurrentPosition and takes
+	// that same grab over in place; it drops the lock on the release itself.
+	script := stubEngineMouseBehavior(t,
+		mouseBehaviorUnavailable, MouseBehaviorLockCurrentPosition, MouseBehaviorDefault)
+	testDirectRecSetMouseLocked(false)
+	fakeZoomClock(t)
+
+	handleX11InputEvent(x11.InputEvent{Kind: x11.InputPointer, PointerAction: x11.PointerMove, X: 400, Y: 300})
+	if !persistentPointerCapture.Load() || len(calls.cursor) != 1 || !calls.cursor[0] {
+		t.Fatalf("setup: persistent=%t calls=%+v", persistentPointerCapture.Load(), calls)
+	}
+	script.next()
+	lookRelative(11, -7)
+	if !engineAnchorActive() || persistentPointerCapture.Load() {
+		t.Fatalf("takeover: anchor=%t persistent=%t", engineAnchorActive(), persistentPointerCapture.Load())
+	}
+	grabsBefore := calls.grabs()
+	zoomBefore := len(calls.zoom)
+
+	// The press is an ordinary captured button edge: no second grab, and the
+	// drag integrates from the pinned press point.
+	handleX11InputEvent(x11.InputEvent{Kind: x11.InputPointer, PointerAction: x11.PointerDown, Button: 3, X: 400, Y: 300})
+	if x, y := testDirectRecButtonFloat(0), testDirectRecButtonFloat(1); x != 411 || y != 293 {
+		t.Fatalf("captured RMB down=(%v,%v), want the logical cursor (411,293)", x, y)
+	}
+	if calls.grabs() != grabsBefore || !engineAnchorActive() {
+		t.Fatalf("RMB down took another grab: calls=%+v anchor=%t", calls, engineAnchorActive())
+	}
+	handleX11InputEvent(x11.InputEvent{Kind: x11.InputPointer, PointerAction: x11.PointerMove, Relative: true, X: 400, Y: 300, DeltaX: -5, DeltaY: 4})
+	if x, y, dx, dy := testDirectRecMoveFloat(0), testDirectRecMoveFloat(1), testDirectRecMoveFloat(2), testDirectRecMoveFloat(3); x != 406 || y != 297 || dx != -5 || dy != 4 {
+		t.Fatalf("held RMB motion=(%v,%v,%v,%v), want (406,297,-5,4)", x, y, dx, dy)
+	}
+
+	// The engine drops its lock on the release itself. The engine lock ends on
+	// the button edge; the desktop policy still wants the pointer confined, so
+	// its stream is retained rather than freed, and no center re-anchor happens.
+	script.next()
+	handleX11InputEvent(x11.InputEvent{Kind: x11.InputPointer, PointerAction: x11.PointerUp, Button: 3, X: 400, Y: 300})
+	if engineAnchorActive() {
+		t.Fatal("the 2->0 transition did not release on the secondary-up edge")
+	}
+	if len(calls.zoom) != zoomBefore {
+		t.Fatalf("release re-anchored at the center: %+v", calls.zoom)
+	}
+	if calls.grabs() != grabsBefore {
+		t.Fatalf("release changed the host grab: %+v", calls)
+	}
+	if !persistentPointerCapture.Load() {
+		t.Fatal("the always policy lost confinement across an RMB gesture")
+	}
+	// The logical pair is restored at the engage-time frozen origin, not at
+	// the drifted press point and not at the center.
+	if lx, ly, ok := robloxDirectLastPosition(); !ok || lx != 400 || ly != 300 {
+		t.Fatalf("logical pair after release=(%v,%v,%v), want the frozen origin (400,300)", lx, ly, ok)
+	}
+	// Nothing is deferred to the next motion sample: the retained stream
+	// simply keeps integrating from the frozen origin.
+	lookRelative(2, 1)
+	if len(calls.zoom) != zoomBefore || calls.grabs() != grabsBefore {
+		t.Fatalf("post-release motion released at the center: %+v", calls)
+	}
+	if x, y, dx, dy := testDirectRecMoveFloat(0), testDirectRecMoveFloat(1), testDirectRecMoveFloat(2), testDirectRecMoveFloat(3); x != 402 || y != 301 || dx != 2 || dy != 1 {
+		t.Fatalf("post-release motion=(%v,%v,%v,%v), want (402,301,2,1) from the frozen origin", x, y, dx, dy)
+	}
+	if !persistentPointerCapture.Load() {
+		t.Fatal("the retained desktop stream did not survive the post-release motion")
+	}
+}
+
+// TestEngineAnchorLockReacquiresAtTheGrabAnchorNotTheDrift pins the deliberate
+// split of the two remembered points: a focus flap or an Alt re-arm takes the
+// grab where the host pointer physically is -- the point the grab was last
+// taken at, because tipsy_pointer_unlock leaves the desktop pointer at the grab
+// anchor -- and not at the integrator's drifted position, which the X11 anchor
+// never followed.
+func TestEngineAnchorLockReacquiresAtTheGrabAnchorNotTheDrift(t *testing.T) {
+	selectPointerPath(t, "direct")
+	wireRecordingDirectTarget(t, 0x1234, 0x5678)
+	calls := stubCaptureSeams(t)
+	vm := newCaptureVM(t)
+	enterExperienceForTest(t, vm, 79966250354565)
+	stubEngineMouseBehavior(t, MouseBehaviorLockCurrentPosition)
+	testDirectRecSetMouseLocked(false)
+	fakeZoomClock(t)
+
+	moveAbsolute(900, 220)
+	if !engineAnchorActive() || len(calls.cursor) != 1 {
+		t.Fatalf("setup: anchor=%t calls=%+v", engineAnchorActive(), calls)
+	}
+	// A long first-person look drifts the logical pair far off; the remembered
+	// re-acquire point must not follow it.
+	lookRelative(300, 100)
+	if fx, fy, _ := RobloxDirectFallbackPosition(); fx != 1200 || fy != 320 {
+		t.Fatalf("drifted logical=(%v,%v), want (1200,320)", fx, fy)
+	}
+	if x, y, ok := engineAnchorOrigin(); !ok || x != 900 || y != 220 {
+		t.Fatalf("remembered re-acquire point=(%v,%v,%v), want the grab anchor (900,220)", x, y, ok)
+	}
+
+	// A focus flap drops the host grab (leaving the pointer at its anchor) and
+	// clears the integrator; focus gain re-acquires from the anchor.
+	handleX11InputEvent(x11.InputEvent{Kind: x11.InputFocus, FocusGained: false})
+	handleX11InputEvent(x11.InputEvent{Kind: x11.InputFocus, FocusGained: true})
+	if !engineAnchorActive() {
+		t.Fatal("focus gain did not keep the engine's anchored lock")
+	}
+	if n := len(calls.cursor); n != 2 || !calls.cursor[n-1] {
+		t.Fatalf("focus-gain cursor calls=%+v, want one more anchored acquire", calls.cursor)
+	}
+	if fx, fy, ok := RobloxDirectFallbackPosition(); !ok || fx != 900 || fy != 220 {
+		t.Fatalf("re-acquired integrator=(%v,%v,%v), want the grab anchor (900,220)", fx, fy, ok)
+	}
+	lookRelative(5, 5)
+	if x, y, dx, dy := testDirectRecMoveFloat(0), testDirectRecMoveFloat(1), testDirectRecMoveFloat(2), testDirectRecMoveFloat(3); x != 905 || y != 225 || dx != 5 || dy != 5 {
+		t.Fatalf("post-focus motion=(%v,%v,%v,%v), want (905,225,5,5) from the anchor", x, y, dx, dy)
+	}
+	// The frozen origin is still the engage point, so a later release restores
+	// there rather than at the drifted position.
+	if x, y, ok := engineAnchorFrozenOrigin(); !ok || x != 900 || y != 220 {
+		t.Fatalf("frozen origin=(%v,%v,%v), want the engage point (900,220)", x, y, ok)
 	}
 }

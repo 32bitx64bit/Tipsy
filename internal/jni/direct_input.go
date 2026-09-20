@@ -329,6 +329,10 @@ func ClearRobloxDirectInputTarget() {
 	rmbPointerFallback.Store(false)
 	persistentPointerCapture.Store(false)
 	altToggleConsumed.Store(false)
+	// The decoded MouseBehavior layout belongs to the image that is about to
+	// be unmapped. Drop it so a re-wired target decodes against the bytes it
+	// actually has instead of inheriting a stale address.
+	resetEngineMouseBehavior()
 }
 
 // The direct keyboard target is a separate APK identity from the mouse
@@ -677,6 +681,18 @@ func DispatchRobloxDirectPointerFallbackDelta(dx, dy float32) bool {
 	return true
 }
 
+// robloxDirectMouseLockedFn returns the resolved address of the engine's own
+// exported lock getter, NativeInputInterface
+// .nativeGetMainWindowIsMouseLockedCenter. It is the only anchor the
+// MouseBehavior decode starts from: the constants it needs are decoded from
+// this function's own instructions at runtime, never from a version-pinned
+// file vaddr (see engine_mouse_behavior.go).
+func robloxDirectMouseLockedFn() uintptr {
+	directInputTarget.mu.RLock()
+	defer directInputTarget.mu.RUnlock()
+	return directInputTarget.lockFn
+}
+
 // robloxDirectMoveTargetLive reports whether the direct mouse-move native is
 // wired. Persistent desktop capture engages only after this is true, so no
 // host grab is acquired before the engine listener exists (startup/Home).
@@ -732,6 +748,47 @@ func SnapRobloxDirectPointerFallbackToCenter() (x, y float32, ok bool) {
 	directInputTarget.havePointer = true
 	directInputTarget.lastX, directInputTarget.lastY = x, y
 	return x, y, true
+}
+
+// SeedRobloxDirectPointerAtCenter re-seeds the direct dispatcher's origin --
+// and the captured integrator, when one holds it -- to the live viewport
+// center, and reports that point. The engine's cursor reappears at the center
+// when MouseBehavior returns to Default after a centered lock, so the release
+// that frees the host pointer warps it there too (releaseEngineLockAtCenter)
+// and the two cursors stay together across the transition. Unlike
+// SnapRobloxDirectPointerFallbackToCenter it also applies to a centered
+// LockCenter stream, which holds no fallback integrator.
+func SeedRobloxDirectPointerAtCenter() (x, y float32) {
+	directInputTarget.mu.Lock()
+	defer directInputTarget.mu.Unlock()
+	x, y = pointerViewportCenter()
+	seedRobloxDirectPointerAtLocked(x, y)
+	return x, y
+}
+
+// SeedRobloxDirectPointerAt re-seeds the direct dispatcher's origin -- and the
+// captured integrator, when one holds it -- to the point x, y. It is the
+// generic form of SeedRobloxDirectPointerAtCenter, for a release whose restore
+// point is not the center: LockCurrentPosition froze the engine cursor at the
+// engage-time origin, so that is where it reappears and where the logical pair
+// must be re-seeded (releaseEngineLockAtOrigin). The host pointer is the
+// caller's business -- the anchored ungrab leaves it at the grab anchor, a
+// centered one warps it there first -- so a re-seed never moves it by itself.
+func SeedRobloxDirectPointerAt(x, y float32) {
+	directInputTarget.mu.Lock()
+	defer directInputTarget.mu.Unlock()
+	seedRobloxDirectPointerAtLocked(x, y)
+}
+
+// seedRobloxDirectPointerAtLocked re-seeds both the captured integrator (when
+// one holds it) and the ordinary dispatcher's origin to x, y. Caller holds
+// directInputTarget.mu.
+func seedRobloxDirectPointerAtLocked(x, y float32) {
+	if directInputTarget.fallbackCaptured {
+		directInputTarget.fallbackX, directInputTarget.fallbackY = x, y
+	}
+	directInputTarget.havePointer = true
+	directInputTarget.lastX, directInputTarget.lastY = x, y
 }
 
 // pointerViewportCenter returns the live viewport center in logical surface
