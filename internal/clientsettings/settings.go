@@ -637,8 +637,17 @@ func (s *Service) Reset(ctx context.Context) (Settings, error) {
 // ClientAppSettings strings. Automatic mode leaves both FPS controls under
 // client ownership; High texture quality selects the official TM1 path.
 func Overrides(s Settings) (map[string]any, error) {
+	return overridesFor(s, graphics.ProbeRendererCapabilities())
+}
+
+// overridesFor is Overrides against a host renderer snapshot the caller
+// already holds, so a launch creates its probe Vulkan instance only once.
+func overridesFor(s Settings, caps graphics.RendererCapabilities) (map[string]any, error) {
 	s = normalized(s)
-	if err := s.Validate(); err != nil {
+	if err := s.validateShape(); err != nil {
+		return nil, err
+	}
+	if _, err := caps.Resolve(graphics.Renderer(s.Renderer)); err != nil {
 		return nil, err
 	}
 	out := map[string]any{
@@ -656,7 +665,7 @@ func Overrides(s Settings) (map[string]any, error) {
 	case RendererVulkan:
 		out[flagPreferVulkan] = "True"
 	case RendererAuto:
-		resolved, err := graphics.ProbeRendererCapabilities().Resolve(graphics.RendererAuto)
+		resolved, err := caps.Resolve(graphics.RendererAuto)
 		if err != nil {
 			return nil, err
 		}
@@ -683,7 +692,11 @@ func Overrides(s Settings) (map[string]any, error) {
 // last, so an explicitly confirmed custom value wins over a normal Settings
 // control for the next Roblox launch.
 func OverridesWithFastFlags(s Settings, flags []FastFlag) (map[string]any, error) {
-	out, err := Overrides(s)
+	return overridesWithFastFlagsFor(s, flags, graphics.ProbeRendererCapabilities())
+}
+
+func overridesWithFastFlagsFor(s Settings, flags []FastFlag, caps graphics.RendererCapabilities) (map[string]any, error) {
+	out, err := overridesFor(s, caps)
 	if err != nil {
 		return nil, err
 	}
@@ -731,7 +744,9 @@ func applyTextureQualityOverrides(out map[string]any, low bool) {
 	out[flagUseTM1LegacyMipPackForDecal] = "False"
 }
 
-func (s *Service) LoadOverrides(ctx context.Context) (map[string]any, error) {
+// LoadOverrides resolves the persisted settings against caps, the launch's
+// host renderer snapshot, so presenter and client flags agree on a renderer.
+func (s *Service) LoadOverrides(ctx context.Context, caps graphics.RendererCapabilities) (map[string]any, error) {
 	release, err := AcquireSettingsDocumentLock()
 	if err != nil {
 		return nil, err
@@ -741,7 +756,7 @@ func (s *Service) LoadOverrides(ctx context.Context) (map[string]any, error) {
 	if err != nil {
 		return nil, err
 	}
-	return OverridesWithFastFlags(doc.Settings, doc.FastFlags)
+	return overridesWithFastFlagsFor(doc.Settings, doc.FastFlags, caps)
 }
 
 // LoadFastFlags returns a copy of the persisted custom Fast Flag list. The

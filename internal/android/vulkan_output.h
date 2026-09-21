@@ -77,6 +77,7 @@ enum {
 	TIPSY_VK_OUTPUT_TX_OUTPUT_PRESENT_DEVICE_LOST = 10,
 	TIPSY_VK_OUTPUT_TX_UNPUBLISHED = 11,
 	TIPSY_VK_OUTPUT_TX_UNPUBLISHED_TEARDOWN = 12,
+	TIPSY_VK_OUTPUT_TX_UNPUBLISHED_TEARDOWN_BUSY = 13,
 };
 typedef struct TipsyVkOutputTransactionFixture {
 	uint32_t order[5];
@@ -115,6 +116,10 @@ typedef struct TipsyVkOutputTransactionFixture {
 	float push_rect[4];
 	uint32_t viewport_width;
 	uint32_t viewport_height;
+	uint32_t blocking_fence_waits;
+	uint32_t record_calls;
+	uint32_t lease_release_calls;
+	uint32_t lease_released_before_present;
 } TipsyVkOutputTransactionFixture;
 void tipsy_test_vk_output_transaction_fixture(uint32_t scenario,
 	TipsyVkOutputTransactionFixture *out);
@@ -123,6 +128,7 @@ typedef struct TipsyVkOutputGeometryFixture {
 	TipsyVkOutputTransactionFixture first;
 	TipsyVkOutputTransactionFixture second;
 	TipsyVkOutputTransactionFixture empty;
+	TipsyVkOutputTransactionFixture repeat;
 } TipsyVkOutputGeometryFixture;
 void tipsy_test_vk_output_overlay_geometry_fixture(
 	TipsyVkOutputGeometryFixture *out);

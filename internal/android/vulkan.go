@@ -20,6 +20,7 @@ void tipsy_test_vk_pacing_query_counts(uint64_t *out);
 int tipsy_test_vk_pacing_query_logged(void);
 void *tipsy_test_vk_host_loader_symbol(const char *name);
 void *tipsy_test_vk_resolve_create_swapchain(void);
+int tipsy_test_vk_device_proc_cache(void);
 */
 import "C"
 
@@ -412,6 +413,10 @@ type vulkanOutputTransactionFixture struct {
 	pushRect                      [4]float32
 	viewportWidth                 uint32
 	viewportHeight                uint32
+	blockingFenceWaits            uint32
+	recordCalls                   uint32
+	leaseReleaseCalls             uint32
+	leaseReleasedBeforePresent    bool
 }
 
 func testVulkanOutputTransactionFixture(scenario uint32) vulkanOutputTransactionFixture {
@@ -424,6 +429,7 @@ type vulkanOutputGeometryFixture struct {
 	first  vulkanOutputTransactionFixture
 	second vulkanOutputTransactionFixture
 	empty  vulkanOutputTransactionFixture
+	repeat vulkanOutputTransactionFixture
 }
 
 func testVulkanOutputTransactionFromRaw(raw C.TipsyVkOutputTransactionFixture) vulkanOutputTransactionFixture {
@@ -470,8 +476,12 @@ func testVulkanOutputTransactionFromRaw(raw C.TipsyVkOutputTransactionFixture) v
 			float32(raw.push_rect[2]),
 			float32(raw.push_rect[3]),
 		},
-		viewportWidth:  uint32(raw.viewport_width),
-		viewportHeight: uint32(raw.viewport_height),
+		viewportWidth:              uint32(raw.viewport_width),
+		viewportHeight:             uint32(raw.viewport_height),
+		blockingFenceWaits:         uint32(raw.blocking_fence_waits),
+		recordCalls:                uint32(raw.record_calls),
+		leaseReleaseCalls:          uint32(raw.lease_release_calls),
+		leaseReleasedBeforePresent: raw.lease_released_before_present != 0,
 	}
 }
 
@@ -482,6 +492,7 @@ func testVulkanOutputOverlayGeometryFixture() vulkanOutputGeometryFixture {
 		first:  testVulkanOutputTransactionFromRaw(raw.first),
 		second: testVulkanOutputTransactionFromRaw(raw.second),
 		empty:  testVulkanOutputTransactionFromRaw(raw.empty),
+		repeat: testVulkanOutputTransactionFromRaw(raw.repeat),
 	}
 }
 
@@ -694,6 +705,10 @@ func testVulkanHostLoaderSymbol(name string) uintptr {
 
 func testVulkanResolveCreateSwapchain() uintptr {
 	return uintptr(C.tipsy_test_vk_resolve_create_swapchain())
+}
+
+func testVulkanDeviceProcCache() int {
+	return int(C.tipsy_test_vk_device_proc_cache())
 }
 
 func testEGLNoteSuccessfulSwap() {

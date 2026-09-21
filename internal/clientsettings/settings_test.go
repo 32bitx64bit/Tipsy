@@ -499,6 +499,30 @@ func TestRendererOverridesAndVulkanAvailability(t *testing.T) {
 	}
 }
 
+func TestLoadOverridesResolvesTheLaunchRendererSnapshot(t *testing.T) {
+	s := testService(t)
+	vulkan := graphics.RendererCapabilities{
+		OpenGL: graphics.RendererCapability{Renderer: graphics.RendererOpenGL, Available: true},
+		Vulkan: graphics.RendererCapability{Renderer: graphics.RendererVulkan, Available: true},
+	}
+	openGLOnly := vulkan
+	openGLOnly.Vulkan.Available = false
+	// Auto follows the supplied snapshot rather than a second host probe, so
+	// the presenter and the client's renderer flags agree within one launch.
+	got, err := s.LoadOverrides(context.Background(), vulkan)
+	if err != nil || got[flagPreferVulkan] != "True" {
+		t.Fatalf("Vulkan snapshot overrides=%v err=%v", got, err)
+	}
+	got, err = s.LoadOverrides(context.Background(), openGLOnly)
+	if _, ok := got[flagPreferVulkan]; err != nil || ok {
+		t.Fatalf("OpenGL-only snapshot overrides=%v err=%v", got, err)
+	}
+	explicit := Settings{Renderer: RendererVulkan, FrameRate: FrameRate{Mode: FrameRateAuto}}
+	if _, err := overridesFor(explicit, openGLOnly); err == nil {
+		t.Fatal("explicit Vulkan resolved against a snapshot without Vulkan")
+	}
+}
+
 func TestUnavailableRendererRemainsPersistedButCannotApply(t *testing.T) {
 	s := testService(t)
 	want := persistedSettings{Settings: Settings{
@@ -825,7 +849,10 @@ func TestCustomFastFlagsPersistAndEnterOfficialClientSettingsOverrides(t *testin
 	if err != nil || !equalFastFlags(loaded, flags) {
 		t.Fatalf("loaded Fast Flags=%+v err=%v", loaded, err)
 	}
-	overrides, err := s.LoadOverrides(context.Background())
+	// LoadOverrides is the exact map Runtime merges into AndroidApp's
+	// ClientAppSettings JSON before official nativeInitClientSettings. These
+	// assertions pin both persistence and the next-launch application surface.
+	overrides, err := s.LoadOverrides(context.Background(), graphics.ProbeRendererCapabilities())
 	if err != nil {
 		t.Fatalf("load official client-settings overrides: %v", err)
 	}

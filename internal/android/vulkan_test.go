@@ -113,6 +113,12 @@ func TestVulkanSameQueueTransactionOrderAndCounts(t *testing.T) {
 		got.viewportWidth != 8 || got.viewportHeight != 8 {
 		t.Fatalf("qualified same-queue in-place sequence=%+v", got)
 	}
+	// A text upload writes only this image's staging slot: no queue drain.
+	// The pixels are released before the host present can block.
+	if got.blockingFenceWaits != 0 || got.recordCalls != 1 ||
+		got.leaseReleaseCalls != 1 || !got.leaseReleasedBeforePresent {
+		t.Fatalf("upload synchronization = %+v", got)
+	}
 }
 
 func TestVulkanSameQueueDirectGatesHaveNoPrivateOperations(t *testing.T) {
@@ -126,7 +132,8 @@ func TestVulkanSameQueueDirectGatesHaveNoPrivateOperations(t *testing.T) {
 			got.deviceTerminal || got.returnedResult != 0 ||
 			got.overlayAcquireCalls != 1 || got.presentMutexLocks != 1 ||
 			got.copyWidth != 0 || got.copyHeight != 0 ||
-			got.outputCreateCalls != 0 {
+			got.outputCreateCalls != 0 || got.blockingFenceWaits != 0 ||
+			got.recordCalls != 0 || got.leaseReleaseCalls != 1 {
 			t.Errorf("direct scenario %d performed private work: %+v", scenario, got)
 		}
 	}
@@ -150,8 +157,22 @@ func TestVulkanUnpublishedPresentSkipsOverlayAcquireAndMutex(t *testing.T) {
 		!teardown.originalGuestForwarded || teardown.fullCopyCount != 0 ||
 		teardown.drawCount != 0 || teardown.guestPresentCalls != 1 ||
 		teardown.outputPresentCalls != 0 || teardown.quarantined ||
-		teardown.deviceTerminal || teardown.returnedResult != 0 {
+		teardown.deviceTerminal || teardown.returnedResult != 0 ||
+		teardown.blockingFenceWaits != 0 {
 		t.Fatalf("unpublished teardown present = %+v", teardown)
+	}
+}
+
+func TestVulkanUnpublishedTeardownPollsInsteadOfDraining(t *testing.T) {
+	// The overlay draw is still on the GPU: the foreground must survive the
+	// first unpublished present without a blocking wait and be retried later.
+	busy := testVulkanOutputTransactionFixture(13)
+	if !slices.Equal(busy.order, []uint32{3}) || busy.overlayAcquireCalls != 0 ||
+		busy.presentMutexLocks != 2 || busy.unpublishedFollowupMutexLocks != 1 ||
+		busy.blockingFenceWaits != 0 || !busy.originalGuestForwarded ||
+		busy.drawCount != 0 || busy.guestPresentCalls != 1 ||
+		busy.quarantined || busy.deviceTerminal || busy.returnedResult != 0 {
+		t.Fatalf("busy unpublished teardown = %+v", busy)
 	}
 }
 
@@ -183,7 +204,8 @@ func TestVulkanSameQueueFailureMatrix(t *testing.T) {
 			got.gWaitConsumedOnce != tt.gConsumed ||
 			got.oWaitConsumedOnce || !got.quarantined ||
 			got.deviceTerminal != tt.terminal || got.returnedResult != tt.guestResult ||
-			got.overlayAcquireCalls != 1 || got.presentMutexLocks != 1 {
+			got.overlayAcquireCalls != 1 || got.presentMutexLocks != 1 ||
+			got.leaseReleaseCalls != 1 {
 			t.Errorf("failure scenario %d=%+v", tt.scenario, got)
 		}
 	}
@@ -204,7 +226,8 @@ func TestVulkanOutputOverlayGuestNDC(t *testing.T) {
 		got.second.fullCopyCount != 0 || got.second.outputCreateCalls != 0 ||
 		got.second.pushRect != [4]float32{0, 0.25, 0.25, 0.5} ||
 		got.second.originalGuestForwarded || got.second.quarantined ||
-		got.second.returnedResult != 0 {
+		got.second.returnedResult != 0 || got.second.recordCalls != 1 ||
+		got.second.uploadCount != 0 {
 		t.Fatalf("moved overlay present = %+v", got.second)
 	}
 	if !slices.Equal(got.empty.order, []uint32{3}) ||
@@ -212,6 +235,14 @@ func TestVulkanOutputOverlayGuestNDC(t *testing.T) {
 		got.empty.outputPresentCalls != 0 || !got.empty.originalGuestForwarded ||
 		got.empty.drawCount != 0 || got.empty.returnedResult != 0 {
 		t.Fatalf("empty clipped overlay present = %+v", got.empty)
+	}
+	// Unchanged text and rectangle: the draw-only recording is resubmitted.
+	if !slices.Equal(got.repeat.order, []uint32{2, 3}) ||
+		got.repeat.compositionSubmitCalls != 1 || got.repeat.recordCalls != 0 ||
+		got.repeat.drawCount != 0 || got.repeat.uploadCount != 0 ||
+		got.repeat.originalGuestForwarded || got.repeat.quarantined ||
+		got.repeat.returnedResult != 0 || got.repeat.blockingFenceWaits != 0 {
+		t.Fatalf("unchanged overlay present = %+v", got.repeat)
 	}
 }
 
@@ -367,11 +398,11 @@ func TestVulkanCreateSwapchainPreservesActualSurfaceCapability(t *testing.T) {
 
 func TestVulkanUnthrottledRewritesMailboxToImmediate(t *testing.T) {
 	const (
-		immediate uint32 = 0
-		mailbox          = 1
-		fifo             = 2
-		success    int32 = 0
-		incomplete int32 = 5
+		immediate  uint32 = 0
+		mailbox           = 1
+		fifo              = 2
+		success    int32  = 0
+		incomplete int32  = 5
 	)
 	got := testVulkanPresentModeCapability([]uint32{fifo, mailbox, immediate}, success, success, 3, false, mailbox)
 	if got.enumerateResult != success || !slices.Equal(got.advertised, []uint32{immediate}) {
@@ -518,6 +549,16 @@ func TestVulkanSwapchainResolverPrefersLoaderTrampoline(t *testing.T) {
 	}
 	if again := testVulkanResolveCreateSwapchain(); again != want {
 		t.Fatalf("swapchain resolver not stable: %#x want %#x", again, want)
+	}
+}
+
+func TestVulkanDeviceProcsResolveOncePerDevice(t *testing.T) {
+	switch step := testVulkanDeviceProcCache(); step {
+	case 0:
+	case -1:
+		t.Skip("a live Vulkan device occupies the entry-point table")
+	default:
+		t.Fatalf("device entry-point table failed at step %d", step)
 	}
 }
 
