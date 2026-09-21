@@ -17,9 +17,9 @@ import (
 	"github.com/tipsy-linux/tipsy/internal/logging"
 )
 
-// argCaptureKey identifies one observation-only argument capture without
-// formatting a key string: kind distinguishes the capture, name carries the
-// method/class identity, and value/flag carry the approved aggregate.
+// argCaptureKey identifies one argument capture without formatting a key
+// string: kind distinguishes the capture, name carries the method/class
+// identity, value/flag carry the aggregate.
 type argCaptureKey struct {
 	kind  uint8
 	name  string
@@ -33,22 +33,19 @@ const (
 	argCaptureLifecycle   uint8 = 3
 )
 
-// argCaptureLogged dedupes the observation-only argument diagnostics: one
-// line per unique capture identity (approved method + value) per process.
+// argCaptureLogged dedupes the argument diagnostics: one line per unique
+// capture identity per process.
 var argCaptureLogged sync.Map
 
-// packJlong packs a 64-bit jvalue argument slot (test and capture helper).
+// packJlong packs a 64-bit jvalue argument slot.
 func packJlong(v int64) *C.jvalue {
 	sl := make([]C.jvalue, 1)
 	jvalueSetJ(&sl[0], C.jlong(v))
 	return &sl[0]
 }
 
-// logFindClassName records the class-name argument the engine passes to the
-// dispatched java/lang/ClassLoader.findClass path. Observation-only: the
-// captured string is exactly the binary name findClassByName resolves, so
-// the next launch proves which classes the ClassLoader path is asked for.
-// No other argument data is captured.
+// logFindClassName records the class-name argument passed to the
+// java/lang/ClassLoader.findClass path. No other argument data is captured.
 func logFindClassName(name string) {
 	if !diagnosticsEnabled() || name == "" {
 		return
@@ -60,19 +57,15 @@ func logFindClassName(name string) {
 	logging.Logger(logging.CatJNI).Info("[jni] findClass-name", "class", name)
 }
 
-// logLifecycleStubArgs records the raw J-handle argument of the only two
-// approved lifecycle identities, at real stub-dispatch time. The identity
-// filter is exact (class AND name AND sig), so nothing else is ever
-// captured: in particular no NativeUserJavaInterface data, no object
-// references, and no strings. Values repeat verbatim what native passed.
+// logLifecycleStubArgs records the raw handle argument of the two lifecycle
+// identities at stub-dispatch time. The identity filter is exact (class AND
+// name AND sig), so nothing else is captured.
 func logLifecycleStubArgs(class, name, sig string, args *C.jvalue) {
 	if !diagnosticsEnabled() {
 		return
 	}
-	// NativeHelper.gameActivity_onScreenOrientationChanged(IZ)V: the
-	// engine pushes its orientation request to Java here. Observation
-	// only: the orientation enum int and the boolean flag are safe
-	// aggregates (no text, no coordinates); they never alter dispatch.
+	// The orientation int and boolean flag are safe aggregates (no text, no
+	// coordinates); they never alter dispatch.
 	if class == nativeHelperClass && name == "gameActivity_onScreenOrientationChanged" && sig == "(IZ)V" {
 		if args == nil {
 			return

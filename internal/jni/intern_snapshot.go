@@ -6,9 +6,8 @@
 package jni
 
 // appendInternedSnapshot requires a serialized writer (methodMu/fieldMu).
-// A reader sees only the published length and immutable elements below it.
-// Appending beyond that length is safe even when the backing array is shared;
-// never reslice a reader snapshot to capacity or mutate published entries.
+// Readers see only the published length and immutable elements below it; never
+// reslice a reader snapshot to capacity or mutate published entries.
 func appendInternedSnapshot[T any](old *[]*T, info *T) (*[]*T, uint32) {
 	var next []*T
 	if old == nil {

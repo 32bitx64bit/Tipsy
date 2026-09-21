@@ -58,8 +58,8 @@ func (s *progressService) Launch(_ context.Context, request guimodel.LaunchReque
 }
 
 // launchOrderingService holds a launch at each model boundary without running
-// Qt events. That lets the test prove the owner event observes only the final,
-// already-committed state rather than relying on a periodic refresh race.
+// Qt events, so the test proves the owner event observes only the final,
+// already-committed state.
 type launchOrderingService struct {
 	visualService
 	entered, release, acknowledged, finish chan struct{}
@@ -163,9 +163,8 @@ func TestLauncherOwnerNotificationObservesCommittedTerminalState(t *testing.T) {
 				t.Fatal(err)
 			}
 
-			// Deliberately do not process Qt events until the worker has returned.
-			// A duplicate wrapper notification or pre-commit terminal notification
-			// changes these exact counts; a timer cannot make this assertion pass.
+			// Do not process Qt events until the worker has returned; a timer
+			// cannot make these exact counts pass.
 			if got := win.launch.View(); got != tc.want {
 				t.Fatalf("terminal view=%+v, want %+v", got, tc.want)
 			}

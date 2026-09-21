@@ -1,8 +1,7 @@
 package perf
 
 // ProgramCapturePlan describes whole-process profiling of a real tipsy
-// binary. Isolated package microbenchmarks cannot rank live hotspots because
-// they never share the production process, CGO boundary, or guest present path.
+// binary. Isolated package microbenchmarks cannot rank live hotspots.
 type ProgramCapturePlan struct {
 	Instrumented CaptureMode    `json:"instrumented"`
 	Clean        CaptureMode    `json:"clean_acceptance"`

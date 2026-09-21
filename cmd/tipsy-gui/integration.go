@@ -15,10 +15,9 @@ import (
 	"github.com/tipsy-linux/tipsy/internal/version"
 )
 
-// integrationView is what the Settings page shows about the desktop
-// launcher: who provides this build's identity and the one action the
-// running install can take. All decisions come from internal/desktop; this
-// only turns them into words.
+// integrationView is what the Settings page shows about the desktop launcher:
+// who provides this build's identity and the one action the running install
+// can take.
 type integrationView struct {
 	summary string
 	detail  string

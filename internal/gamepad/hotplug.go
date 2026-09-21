@@ -9,25 +9,19 @@ import (
 	"sync"
 )
 
-// Manager is the lean single-pad hotplug owner (simplified 2026-09-12): one
-// open pad with a stable device id, an inotify watch plus rescan helper, and
-// connect/disconnect callbacks.
+// Manager is the single-pad hotplug owner: one open pad with a stable
+// device id, an inotify watch plus rescan helper, and connect/disconnect
+// callbacks.
 //
-// Contract:
-//   - Zero devices means empty: Pads() is empty, Current()==nil, no
-//     synthesized pad.
-//   - The lowest-sorted /dev/input/event* gamepad is player 1 (id 1) until
-//     it disconnects. A second simultaneous pad is ignored honestly (logged
-//     once, never delivered, never faked).
-//   - Connect runs the E() capability replay + typed connect downstream;
-//     disconnect synthesizes UP for all held buttons plus zeroed axes in the
-//     same frame, so the engine never keeps a stuck button after unplug or
-//     focus loss.
-//   - A vanished fd is closed exactly once, a new node opens
-//     O_RDONLY|O_NONBLOCK (never EVIOCGRAB), and a same-path device swap
-//     (kernel eventX reuse) reopens the slot instead of serving stale caps.
-//
-// Deleted vs v1 (see gamepad-simplify-2026-09-12.md): players 2..4.
+// Zero devices means empty: Pads() is empty, Current()==nil, no synthesized
+// pad. The lowest-sorted /dev/input/event* gamepad is player 1 (id 1) until
+// it disconnects; a second simultaneous pad is ignored (logged once, never
+// delivered, never faked). Connect runs the capability replay plus typed
+// connect downstream; disconnect synthesizes UP for all held buttons plus
+// zeroed axes in the same frame, so a stuck button never survives unplug or
+// focus loss. A vanished fd is closed exactly once, a new node opens
+// O_RDONLY|O_NONBLOCK (never EVIOCGRAB), and a same-path device swap
+// reopens the slot instead of serving stale caps.
 //
 // Concurrency: the pump and watch goroutines both call Rescan; mu guards all
 // slot state. Log/OnConnect/OnDisconnect fire without holding mu.
@@ -36,11 +30,9 @@ type Manager struct {
 	Dir string
 	// Log receives content-free connect/disconnect lines. May be nil.
 	Log func(msg string)
-	// OnConnect fires after unlock for the newly opened pad. The pump
-	// wires it to the E() replay + typed connect. May be nil.
+	// OnConnect fires after unlock for the newly opened pad. May be nil.
 	OnConnect func(info DeviceInfo, devID int)
-	// OnDisconnect fires after unlock for the withdrawn pad. The pump
-	// wires it to UP synthesis + disconnect. May be nil.
+	// OnDisconnect fires after unlock for the withdrawn pad. May be nil.
 	OnDisconnect func(devID int)
 	// ScanFn overrides Scan for tests (virtual nodes / recorded inotify
 	// without hardware). Nil means Scan.
@@ -54,7 +46,6 @@ type Manager struct {
 	ignoredLogged bool     // second-pad spam guard (log once per streak)
 }
 
-// padSlot is the open pad.
 type padSlot struct {
 	dev     *Device
 	reader  *Reader
@@ -204,7 +195,6 @@ func (m *Manager) Rescan() (bool, error) {
 
 	switch {
 	case want == nil:
-		// No pad wanted: drop the open one, if any.
 		if cur == nil {
 			m.mu.Unlock()
 			break
@@ -219,12 +209,9 @@ func (m *Manager) Rescan() (bool, error) {
 		return true, nil
 	case cur != nil && cur.info.Path == want.Path &&
 		cur.info.Name == want.Name && cur.info.ID == want.ID:
-		// Same pad still there: nothing to do.
 		m.mu.Unlock()
 		return false, nil
 	default:
-		// New pad, vanished-then-replaced pad, or same-path device swap:
-		// close the old handle (replug keeps player 1) and open below.
 		if cur != nil {
 			if cur.info.Path == want.Path {
 				m.logf("gamepad: replug " + sanitizeName(want.Name))
@@ -239,7 +226,7 @@ func (m *Manager) Rescan() (bool, error) {
 		d, oerr := m.open(want.Path)
 		if oerr != nil {
 			// Honest skip: the node vanished or denied between Scan and
-			// open. It reconciles on the next pass; never a fake pad.
+			// open; the next pass reconciles.
 			if dropped && m.OnDisconnect != nil {
 				m.OnDisconnect(singlePadID)
 			}
@@ -303,10 +290,9 @@ func (m *Manager) Close() error {
 }
 
 // dropCurrent withdraws the open slot after its fd reports an unrecoverable
-// read-side failure. ReadyPump is its only production caller: that makes the
-// pump the single owner of read, close, and reopen operations. The callback
-// happens after the fd is closed and after the slot is gone, so consumers
-// synthesize releases before a later rescan can reconnect player 1.
+// read-side failure. The callback happens after the fd is closed and after
+// the slot is gone, so consumers synthesize releases before a later rescan
+// can reconnect player 1.
 func (m *Manager) dropCurrent() bool {
 	m.mu.Lock()
 	s := m.slot

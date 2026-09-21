@@ -5,7 +5,7 @@ package gamepad
 
 import "sort"
 
-// Android KeyEvent keycodes (android.view.KeyEvent).
+// Android KeyEvent keycodes.
 const (
 	AndroidDpadUp     = 19
 	AndroidDpadDown   = 20
@@ -30,7 +30,7 @@ const (
 	AndroidButtonMode   = 110
 )
 
-// Android MotionEvent axes (AMOTION_EVENT_AXIS_*).
+// Android MotionEvent axes.
 const (
 	AndroidAxisX        = 0
 	AndroidAxisY        = 1
@@ -47,28 +47,25 @@ const (
 )
 
 // HatDpadThreshold is the normalized hat deflection that also fires the
-// DPAD_* key door (±0.5, matching real Android drivers where a fully
-// deflected discrete hat reads ±1 and the key edge follows the same motion).
+// DPAD_* key door.
 const HatDpadThreshold = 0.5
 
-// Android input sources.
 const (
 	AndroidSourceGamepad  = 0x401
 	AndroidSourceDpad     = 0x201
 	AndroidSourceJoystick = 0x1000010
 )
 
-// EvdevButtonToAndroid maps positional evdev diamond/shoulders/system
-// buttons to Android keycodes: BTN_SOUTH is BUTTON_A (Xbox A), east is B,
-// west is X, north is Y. BTN_TL/TR are L1/R1, BTN_TL2/TR2 are L2/R2.
+// EvdevButtonToAndroid maps positional evdev diamond/shoulder/system buttons
+// to Android keycodes: BTN_SOUTH is BUTTON_A, east is B, west is X, north is
+// Y, and BTN_TL/TR/TL2/TR2 are L1/R1/L2/R2.
 func EvdevButtonToAndroid(code uint16) (int, bool) {
 	return MapEvdevButton(code, false)
 }
 
 // MapEvdevButton is EvdevButtonToAndroid with the hid-linear 10-button
-// overlay used by hid-microsoft Xbox Bluetooth (GuliKit XW): kernel
-// Button 1–10 occupy SOUTH,EAST,C,NORTH,WEST,Z,TL,TR,TL2,TR2, so C is X,
-// WEST/Z are L1/R1, TL/TR are Select/Start, and TL2/TR2 are stick clicks.
+// overlay: C is X, WEST/Z are L1/R1, TL/TR are Select/Start, and TL2/TR2 are
+// stick clicks.
 func MapEvdevButton(code uint16, hidLinear bool) (int, bool) {
 	if hidLinear {
 		switch code {
@@ -136,10 +133,8 @@ func MapEvdevButton(code uint16, hidLinear bool) (int, bool) {
 }
 
 // MapEvdevButtonWithFaceButtonLayout maps the positional evdev code and then
-// applies the selected labelled diamond. Switch-labelled pads place B/A at
-// south/east and Y/X at west/north, the inverse of Android's Xbox-positioned
-// BUTTON_A/B/X/Y semantics. Shoulders, sticks, system, and D-pad controls are
-// deliberately unchanged.
+// applies the selected labelled diamond. Switch-labelled pads swap A/B and
+// X/Y; shoulders, sticks, system, and D-pad controls are unchanged.
 func MapEvdevButtonWithFaceButtonLayout(code uint16, hidLinear bool, layout FaceButtonLayout) (int, bool) {
 	key, ok := MapEvdevButton(code, hidLinear)
 	if !ok || NormalizeFaceButtonLayout(layout) != FaceButtonLayoutSwitch {
@@ -159,9 +154,8 @@ func MapEvdevButtonWithFaceButtonLayout(code uint16, hidLinear bool, layout Face
 	}
 }
 
-// MotionRange is the honest per-axis range served for
-// InputDevice.getMotionRange(axis): device min/max/flat, never zeros for
-// unreported axes (unreported axes are simply absent from the map).
+// MotionRange is the per-axis range served for InputDevice.getMotionRange:
+// device min/max/flat. Unreported axes are absent, never zeros.
 type MotionRange struct {
 	Axis int32
 	Min  float32
@@ -173,49 +167,26 @@ type MotionRange struct {
 // pressed Android keycodes plus float axes plus honest ranges.
 type AndroidFrame struct {
 	DeviceID int
-	// Buttons maps Android keyCode → pressed.
-	Buttons map[int]bool
+	Buttons  map[int]bool
 	// Axes maps Android axis → value: sticks -1..1, triggers 0..1,
 	// hats -1..1.
 	Axes map[int]float32
-	// Ranges holds honest MotionRanges for reported axes only. It is a compact,
-	// independently owned slice because Android has a small fixed axis topology.
-	Ranges []MotionRange
-	// Disconnect mirrors Frame.Disconnect.
+	// Ranges holds MotionRanges for reported axes only; it is independently
+	// owned.
+	Ranges     []MotionRange
 	Disconnect bool
 }
 
-// MapFrame translates a normalized reader Frame to Android vocabulary
-// and returns a freshly allocated AndroidFrame. Snapshot callers
-// (DisconnectSnapshotFor, tests that keep first then next) may retain or
-// mutate the result after the next SYN_REPORT; successive MapFrame
-// results never alias.
-//
-// Hot-path consumers that copy edges before return must use MapFrameInto
-// so Buttons/Axes/Ranges are cleared and refilled in place.
-//
-//   - ABS_X/Y → AXIS_X/Y (0/1).
-//   - Physical right stick (mapping.RightX/RightY) → both Z(11)/RZ(14)
-//     and the RX(12)/RY(13) mirror from the same sample. The engine reads
-//     Z/RZ (Phase 0 §2); the mirror costs nothing and covers builds that
-//     read RX/RY.
-//   - Analog triggers (mapping.TriggerL/R) → AXIS_L/RTRIGGER (17/18).
-//   - HAT0X/Y or DPAD buttons → both HAT_X/Y axes and DPAD_* keys
-//     (duality, matching real Android drivers).
-//   - BTN_TL2/TR2 edges → BUTTON_L2/R2 keys alongside the analog axes.
-//   - Face buttons use f.FaceButtonLayout (Xbox by default; Switch swaps
-//     only A/B and X/Y).
+// MapFrame translates a normalized reader Frame to Android vocabulary.
+// The result never aliases a later result; hot-path consumers must use
+// MapFrameInto, which recycles its containers.
 func MapFrame(f *Frame, deviceID int, m Mapping, infos map[uint16]AbsInfo) AndroidFrame {
 	return MapFrameInto(nil, f, deviceID, m, infos)
 }
 
 // MapFrameInto is MapFrame for a reused destination. It clears and fills
-// dst.Buttons, dst.Axes, and dst.Ranges (growing slice cap when needed).
-// dst's containers are recycled: a retained copy of those maps or the
-// range slice aliases the next call. Nil dst allocates like MapFrame.
-//
-// The JNI pump keeps one scratch AndroidFrame per pump goroutine and
-// copies edges in handleGamepadFrame before return.
+// dst.Buttons, dst.Axes, and dst.Ranges. A retained copy of those containers
+// aliases the next call; nil dst allocates like MapFrame.
 func MapFrameInto(dst *AndroidFrame, f *Frame, deviceID int, m Mapping, infos map[uint16]AbsInfo) AndroidFrame {
 	var fresh AndroidFrame
 	if dst == nil {
@@ -243,7 +214,6 @@ func MapFrameInto(dst *AndroidFrame, f *Frame, deviceID int, m Mapping, infos ma
 		dst.Ranges = setRange(dst.Ranges, AndroidAxisY, infos, AbsY, -1, 1)
 	}
 
-	// Right stick → Z/RZ + RX/RY mirror.
 	if m.RightX != NoAxis && m.RightY != NoAxis {
 		if vx, ok := axes[m.RightX]; ok {
 			dst.Axes[AndroidAxisZ] = float32(vx)
@@ -259,7 +229,6 @@ func MapFrameInto(dst *AndroidFrame, f *Frame, deviceID int, m Mapping, infos ma
 		}
 	}
 
-	// Analog triggers → L/RTRIGGER.
 	if m.TriggerL != NoAxis {
 		if v, ok := axes[m.TriggerL]; ok {
 			dst.Axes[AndroidAxisLTrigger] = float32(v)
@@ -273,9 +242,8 @@ func MapFrameInto(dst *AndroidFrame, f *Frame, deviceID int, m Mapping, infos ma
 		}
 	}
 
-	// Hat/DPAD duality: hat axes drive HAT_X/Y plus DPAD keys at ±0.5;
-	// DPAD button keys (already in Buttons) additionally drive the HAT
-	// axes so both doors fire from one physical motion.
+	// Hat axes and DPAD buttons each drive both the HAT_* axes and the
+	// DPAD_* keys.
 	hatX, hasHatX := axes[AbsHat0X]
 	hatY, hasHatY := axes[AbsHat0Y]
 	if hasHatX {
@@ -298,8 +266,7 @@ func MapFrameInto(dst *AndroidFrame, f *Frame, deviceID int, m Mapping, infos ma
 			dst.Buttons[AndroidDpadDown] = true
 		}
 	}
-	// DPAD buttons → HAT axes (only when the hat axes are absent, so a
-	// real hat keeps its analog value).
+	// DPAD buttons drive the HAT axes only when the hat axes are absent.
 	if !hasHatX {
 		hx := 0.0
 		if dst.Buttons[AndroidDpadLeft] {
@@ -328,12 +295,8 @@ func MapFrameInto(dst *AndroidFrame, f *Frame, deviceID int, m Mapping, infos ma
 func prepareAndroidFrame(dst *AndroidFrame, f *Frame, deviceID int) {
 	buttonCap, axisCap := 0, 0
 	if f != nil {
-		// Android translation can add at most the two hat-derived DPAD keys
-		// beyond the normalized button snapshot, and only the physical right
-		// stick expands its two source axes into the Z/RZ + RX/RY mirrors.
-		// Reserve the bounded topology up front so a first fill (or a
-		// capacity-short reuse) does not grow maps or the compact range
-		// slice while it is being populated.
+		// +2 covers the hat-derived DPAD keys and the right-stick RX/RY
+		// mirror.
 		buttonCap = len(f.Buttons) + 2
 		axisCap = len(f.Axes) + 2
 	}
@@ -356,8 +319,8 @@ func prepareAndroidFrame(dst *AndroidFrame, f *Frame, deviceID int) {
 	}
 }
 
-// Range returns the honest MotionRange for an Android axis, if that physical
-// axis was reported in this frame.
+// Range returns the MotionRange for an Android axis, if that physical axis
+// was reported in this frame.
 func (f AndroidFrame) Range(androidAxis int) (MotionRange, bool) {
 	for _, r := range f.Ranges {
 		if int(r.Axis) == androidAxis {
@@ -367,11 +330,10 @@ func (f AndroidFrame) Range(androidAxis int) (MotionRange, bool) {
 	return MotionRange{}, false
 }
 
-// setRange records the honest device range for an Android axis. Flat is
-// normalized to the axis scale (stick half-range, trigger span) because
-// Android reports flat in axis units while evdev reports raw units.
-// Stick flats are capped at DefaultDeadzone so an oversized EVIOCGABS
-// flat cannot make the engine's |v|<=flat gate swallow gyro-to-stick.
+// setRange records the device range for an Android axis. Flat is normalized
+// to the axis scale because evdev reports raw units. Stick flats are capped
+// at DefaultDeadzone so an oversized device flat cannot swallow small
+// deflections.
 func setRange(ranges []MotionRange, androidAxis int, infos map[uint16]AbsInfo, evdevCode uint16, lo, hi float32) []MotionRange {
 	info, ok := infos[evdevCode]
 	if !ok || info.Maximum <= info.Minimum {
@@ -397,10 +359,9 @@ func setRange(ranges []MotionRange, androidAxis int, infos map[uint16]AbsInfo, e
 }
 
 // SupportedKeys returns the Android keycodes advertised for the capability
-// setters (nativeSetGamepadSupportedKeyWithGamepadType): the engine probe
-// set H[] = A/B/X/Y, DPAD 19-22, R1/L1, THUMBL/R, SELECT/START, plus L2/R2
+// setters (nativeSetGamepadSupportedKeyWithGamepadType), including L2/R2
 // and MODE when the device physically offers them. KEY_MENU/KEY_BACK are
-// treated as START/SELECT for Bluetooth pads that do not expose BTN_START.
+// treated as START/SELECT for pads that do not expose BTN_START.
 func SupportedKeys(hasKey map[uint16]bool) []int {
 	return supportedKeys(hasKey, false, false)
 }
@@ -437,8 +398,7 @@ func supportedKeys(hasKey map[uint16]bool, hatDPAD, hidLinear bool) []int {
 
 // SupportedMotions returns the Android axes advertised for the capability
 // setters (nativeSetGamepadSupportedMotionWithGamepadType), derived from
-// the mapping the device resolved to: X/Y always when present, right-stick
-// Z/RZ (+RX/RY mirror), triggers, hats.
+// the mapping the device resolved to.
 func SupportedMotions(m Mapping, hasAbs map[uint16]bool) []int {
 	set := make(map[int]bool)
 	if hasAbs[AbsX] {
@@ -475,7 +435,6 @@ func SupportedMotions(m Mapping, hasAbs map[uint16]bool) []int {
 
 // KeySource returns the truthful Android source for a button keycode:
 // DPAD keys use SOURCE_DPAD, gamepad buttons use SOURCE_GAMEPAD.
-// It reports truthful sources and never combines them.
 func KeySource(keyCode int) int {
 	switch keyCode {
 	case AndroidDpadUp, AndroidDpadDown, AndroidDpadLeft, AndroidDpadRight, AndroidDpadCenter:

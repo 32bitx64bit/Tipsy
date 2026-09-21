@@ -23,10 +23,8 @@ import (
 	"github.com/tipsy-linux/tipsy/internal/logging"
 )
 
-// PointerDeliveryPath selects which descriptor-proven pointer surface receives
-// each real X11 event. The desktop default is the APK's final direct Roblox
-// listener: it accepts ordinary mouse hover as well as button edges. The
-// GameActivity touch listener remains available as an explicit A/B control.
+// PointerDeliveryPath selects which pointer surface receives each real X11
+// event.
 type PointerDeliveryPath uint8
 
 const (
@@ -65,11 +63,10 @@ func pointerDeliveryPath() PointerDeliveryPath {
 	return pointerPath.value
 }
 
-// PointerInputPath reports the selected A/B arm.
+// PointerInputPath reports the selected pointer delivery path.
 func PointerInputPath() PointerDeliveryPath { return pointerDeliveryPath() }
 
 // ResetPointerInputPath makes the next path lookup re-read TIPSY_INPUT_PATH.
-// It is a test seam; production never changes paths within a process.
 func ResetPointerInputPath() {
 	pointerPath.Once = sync.Once{}
 	pointerPath.value = PointerPathDirect
@@ -79,9 +76,7 @@ func ResetPointerInputPath() {
 }
 
 // KeyboardDeliveryPath selects the event family for physical keyboard input.
-// Its values intentionally mirror PointerDeliveryPath: the official APK's
-// final Roblox listener is direct, while GameActivity remains a useful A/B
-// control and `both` is diagnostics only.
+// Its values mirror PointerDeliveryPath.
 type KeyboardDeliveryPath uint8
 
 const (
@@ -117,9 +112,7 @@ func keyboardDeliveryPath() KeyboardDeliveryPath {
 			keyboardPath.value = KeyboardPathGameActivity
 		default:
 			// Keep keyboard and pointer on the same listener family unless a
-			// deliberate keyboard-only A/B mode was requested. In particular,
-			// TIPSY_INPUT_PATH=direct must not leave keys on the GameActivity
-			// listener that the APK's Roblox listener replaces.
+			// keyboard-only mode was requested.
 			switch pointerDeliveryPath() {
 			case PointerPathDirect:
 				keyboardPath.value = KeyboardPathDirect
@@ -133,19 +126,17 @@ func keyboardDeliveryPath() KeyboardDeliveryPath {
 	return keyboardPath.value
 }
 
-// KeyboardInputPath reports the selected physical-keyboard A/B arm.
+// KeyboardInputPath reports the selected keyboard delivery path.
 func KeyboardInputPath() KeyboardDeliveryPath { return keyboardDeliveryPath() }
 
 // ResetKeyboardInputPath makes the next lookup re-read TIPSY_KEY_INPUT_PATH.
-// It is a test seam; production never changes paths within a process.
 func ResetKeyboardInputPath() {
 	keyboardPath.Once = sync.Once{}
 	keyboardPath.value = KeyboardPathDirect
 }
 
-// The direct input target is the exact JNI static-native identity from the APK:
-// (JNIEnv*, NativeInputInterface jclass, native function pointers). It remains
-// parked until the runtime resolves both matching named exports.
+// The direct input target holds the resolved direct-input native function
+// pointers; it stays parked until the runtime wires them.
 var directInputTarget struct {
 	mu          sync.RWMutex
 	env         uintptr
@@ -157,43 +148,32 @@ var directInputTarget struct {
 	havePointer bool
 	lastX       float32
 	lastY       float32
-	// fallbackCaptured is only the host-held-RMB compatibility path. Getter-true
-	// capture uses DispatchRobloxDirectPointerDelta, which accumulates the same
-	// APK-style logical pair from lastX/lastY.
+	// fallbackCaptured is only the held-RMB compatibility path. Getter-true
+	// capture uses DispatchRobloxDirectPointerDelta.
 	fallbackCaptured bool
 	fallbackX        float32
 	fallbackY        float32
 	// clampW/clampH pin captured points (button edges, wheel detents) to the
-	// live surface so a minutes-long desktop grab cannot land clicks or zoom
-	// off-view. Motion pairs are never pinned: a pair that stops changing can
-	// read as no motion to the engine, so outward travel stays unbounded and
-	// only travel back toward the surface re-enters from the edge (no dead
-	// zone). Updated from the resize sink; never reset by target re-wires
-	// because the viewport outlives them.
+	// live surface. Updated from the resize sink; never reset by target
+	// re-wires because the viewport outlives them.
 	clampW int32
 	clampH int32
 	// rmbAnchor is the LockCurrentPosition point of a secondary press taken
-	// under persistent capture. The old held-RMB fallback grabbed at the click
-	// and released the button at that same anchor, so the engine cursor came
-	// back to where the operator clicked; the persistent stream reproduces
-	// that by re-seeding the integrator to this point on release.
+	// under persistent capture; release re-seeds the integrator to it.
 	rmbAnchorSet bool
 	rmbAnchorX   float32
 	rmbAnchorY   float32
 }
 
 func init() {
-	// Match the VM's constructor display default and the initial X11 client
-	// geometry. The first surface resize publishes the real bounds.
+	// Match the VM's display default; the first surface resize publishes the
+	// real bounds.
 	directInputTarget.clampW = 1280
 	directInputTarget.clampH = 720
 }
 
 // SetPointerClampViewport publishes the live surface bounds for captured
-// points (button edges, wheel detents). The resize sink calls it alongside
-// SetDisplaySize so the clamp always agrees with the DisplayMetrics the
-// engine sees. Non-positive sizes are ignored defensively; production never
-// sends them.
+// points. Non-positive sizes are ignored.
 func SetPointerClampViewport(w, h int) {
 	if w <= 0 || h <= 0 {
 		return
@@ -204,8 +184,7 @@ func SetPointerClampViewport(w, h int) {
 	directInputTarget.mu.Unlock()
 }
 
-// ResetPointerClampViewportForTest restores the default clamp bounds. Test
-// seam; production bounds only move forward from surface resizes.
+// ResetPointerClampViewportForTest restores the default clamp bounds.
 func ResetPointerClampViewportForTest() {
 	directInputTarget.mu.Lock()
 	directInputTarget.clampW = 1280
@@ -213,8 +192,7 @@ func ResetPointerClampViewportForTest() {
 	directInputTarget.mu.Unlock()
 }
 
-// PointerClampViewport reports the live captured-logical bounds. The resize
-// sink test pins fan-out through it.
+// PointerClampViewport reports the live captured-logical bounds.
 func PointerClampViewport() (w, h int) {
 	directInputTarget.mu.RLock()
 	defer directInputTarget.mu.RUnlock()
@@ -222,11 +200,7 @@ func PointerClampViewport() (w, h int) {
 }
 
 // clampPointerLogical pins a captured point to the live surface. Caller must
-// hold directInputTarget.mu (either mode; it only reads the bounds). Absolute
-// X11 coordinates span [0,W-1]x[0,H-1]; the pinned point matches that domain
-// so a click or wheel detent always lands where the engine can see it. Never
-// call on motion pairs: a pair that stops changing can read as no motion to
-// the engine and the camera stops at the edge.
+// hold directInputTarget.mu; never call on motion pairs (a stopped pair reads as no motion).
 func clampPointerLogical(x, y float32) (float32, float32) {
 	maxX := float32(directInputTarget.clampW - 1)
 	maxY := float32(directInputTarget.clampH - 1)
@@ -247,11 +221,8 @@ func clampPointerLogical(x, y float32) (float32, float32) {
 }
 
 // advancePointerLogical moves a captured motion pair by an exact delta.
-// Caller must hold directInputTarget.mu. Outward travel past the live surface
-// stays unbounded so every sample keeps changing position; travel back toward
-// the surface first snaps the pair to the crossed edge so the engine cursor
-// reappears the moment the operator reverses instead of after replaying the
-// whole overshoot. The delta itself is never altered.
+// Caller must hold directInputTarget.mu; outward travel stays unbounded,
+// travel back snaps to the crossed edge, and the delta is never altered.
 func advancePointerLogical(x, y, dx, dy float32) (float32, float32) {
 	maxX := float32(directInputTarget.clampW - 1)
 	maxY := float32(directInputTarget.clampH - 1)
@@ -273,9 +244,8 @@ func advancePointerLogical(x, y, dx, dy float32) (float32, float32) {
 }
 
 // SetRobloxDirectInputTarget wires the direct mouse methods used by the
-// official client listener. Exact DEX descriptors are (FFZI)V, (FFFF)V,
-// (FFF)V, and ()Z respectively. The last method is the engine-owned lock
-// handshake; Tipsy never invents its state.
+// official client listener. The lock handshake is engine-owned; Tipsy never
+// invents its state.
 func SetRobloxDirectInputTarget(env, class, buttonFn, moveFn, wheelFn, lockFn uintptr) bool {
 	directInputTarget.mu.Lock()
 	directInputTarget.env = env
@@ -323,21 +293,16 @@ func ClearRobloxDirectInputTarget() {
 	directInputTarget.rmbAnchorSet = false
 	directInputTarget.mu.Unlock()
 	// Delivery is dead without a target; drop any anchored stream so a
-	// re-wired target never inherits a stale grab. The Alt toggle (operator
-	// state) and the sticky centered request survive; the next motion after
-	// re-wire re-acquires honestly.
+	// re-wired target never inherits a stale grab.
 	rmbPointerFallback.Store(false)
 	persistentPointerCapture.Store(false)
 	altToggleConsumed.Store(false)
 	// The decoded MouseBehavior layout belongs to the image that is about to
-	// be unmapped. Drop it so a re-wired target decodes against the bytes it
-	// actually has instead of inheriting a stale address.
+	// be unmapped; drop it so a re-wired target decodes against its own bytes.
 	resetEngineMouseBehavior()
 }
 
-// The direct keyboard target is a separate APK identity from the mouse
-// target: classes2.dex declares nativePassKeyEvent(ZIIZ)V on
-// NativeGLInterface, not NativeInputInterface.
+// The direct keyboard target is a separate identity from the mouse target.
 var directKeyTarget struct {
 	mu    sync.RWMutex
 	env   uintptr
@@ -345,11 +310,8 @@ var directKeyTarget struct {
 	fn    uintptr
 }
 
-// SetRobloxDirectKeyTarget wires the exact public static native keyboard
-// method in client 2.734.917:
-// NativeGLInterface.nativePassKeyEvent(ZIIZ)V. `scanCode` and `keyCode` are
-// kept distinct because the APK passes KeyEvent.getScanCode() first and
-// KeyEvent.getKeyCode() second.
+// SetRobloxDirectKeyTarget wires the direct keyboard native. `scanCode` and
+// `keyCode` are distinct: evdev scan code first, Android keycode second.
 func SetRobloxDirectKeyTarget(env, class, fn uintptr) bool {
 	directKeyTarget.mu.Lock()
 	directKeyTarget.env = env
@@ -375,8 +337,8 @@ func ClearRobloxDirectKeyTarget() {
 	directKeyTarget.mu.Unlock()
 }
 
-// DirectInputStats is separate from GameActivity's consumed/delivered counts:
-// the direct methods return void, so only honest deliveries and drops exist.
+// DirectInputStats counts direct-path deliveries and drops; the direct
+// methods return void, so no consumed count exists.
 type DirectInputStats struct {
 	ButtonDelivered uint64
 	MoveDelivered   uint64
@@ -402,15 +364,11 @@ func RobloxDirectInputStats() DirectInputStats {
 	}
 }
 
-// RobloxMainWindowMouseLocked reads the exact APK-declared and exported
-// NativeInputInterface.nativeGetMainWindowIsMouseLockedCenter()Z handshake.
-// The official generic-motion listener requests View pointer capture only
-// after this getter becomes true, and its captured-pointer listener releases
-// capture when it becomes false.
+// RobloxMainWindowMouseLocked reports the engine's lock getter. Capture is
+// requested only once it becomes true and released when it becomes false.
 func RobloxMainWindowMouseLocked() (locked bool, available bool) {
 	// Snapshot-unlock-call: teardown takes the write lock, so the engine
-	// getter must run after this lock is dropped (dispatchRobloxDirectKey
-	// and the pointer dispatchers already follow the same pattern).
+	// getter must run after this lock is dropped.
 	directInputTarget.mu.RLock()
 	env, class, lockFn := directInputTarget.env, directInputTarget.class, directInputTarget.lockFn
 	directInputTarget.mu.RUnlock()
@@ -426,13 +384,8 @@ func RobloxMainWindowMouseLocked() (locked bool, available bool) {
 	return locked, true
 }
 
-// DispatchRobloxDirectScroll maps a core-X11 vertical wheel detent to the
-// supplied APK's exact nativePassMouseWheel(FFF)V method. The APK's generic
-// mouse listener passes its cached logical x/y and MotionEvent AXIS_VSCROLL
-// (axis 9) as the third float, so Button4/Button5 map to +1/-1 without pixel
-// scaling. Its ACTION_SCROLL branch never reads AXIS_HSCROLL; horizontal
-// Button6/Button7 events are rejected honestly instead of being reinterpreted
-// as an unrelated touch-pan gesture.
+// DispatchRobloxDirectScroll maps a vertical wheel detent to the direct
+// wheel native. Horizontal wheel events are unsupported and dropped.
 func DispatchRobloxDirectScroll(x, y, deltaX, deltaY float32) bool {
 	if deltaY == 0 {
 		dropDirectEvent("scroll: APK listener has no horizontal wheel route")
@@ -445,9 +398,7 @@ func DispatchRobloxDirectScroll(x, y, deltaX, deltaY float32) bool {
 	directInputTarget.mu.RLock()
 	env, class, fn := directInputTarget.env, directInputTarget.class, directInputTarget.wheelFn
 	// A wheel detent is a point, not motion: pin the captured logical to the
-	// live surface so zoom always hit-tests on-view, even after the unbounded
-	// motion pair has drifted far off-viewport. Absolute wheel (already
-	// on-view) is unaffected.
+	// live surface so zoom hit-tests on-view.
 	x, y = clampPointerLogical(x, y)
 	directInputTarget.mu.RUnlock()
 	if env == 0 || class == 0 || fn == 0 {
@@ -462,14 +413,12 @@ func DispatchRobloxDirectScroll(x, y, deltaX, deltaY float32) bool {
 
 func dropDirectEvent(reason string) {
 	atomic.AddUint64(&directInputStats.Dropped, 1)
-	// High-frequency honest drops must not flood the default Info log; the
-	// counter remains the authoritative diagnostic.
+	// High-frequency drops must not flood the Info log; the counter is authoritative.
 	logging.Logger(logging.CatJNI).Debug("[jni] direct input dropped", "reason", reason)
 }
 
 func directButtonIndex(x11Button int32) (int32, bool) {
-	// APK caller: MotionEvent.getActionButton() - 1. Android's primary and
-	// secondary button constants are 1 and 2; X11 names them Button1/Button3.
+	// X11 Button1/Button3 map to the APK's primary/secondary button indices.
 	switch x11Button {
 	case 1:
 		return 0, true
@@ -480,18 +429,10 @@ func directButtonIndex(x11Button int32) (int32, bool) {
 	}
 }
 
-// DispatchRobloxDirectPointer maps one real X11 pointer event to exactly one
-// APK-proven native call. DOWN/UP map to nativePassMouseButton(x,y,pressed,
-// buttonIndex); MOVE maps to nativePassMouseMove(x,y,dx,dy). Calls are
-// synchronous, preserving the X11 event order and button edges. Descriptors do
-// not carry timestamps, so no timestamp is fabricated.
-//
-// Density: the APK divides MotionEvent pixels by DisplayMetrics.density
-// before calling these methods. Tipsy presents Android/X11 coordinates at
-// density 1.0 (DisplayMetrics.density=1, PlatformParams.dpiScale=1), so X11
-// window pixels pass through unchanged with no per-call scale factor. If the
-// presented density ever changes, scale once at the coordinate source — never
-// scatter magic divisors through this dispatcher.
+// DispatchRobloxDirectPointer maps one X11 pointer event to one native
+// call: DOWN/UP to the button native, MOVE to the move native. Calls are
+// synchronous, preserving X11 event order. Coordinates are presented at
+// density 1.0; scale once at the coordinate source if that ever changes.
 func DispatchRobloxDirectPointer(action int32, x, y float32, x11Button int32) bool {
 	directInputTarget.mu.Lock()
 	env, class := directInputTarget.env, directInputTarget.class
@@ -510,8 +451,7 @@ func DispatchRobloxDirectPointer(action int32, x, y float32, x11Button int32) bo
 			dropDirectEvent("pointer: unsupported X11 button")
 			return false
 		}
-		// X11 button events carry their real window-relative coordinates.
-		// Retain them only as the origin for a subsequent drag delta.
+		// Retain the real coordinates as the origin for a subsequent drag delta.
 		directInputTarget.havePointer = true
 		directInputTarget.lastX = x
 		directInputTarget.lastY = y
@@ -546,12 +486,9 @@ func DispatchRobloxDirectPointer(action int32, x, y float32, x11Button int32) bo
 	}
 }
 
-// DispatchRobloxDirectPointerDelta delivers one captured-pointer move through
-// the APK's axis-27/28 path. The host cursor stays at the X11 grab anchor;
-// the engine call uses the official listener's cached logical pair, which
-// accumulates density-normalized relative axes before nativePassMouseMove.
-// Routing through the absolute-position differencer would report a zero delta
-// because recentering intentionally keeps the host x/y unchanged.
+// DispatchRobloxDirectPointerDelta delivers one captured-pointer move. The
+// host cursor stays at the X11 grab anchor; the engine call uses the
+// accumulated logical pair.
 func DispatchRobloxDirectPointerDelta(x, y, dx, dy float32) bool {
 	directInputTarget.mu.Lock()
 	env, class := directInputTarget.env, directInputTarget.class
@@ -579,9 +516,8 @@ func DispatchRobloxDirectPointerDelta(x, y, dx, dy float32) bool {
 		dropDirectEvent("pointer: captured logical coordinate overflow")
 		return false
 	}
-	// Deliberately unbounded, matching the official captured listener's
-	// accumulated pair: the cursor is hidden while centered, and a pair that
-	// stops changing can read as no motion. Points clamp at their own sites.
+	// Deliberately unbounded: a pair that stops changing can read as no
+	// motion. Points clamp at their own dispatch sites.
 	directInputTarget.havePointer = true
 	directInputTarget.lastX = x
 	directInputTarget.lastY = y
@@ -592,40 +528,24 @@ func DispatchRobloxDirectPointerDelta(x, y, dx, dy float32) bool {
 	return true
 }
 
-// BeginRobloxDirectPointerFallback starts the narrow host-captured fallback
-// used only when a real held secondary-button gesture has acquired an X11
-// grab while the APK's own lock getter is false. The official listener keeps a
-// cached logical pair and advances it from AXIS_RELATIVE_X/Y when its lock
-// branch permits. The fallback must do the same: a permanently anchored x/y
-// pair can make the engine discard otherwise-real deltas as no logical motion.
-//
-// The APK's cached pair is a logical pointer coordinate, not a View bounds
-// check: its captured listener accumulates the density-normalized axes without
-// clamping them back to the captured View. Tipsy presents density 1.0, and X11
-// supplies finite integer-pixel deltas. Motion is never pinned: a pair that
-// stops changing can read as no motion to the engine (the reason this
-// integrator exists). Outward travel stays unbounded; travel back re-enters
-// from the crossed edge so a visible cursor has no dead zone. Buttons and
-// wheel are points, not motion, and clamp to the live surface at their own
-// dispatch sites so clicks and zoom always land on-view.
+// BeginRobloxDirectPointerFallback starts the host-captured fallback used
+// when a held secondary-button gesture acquires an X11 grab while the lock
+// getter is false. Motion is never pinned: outward travel stays unbounded
+// and travel back re-enters from the crossed edge.
 func BeginRobloxDirectPointerFallback(x, y float32) {
 	directInputTarget.mu.Lock()
 	directInputTarget.fallbackCaptured = true
 	directInputTarget.fallbackX = x
 	directInputTarget.fallbackY = y
-	// Keep the ordinary direct dispatcher coherent if an edge arrives after
-	// host capture has already been acquired.
+	// Keep the ordinary direct dispatcher coherent if an edge arrives after capture.
 	directInputTarget.havePointer = true
 	directInputTarget.lastX = x
 	directInputTarget.lastY = y
 	directInputTarget.mu.Unlock()
 }
 
-// ClearRobloxDirectPointerFallback discards a fallback-era virtual coordinate.
-// The caller follows an ordinary RMB release with DispatchRobloxDirectPointer,
-// which seeds the real anchored physical coordinate. Focus/teardown may lack
-// that final physical edge, so clearing also drops the old virtual origin and
-// makes the next normal absolute motion establish a fresh origin.
+// ClearRobloxDirectPointerFallback discards the fallback-era virtual
+// coordinate so the next normal absolute motion establishes a fresh origin.
 func ClearRobloxDirectPointerFallback() {
 	directInputTarget.mu.Lock()
 	directInputTarget.fallbackCaptured = false
@@ -638,11 +558,9 @@ func ClearRobloxDirectPointerFallback() {
 	directInputTarget.mu.Unlock()
 }
 
-// DispatchRobloxDirectPointerFallbackDelta invokes the same descriptor-exact
-// native as captured pointer delivery, but with the evolving logical x/y pair
-// required by the measured getter-false RMB compatibility case. It deliberately
-// does not query or override the APK's getter; callers select it only after the
-// already-delivered RMB edge and a successful host fallback acquisition.
+// DispatchRobloxDirectPointerFallbackDelta invokes the same native as
+// captured pointer delivery with the evolving logical pair. It never queries
+// or overrides the engine getter.
 func DispatchRobloxDirectPointerFallbackDelta(dx, dy float32) bool {
 	directInputTarget.mu.Lock()
 	env, class := directInputTarget.env, directInputTarget.class
@@ -652,9 +570,8 @@ func DispatchRobloxDirectPointerFallbackDelta(dx, dy float32) bool {
 		dropDirectEvent("pointer: no captured fallback target wired")
 		return false
 	}
-	// X11's relative producer uses integer event coordinates, so non-finite
-	// values cannot arise in production. Reject a corrupt synthetic/source
-	// value rather than poison the cached pair and later normal mouse deltas.
+	// Reject a non-finite delta rather than poison the cached pair and later
+	// normal mouse deltas.
 	if math.IsNaN(float64(dx)) || math.IsNaN(float64(dy)) ||
 		math.IsInf(float64(dx), 0) || math.IsInf(float64(dy), 0) {
 		directInputTarget.mu.Unlock()
@@ -681,21 +598,16 @@ func DispatchRobloxDirectPointerFallbackDelta(dx, dy float32) bool {
 	return true
 }
 
-// robloxDirectMouseLockedFn returns the resolved address of the engine's own
-// exported lock getter, NativeInputInterface
-// .nativeGetMainWindowIsMouseLockedCenter. It is the only anchor the
-// MouseBehavior decode starts from: the constants it needs are decoded from
-// this function's own instructions at runtime, never from a version-pinned
-// file vaddr (see engine_mouse_behavior.go).
+// robloxDirectMouseLockedFn returns the resolved address of the engine's
+// lock getter. It is the only anchor the MouseBehavior decode starts from.
 func robloxDirectMouseLockedFn() uintptr {
 	directInputTarget.mu.RLock()
 	defer directInputTarget.mu.RUnlock()
 	return directInputTarget.lockFn
 }
 
-// robloxDirectMoveTargetLive reports whether the direct mouse-move native is
-// wired. Persistent desktop capture engages only after this is true, so no
-// host grab is acquired before the engine listener exists (startup/Home).
+// robloxDirectMoveTargetLive reports whether the direct mouse-move native
+// is wired. Persistent capture engages only after this is true.
 func robloxDirectMoveTargetLive() bool {
 	directInputTarget.mu.RLock()
 	defer directInputTarget.mu.RUnlock()
@@ -703,10 +615,8 @@ func robloxDirectMoveTargetLive() bool {
 }
 
 // RobloxDirectFallbackPosition returns the evolving captured logical cursor
-// position. Captured button and wheel events must use it — not X11's fixed
-// grab anchor — so the engine's software cursor and the delivered click or
-// scroll agree. ok is false when no fallback/persistent capture holds the
-// integrator.
+// position. Captured button and wheel events must use it, not X11's fixed
+// grab anchor. ok is false when no capture holds the integrator.
 func RobloxDirectFallbackPosition() (x, y float32, ok bool) {
 	directInputTarget.mu.RLock()
 	defer directInputTarget.mu.RUnlock()
@@ -717,9 +627,8 @@ func RobloxDirectFallbackPosition() (x, y float32, ok bool) {
 }
 
 // RobloxDirectFallbackOffView reports whether the captured logical pair has
-// drifted outside the live viewport, i.e. the engine's software cursor (when
-// shown) is currently invisible. ok is false when no fallback/persistent
-// capture holds the integrator.
+// drifted outside the live viewport. ok is false when no capture holds the
+// integrator.
 func RobloxDirectFallbackOffView() (off, ok bool) {
 	directInputTarget.mu.RLock()
 	defer directInputTarget.mu.RUnlock()
@@ -731,12 +640,8 @@ func RobloxDirectFallbackOffView() (off, ok bool) {
 }
 
 // SnapRobloxDirectPointerFallbackToCenter re-seeds the captured logical pair
-// to the live viewport center and reports that point. The wheel-driven
-// dead-center heuristic (zoomLock in gameactivity_input.go) uses it so a
-// first-person lock begins and ends with the engine cursor at the center:
-// motion between detents still integrates exact dx/dy from there, the pair is
-// never pinned. ok is false when no fallback/persistent capture holds the
-// integrator.
+// to the live viewport center and reports that point; the pair is never
+// pinned. ok is false when no capture holds the integrator.
 func SnapRobloxDirectPointerFallbackToCenter() (x, y float32, ok bool) {
 	directInputTarget.mu.Lock()
 	defer directInputTarget.mu.Unlock()
@@ -750,14 +655,10 @@ func SnapRobloxDirectPointerFallbackToCenter() (x, y float32, ok bool) {
 	return x, y, true
 }
 
-// SeedRobloxDirectPointerAtCenter re-seeds the direct dispatcher's origin --
-// and the captured integrator, when one holds it -- to the live viewport
-// center, and reports that point. The engine's cursor reappears at the center
-// when MouseBehavior returns to Default after a centered lock, so the release
-// that frees the host pointer warps it there too (releaseEngineLockAtCenter)
-// and the two cursors stay together across the transition. Unlike
-// SnapRobloxDirectPointerFallbackToCenter it also applies to a centered
-// LockCenter stream, which holds no fallback integrator.
+// SeedRobloxDirectPointerAtCenter re-seeds the direct dispatcher's origin
+// and the captured integrator to the live viewport center and reports that
+// point. Unlike SnapRobloxDirectPointerFallbackToCenter it also applies to a
+// centered LockCenter stream, which holds no fallback integrator.
 func SeedRobloxDirectPointerAtCenter() (x, y float32) {
 	directInputTarget.mu.Lock()
 	defer directInputTarget.mu.Unlock()
@@ -766,23 +667,17 @@ func SeedRobloxDirectPointerAtCenter() (x, y float32) {
 	return x, y
 }
 
-// SeedRobloxDirectPointerAt re-seeds the direct dispatcher's origin -- and the
-// captured integrator, when one holds it -- to the point x, y. It is the
-// generic form of SeedRobloxDirectPointerAtCenter, for a release whose restore
-// point is not the center: LockCurrentPosition froze the engine cursor at the
-// engage-time origin, so that is where it reappears and where the logical pair
-// must be re-seeded (releaseEngineLockAtOrigin). The host pointer is the
-// caller's business -- the anchored ungrab leaves it at the grab anchor, a
-// centered one warps it there first -- so a re-seed never moves it by itself.
+// SeedRobloxDirectPointerAt re-seeds the direct dispatcher's origin and the
+// captured integrator to x, y. It is the generic form of
+// SeedRobloxDirectPointerAtCenter; the host pointer is the caller's business.
 func SeedRobloxDirectPointerAt(x, y float32) {
 	directInputTarget.mu.Lock()
 	defer directInputTarget.mu.Unlock()
 	seedRobloxDirectPointerAtLocked(x, y)
 }
 
-// seedRobloxDirectPointerAtLocked re-seeds both the captured integrator (when
-// one holds it) and the ordinary dispatcher's origin to x, y. Caller holds
-// directInputTarget.mu.
+// seedRobloxDirectPointerAtLocked re-seeds both the captured integrator and
+// the ordinary dispatcher's origin to x, y. Caller holds directInputTarget.mu.
 func seedRobloxDirectPointerAtLocked(x, y float32) {
 	if directInputTarget.fallbackCaptured {
 		directInputTarget.fallbackX, directInputTarget.fallbackY = x, y
@@ -798,8 +693,7 @@ func pointerViewportCenter() (float32, float32) {
 }
 
 // robloxDirectLastPosition returns the ordinary direct dispatcher's last
-// delivered origin. The centered LockCenter path accumulates from it; a
-// wheel detent while centered reports it so zoom UI follows the look cursor.
+// delivered origin. The centered LockCenter path accumulates from it.
 func robloxDirectLastPosition() (x, y float32, ok bool) {
 	directInputTarget.mu.RLock()
 	defer directInputTarget.mu.RUnlock()
@@ -810,10 +704,9 @@ func robloxDirectLastPosition() (x, y float32, ok bool) {
 }
 
 // BeginRobloxDirectCapturedSecondary marks a secondary-button press taken
-// under persistent capture. It pins the logical cursor on-view, re-seeds the
-// integrator there so the drag starts from the delivered press point, and
-// remembers that point as the LockCurrentPosition anchor. ok is false when no
-// persistent/fallback stream holds the integrator.
+// under persistent capture, pins the logical cursor on-view, and remembers
+// that point as the LockCurrentPosition anchor. ok is false when no stream
+// holds the integrator.
 func BeginRobloxDirectCapturedSecondary() (x, y float32, ok bool) {
 	directInputTarget.mu.Lock()
 	defer directInputTarget.mu.Unlock()
@@ -830,11 +723,8 @@ func BeginRobloxDirectCapturedSecondary() (x, y float32, ok bool) {
 }
 
 // EndRobloxDirectCapturedSecondary restores the integrator to the remembered
-// secondary-press anchor so the matching release lands there and later motion
-// continues from it: the engine cursor comes back to the click point, exactly
-// as the held-RMB fallback's release at the grab anchor did. ok is false when
-// no press is remembered (the press predates the stream, or a focus/convert
-// reset dropped it); the caller then releases at the live logical cursor.
+// secondary-press anchor so the matching release lands there. ok is false
+// when no press is remembered; the caller then releases at the live cursor.
 func EndRobloxDirectCapturedSecondary() (x, y float32, ok bool) {
 	directInputTarget.mu.Lock()
 	defer directInputTarget.mu.Unlock()
@@ -851,10 +741,8 @@ func EndRobloxDirectCapturedSecondary() (x, y float32, ok bool) {
 }
 
 // DispatchRobloxDirectButtonCaptured delivers a button edge at the captured
-// logical cursor instead of a physical X11 coordinate. The host pointer is
-// confined at the grab anchor while captured, so the physical coordinate is
-// the anchor — not where the engine's software cursor is. The integrator is
-// otherwise untouched: a click does not move the logical cursor.
+// logical cursor instead of a physical X11 coordinate: the host pointer is
+// confined at the grab anchor while captured. The integrator is untouched.
 func DispatchRobloxDirectButtonCaptured(action int32, x11Button int32) bool {
 	directInputTarget.mu.Lock()
 	env, class := directInputTarget.env, directInputTarget.class
@@ -872,8 +760,7 @@ func DispatchRobloxDirectButtonCaptured(action int32, x11Button int32) bool {
 	}
 	x, y := directInputTarget.fallbackX, directInputTarget.fallbackY
 	// A click is a point, not motion: pin to the live surface so it always
-	// hit-tests on-view, even after the unbounded motion pair has drifted
-	// far off-viewport. The stored integrator is untouched.
+	// hit-tests on-view. The stored integrator is untouched.
 	x, y = clampPointerLogical(x, y)
 	directInputTarget.mu.Unlock()
 	pressed := C.uchar(0)
@@ -887,10 +774,7 @@ func DispatchRobloxDirectButtonCaptured(action int32, x11Button int32) bool {
 }
 
 // ClearRobloxDirectPointerFallbackKeepLast drops the fallback-captured flag
-// while preserving the ordinary dispatcher's last origin. The anchored to
-// centered LockCenter conversion uses it so the first centered deltas
-// continue from the established logical cursor instead of restarting at the
-// window-center anchor.
+// while preserving the ordinary dispatcher's last origin.
 func ClearRobloxDirectPointerFallbackKeepLast() {
 	directInputTarget.mu.Lock()
 	directInputTarget.fallbackCaptured = false
@@ -901,19 +785,14 @@ func ClearRobloxDirectPointerFallbackKeepLast() {
 }
 
 const (
-	// Xorg's installed evdev XKB keycodes are the Linux evdev scan codes plus
-	// eight: for example, <ESC>=9 while KEY_ESC=1 and <AD01>=24 while
-	// KEY_Q=16. The official Android listener passes KeyEvent.getScanCode()
-	// to nativePassKeyEvent, and this native method's physical-code parameter
-	// therefore receives the original evdev value, not an Android keycode.
+	// Xorg's evdev XKB keycodes are the Linux evdev scan codes plus eight
+	// (<ESC>=9 while KEY_ESC=1); this native receives evdev, not Android keycodes.
 	x11EvdevKeycodeOffset int32 = 8
 	x11MaximumKeycode     int32 = 255
 )
 
-// x11KeycodeToEvdev converts a raw core-X11 keycode to its evdev scan code
-// under the system evdev XKB keycode map. Core X11 keycodes are an unsigned
-// byte with the configured range [8,255]; 8 maps to evdev's reserved code 0
-// and is not a physical keyboard key we can truthfully forward.
+// x11KeycodeToEvdev converts a raw core-X11 keycode to its evdev scan code.
+// X11 keycode 8 maps to evdev's reserved code 0 and is not a physical key.
 func x11KeycodeToEvdev(x11Keycode int32) (int32, bool) {
 	if x11Keycode <= x11EvdevKeycodeOffset || x11Keycode > x11MaximumKeycode {
 		return 0, false
@@ -922,15 +801,8 @@ func x11KeycodeToEvdev(x11Keycode int32) (int32, bool) {
 }
 
 // DispatchRobloxDirectKey delivers one physical X11 key edge through the
-// exact final Roblox-listener native in the supplied APK:
-// NativeGLInterface.nativePassKeyEvent(ZIIZ)V. Its caller passes, in order,
-// KeyEvent down/up, getScanCode(), getKeyCode(), and repeatCount > 0.
-//
-// `x11Keycode` is the real core-X11 keycode, converted once to an evdev scan
-// code. `androidKeycode` remains the X11 layer's complete keysym-to-Android
-// translation. They must never be substituted for one another: only the
-// first uses the evdev vocabulary. This entry point represents a physical
-// edge; the X11 event dispatcher also carries the observed repeat count.
+// direct keyboard native. `x11Keycode` converts to an evdev scan code;
+// `androidKeycode` stays the keysym-to-Android translation. Never substitute.
 func DispatchRobloxDirectKey(x11Keycode, androidKeycode int32, pressed bool) bool {
 	return dispatchRobloxDirectKey(x11Keycode, androidKeycode, pressed, 0)
 }

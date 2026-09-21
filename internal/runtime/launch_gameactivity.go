@@ -44,32 +44,25 @@ const (
 	initStorageManagerV3Sym   = "Java_com_roblox_client_LocalStorageManager_initStorageManagerNativeV3"
 	initStorageManagerV3Sig   = "(Landroid/content/res/AssetManager;Ljava/lang/String;Ljava/lang/String;)V"
 	appStartSym               = "Java_com_roblox_engine_jni_NativeAppBridgeInterface_nativeAppBridgeAppStart__Ljava_lang_String_2Ljava_lang_String_2ZLjava_lang_String_2Ljava_lang_String_2Ljava_lang_String_2"
-	// updateSurfaceSym is the APK-declared, non-overloaded static native
-	// NativeGLInterface.nativeAppBridgeV2UpdateSurfaceAppWithPlatformParams(
-	// Surface, PlatformParams). It is the public app bridge Android invokes
-	// after a real surface-size change; unlike the registered GameActivity
-	// onSurfaceChangedNative callback, it does not re-enter surface creation.
+	// updateSurfaceSym is the public app bridge Android invokes after a real
+	// surface-size change; unlike the GameActivity onSurfaceChangedNative callback,
+	// it does not re-enter surface creation.
 	updateSurfaceSym     = "Java_com_roblox_engine_jni_NativeGLInterface_nativeAppBridgeV2UpdateSurfaceAppWithPlatformParams"
 	directMouseButtonSym = "Java_com_roblox_engine_jni_NativeInputInterface_nativePassMouseButton"
 	directMouseMoveSym   = "Java_com_roblox_engine_jni_NativeInputInterface_nativePassMouseMove"
 	directMouseWheelSym  = "Java_com_roblox_engine_jni_NativeInputInterface_nativePassMouseWheel"
 	directMouseLockedSym = "Java_com_roblox_engine_jni_NativeInputInterface_nativeGetMainWindowIsMouseLockedCenter"
 	directKeyEventSym    = "Java_com_roblox_engine_jni_NativeGLInterface_nativePassKeyEvent"
-	// Direct gamepad family: the six DEX-proven NativeInputInterface
-	// dynsyms from Phase 0 (gamepad-ground-truth-2026-09-12.md §1,
-	// 2.736.1408). Only these names are resolved; nativePassGamepad*-,
-	// nativePassJoystick*-, and nativePassController*-shaped names were
-	// verified absent from dynsym and must never be guessed.
+	// Direct gamepad family: only these six names are resolved; other
+	// gamepad-shaped names must never be guessed.
 	directGamepadAxisSym      = "Java_com_roblox_engine_jni_NativeInputInterface_nativeGamepadAxisEvent"
 	directGamepadButtonSym    = "Java_com_roblox_engine_jni_NativeInputInterface_nativeGamepadButtonEvent"
 	directGamepadConnectSym   = "Java_com_roblox_engine_jni_NativeInputInterface_nativeGamepadConnectEventWithGamepadType"
 	directGamepadDisconnSym   = "Java_com_roblox_engine_jni_NativeInputInterface_nativeGamepadDisconnectEvent"
 	directGamepadSetKeySym    = "Java_com_roblox_engine_jni_NativeInputInterface_nativeSetGamepadSupportedKeyWithGamepadType"
 	directGamepadSetMotionSym = "Java_com_roblox_engine_jni_NativeInputInterface_nativeSetGamepadSupportedMotionWithGamepadType"
-	// universalapp MessageBus exports the APK's Java PermissionsProtocol
-	// (classes2.dex sm/k) calls to register itself; Tipsy plays that role
-	// (voice-permissions-messagebus-2026-09-12.md). Java→native dynsyms,
-	// resolved by name; none are hooks.
+	// MessageBus exports the APK's PermissionsProtocol registration; Tipsy plays
+	// that role. These are Java→native symbols resolved by name, not hooks.
 	messageBusSetRequestHandlerRawSym = "Java_com_roblox_universalapp_messagebus_MessageBus_setRequestHandlerRaw"
 	messageBusSubscribeRequestRawSym  = "Java_com_roblox_universalapp_messagebus_MessageBus_doSubscribeProtocolMethodRequestRaw"
 	messageBusPublishResponseRawSym   = "Java_com_roblox_universalapp_messagebus_MessageBus_publishProtocolMethodResponseRaw"
@@ -78,36 +71,25 @@ const (
 	messageBusPublishRawSym           = "Java_com_roblox_universalapp_messagebus_MessageBus_publishRaw"
 	webViewInitializeSym              = "Java_com_roblox_protocols_webview_WebViewProtocol_initializeAndroidWebViewProtocol"
 	webViewSignalJavascriptSym        = "Java_com_roblox_protocols_webview_WebViewProtocol_signalJavascriptCallback"
-	// setInputConnectionName/Sig is the exact Java→native handshake the
-	// engine registered (DEX ground truth, classes2.dex method table,
-	// 2.734.917 — descriptors only, never vendored):
-	// com/google/androidgamesdk/GameActivity.setInputConnectionNative(
-	//   J, Lcom/google/androidgamesdk/gametextinput/InputConnection;)V
-	// Direction is Tipsy→engine: Tipsy CALLs it once after
-	// initializeNativeCode with the Tipsy-owned InputConnection object so
-	// the engine has somewhere to send State deltas. Resolved via the same
-	// RegisterNatives path as other GameActivity natives (callGameActivityNative),
-	// never a version-pinned file vaddr.
+	// setInputConnectionName/Sig is the Java→native handshake the engine
+	// registered. Tipsy calls it once after initializeNativeCode with the
+	// Tipsy-owned InputConnection so the engine can send State deltas.
 	setInputConnectionName = "setInputConnectionNative"
 	setInputConnectionSig  = "(JLcom/google/androidgamesdk/gametextinput/InputConnection;)V"
-	// nativePassTextSym/Sig is the named commit route the engine exports
-	// (named dynsym, no vaddrs):
-	// com/roblox/engine/jni/NativeGLInterface.nativePassText(
-	//   J, Ljava/lang/String;, Z, I)V
-	// The caller is focus-gated by the engine's own showKeyboard textbox
-	// handle. Its text comes only from the X11 input method's committed UTF-8.
+	// nativePassTextSym/Sig is the engine's named commit route. It is focus-gated
+	// by the engine's showKeyboard textbox handle; its text comes only from the X11
+	// input method's committed UTF-8.
 	nativePassTextSym       = "Java_com_roblox_engine_jni_NativeGLInterface_nativePassText"
 	nativePassTextSig       = "(JLjava/lang/String;ZI)V"
 	nativeReturnPressedSym  = "Java_com_roblox_engine_jni_NativeGLInterface_nativeReturnPressedFromOnScreenKeyboard"
 	syncTextboxSelectionSym = "Java_com_roblox_engine_jni_NativeGLInterface_syncTextboxTextAndCursorPosition2"
 	nativeGetTextBoxInfoSym = "Java_com_roblox_engine_jni_NativeGLInterface_nativeGetTextBoxInfo"
-	// postExitForegroundSym is the named static native ActivityNativeMain
-	// invokes through AppShell's foreground callback after an experience ends.
-	// Its Focused/AppInput event resumes the retained app, preserving its page.
+	// postExitForegroundSym is the static native invoked after an experience ends;
+	// its Focused/AppInput event resumes the retained app, preserving its page.
 	postExitForegroundSym = "Java_com_roblox_engine_jni_NativeGLInterface_nativeAppBridgeV2SendAppEventOnGameLoaded"
-	// postExitLeaveGameSym is the exact static native invoked by the current
-	// APK's ExperienceSession.D(false) cleanup path after gameDidLeave. It is
-	// session cleanup, not a second destination request or process shutdown.
+	// postExitLeaveGameSym is the static native invoked by the APK's session
+	// cleanup path after gameDidLeave. It is session cleanup, not a second
+	// destination request or process shutdown.
 	postExitLeaveGameSym     = "Java_com_roblox_engine_jni_NativeGLInterface_nativeAppBridgeV2LeaveGame"
 	appCmdInitWindow         = 1
 	appCmdWindowResized      = 3
@@ -118,8 +100,7 @@ const (
 	appCmdResume             = 12
 )
 
-// appForegroundEvent follows the current APK's fi/e.A(true) argument order.
-// Foreground restoration carries no destination, place, or account payload.
+// appForegroundEvent carries no destination, place, or account payload.
 type appForegroundEvent struct {
 	Protocol string
 	Payload  string
@@ -132,9 +113,9 @@ var postExitForegroundEvent = appForegroundEvent{
 	Topic:    "Focused",
 }
 
-// postExitForegroundUnavailableError is the typed, fail-closed
-// diagnostic for a client whose named AppShell foreground export is unavailable.
-// The caller deliberately registers no lifecycle consumer in that case.
+// postExitForegroundUnavailableError is the typed, fail-closed diagnostic for a
+// client whose foreground export is unavailable; the caller registers no
+// lifecycle consumer in that case.
 type postExitForegroundUnavailableError struct {
 	Symbol string
 	Cause  error
@@ -157,10 +138,9 @@ func (e *postExitForegroundUnavailableError) Unwrap() error {
 	return e.Cause
 }
 
-// resolvePostExitForeground resolves one APK-named native export. It
-// is kept separate from session construction so the unavailable case stays
-// testable and cannot silently subscribe a consumer that has nowhere honest
-// to send the event.
+// resolvePostExitForeground resolves one named native export, keeping the
+// unavailable case from silently subscribing a consumer with nowhere to send
+// the event.
 func resolvePostExitForeground(lookup func(string) (uintptr, error)) (uintptr, error) {
 	if lookup == nil {
 		return 0, &postExitForegroundUnavailableError{
@@ -181,8 +161,8 @@ func resolvePostExitForeground(lookup func(string) (uintptr, error)) (uintptr, e
 	return fn, nil
 }
 
-// postExitGameRestorationUnavailableError is the typed, fail-closed
-// diagnostic for a client missing the named ExperienceSession cleanup export.
+// postExitGameRestorationUnavailableError is the typed, fail-closed diagnostic
+// for a client missing the named session-cleanup export.
 type postExitGameRestorationUnavailableError struct {
 	Symbol string
 	Cause  error
@@ -234,14 +214,12 @@ const (
 	postExitAppStopped
 )
 
-// postExitAppResume owns one GameActivity session's observed lifecycle
-// state. A non-zero onGameLoaded is the engine's direct statement that an
-// experience DataModel loaded, so the matching later onGameLoaded(0) is a
-// sufficient return-to-Home sequence even on APK paths that do not emit the
-// optional NativeHelper start/stop callbacks. The explicit start -> stop ->
-// Home sequence remains accepted when those callbacks are present. Startup
-// Home, Lua notifications, and incomplete sequences remain no-ops. A later
-// real start or non-zero load rearms an independent experience.
+// postExitAppResume owns one GameActivity session's observed lifecycle state. A
+// non-zero onGameLoaded proves an experience DataModel loaded, so the matching
+// later onGameLoaded(0) is a sufficient return-to-Home sequence; the explicit
+// start -> stop -> Home sequence is also accepted. Startup Home, Lua
+// notifications, and incomplete sequences are no-ops, and a later real start or
+// non-zero load rearms an independent experience.
 type postExitAppResume struct {
 	mu             sync.Mutex
 	state          postExitAppState
@@ -284,9 +262,8 @@ func (r *postExitAppResume) observe(event jni.NativeHelperLifecycleEvent) {
 			r.state = postExitAppStopped
 			gate = "awaiting_home"
 		} else {
-			// A second stop (or a stop without a session start) is not the
-			// required ordered pair. Clear any stale state rather than
-			// allowing a following Home notification to complete it.
+			// A second stop, or a stop without a start, is not the required ordered
+			// pair; clear stale state rather than letting a following Home complete it.
 			r.state = postExitAppIdle
 			gate = "disarmed"
 		}
@@ -294,9 +271,8 @@ func (r *postExitAppResume) observe(event jni.NativeHelperLifecycleEvent) {
 		eventName = "game_loaded"
 		idClass = "nonzero"
 		if event.PlaceID != 0 {
-			// Live 2.734.917 does not announce NativeHelper start/stop on
-			// this join/exit path. Its non-zero DataModel load is the exact
-			// event-driven evidence needed to arm the later Home-zero return.
+			// This join/exit path does not emit NativeHelper start/stop; its non-zero
+			// DataModel load is the evidence needed to arm the later Home-zero return.
 			r.state = postExitAppLoadedExperience
 			r.leaveConsumed = false
 			gate = "armed"
@@ -321,12 +297,12 @@ func (r *postExitAppResume) observe(event jni.NativeHelperLifecycleEvent) {
 		}
 	case jni.NativeHelperLuaAppDidReturn:
 		eventName = "lua_return"
-		// The APK uses this callback for Android orientation restoration.
-		// It is observed but is neither an ordering substitute nor a route.
+		// This callback is used for Android orientation restoration; it is observed
+		// but is neither an ordering substitute nor a route.
 	}
 	r.mu.Unlock()
-	// This bounded trace contains fixed lifecycle classes only. In
-	// particular, it never records the engine duration or a place identifier.
+	// This trace contains fixed lifecycle classes only; it never records the engine
+	// duration or a place identifier.
 	logging.Logger(logging.CatGameActivity).Info("post-exit app lifecycle",
 		"event", eventName, "id_class", idClass, "gate", gate, "action", action)
 	if invoke == nil {
@@ -341,11 +317,9 @@ func (r *postExitAppResume) observe(event jni.NativeHelperLifecycleEvent) {
 		invokeLeave = r.invokeLeave
 	}
 	r.mu.Unlock()
-	// The current APK does not call LeaveGame re-entrantly from the
-	// gameDidLeave wrapper. ExperienceSession.D(false) queues h0.j's runnable,
-	// which reaches h0.t only after the native call that emitted gameDidLeave
-	// has returned. Flush at that same safe boundary while retaining this
-	// route's existing in-flight teardown ownership.
+	// The APK does not call LeaveGame re-entrantly from the gameDidLeave wrapper;
+	// the deferred cleanup runs only after the foreground native returns. Flush at
+	// that boundary while retaining this route's in-flight teardown ownership.
 	if invokeLeave != nil {
 		logging.Logger(logging.CatGameActivity).Info("post-exit game session restoration",
 			"operation", "leave_game", "gate", "flushed")
@@ -354,10 +328,9 @@ func (r *postExitAppResume) observe(event jni.NativeHelperLifecycleEvent) {
 	r.inflight.Done()
 }
 
-// gameDidLeave synchronously consumes the callback and defers the one
-// engine-facing operation from ExperienceSession.D(false) until the outer
-// foreground native has returned. Consumption precedes the later call so
-// native re-entry cannot recurse. It never emits a destination request.
+// gameDidLeave synchronously consumes the callback and defers the engine-facing
+// operation until the outer foreground native returns. Consumption precedes the
+// later call so native re-entry cannot recurse; it never emits a destination request.
 func (r *postExitAppResume) gameDidLeave() {
 	if r == nil {
 		return
@@ -380,8 +353,8 @@ func (r *postExitAppResume) gameDidLeave() {
 }
 
 // close blocks until an already-dispatched route call has returned. Combined
-// with unsubscribing first, this prevents a dispatcher snapshot from calling
-// an unloaded client module during GameActivity teardown.
+// with unsubscribing first, it prevents a dispatcher snapshot from calling an
+// unloaded client module during teardown.
 func (r *postExitAppResume) close() {
 	if r == nil {
 		return
@@ -396,8 +369,8 @@ func (r *postExitAppResume) close() {
 }
 
 // bindPostExitAppObservers owns both subscriptions and the shared in-flight
-// barrier. Cancellation happens before close waits, preventing new dispatcher
-// snapshots while allowing already-copied callbacks to finish safely.
+// barrier. Cancellation precedes close so new dispatcher snapshots stop while
+// already-copied callbacks finish safely.
 func bindPostExitAppObservers(
 	route *postExitAppResume,
 	subscribeLifecycle func(jni.NativeHelperLifecycleListener) func(),
@@ -421,9 +394,9 @@ func bindPostExitAppObservers(
 	}
 }
 
-// subscribePostExitAppResume ties the exact lifecycle consumer to this
-// GameActivity session. Missing module exports are recorded as a typed
-// capability failure and leave navigation untouched.
+// subscribePostExitAppResume ties the lifecycle consumer to this GameActivity
+// session. Missing exports are recorded as a typed capability failure and leave
+// navigation untouched.
 func subscribePostExitAppResume(mod *loader.Module, env *jni.Env, gl uintptr) func() {
 	fn, err := resolvePostExitForeground(func(sym string) (uintptr, error) {
 		if mod == nil {
@@ -466,20 +439,18 @@ func subscribePostExitAppResume(mod *loader.Module, env *jni.Env, gl uintptr) fu
 	return bindPostExitAppObservers(route, jni.SubscribeNativeHelperLifecycle, jni.SubscribeNativeGLGameDidLeave)
 }
 
-// shutdown follows the official GameActivity Java lifecycle already declared
-// by this APK: focus loss, pause, surface destruction, stop, then
-// terminateNativeCode. The final call posts APP_CMD_DESTROY and joins the
-// native app thread before Launch's deferred module unmap can run. sync.Once
-// prevents a context cancellation racing a WM close from double-destroying
-// the native handle.
+// shutdown follows the GameActivity lifecycle: focus loss, pause, surface
+// destruction, stop, then terminateNativeCode, which joins the native app
+// thread before Launch's deferred module unmap. sync.Once prevents a context
+// cancellation racing a WM close from double-destroying the native handle.
 func (s *gameActivitySession) shutdown(reason string) time.Duration {
 	if s == nil {
 		return 0
 	}
 	s.shutdownOnce.Do(func() {
-		// Remove the session-owned NativeHelper observer before teardown. Its
-		// close waits for a copied dispatcher callback already in flight, so
-		// no post-exit foreground call can cross module unmap.
+		// Remove the session-owned NativeHelper observer before teardown; its close
+		// waits for an in-flight dispatcher callback, so no post-exit foreground
+		// call crosses module unmap.
 		if s.closeLifecycle != nil {
 			s.closeLifecycle()
 		}
@@ -488,16 +459,13 @@ func (s *gameActivitySession) shutdown(reason string) time.Duration {
 		}
 		started := time.Now()
 		logging.Logger(logging.CatGameActivity).Info("graceful shutdown started", "reason", reason)
-		// Park the evdev pad pump with the session it feeds: after
-		// terminateNativeCode no direct gamepad target is live, so further
-		// polls would only count parked drops.
+		// Park the evdev pad pump with the session it feeds: after terminateNativeCode
+		// no gamepad target is live, so further polls only count parked drops.
 		jni.StopRobloxDirectGamepadPump()
-		// The runtime is an in-process host: returning and unmapping libroblox
-		// while terminateNativeCode is still executing is unsafe. Give the
-		// official lifecycle/join path a generous deadline, then terminate the
-		// already-dismissed host process as a last resort so an engine teardown
-		// stall cannot leave a hidden Tipsy process indefinitely. Normal closes
-		// stop this watchdog hundreds of times before it can fire.
+		// The runtime is an in-process host: unmapping libroblox while
+		// terminateNativeCode still runs is unsafe. Give the join path a deadline, then
+		// terminate the dismissed host as a last resort so a teardown stall cannot
+		// leave a hidden process indefinitely.
 		var watchdog *time.Timer
 		if s.forceExit != nil {
 			deadline := s.shutdownDeadline
@@ -537,9 +505,8 @@ func startGameActivity(ctx context.Context, vm *jni.VM, mod *loader.Module, aw *
 	overrides, overrideErr := loadAndroidAppOverrides(ctx, filepath.Join(files, "ClientAppSettings.json"), testOpenGL)
 	assetsObj := env.AllocObject(env.FindClass("android/content/res/AssetManager"))
 	cfg := env.AllocObject(env.FindClass("android/content/res/Configuration"))
-	// The APK's NativeHelper startup calls org.fmod.FMOD.init(context)
-	// before the engine initializes (classes2.dex); FMOD's output selection
-	// later reads that Context via checkInit(). Java-side role, jni-owned.
+	// FMOD init runs before the engine initializes; FMOD's output selection later
+	// reads that Context. Java-side role, jni-owned.
 	vm.FmodInit(activity)
 	initJNIAAssetManager(mod, env, assetsObj)
 	fn, err := mod.Lookup(initNativeSym)
@@ -559,26 +526,22 @@ func startGameActivity(ctx context.Context, vm *jni.VM, mod *loader.Module, aw *
 	commands, err := android.NewGameActivityCommandWriter(uintptr(handle), writeCommand)
 	if err != nil {
 		logging.Logger(logging.CatGameActivity).Error("GameActivity command bridge unavailable", "err", err)
-		// initializeNativeCode owns a native app thread. Let its registered
-		// termination method destroy and join that thread before the caller
-		// closes the authenticated module after this compatibility failure.
+		// initializeNativeCode owns a native app thread; let its termination method
+		// destroy and join that thread before the caller closes the module.
 		callGameActivityNative(vm, env, activity, uintptr(handle), "terminateNativeCode", "(J)V")
 		return nil, fmt.Errorf("GameActivity command bridge: %w", err)
 	}
 	jni.SetGameActivityInputTarget(env.Raw(), activity, uintptr(handle))
-	// Text-input handshake (§88): hand the Tipsy-owned InputConnection to
-	// the engine immediately after the input target, on this same
-	// Main-pthread stack (CallP8 hops there like every other GameActivity
-	// native — never a goroutine hop). The dormant commit gate runs right
-	// after. The InputConnection is engine→Java state priming; typed text
-	// takes the APK's separate RbxKeyboard nativePassText path wired below.
+	// Hand the Tipsy-owned InputConnection to the engine right after the input
+	// target, on the same Main-pthread stack. It is engine→Java state priming;
+	// typed text uses the separate nativePassText path wired below.
 	deliverTextInputConnection(vm, env, activity, uintptr(handle))
 	wireRobloxDirectInput(mod, env)
 	wireRobloxDirectKey(mod, env)
 	wireRobloxDirectGamepad(mod, env)
-	// The evdev pad pump bypasses the X11 ring (own goroutine into the
-	// JNI gamepad frame handler). It honors the TIPSY_GAMEPAD
-	// kill-switch internally and stays silent with zero host pads.
+	// The evdev pad pump runs its own goroutine into the JNI gamepad handler,
+	// bypassing the X11 ring. It honors the TIPSY_GAMEPAD kill-switch and stays
+	// silent with zero host pads.
 	jni.StartRobloxDirectGamepadPump()
 	wireRobloxTextInput(mod, env)
 	wireRobloxPermissionsProtocol(mod, env)
@@ -588,20 +551,12 @@ func startGameActivity(ctx context.Context, vm *jni.VM, mod *loader.Module, aw *
 		width, height, currentRefreshHz, supportedRefreshHz, aw, req, overrides, overrideErr), nil
 }
 
-// deliverTextInputConnection ensures the Tipsy-owned InputConnection object
-// (jni.EnsureTextInputConnection, a real VM object — opaque handle, never an
-// engine pointer) and delivers it through the engine-registered
-// setInputConnectionNative(J, InputConnection)V via the same
-// RegisterNatives-resolved path as other GameActivity natives. The jobject
-// encoding in this VM is the object id itself (cgo idToJobject/jobjectToID;
-// Env.NewString does uintptr(idToJobject(id))), so uintptr(conn) IS the
-// honest Java object — no wrapper fabrication, no fake engine pointers. A
-// zero VM/env/activity/handle parks honestly (returns 0, no call). A missing
-// engine registration logs the honest missing-native line and keeps the
-// object for a later focus-driven retry — never a stub success. No text
-// content is handled or logged here (opaque ids only); activation still
-// follows only the engine's own showKeyboard/hideKeyboard focus signals
-// inside internal/jni.
+// deliverTextInputConnection delivers the Tipsy-owned InputConnection (a real
+// VM object with an opaque handle, never an engine pointer) to the engine. A
+// zero VM/env/activity/handle parks honestly; a missing registration logs and
+// keeps the object for a later retry, never a stub success. No text content is
+// handled or logged (opaque ids only); activation follows only the engine's
+// own focus signals.
 func deliverTextInputConnection(vm *jni.VM, env *jni.Env, activity, handle uintptr) int64 {
 	if vm == nil || env == nil || activity == 0 || handle == 0 {
 		return 0
@@ -616,9 +571,9 @@ func deliverTextInputConnection(vm *jni.VM, env *jni.Env, activity, handle uintp
 	return conn
 }
 
-// wireRobloxDirectInput resolves only the public static native methods used by
-// the official 2.734.917 mouse listeners. `nativePassMouse` is absent and must
-// not be guessed. The ()Z getter is the authority for host pointer capture.
+// wireRobloxDirectInput resolves only the public static native mouse methods.
+// `nativePassMouse` is absent and must not be guessed; the ()Z getter is the
+// authority for host pointer capture.
 func wireRobloxDirectInput(mod *loader.Module, env *jni.Env) {
 	buttonFn, buttonErr := mod.Lookup(directMouseButtonSym)
 	moveFn, moveErr := mod.Lookup(directMouseMoveSym)
@@ -640,9 +595,9 @@ func wireRobloxDirectInput(mod *loader.Module, env *jni.Env) {
 	jni.SetRobloxDirectInputTarget(env.Raw(), class, buttonFn, moveFn, wheelFn, lockedFn)
 }
 
-// wireRobloxDirectKey resolves the separate public static native key route
-// proven by the official APK. NativeGLInterface owns nativePassKeyEvent;
-// it must not be conflated with the mouse methods on NativeInputInterface.
+// wireRobloxDirectKey resolves the separate key route. NativeGLInterface owns
+// nativePassKeyEvent; it must not be conflated with the NativeInputInterface
+// mouse methods.
 func wireRobloxDirectKey(mod *loader.Module, env *jni.Env) {
 	fn, err := mod.Lookup(directKeyEventSym)
 	if err != nil {
@@ -652,10 +607,9 @@ func wireRobloxDirectKey(mod *loader.Module, env *jni.Env) {
 	jni.SetRobloxDirectKeyTarget(env.Raw(), class, fn)
 }
 
-// wireRobloxDirectGamepad resolves only the six DEX-proven direct gamepad
-// methods on NativeInputInterface. Missing exports log the honest missing
-// line and park pad delivery (drops, never queues), exactly like the mouse
-// and key arms.
+// wireRobloxDirectGamepad resolves only the six direct gamepad methods on
+// NativeInputInterface. Missing exports log the missing line and park pad
+// delivery (drops, never queues).
 func wireRobloxDirectGamepad(mod *loader.Module, env *jni.Env) {
 	axisFn, axisErr := mod.Lookup(directGamepadAxisSym)
 	buttonFn, buttonErr := mod.Lookup(directGamepadButtonSym)
@@ -682,14 +636,10 @@ func wireRobloxDirectGamepad(mod *loader.Module, env *jni.Env) {
 	jni.SetRobloxDirectGamepadTarget(env.Raw(), class, axisFn, buttonFn, connectFn, disconnectFn, setKeyFn, setMotionFn)
 }
 
-// wireRobloxPermissionsProtocol registers Tipsy as the MessageBus answerer
-// for the official PermissionsProtocol, the path the engine's voice stack
-// (RBX::Voice::RobloxAudioDevice::CheckMicrophonePermissionAsync →
-// PermissionsProtocolCore::hasPermissions) uses instead of
-// Context.checkSelfPermission. On a phone the APK's Java protocol registers
-// at Activity creation; Tipsy does it at the same phase, right after
-// initializeNativeCode. Missing exports log the honest missing line; each
-// arm degrades independently inside jni.
+// wireRobloxPermissionsProtocol registers Tipsy as the MessageBus answerer for
+// the PermissionsProtocol the engine's voice stack uses. It runs at the same
+// phase as the APK's Java protocol, right after initializeNativeCode. Missing
+// exports log the missing line; each degrades independently inside jni.
 func wireRobloxPermissionsProtocol(mod *loader.Module, env *jni.Env) {
 	var exports jni.PermissionsProtocolExports
 	for _, want := range []struct {
@@ -710,10 +660,9 @@ func wireRobloxPermissionsProtocol(mod *loader.Module, env *jni.Env) {
 	env.RegisterPermissionsProtocol(exports)
 }
 
-// wireRobloxWebViewProtocol registers Tipsy as the MessageBus answerer for
-// the official WebView protocol (Servers and similar in-app listings). On a
-// phone the APK's Java WebViewProtocol registers at Activity creation
-// (classes2.dex <init>); Tipsy does it at the same phase.
+// wireRobloxWebViewProtocol registers Tipsy as the MessageBus answerer for the
+// WebView protocol (Servers and similar in-app listings), at the same phase as
+// the APK's Java WebViewProtocol.
 func wireRobloxWebViewProtocol(mod *loader.Module, env *jni.Env) {
 	var exports jni.WebViewProtocolExports
 	for _, want := range []struct {
@@ -738,10 +687,9 @@ func wireRobloxWebViewProtocol(mod *loader.Module, env *jni.Env) {
 	env.RegisterWebViewProtocol(exports)
 }
 
-// wireRobloxTextInput resolves the exact public static natives used by the
-// APK's RbxKeyboard EditText. nativePassText is the required typing route;
-// editor action and cursor selection are optional companions. All are named
-// JNI exports, never version-pinned addresses or hooks.
+// wireRobloxTextInput resolves the public static natives for text input.
+// nativePassText is the required typing route; editor action and cursor
+// selection are optional companions.
 func wireRobloxTextInput(mod *loader.Module, env *jni.Env) {
 	passFn, passErr := mod.Lookup(nativePassTextSym)
 	returnFn, returnErr := mod.Lookup(nativeReturnPressedSym)
@@ -774,10 +722,9 @@ func dispatchGameActivityLifecycle(ctx context.Context, vm *jni.VM, mod *loader.
 	setRobloxAssetPath(mod, env, activity, content)
 	handleColdStartProtocolLaunch(mod, env, activity, req)
 	startRobloxApp(ctx, mod, env, activity, files, version, overrides, overrideErr)
-	// Official MainScreenController ON_CREATE publishes Display 0's current
-	// and supported refresh rates after native/client-settings initialization
-	// and before resume/surface/V2Start. Reproduce that named JNI boundary
-	// with the XRandR modes of this window's active output.
+	// Publish Display's current and supported refresh rates after client-settings
+	// init and before resume/surface/V2Start, matching the named JNI boundary,
+	// using the XRandR modes of this window's active output.
 	if err := publishDisplayRefreshRates(mod, env, currentRefreshHz, supportedRefreshHz); err != nil {
 		logging.Logger(logging.CatGraphics).Error("Android display refresh publication failed", "err", err)
 	}
@@ -805,8 +752,8 @@ func dispatchGameActivityLifecycle(ctx context.Context, vm *jni.VM, mod *loader.
 	for _, cmd := range []byte{appCmdInitWindow, appCmdStart, appCmdResume, appCmdGainedFocus, appCmdWindowResized, appCmdWindowRedraw} {
 		postAndroidAppCmd(commands, cmd)
 	}
-	// X11 supplies the first real surface geometry. Deliver it once via the
-	// registered GameActivity contract after lifecycle and surface setup.
+	// X11 supplies the first real surface geometry; deliver it once via the
+	// GameActivity contract after lifecycle and surface setup.
 	deliverInitialContentRect(mod, vm, env, activity, handle, commands, width, height)
 	for _, n := range [][2]string{
 		{"onWindowFocusChangedNative", "(JZ)V"},
@@ -878,9 +825,9 @@ func setRobloxAssetPath(mod *loader.Module, env *jni.Env, activity uintptr, cont
 func setRobloxCacheAndFiles(mod *loader.Module, env *jni.Env, activity uintptr, files, cache string) {
 	absFiles, absCache := absExistingDir(files), absExistingDir(cache)
 	if absFiles == "" || absCache == "" {
-		// Honest structured failure instead of a silent skip: the official
-		// cache/files setters and LocalStorageManager stay unavailable, which
-		// can surface later as missing-API failures. Paths are not secrets.
+		// Honest structured failure instead of a silent skip: the cache/files setters
+		// and LocalStorageManager stay unavailable, surfacing later as missing-API
+		// failures. Paths are not secrets.
 		logging.Logger(logging.CatGameActivity).Error("Android cache/files directories unavailable",
 			"files_unavailable", absFiles == "", "cache_unavailable", absCache == "")
 		return
@@ -923,11 +870,9 @@ func releaseClientSettingsInitLocals(env *jni.Env, locals [3]uintptr) {
 	}
 }
 
-// runMainGameActivityOnCreateBoundary preserves the APK's MainGameActivity
-// order: a non-empty external override is preloaded before the
-// GameActivity.super.onCreate equivalent initializes native code. Ordinary
-// launches have no external renderer payload and therefore make no synthetic
-// empty preload call.
+// runMainGameActivityOnCreateBoundary preserves MainGameActivity's order: a
+// non-empty external override is preloaded before the super.onCreate equivalent
+// initializes native code. Ordinary launches make no synthetic empty preload.
 func runMainGameActivityOnCreateBoundary(rendererOverrides string, preload func(string), superCreate func()) {
 	if rendererOverrides != "" {
 		preload(rendererOverrides)
@@ -953,12 +898,11 @@ func startRobloxApp(ctx context.Context, mod *loader.Module, env *jni.Env, activ
 	initLocals := newClientSettingsInitLocals(env, initArgs)
 	settingsStatus := callRobloxJNI(mod, env.Raw(), gl, "Java_com_roblox_engine_jni_NativeGLInterface_nativeInitClientSettings", initLocals[0], initLocals[1], initLocals[2])
 	callRobloxJNI(mod, env.Raw(), gl, "Java_com_roblox_engine_jni_NativeGLInterface_nativePostClientSettingsLoadedInitialization3", env.NewArrayList())
-	// nativeInitClientSettings copies the dual-key JSON into the C++ store
-	// (launch-init.md ingest/extract/commit). Inverted JNI does not auto-drop
-	// the NewString locals a Java caller would release when the native method
-	// returns; that would pin interned o.str for the whole Main thread.
+	// nativeInitClientSettings copies the dual-key JSON into the C++ store. Inverted
+	// JNI does not auto-drop the NewString locals a Java caller would release, which
+	// would pin the string backing for the whole Main thread.
 	releaseClientSettingsInitLocals(env, initLocals)
-	// Complete the APK Java setup phase which owns CookieProtocol construction.
+	// Complete the Java setup phase that owns CookieProtocol construction.
 	if int32(settingsStatus) == 0 {
 		env.CompleteAuthCookieInitialization()
 	} else {
@@ -969,9 +913,9 @@ func startRobloxApp(ctx context.Context, mod *loader.Module, env *jni.Env, activ
 	logNativeCookieRestoreState(mod, env, "after-app-start")
 }
 
-// startLoggedOutAppBridge follows the Android bridge order for app startup.
-// APK yk/l0 passes rh/w0.g() as the first argument: the production base URL,
-// not account identity. NativeUser remains responsible for user state.
+// startLoggedOutAppBridge follows the Android bridge order for app startup. The
+// first argument is the production base URL, not account identity; NativeUser
+// owns user state.
 func startLoggedOutAppBridge(mod *loader.Module, env *jni.Env) {
 	if mod == nil || env == nil {
 		return
@@ -1018,9 +962,9 @@ func makePlatformParams(env *jni.Env, assets string, width, height int) uintptr 
 	p := env.AllocObject(env.FindClass("com/roblox/engine/jni/model/PlatformParams"))
 	env.PutField(p, "assetFolderPath", assets)
 	env.PutField(p, "dpiScale", float32(1))
-	// One coherent pointer identity shared with the input dispatchers. Native
-	// X11 launches default to a mouse; TIPSY_INPUT_DEVICE=touch retains the
-	// Android phone identity as an explicit A/B control.
+	// One coherent pointer identity shared with the input dispatchers. Native X11
+	// launches default to a mouse; TIPSY_INPUT_DEVICE=touch keeps the Android
+	// phone identity.
 	touch := jni.PointerDeviceIsTouch()
 	env.PutField(p, "isKeyboardDevice", !touch)
 	env.PutField(p, "isMouseDevice", !touch)
@@ -1029,9 +973,9 @@ func makePlatformParams(env *jni.Env, assets string, width, height int) uintptr 
 	return p
 }
 
-// setPlatformViewport refreshes the two geometry fields present in the
-// official PlatformParams DEX class. Width/height stay X11 density-1 pixels;
-// the existing 160 dpi conversion is preserved exactly from startup.
+// setPlatformViewport refreshes the two geometry fields on PlatformParams.
+// Width/height stay X11 density-1 pixels; the 160 dpi conversion is preserved
+// from startup.
 func setPlatformViewport(env *jni.Env, platform uintptr, width, height int) {
 	if env == nil || platform == 0 || width <= 0 || height <= 0 {
 		return

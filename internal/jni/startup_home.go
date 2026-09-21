@@ -11,35 +11,28 @@ import (
 	"sync/atomic"
 )
 
-// StartupHomeEvent is one fixed, payload-free milestone declared by the
-// active APK's NativeHelper callbacks. It deliberately contains no place ID,
-// navigator step, account, UI, or content data.
+// StartupHomeEvent is a fixed, payload-free milestone. It carries no place
+// ID, navigator step, account, UI, or content data.
 type StartupHomeEvent uint8
 
 const (
 	// StartupHomeDataModel is emitted only for the exact
-	// NativeHelper.gameActivity_onGameLoaded(0) callback. The APK uses zero
-	// to announce its Home/App DataModel; it is not a visible-Home claim.
+	// NativeHelper.gameActivity_onGameLoaded(0) callback; zero announces the
+	// Home/App DataModel, not a visible-Home claim.
 	StartupHomeDataModel StartupHomeEvent = iota + 1
 
-	// StartupHomeReady is emitted only for the active APK's exact
-	// NativeHelper.gameActivity_onAppReady("Home") transition. The string is
-	// classified inside the JNI receiver and never reaches a subscriber. It
-	// is an engine Home-route readiness milestone, not a visible-Home claim.
+	// StartupHomeReady is emitted only for the exact
+	// NativeHelper.gameActivity_onAppReady("Home") transition. It is a
+	// Home-route readiness milestone, not a visible-Home claim.
 	StartupHomeReady
 )
 
-// StartupHomeListener receives one fixed enum event. It receives no mutable
-// state or source payload, so a measurement consumer cannot retain a place ID
-// or an arbitrary NativeHelper AppReady step.
+// StartupHomeListener receives one fixed enum event and no source payload.
 type StartupHomeListener func(StartupHomeEvent)
 
-// SubscribeStartupHomeDataModel registers an independent observer of the
-// active APK's Home DataModel announcement. It filters the existing
-// composable NativeHelper lifecycle stream rather than replacing the
-// process-wide GameLoadedListener used by Discord presence. The returned
-// cancellation function is idempotent, may run from the observer, and has the
-// same snapshot lifetime as SubscribeNativeHelperLifecycle.
+// SubscribeStartupHomeDataModel registers an independent observer of the Home
+// DataModel announcement, filtering the NativeHelper lifecycle stream without
+// replacing GameLoadedListener. Its cancellation is idempotent and re-entrant.
 func SubscribeStartupHomeDataModel(fn StartupHomeListener) func() {
 	if fn == nil {
 		return func() {}
@@ -58,11 +51,9 @@ var startupHomeReadyListeners struct {
 	active atomic.Uint64
 }
 
-// SubscribeStartupHomeReady registers an independent observer of the active
-// APK's fixed Home-ready transition. Registration is dormant by default:
-// NativeHelper dispatch neither logs nor retains readiness data for this seam
-// unless a consumer attaches. Cancellation is idempotent and re-entrant;
-// dispatch snapshots registration order before invoking listeners.
+// SubscribeStartupHomeReady registers an independent observer of the Home-ready
+// transition. Cancellation is idempotent and re-entrant; dispatch snapshots
+// registration order before invoking listeners.
 func SubscribeStartupHomeReady(fn StartupHomeListener) func() {
 	if fn == nil {
 		return func() {}
@@ -90,10 +81,9 @@ func SubscribeStartupHomeReady(fn StartupHomeListener) func() {
 	}
 }
 
-// noteStartupHomeReady is called only after dispatchNativeHelper accepted the
-// exact NativeHelper AppReady identity and classified its stable `Home` step.
-// It contains no source payload. A normal launch with no Runtime consumer
-// avoids both allocation and mutex work here.
+// noteStartupHomeReady runs only after dispatchNativeHelper accepted the exact
+// NativeHelper AppReady identity and classified its `Home` step. It carries no
+// source payload.
 func noteStartupHomeReady() {
 	if startupHomeReadyListeners.active.Load() == 0 {
 		return

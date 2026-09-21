@@ -18,8 +18,8 @@ const (
 )
 
 // InputDrainDurationStats is a content-free aggregate duration distribution.
-// Total and Max are in monotonic nanoseconds. Buckets never retain individual
-// samples or timestamps.
+// Total and Max are in monotonic nanoseconds; buckets never retain
+// individual samples or timestamps.
 type InputDrainDurationStats struct {
 	Samples uint64
 	TotalNS uint64
@@ -32,9 +32,8 @@ type InputDrainDurationStats struct {
 // text, timestamps, window identifiers, URL, or account data.
 //
 // DrainCalls/EmptyDrains/NonEmptyDrains/Events and BatchBuckets are exact for
-// an enabled interval. Duration fields are sampled once per 64 C-side calls
-// to bound diagnostic perturbation. GoWindowLockWait and GoDrain include all
-// enabled calls because they are already on the Go launch-loop boundary.
+// an enabled interval; duration fields are sampled and therefore approximate.
+// GoWindowLockWait and GoDrain cover every enabled call.
 type InputDrainStats struct {
 	DrainCalls     uint64
 	EmptyDrains    uint64
@@ -53,8 +52,7 @@ type InputDrainStats struct {
 	PumpPipeWakes uint64
 	PumpErrors    uint64
 	// RingDrops counts oldest-queued events discarded on ring saturation
-	// during an enabled interval. It is the telemetry half of the overflow
-	// task; a resynchronization protocol for dropped edges is still open.
+	// during an enabled interval.
 	RingDrops uint64
 
 	// GoWindowLockWait covers waiting to enter Window.Pump's Window mutex.
@@ -64,9 +62,8 @@ type InputDrainStats struct {
 	GoDrain InputDrainDurationStats
 }
 
-// inputDrainDiagnosticsRequested shares the exact stutter-capture policy.
-// Values such as "true" and "yes" stay disabled so captures are deliberate
-// and normal launches retain their existing behavior.
+// inputDrainDiagnosticsRequested reports whether stutter diagnostics were
+// deliberately requested; only "1" enables them.
 func inputDrainDiagnosticsRequested(getenv func(string) string) bool {
 	return getenv != nil && getenv("TIPSY_STUTTER_DIAG") == "1"
 }

@@ -17,8 +17,7 @@ import (
 )
 
 // JNIStringDiagnosticPath identifies one content-free JNI boundary. Names map
-// to the JNI vtable entry, never to a Java class, method, object, address, or
-// string payload.
+// to the JNI vtable entry, never to content.
 type JNIStringDiagnosticPath int
 
 const (
@@ -38,12 +37,11 @@ const (
 )
 
 // JNIStringDurationBucketUpperNS gives the inclusive upper bound of each
-// sampled-duration bucket. The final bucket contains every value above 50 us.
+// sampled-duration bucket; the final bucket holds every value above 50 us.
 var JNIStringDurationBucketUpperNS = [...]uint64{250, 500, 1_000, 2_000, 5_000, 10_000, 50_000}
 
-// JNIStringPathStats contains fixed-size, content-free aggregate data. The
-// byte values describe boundary copies/allocations only; they are never text,
-// object, handle, URL, credential, or raw-pointer data.
+// JNIStringPathStats contains fixed-size, content-free aggregate data; byte
+// values describe boundary copies/allocations only, never content or pointers.
 type JNIStringPathStats struct {
 	Calls, Succeeded                   uint64
 	InputUTF8Bytes, OutputUTF8Bytes    uint64
@@ -56,7 +54,7 @@ type JNIStringPathStats struct {
 
 // JNIStringDiagnostics is resettable aggregate instrumentation for JNI string
 // and type-test boundaries. A reset snapshot atomically takes each counter;
-// concurrent work lands either in that snapshot or the next one.
+// concurrent work lands in that snapshot or the next.
 type JNIStringDiagnostics struct {
 	Paths [jniStringDiagnosticPaths]JNIStringPathStats
 }
@@ -67,10 +65,8 @@ var (
 )
 
 // SetStringDiagnostics enables aggregate JNI string diagnostics. It is
-// default-off and is normally driven by the existing TIPSY_STUTTER_DIAG
-// lifecycle through SetStutterDiagnostics. With it disabled, each Go-only
-// field getter has one atomic gate load and no clock, counter update,
-// allocation, or logging work.
+// default-off. With it disabled, each Go-only field getter has one atomic gate
+// load and no counter, allocation, or logging work.
 func SetStringDiagnostics(enabled bool) {
 	if !enabled {
 		C.tipsy_jni_string_diag_set_enabled(0)
@@ -153,9 +149,8 @@ func beginStringFieldDiagnostics() stringFieldDiagnosticToken {
 		return stringFieldDiagnosticToken{}
 	}
 	token := stringFieldDiagnosticToken{active: true}
-	// Sampling candidates before the map lookup avoids a clock on all but one
-	// in 64 object-field reads. Only a completed String-valued getter is then
-	// published, so no other field identity or value is exposed.
+	// Only a completed String-valued getter is published, so no other field
+	// identity or value is exposed.
 	token.sampled = stringFieldSampleSequence.Add(1)%JNIStringDurationSampleEvery == 0
 	if token.sampled {
 		token.start = time.Now()

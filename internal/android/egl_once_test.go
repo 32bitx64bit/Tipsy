@@ -11,8 +11,7 @@ import (
 )
 
 // TestEnsureEGLInitializesOnce exercises ensure_egl from many goroutines and
-// checks that host EGL/GLES resolution ran exactly once (pthread_once caches a
-// failed dlopen instead of retrying from every swap).
+// checks that host EGL/GLES resolution ran exactly once.
 func TestEnsureEGLInitializesOnce(t *testing.T) {
 	var wg sync.WaitGroup
 	for w := 0; w < 8; w++ {

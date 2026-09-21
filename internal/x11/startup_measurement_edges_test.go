@@ -50,8 +50,8 @@ func TestStartupMeasurementMapSubscriptionIsOwnedComposableAndTornDown(t *testin
 	stopFirst()
 	testStartupMeasurementClear()
 	testStartupMeasurementMap(41, 73)
-	// The surviving subscription has already received the only MapNotify, so
-	// a second real map cannot duplicate it; cancelled first never returns.
+	// The surviving subscription already received the only MapNotify; a
+	// second real map cannot duplicate it.
 	deliverStartupMeasurementEdges(w)
 	if want := []string{"first", "second"}; len(got) != len(want) || got[0] != want[0] || got[1] != want[1] {
 		t.Fatalf("teardown or once-only delivery changed callbacks: %v", got)
@@ -75,16 +75,15 @@ func TestStartupMeasurementEdgesOrderDrawableOnlyAfterDeclaredArm(t *testing.T) 
 	})
 	w.mu.Unlock()
 
-	// A drawable update before a declared scroll arm is ignored rather than
-	// being reclassified as an input response.
+	// A drawable update before a declared scroll arm is ignored.
 	testStartupMeasurementDrawable(91, 92)
 	deliverStartupMeasurementEdges(w)
 	if len(got) != 0 {
 		t.Fatalf("pre-arm drawable delivered %v", got)
 	}
 
-	// The native arm clears stale damage before setting its one-shot bit. Model
-	// that boundary here, then provide the first later owned XDamage fact.
+	// Model the one-shot arm boundary here, then provide the first later
+	// owned XDamage fact.
 	resetStartupMeasurementForTest(t)
 	w.mu.Lock()
 	w.startupMeasurementMapEnabled = true

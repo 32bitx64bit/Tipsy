@@ -14,9 +14,8 @@ import (
 
 // ownerThreadNotifier turns a background-model state edge into one queued Qt
 // event. Widgets are never touched by the worker: the QSocketNotifier runs the
-// callback on the QObject owner's event loop instead. One unread byte is also
-// the coalescing token, so a burst of worker updates cannot create a busy GUI
-// wake loop.
+// callback on the QObject owner's event loop. One unread byte is also the
+// coalescing token.
 type ownerThreadNotifier struct {
 	mu      sync.Mutex
 	readFD  int
@@ -84,8 +83,8 @@ func (n *ownerThreadNotifier) notify() {
 			continue
 		}
 		if errors.Is(err, unix.EAGAIN) || errors.Is(err, unix.EWOULDBLOCK) {
-			// An unread byte is already sufficient to dispatch the latest model
-			// state. Keep the coalescing token even if the kernel pipe is full.
+			// An unread byte already dispatches the latest model state; keep
+			// the coalescing token even if the kernel pipe is full.
 			n.queued = true
 			if n.metrics != nil {
 				n.metrics.ownerCoalesced.Add(1)
@@ -159,8 +158,7 @@ func (n *ownerThreadNotifier) close() {
 	_ = unix.Close(n.writeFD)
 }
 
-// guiRuntimeMetrics is intentionally content-free. It is a test seam for
-// cadence and avoided presentation work, not client or gameplay telemetry.
+// guiRuntimeMetrics counts GUI cadence and avoided presentation work only.
 type guiRuntimeMetrics struct {
 	ownerQueued, ownerCoalesced, ownerDispatched atomic.Uint64
 	widgetWrites, widgetSkipped                  atomic.Uint64

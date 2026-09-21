@@ -23,8 +23,8 @@ const (
 
 	// ActiveSlotOfficial and ActiveSlotDevelopment keep the live Roblox
 	// client and a development build from overwriting each other's active
-	// generation. An empty slot is the historical single-pointer behavior
-	// used by existing tests.
+	// generation. An empty slot is the legacy single-pointer behavior
+	// retained for compatibility.
 	ActiveSlotOfficial    = "official"
 	ActiveSlotDevelopment = "development"
 	developmentAuthMode   = "development-unrestricted"
@@ -131,8 +131,8 @@ func (s Store) Stage(ctx context.Context, sourceRoot string, in Inventory) (stri
 		} else {
 			_ = verified.Close()
 		}
-		// stage now names the rejected old tree. From this point preserve it
-		// even if moving it into the rejected directory is interrupted.
+		// stage now names the rejected old tree; preserve it even if moving it
+		// into the rejected directory is interrupted.
 		removeStage = false
 		if err := os.Chmod(stage, 0o700); err != nil {
 			return "", fmt.Errorf("integrity: prepare rejected generation for preservation: %w", err)

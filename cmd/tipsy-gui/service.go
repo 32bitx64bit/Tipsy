@@ -16,9 +16,9 @@ import (
 	"github.com/tipsy-linux/tipsy/internal/setupsvc"
 )
 
-// productionService is intentionally a thin adapter. It translates backend
-// values into presentation-neutral GUI values and owns no package, settings,
-// or compatibility policy.
+// productionService is a thin adapter that translates backend values into
+// presentation-neutral GUI values and owns no package, settings, or
+// compatibility policy.
 type productionService struct {
 	installer    setupBackend
 	packageTrust func(context.Context) (setupsvc.TrustPolicy, error)
@@ -186,9 +186,9 @@ func (s *productionService) Install(ctx context.Context, request guimodel.Instal
 	return nil
 }
 
-// PrepareLaunch resolves authority through internal/app and retains exactly one
-// authenticated generation for the next Launch call. It never infers official
-// authority from missing release metadata.
+// PrepareLaunch resolves authority through internal/app and retains exactly
+// one authenticated generation for the next Launch; authority is never
+// inferred from missing release metadata.
 func (s *productionService) PrepareLaunch(ctx context.Context, approveDevelopment bool) (guimodel.LaunchAuthority, error) {
 	if s == nil || s.launchBackend.open == nil {
 		return guimodel.LaunchAuthority{}, fmt.Errorf("authorized GUI launch integration is unavailable")
@@ -311,9 +311,8 @@ func (s *productionService) ResetSettings(ctx context.Context) (guimodel.Setting
 	return guiSettings(settings), err
 }
 
-// ControllerPads binds the Controller card to the existing diagnose
-// gamepad report. It copies content-free name/status/mapping rows only and
-// computes nothing about devices.
+// ControllerPads binds the Controller card to the existing diagnose gamepad
+// report, copying name/status/mapping rows only.
 func (s *productionService) ControllerPads(ctx context.Context) (guimodel.ControllerState, error) {
 	report := diagnostics.Doctor(ctx)
 	if report == nil {
@@ -337,9 +336,8 @@ func (s *productionService) ControllerPads(ctx context.Context) (guimodel.Contro
 	return state, nil
 }
 
-// MicrophoneStatus binds the microphone card to the existing diagnose
-// audio report. It copies door control, capture count, and pin boolean
-// only — never Pulse source names and never PCM.
+// MicrophoneStatus binds the microphone card to the existing diagnose audio
+// report, copying door control, capture count, and pin boolean only.
 func (s *productionService) MicrophoneStatus(ctx context.Context) (guimodel.MicrophoneState, error) {
 	report := diagnostics.Doctor(ctx)
 	if report == nil {

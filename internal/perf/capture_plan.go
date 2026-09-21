@@ -2,8 +2,6 @@ package perf
 
 // CapturePlan describes the privacy-safe evidence required before a
 // host-runtime microbenchmark can be connected to user-visible performance.
-// It is emitted with every runner report so raw baseline data cannot be
-// mistaken for a gameplay result.
 type CapturePlan struct {
 	Instrumented CaptureMode    `json:"instrumented"`
 	Clean        CaptureMode    `json:"clean_acceptance"`
@@ -12,9 +10,7 @@ type CapturePlan struct {
 }
 
 // CaptureMode is one deliberately separate kind of live evidence. A clean
-// acceptance run is not a control for an instrumented run: it answers whether
-// the client still behaves correctly without diagnostics, while like-for-like
-// instrumented arms answer a performance comparison.
+// acceptance run is not a control for an instrumented run.
 type CaptureMode struct {
 	ID         string   `json:"id"`
 	Purpose    string   `json:"purpose"`
@@ -22,10 +18,9 @@ type CaptureMode struct {
 	Prohibited []string `json:"prohibited"`
 }
 
-// Measurement makes both a unit and an availability boundary explicit. The
-// baseline runner records Go allocations from the testing package and direct
-// test-binary resource usage. Metrics marked live-workload-required must come
-// from the named owner seam during matched, user-driven gameplay.
+// Measurement makes both a unit and an availability boundary explicit. Metrics
+// marked live-workload-required must come from the named owner seam during
+// matched, user-driven gameplay.
 type Measurement struct {
 	ID           string `json:"id"`
 	Unit         string `json:"unit"`
@@ -35,8 +30,8 @@ type Measurement struct {
 }
 
 // WorkloadCase is a requested host-overhead workload that cannot necessarily
-// be run by a privacy-safe checkout. It gives the next subsystem owner the
-// smallest required seam without turning unavailable work into a zero result.
+// be run by a privacy-safe checkout. It records the smallest required seam
+// without turning unavailable work into a zero result.
 type WorkloadCase struct {
 	ID             string   `json:"id"`
 	Subsystem      string   `json:"subsystem"`

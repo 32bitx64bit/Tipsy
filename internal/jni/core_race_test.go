@@ -10,10 +10,9 @@ import (
 	"testing"
 )
 
-// These tests must be run with -race: they drive the production dispatch
-// paths that read Object.fields/Object.elems concurrently with writers that
-// hold vm.mu. A missing read lock aborts the process under the race
-// detector's concurrent-map-access check.
+// These tests must run with -race: they drive production dispatch paths that
+// read Object.fields/Object.elems concurrently with writers holding vm.mu. A
+// missing read lock aborts under the race detector's concurrent-map check.
 
 func TestObjectFieldsConcurrentGetSet(t *testing.T) {
 	vm, err := NewVM()
@@ -73,8 +72,8 @@ func TestObjectArrayElemsConcurrentAccess(t *testing.T) {
 	itObj := idToJobject(it.id)
 	itemHandle := idToJobject(item.id)
 
-	// Constant indices keep every call site on an untyped constant, which
-	// this cgo-free test file can pass without naming C.jsize.
+	// Constant indices keep call sites on untyped constants this cgo-free test
+	// file can pass without naming C.jsize.
 	setters := []func(){
 		func() { GoJNI_SetObjectArrayElement(nil, arrHandle, 0, itemHandle) },
 		func() { GoJNI_SetObjectArrayElement(nil, arrHandle, 1, itemHandle) },
@@ -106,9 +105,7 @@ func TestObjectArrayElemsConcurrentAccess(t *testing.T) {
 		go func() {
 			defer wg.Done()
 			for j := 0; j < 600; j++ {
-				// GetArrayLength and get read o.elems under vm.mu; next
-				// reads the iterator fields and array elems, then writes
-				// the iterator index under vm.mu.
+				// These read o.elems under vm.mu; next also writes the iterator index.
 				_ = int(GoJNI_GetArrayLength(nil, jarrayOf(idToJobject(arrID))))
 				_, _ = vm.dispatch(idToJobject(arrID), "java/util/ArrayList", "get", "(I)Ljava/lang/Object;", packJint(1))
 				_, _ = vm.dispatch(itObj, "java/util/Iterator", "next", "()Ljava/lang/Object;", nil)
@@ -118,10 +115,9 @@ func TestObjectArrayElemsConcurrentAccess(t *testing.T) {
 	wg.Wait()
 }
 
-// TestConnectivityFieldsConcurrentAccess drives the ConnectivityManager /
-// NetworkInfo / NetworkCapabilities getters concurrently with writers that
-// hold vm.mu, the way dispatchConnectivity sees live events. Every field read
-// must take vm.mu.RLock, so a missing read lock aborts here under -race.
+// TestConnectivityFieldsConcurrentAccess drives the connectivity getters
+// concurrently with writers holding vm.mu. Every field read must take
+// vm.mu.RLock, so a missing read lock aborts here under -race.
 func TestConnectivityFieldsConcurrentAccess(t *testing.T) {
 	vm, err := NewVM()
 	if err != nil {
@@ -161,8 +157,8 @@ func TestConnectivityFieldsConcurrentAccess(t *testing.T) {
 }
 
 // TestInputEventFieldsConcurrentAccess drives dispatchInput getters
-// concurrently with the vm.mu-held resets that reuse the pooled MotionEvent /
-// KeyEvent objects. A missing read lock aborts here under -race.
+// concurrently with the vm.mu-held resets that reuse pooled MotionEvent/KeyEvent
+// objects. A missing read lock aborts here under -race.
 func TestInputEventFieldsConcurrentAccess(t *testing.T) {
 	vm, err := NewVM()
 	if err != nil {

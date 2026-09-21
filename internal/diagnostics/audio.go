@@ -16,16 +16,16 @@ import (
 	"github.com/tipsy-linux/tipsy/internal/mic"
 )
 
-// Honest JNI leftover this slice: hasSystemFeature(microphone) already
-// follows the OpenSL env door (§269), not mic.Allowed() / the config file.
-// Doctor must not treat that split as a host failure.
+// The JNI hasSystemFeature(microphone) check follows the OpenSL env door,
+// not mic.Allowed() or the config file. Doctor must not treat that split as
+// a host failure.
 const microphoneFeatureNote = "JNI feature follows the env mic door (not yet mic.Allowed(); config file is CLI-canonical)"
 
 const microphoneDisabledHint = "unset TIPSY_MICROPHONE / TIPSY_DISABLE_MICROPHONE, or enable the microphone section in the config file"
 const noCaptureSourceHint = "no capture source found: unmute in pavucontrol/wpctl; Flatpak needs Pulse visible (see packaging/microphone-input.md)"
 
-// captureSourceProbe enumerates Pulse/PipeWire capture sources. Test seam;
-// production always calls probeCaptureSourcesLive. Never opens a stream.
+// captureSourceProbe enumerates Pulse/PipeWire capture sources. It never opens
+// a stream.
 var captureSourceProbe = probeCaptureSourcesLive
 
 func attachMicrophone(ctx context.Context, info *AudioInfo) {

@@ -11,18 +11,10 @@ import (
 	"testing"
 )
 
-// Phase 5 (controller-plan §6): the sandbox must pass through gamepad
-// evdev nodes, or pads are EACCES-denied inside the Flatpak even when the
-// host session can open them. --device=input is Flatpak 1.15.6+ and is
-// rejected at build-finish on Ubuntu 24.04 / GitHub ubuntu-24.04
-// (flatpak 1.14.6: "Unknown device type input"). Pin --device=all, which
-// 1.14 understands and includes /dev/input, plus --device=dri. The
-// finish-args must not name --device=input or the publish job dies after
-// a successful compose. Same render seam as
-// TestBuildFlatpakRendersManifestForBothModes.
-//
-// Like the existing flatpak tests, this relies on go test running with
-// the package directory as the working directory.
+// The sandbox must pass through gamepad evdev nodes, or pads are EACCES-denied
+// inside the Flatpak even when the host session can open them. Pin
+// --device=all, which includes /dev/input, plus --device=dri. Same render seam
+// as TestBuildFlatpakRendersManifestForBothModes.
 func TestFlatpakManifestAllowsGamepadInput(t *testing.T) {
 	raw, err := os.ReadFile("io.github.tipsy_linux.Tipsy.yaml")
 	if err != nil {

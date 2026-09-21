@@ -11,17 +11,15 @@ import (
 )
 
 // startupMeasurementRequested uses a separate exact opt-in from
-// TIPSY_STUTTER_DIAG. A startup arm must not accidentally enable the existing
-// high-frequency JNI, bionic, and input-drain observers it is trying to
-// measure alongside.
+// TIPSY_STUTTER_DIAG so it does not enable the high-frequency JNI, bionic, and
+// input-drain observers it measures alongside.
 func startupMeasurementRequested(getenv func(string) string) bool {
 	return getenv != nil && getenv("TIPSY_STARTUP_MEASUREMENT") == "1"
 }
 
-// startupMeasurementUnavailableReason is a closed, content-free vocabulary
-// for a requested boundary that an owner did not observe. Do not substitute a
-// timeout, process state, mapped window, arbitrary app-ready text, or a
-// present return for one of these unavailable sources.
+// startupMeasurementUnavailableReason is a closed, content-free vocabulary for a
+// requested boundary an owner did not observe. Never substitute a timeout,
+// process state, mapped window, app-ready text, or present return for one.
 type startupMeasurementUnavailableReason uint8
 
 const (
@@ -64,19 +62,16 @@ func (r startupMeasurementUnavailableReason) String() string {
 	}
 }
 
-// startupMeasurementSpan is a single duration for a bounded arm. It never
-// releases an absolute clock value; Unavailable is always one of the fixed
-// reasons above.
+// startupMeasurementSpan is a single bounded duration. It never releases an
+// absolute clock value; Unavailable is always one of the fixed reasons above.
 type startupMeasurementSpan struct {
 	Available   bool
 	DurationNS  uint64
 	Unavailable startupMeasurementUnavailableReason
 }
 
-// startupMeasurementLogSpan keeps the emitted reason human-readable while
-// retaining the recorder's closed enum internally. Its string field is always
-// produced by startupMeasurementUnavailableReason.String; no owner input can
-// enter it.
+// startupMeasurementLogSpan keeps the emitted reason human-readable while the
+// recorder's closed enum stays internal; no owner input can enter the string.
 type startupMeasurementLogSpan struct {
 	Available         bool
 	DurationNS        uint64
@@ -91,9 +86,9 @@ func (s startupMeasurementSpan) logValue() startupMeasurementLogSpan {
 	}
 }
 
-// startupMeasurementSummary contains exactly one aggregate result for each
-// boundary, not a sample stream. Engine Home is deliberately not called
-// visible Home: the independent X11 visual acceptance still owns that claim.
+// startupMeasurementSummary contains exactly one aggregate result per boundary,
+// not a sample stream. Engine Home is not "visible Home"; the independent X11
+// visual acceptance owns that claim.
 type startupMeasurementSummary struct {
 	RuntimeLaunchToX11Map              startupMeasurementSpan
 	RuntimeLaunchToEngineHomeModel     startupMeasurementSpan
@@ -102,11 +97,10 @@ type startupMeasurementSummary struct {
 	InputToFirstObservedDrawableUpdate startupMeasurementSpan
 }
 
-// startupMeasurement keeps a fixed set of private boundary clocks for one
-// launch arm. It is safe for the X11, JNI, and Runtime owners to report from
-// their existing threads, but it neither subscribes to nor polls them. That
-// separation prevents Runtime from inventing a MapNotify, Home, input, or
-// redraw event from a weaker signal.
+// startupMeasurement keeps a fixed set of private boundary clocks. It is safe
+// for the X11, JNI, and Runtime owners to report from their own threads, but it
+// neither subscribes to nor polls them, so Runtime never invents a boundary
+// event from a weaker signal.
 type startupMeasurement struct {
 	mu      sync.Mutex
 	enabled bool
@@ -117,18 +111,15 @@ type startupMeasurement struct {
 	engineHomeReady   time.Time
 	predeclaredScroll time.Time
 	drawableUpdate    time.Time
-	// drawableAvailabilityKnown is set only by X11's exact opt-in edge
-	// registration. A failed XDamage setup is never replaced with Expose,
-	// Present, or an input-pump wake.
+	// drawableAvailabilityKnown is set only by X11's opt-in edge registration; a
+	// failed XDamage setup is never replaced with Expose, Present, or a pump wake.
 	drawableAvailabilityKnown bool
 	drawableAvailable         bool
 }
 
-// newStartupMeasurement allocates no observer work for an ordinary launch.
-// A Launch owner should create it at the earliest Runtime lifecycle point it
-// owns, then call Log exactly once when the arm ends. Its start is deliberately
-// labelled Runtime launch, not process exec: only a test-owned parent
-// supervisor can honestly measure before the child execs.
+// newStartupMeasurement allocates no observer work for an ordinary launch
+// (returns nil when disabled). Its start is the Runtime launch point, not
+// process exec.
 func newStartupMeasurement(getenv func(string) string, started time.Time) *startupMeasurement {
 	if !startupMeasurementRequested(getenv) {
 		return nil
@@ -136,9 +127,8 @@ func newStartupMeasurement(getenv func(string) string, started time.Time) *start
 	return &startupMeasurement{enabled: true, started: started}
 }
 
-// noteX11Map accepts only X11's MapNotify edge for the owned client. Window
-// construction, XID allocation, refresh wakeups, and a mapped-child overlay
-// are not substitutes.
+// noteX11Map accepts only X11's MapNotify edge for the owned client; window
+// construction, XID allocation, refresh wakeups, or an overlay are not substitutes.
 func (m *startupMeasurement) noteX11Map(at time.Time) {
 	if m == nil || at.IsZero() {
 		return
@@ -150,9 +140,9 @@ func (m *startupMeasurement) noteX11Map(at time.Time) {
 	}
 }
 
-// noteEngineHomeModel accepts only the exact JNI
-// NativeHelper.gameActivity_onGameLoaded(0) callback. The caller must classify
-// zero before invoking this method and must never pass a place ID here.
+// noteEngineHomeModel accepts only the exact engine onGameLoaded callback for
+// the zero (Home) case. The caller must classify zero first and never pass a
+// place ID here.
 func (m *startupMeasurement) noteEngineHomeModel(at time.Time) {
 	if m == nil || at.IsZero() {
 		return
@@ -164,9 +154,9 @@ func (m *startupMeasurement) noteEngineHomeModel(at time.Time) {
 	}
 }
 
-// noteEngineHomeReady accepts a JNI owner-established fixed Home-ready enum.
-// It intentionally takes no step string: Runtime must not read, retain, or
-// publish arbitrary onAppReady text to obtain this boundary.
+// noteEngineHomeReady accepts a JNI owner-established fixed Home-ready enum. It
+// takes no step string: Runtime must not read, retain, or publish arbitrary
+// onAppReady text.
 func (m *startupMeasurement) noteEngineHomeReady(at time.Time) {
 	if m == nil || at.IsZero() {
 		return
@@ -178,9 +168,9 @@ func (m *startupMeasurement) noteEngineHomeReady(at time.Time) {
 	}
 }
 
-// notePredeclaredScrollDispatch accepts one test-owner declared non-text,
-// vertical-scroll dispatch after separate visual Home acceptance. It retains
-// neither wheel payload nor coordinates and does not dispatch any input.
+// notePredeclaredScrollDispatch records one declared non-text vertical-scroll
+// dispatch after visual Home acceptance. It retains no wheel payload or
+// coordinates and dispatches no input.
 func (m *startupMeasurement) notePredeclaredScrollDispatch(at time.Time) {
 	if m == nil || at.IsZero() {
 		return
@@ -193,8 +183,8 @@ func (m *startupMeasurement) notePredeclaredScrollDispatch(at time.Time) {
 }
 
 // notePostScrollDrawableUpdate accepts one owner-established drawable update
-// that was observed after the declared scroll. A mapped window, event-pump
-// wake, timeout, or uncorrelated present must never call this method.
+// observed after the declared scroll. A mapped window, pump wake, timeout, or
+// uncorrelated present must never call it.
 func (m *startupMeasurement) notePostScrollDrawableUpdate(at time.Time) {
 	if m == nil || at.IsZero() {
 		return
@@ -279,9 +269,9 @@ func (m *startupMeasurement) summary() startupMeasurementSummary {
 	return summary
 }
 
-// log emits exactly one fixed-shape, aggregate-only arm result. The caller is
-// responsible for the lifecycle boundary: Runtime intentionally does not add
-// an interval ticker, sleep, input action, or readiness poll.
+// log emits exactly one fixed-shape, aggregate-only result. Runtime adds no
+// interval ticker, sleep, input action, or readiness poll; the caller owns the
+// lifecycle boundary.
 func (m *startupMeasurement) log(log func(msg string, args ...any)) {
 	if m == nil || log == nil {
 		return

@@ -24,9 +24,8 @@ import (
 	"github.com/tipsy-linux/tipsy/internal/logging"
 )
 
-// Xlib format=32 uses one native unsigned long per CARD32. On Tipsy's
-// Linux amd64 ABI that is 8 bytes, so the packed []uint32 EWMH payload
-// cannot be passed through as *C.ulong.
+// Xlib format=32 uses one native unsigned long per CARD32 (8 bytes on Linux
+// amd64), so the packed []uint32 EWMH payload cannot be passed as *C.ulong.
 var _ [8]struct{} = [unsafe.Sizeof(C.ulong(0))]struct{}{}
 
 var (
@@ -35,9 +34,8 @@ var (
 	iconNativeErr  error
 )
 
-// windowIconNative returns the process-lifetime Xlib _NET_WM_ICON buffer.
-// It is a Once-widened copy of the small packed CARD32 image, not a
-// per-Open clone and not a second PNG decode.
+// windowIconNative returns the process-lifetime Xlib _NET_WM_ICON buffer:
+// a Once-widened copy of the small packed CARD32 image.
 func windowIconNative() ([]C.ulong, error) {
 	iconNativeOnce.Do(func() {
 		icon32, err := windowIconARGB()
@@ -59,14 +57,14 @@ func windowIconNative() ([]C.ulong, error) {
 const maxListedOutputs = 32
 
 // TIPSYInputRingLen mirrors the C input ring capacity. The ring is
-// process-wide; Tipsy owns one Roblox window per process.
+// process-wide.
 const TIPSYInputRingLen = 256
 
 // inputTextCap is the committed-UTF-8 cap, matching TIPSY_INPUT_TEXT_BYTES.
 const inputTextCap = 256
 
-// inputDrainScratch is the once-per-window C drain buffer. Event slots are
-// ~40 B; IME text lives in a parallel array and is wiped after decode.
+// inputDrainScratch is the once-per-window C drain buffer. IME text lives in
+// a parallel array and is wiped after decode.
 type inputDrainScratch struct {
 	evs   [TIPSYInputRingLen]C.struct_tipsy_input_ev
 	texts [TIPSYInputRingLen][inputTextCap]byte
@@ -216,8 +214,8 @@ func OpenOnDisplay(title string, width, height int, display string) (*Window, er
 		height:         height,
 	}
 	setActiveWindow(w)
-	// Roblox renders its own cursor. This transparent cursor is scoped to the
-	// client window: leaving it returns to the host cursor automatically.
+	// Roblox renders its own cursor. This transparent cursor is
+	// window-scoped: leaving the client window restores the host cursor.
 	w.cursor = uintptr(C.tipsy_x11_hide_cursor(C.uintptr_t(w.display), C.ulong(w.xid)))
 	if w.cursor == 0 {
 		logging.Logger(logging.CatX11).Info("X11 cursor hide unavailable")
@@ -306,9 +304,7 @@ func setPointerLockLocked(w *Window, locked bool, anchor pointerAnchor) (bool, e
 }
 
 // Pump drains the input ring into Go subscribers. While StartBackgroundPump
-// is running, the C thread is the only XPending/XNextEvent reader; Pump
-// does not call tipsy_x11_pump. Without a background pump (unit tests), Pump
-// still consumes X events itself so tests stay single-consumer.
+// is running, the C thread is the only XPending/XNextEvent reader.
 func (w *Window) Pump() error {
 	if w == nil {
 		return ErrClosed
@@ -364,8 +360,7 @@ func (w *Window) Pump() error {
 }
 
 // drainInputLocked moves captured events from the C ring into Go events
-// and applies focus state. Called with w.mu held. Reuses window scratch so
-// the ~40 B slots do not escape to a new 80 KiB heap allocation per wake.
+// and applies focus state. Called with w.mu held.
 func (w *Window) drainInputLocked() ([]InputEvent, bool) {
 	return w.drainInputLockedWithDiagnostics(inputDrainDiagnosticsEnabled())
 }
@@ -398,10 +393,8 @@ func (w *Window) drainInputLockedWithDiagnostics(diagnostics bool) ([]InputEvent
 			logging.Logger(logging.CatX11).Info("window focus", "gained", gained)
 		case C.TIPSY_INPUT_KEY:
 			if r.b == 0 {
-				// Keep the actual X11 edge for diagnostics/subscribers, but
-				// account for the absence of an Android physical key code.
-				// The direct JNI route rejects KeyCode 0 rather than inventing
-				// text or a guessed mapping.
+				// Keep the edge for subscribers, but count the missing
+				// Android physical keycode.
 				inputMu.Lock()
 				inputDrops++
 				inputMu.Unlock()
@@ -444,9 +437,8 @@ func (w *Window) drainInputLockedWithDiagnostics(diagnostics bool) ([]InputEvent
 			// editor adapter, but never log it here.
 			evs = append(evs, InputEvent{Kind: InputText, Text: text})
 		case C.TIPSY_INPUT_CLOSE:
-			// The C ring is process-global because Tipsy hosts one Roblox
-			// window. Still match the XID so a late close from an already
-			// destroyed test window cannot close a later one.
+			// Match the XID so a late close from an already destroyed window
+			// cannot close a later one.
 			if uintptr(r.b) == w.xid {
 				closeRequested = true
 			}
@@ -475,8 +467,8 @@ func (w *Window) drainInputLockedWithDiagnostics(diagnostics bool) ([]InputEvent
 	return evs, closeRequested
 }
 
-// StartBackgroundPump starts the exclusive C X-event reader so V2Start can
-// block on C Main while Go only drains the input ring. Do not Swap/EGL here.
+// StartBackgroundPump starts the exclusive C X-event reader. Do not
+// Swap/EGL here.
 func (w *Window) StartBackgroundPump() error {
 	if w == nil {
 		return ErrClosed
@@ -556,10 +548,10 @@ func (w *Window) Close() error {
 	return nil
 }
 
-// RefreshVersion changes after the event reader observes a client move/resize,
-// reparent/map, or RandR display-configuration event. Reading it performs no
-// X-server query. Call Pump first when no background event reader is running.
-// A zero version means the window is closed.
+// RefreshVersion changes after the event reader observes a client
+// move/resize, reparent/map, or RandR display-configuration event. Reading it
+// performs no X-server query. Call Pump first when no background event reader
+// is running; a zero version means the window is closed.
 func (w *Window) RefreshVersion() uint64 {
 	if w == nil {
 		return 0

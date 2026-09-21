@@ -122,10 +122,9 @@ func nativePerfMakeString(env *Env, value string) (uintptr, int) {
 	return uintptr(ref), int(rc)
 }
 
-// nativePerfModifiedUTF8 encodes the Go test fixture as the Modified UTF-8
-// byte sequence that a real JNIEnv.NewStringUTF expects.  Its C caller still
-// needs a terminating zero, but that zero is not part of the Java String:
-// embedded Go NULs are encoded as C0 80 in the payload.
+// nativePerfModifiedUTF8 encodes the fixture as the Modified UTF-8 byte
+// sequence NewStringUTF expects. Its C caller still needs a terminating zero
+// that is not part of the Java String.
 func nativePerfModifiedUTF8(value string) ([]byte, bool) {
 	units := utf16.Encode([]rune(value))
 	length, ok := modifiedUTF8Length(units)

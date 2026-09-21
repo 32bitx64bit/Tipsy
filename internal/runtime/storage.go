@@ -27,9 +27,8 @@ const (
 )
 
 // AppStorageLayout separates the official client installation from Android
-// application data. FilesDir is durable, account-bearing data and must survive
-// APK replacement. CacheDir is deliberately under XDG_CACHE_HOME and may be
-// discarded without losing the account session.
+// application data. FilesDir is durable, account-bearing data that must survive
+// APK replacement; CacheDir may be discarded without losing the account session.
 type AppStorageLayout struct {
 	DataRoot        string
 	FilesDir        string
@@ -41,7 +40,7 @@ type AppStorageLayout struct {
 }
 
 // AppStorage returns the stable, version-independent storage paths for the
-// current OS user. These paths never include an APK version or RuntimeDir.
+// current OS user; they never include an APK version or RuntimeDir.
 func AppStorage() AppStorageLayout {
 	p := config.Paths()
 	dataRoot := filepath.Join(p.DataDir, "app-data", robloxPackageName)
@@ -67,17 +66,15 @@ func logAppStorageMigration(m appStorageMigration) {
 	if m.Copied == 0 && m.Preserved == 0 {
 		return
 	}
-	// Counts only: account-bearing filenames and payloads are intentionally
-	// absent from logs.
+	// Counts only: account-bearing filenames and payloads are never logged.
 	logging.Logger(logging.CatFilesystem).Info("legacy app data preserved",
 		"copied_files", m.Copied,
 		"existing_files", m.Preserved)
 }
 
-// prepareAppStorage creates private XDG roots and, once, copies the former
-// <runtime>/files tree into the durable FilesDir. The old tree is deliberately
-// retained as a recoverable backup. Payloads are opaque: this code never
-// parses, prints, or assigns meaning to session data.
+// prepareAppStorage creates private XDG roots and copies the former
+// <runtime>/files tree into the durable FilesDir, retaining the old tree as a
+// backup. Payloads are opaque: it never parses, prints, or interprets them.
 func prepareAppStorage(runtimeDir string) (AppStorageLayout, appStorageMigration, error) {
 	layout := AppStorage()
 	for _, dir := range []string{layout.DataRoot, layout.FilesDir, layout.PreferencesDir, layout.CacheRoot, layout.CacheDir} {
@@ -106,10 +103,9 @@ func prepareAppStorage(runtimeDir string) (AppStorageLayout, appStorageMigration
 	return layout, result, nil
 }
 
-// cleanupInterruptedPrivateWrites removes only Tipsy's own atomic-write
-// staging names. A crash can leave one behind, but rename guarantees the
-// official primary file remains either the old complete generation or the new
-// complete generation. The process-wide client lock excludes a live writer.
+// cleanupInterruptedPrivateWrites removes only Tipsy's own atomic-write staging
+// names. Rename guarantees the primary file is always the old or new complete
+// generation. The process-wide client lock excludes a live writer.
 func cleanupInterruptedPrivateWrites(dir string) error {
 	entries, err := os.ReadDir(dir)
 	if err != nil {
@@ -139,10 +135,8 @@ func cleanupInterruptedPrivateWrites(dir string) error {
 	return nil
 }
 
-// securePrivateFileIfPresent validates and tightens the official client's
-// opaque native-preferences file without opening or interpreting its payload.
-// The file is allowed not to exist on a first launch. NativeSetPreferencesFile
-// takes an Android preference name; it does not create any file itself.
+// securePrivateFileIfPresent validates and tightens the opaque native-preferences
+// file without reading its payload. The file may not exist on a first launch.
 func securePrivateFileIfPresent(path string) error {
 	st, err := os.Lstat(path)
 	if errors.Is(err, os.ErrNotExist) {
@@ -157,10 +151,9 @@ func securePrivateFileIfPresent(path string) error {
 	return os.Chmod(path, 0o600)
 }
 
-// syncPrivateOpaqueFile establishes the graceful-close durability boundary
-// after Roblox's lifecycle callbacks have returned. It never reads the file,
-// and therefore cannot expose or make assumptions about account state. The
-// process-wide client lock serializes it against other Tipsy launches.
+// syncPrivateOpaqueFile establishes graceful-close durability after lifecycle
+// callbacks return. It never reads the file, so it cannot expose account state.
+// The process-wide client lock serializes it against other Tipsy launches.
 func syncPrivateOpaqueFile(path string) error {
 	if err := securePrivateFileIfPresent(path); err != nil {
 		return err

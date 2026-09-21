@@ -8,16 +8,9 @@ import (
 	"testing"
 )
 
-// Lean trigger/hat goldens (simplified 2026-09-12): one golden per path —
-// the xpad Z/RZ full-pull (key+axis duality), hat+DPAD duality both
-// directions, and per-axis flat honesty. Deleted vs v1: the HAT2X-trigger
-// and digital-only trigger goldens (duplicate topologies; the capability
-// rules themselves stay pinned in quirks_test.go and the honest-absence
-// rules in the Xbox golden above).
-
 // TestZRZTriggerFullPullGolden pins the xpad topology's key+axis duality:
 // one physical pull feeds BOTH the digital BTN_TL2 edge and the full 0..1
-// analog range (ground-truth §3: L2/R2 are BOTH).
+// analog range (L2/R2 are BOTH).
 func TestZRZTriggerFullPullGolden(t *testing.T) {
 	info, m := xboxDevice()
 	r := NewReader(info.Abs)

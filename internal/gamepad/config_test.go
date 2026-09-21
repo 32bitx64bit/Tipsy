@@ -69,9 +69,8 @@ func TestParseGamepadSectionPartialMerge(t *testing.T) {
 	}
 }
 
-// TestParseGamepadSectionIgnoresRemovedKeys pins the honest downgrade: old
-// v1 files carrying per-stick/invert/rumble keys still load their
-// enabled/deadzone; the removed keys are parsed-but-ignored, never an error.
+// TestParseGamepadSectionIgnoresRemovedKeys pins that unknown section keys
+// are ignored, never an error.
 func TestParseGamepadSectionIgnoresRemovedKeys(t *testing.T) {
 	c, err := ParseGamepadSection([]byte(`{"gamepad":{"enabled":false,"deadzone":0.15,"deadzoneLeft":0.2,"deadzoneRight":0.3,"invertY":true,"invertYRight":true,"rumble":false}}`))
 	if err != nil {
@@ -167,7 +166,6 @@ func TestWithEnvOverlay(t *testing.T) {
 	if got.Deadzone != 0.2 {
 		t.Fatalf("global deadzone = %v, want 0.2", got.Deadzone)
 	}
-	// Removed v1 keys are ignored everywhere, even when set.
 	ignored := base.WithEnv(envLookup(map[string]string{
 		"TIPSY_GAMEPAD_DEADZONE_LEFT":  "0.35",
 		"TIPSY_GAMEPAD_DEADZONE_RIGHT": "0.35",
@@ -177,12 +175,10 @@ func TestWithEnvOverlay(t *testing.T) {
 	if ignored != base {
 		t.Fatalf("removed v1 env keys must be ignored, got %+v", ignored)
 	}
-	// Invalid env never clobbers the file/default value.
 	again := got.WithEnv(envLookup(map[string]string{"TIPSY_GAMEPAD_DEADZONE": "huge"}))
 	if again.Deadzone != 0.2 {
 		t.Fatalf("invalid env must be ignored, got %+v", again)
 	}
-	// Nil lookup is a no-op.
 	if same := base.WithEnv(nil); same != base {
 		t.Fatalf("nil lookup must be a no-op, got %+v", same)
 	}

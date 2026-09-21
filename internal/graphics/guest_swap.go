@@ -5,11 +5,10 @@ package graphics
 
 import "sync"
 
-// guestSwapIdentity is the complete, content-free identity emitted by the
-// Android EGL compatibility boundary. Its generation is owned by the surface,
-// not by the longer-lived target registration. An X11 window alone is not
-// sufficient: an old EGLSurface may be destroyed and its numeric handle reused
-// while the same XID remains mapped.
+// guestSwapIdentity is the complete identity emitted by the Android EGL
+// compatibility boundary. Its generation is owned by the surface, not by the
+// longer-lived target registration: an old EGLSurface may be destroyed and its
+// numeric handle reused while the same XID remains mapped.
 type guestSwapIdentity struct {
 	window     uintptr
 	display    uintptr
@@ -28,19 +27,16 @@ type guestSwapSurfaceKey struct {
 }
 
 // guestSwapDelivery keeps the target-registration lifetime internal to the
-// router. Android retains only identity (including its per-surface generation)
-// across its EGL calls. The registration generation prevents a delayed router
-// callback from an old StartSwapThread instance from changing a later one that
-// reused its XID.
+// router. Android retains only identity (including its per-surface
+// generation); the registration generation stops a delayed callback from an
+// old StartSwapThread instance from changing a later one that reused its XID.
 type guestSwapDelivery struct {
 	identity               guestSwapIdentity
 	registrationGeneration uint64
 }
 
-// guestSwapTarget is deliberately small so tests can exercise the Android to
-// graphics ordering without an EGL driver or a client process. EGL supplies
-// the production implementation; it serializes every method with its own
-// teardown lock before touching the C sentinel allocation.
+// guestSwapTarget is implemented by EGL, which serializes every method with
+// its own teardown lock before touching the C sentinel allocation.
 type guestSwapTarget interface {
 	guestSwapSurfaceCreated(guestSwapDelivery) bool
 	guestSwapSignaled(guestSwapDelivery) bool
@@ -102,9 +98,8 @@ func newGuestSwapRouter() *guestSwapRouter {
 var eglGuestSwaps = newGuestSwapRouter()
 
 // nextGenerationLocked creates globally unique nonzero values. Registration
-// and surface lifetimes use different fields and are intentionally drawn from
-// the same sequence so they can never be mistaken for one another in traces
-// or a delayed internal callback.
+// and surface lifetimes share one sequence so they can never be mistaken for
+// one another in a delayed internal callback.
 func (r *guestSwapRouter) nextGenerationLocked() uint64 {
 	r.nextGeneration++
 	if r.nextGeneration == 0 {
@@ -119,9 +114,8 @@ func (r *guestSwapRouter) register(target guestSwapTarget, window uintptr) *gues
 	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	// A replacement registration owns this XID immediately. Normal lifecycle
-	// teardown unregisters first, but deleting an unexpectedly lingering route
-	// here keeps a delayed old callback from reaching the new target.
+	// A replacement registration owns this XID immediately; drop any lingering
+	// route so a delayed old callback cannot reach the new target.
 	if old := r.windows[window]; old != nil {
 		for key, surface := range r.surfaces {
 			if surface.registration == old {
@@ -187,18 +181,16 @@ func (r *guestSwapRouter) surfaceCreated(window, display, surface uintptr) uint6
 	}
 	r.mu.Unlock()
 	if registration.target.guestSwapSurfaceCreated(delivery) {
-		// The target call is deliberately outside the router lock. A delayed
-		// create must not hand an obsolete token back to Android after the same
-		// registration has replaced this numeric handle.
+		// The target call is deliberately outside the router lock: a delayed
+		// create must not hand an obsolete token back to Android.
 		r.mu.Lock()
 		stillCurrent := r.windows[window] == registration && r.surfaces[key] == entry
 		r.mu.Unlock()
 		if stillCurrent {
 			return delivery.identity.generation
 		}
-		// The target may have recorded this surface before a later create won
-		// the route. Roll it back only if that old delivery is still current in
-		// the target; a newer delivery has a greater surface generation.
+		// Roll back only if that old delivery is still current in the target;
+		// a newer delivery has a greater surface generation.
 		registration.target.guestSwapSurfaceDestroyed(delivery)
 		return 0
 	}

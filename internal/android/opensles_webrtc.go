@@ -10,7 +10,6 @@ package android
 */
 import "C"
 
-// webRtcShapeResult is what the WebRTC-shaped OpenSL probe observed.
 type webRtcShapeResult struct {
 	playCallbacks    uint32
 	captureCallbacks uint32
@@ -21,8 +20,6 @@ type webRtcShapeResult struct {
 	rc               int
 }
 
-// audioTestHostVoicePlayback opens the real host playback endpoint through a
-// player tagged as WebRTC's voice stream (voice-sized Pulse target buffer).
 func audioTestHostVoicePlayback(rate, channels, bytes uint32) (uint64, uint32, int) {
 	var written C.uint64_t
 	var callbacks C.uint32_t
@@ -30,7 +27,6 @@ func audioTestHostVoicePlayback(rate, channels, bytes uint32) (uint64, uint32, i
 	return uint64(written), uint32(callbacks), int(rc)
 }
 
-// probeShapeResult is what the capability-probe sequence observed.
 type probeShapeResult struct {
 	failed              uint32
 	recorderIIDs        uint32
@@ -40,9 +36,6 @@ type probeShapeResult struct {
 	rc                  int
 }
 
-// audioTestProbeShape runs the pre-stream capability probes (interface
-// census, extensions, OutputMix destinations, refused interfaces,
-// configuration keys) against the fake host.
 func audioTestProbeShape() probeShapeResult {
 	var failed, recorderIIDs, mixDevice, unknownResult, perfResult C.uint32_t
 	rc := C.tipsy_audio_test_probe_shape(&failed, &recorderIIDs, &mixDevice, &unknownResult, &perfResult)
@@ -56,9 +49,6 @@ func audioTestProbeShape() probeShapeResult {
 	}
 }
 
-// audioTestWebRtcShape drives Tipsy's OpenSL bridge through the exact call
-// sequence of WebRTC's legacy Android AudioDeviceModule (OpenSLESPlayer +
-// OpenSLESRecorder) against the deterministic fake host.
 func audioTestWebRtcShape() webRtcShapeResult {
 	var playCB, capCB, clearedCount, clearedIndex C.uint32_t
 	var playerVoice, recorderVoice C.int

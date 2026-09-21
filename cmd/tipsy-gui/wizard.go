@@ -491,9 +491,8 @@ func (w *mainWindow) buildReadyWizardPage(wizard *qt.QWizard) *qt.QWizardPage {
 }
 
 func (w *mainWindow) newWizardPageLayout(page *qt.QWizardPage, title, subtitle string) *qt.QVBoxLayout {
-	// Keep headings inside the page instead of Qt's style-dependent native
-	// wizard header. ModernStyle may paint that header either light or dark
-	// depending on the platform theme, which cannot provide invariant contrast.
+	// Keep headings inside the page: Qt's style-dependent native wizard
+	// header cannot provide invariant contrast.
 	page.SetTitle("")
 	page.SetSubTitle("")
 	setObjectName(page.QObject, "wizardPage")

@@ -3,27 +3,6 @@
 
 package main
 
-// Controller settings card backend (lean, simplified 2026-09-12).
-//
-// The GUI owns widgets only: it binds to the existing diagnose gamepad
-// report (via guimodel.ControllerState) and persists the lean gamepad
-// section. It owns no mapping, deadzone, rumble, or feed-in semantics —
-// those belong to Input/JNI.
-//
-// The canonical home is the existing settings file
-// ($XDG_CONFIG_HOME/tipsy/config.json) under the "gamepad" section shaped
-// exactly as gamepad.GamepadConfig: {enabled, deadzone, faceButtonLayout}.
-// Input owns that shape and its merge/defaults/env semantics; this file is a
-// thin adapter. Missing file/key = gamepad defaults (on, device-flat
-// baseline, Xbox face buttons).
-//
-// Deleted vs controller v1 (honest list, see
-// gamepad-simplify-2026-09-12.md): the legacy controller.json import, the
-// local test-input probe (open/poll/bars/lamps), per-stick conversions, and
-// button/axis readout labels. Headless parity stays with the environment:
-// TIPSY_GAMEPAD=0|off disables the subsystem regardless of the file, and
-// TIPSY_GAMEPAD_DEADZONE overrides the file (env wins).
-
 import (
 	"fmt"
 	"os"
@@ -35,8 +14,7 @@ import (
 )
 
 // controllerSettingsFromGamepad renders the effective calibration as widget
-// state: the single global floor both sticks share. Face-button layout stays
-// separate because it has no presentation-neutral field in ControllerSettings.
+// state: the single global deadzone floor both sticks share.
 func controllerSettingsFromGamepad(cfg gamepad.GamepadConfig) guimodel.ControllerSettings {
 	return guimodel.ControllerSettings{
 		Enabled:  cfg.Enabled,
@@ -44,8 +22,8 @@ func controllerSettingsFromGamepad(cfg gamepad.GamepadConfig) guimodel.Controlle
 	}
 }
 
-// gamepadConfigFromController bakes widget state and the selected labelled
-// diamond into the Input-owned config.
+// gamepadConfigFromController bakes widget state and the selected layout
+// into the config.
 func gamepadConfigFromController(settings guimodel.ControllerSettings, layout gamepad.FaceButtonLayout) gamepad.GamepadConfig {
 	cfg := gamepad.DefaultGamepadConfig()
 	cfg.Enabled = settings.Enabled
@@ -70,8 +48,7 @@ func loadControllerSettingsAndFaceButtonLayout() (guimodel.ControllerSettings, g
 }
 
 // loadControllerSettingsAt reads the canonical section from path; a missing
-// file means defaults. A malformed section (or a malformed file) yields
-// defaults plus an honest error and leaves the file untouched.
+// file means defaults, a malformed one yields defaults plus an error.
 func loadControllerSettingsAt(path string) (guimodel.ControllerSettings, error) {
 	settings, _, err := loadControllerSettingsAndFaceButtonLayoutAt(path)
 	return settings, err
@@ -105,10 +82,9 @@ func saveControllerSettingsWithFaceButtonLayout(settings guimodel.ControllerSett
 	})
 }
 
-// saveControllerSettingsAt validates, then overlays the "gamepad" section
-// onto path, preserving every other top-level key. A malformed existing file
-// is never overwritten: the save fails honestly so unrelated keys
-// (dataDir, consent, …) cannot be destroyed by a gamepad write.
+// saveControllerSettingsAt overlays the "gamepad" section onto path,
+// preserving every other top-level key. A malformed existing file is never
+// overwritten, so unrelated keys cannot be destroyed by a gamepad write.
 func saveControllerSettingsAt(path string, settings guimodel.ControllerSettings) error {
 	merged, err := mergeControllerSettingsFromPath(path, settings)
 	if err != nil {
@@ -119,7 +95,7 @@ func saveControllerSettingsAt(path string, settings guimodel.ControllerSettings)
 
 // mergeControllerSettings updates only the gamepad section in one complete
 // config document. The canonical caller runs it under config.UpdateJSON's
-// cross-process lock; the path helper keeps isolated-file tests simple.
+// cross-process lock.
 func mergeControllerSettings(data []byte, settings guimodel.ControllerSettings) ([]byte, error) {
 	// This compatibility helper preserves an already selected layout when a
 	// caller only changes the pre-existing enable/deadzone controls.
@@ -152,9 +128,8 @@ func mergeControllerSettingsFromPath(path string, settings guimodel.ControllerSe
 	return mergeControllerSettings(data, settings)
 }
 
-// controllerEffectiveEnabled mirrors the Input-owned kill-switch without
-// caching: TIPSY_GAMEPAD=0|off|false|no disables pads however the file is
-// set. Read live so the card always reflects the current environment.
+// controllerEffectiveEnabled mirrors the Input-owned kill-switch:
+// TIPSY_GAMEPAD=0|off|false|no disables pads regardless of the file.
 func controllerEffectiveEnabled(settings guimodel.ControllerSettings) bool {
 	if !settings.Enabled {
 		return false
@@ -195,10 +170,8 @@ func controllerPadDetail(pad guimodel.ControllerPad) string {
 	return detail
 }
 
-// controllerProbe is kept as a stub type for window-lifetime compatibility:
-// the lean card never opens a pad (no local test readout), so the probe is
-// always nil and stopControllerTest is a no-op. The test readout (bars,
-// lamps, open/poll) is deleted vs v1.
+// controllerProbe is a stub: the card never opens a pad, so it stays nil and
+// stopControllerTest is a no-op.
 type controllerProbe struct {
 	dev *gamepad.Device
 }

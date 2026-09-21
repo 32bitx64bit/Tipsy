@@ -83,8 +83,7 @@ func (w *mainWindow) initAppearance() {
 	runtime.KeepAlive(palette) // ColorWithCr borrows from this auto-finalized value.
 	w.applyAppearance()
 	w.appearanceTimer = qt.NewQTimer2(w.win.QObject)
-	// MIQT targets Qt 6.2; querying the Qt 6.5+ property avoids a new native shim
-	// while still following desktop theme changes on newer Qt installations.
+	// Query the Qt 6.5+ colorScheme property directly; no native shim needed.
 	w.appearanceTimer.OnTimeout(func() {
 		if w.appearance == appearanceSystem && w.systemDark() != w.appearanceIsDark {
 			w.applyAppearance()

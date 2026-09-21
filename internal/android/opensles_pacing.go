@@ -11,9 +11,8 @@ package android
 import "C"
 
 // OpenSLQueueOwnership contains fixed-size, content-free queue ownership
-// counters from a bounded fake-player fixture. Allocations and copies are C
-// queue-storage events, not Go allocations, CPU, RSS, OS wakeups, audio
-// latency, or FPS measurements.
+// counters from a bounded fake-player fixture; allocations and copies are
+// C queue-storage events, not Go allocations.
 type OpenSLQueueOwnership struct {
 	Capacity                    uint32
 	NodesOwned                  uint32
@@ -32,10 +31,8 @@ type OpenSLQueueOwnership struct {
 	CallerBufferCopiesPreserved bool
 }
 
-// OpenSLQueueOwnershipFixture runs a bounded two-buffer fake-player sequence:
-// a deliberately full enqueue, two callback re-enqueues, then stop and Clear.
-// It never opens a device or carries PCM out of C, and exists solely to make
-// queue lifetime/capacity policy independently measurable by internal/perf.
+// OpenSLQueueOwnershipFixture runs a bounded two-buffer fake-player sequence
+// against the fake host. It never opens a device or carries PCM out of C.
 func OpenSLQueueOwnershipFixture() (OpenSLQueueOwnership, bool) {
 	var result C.tipsy_audio_queue_ownership_result
 	rc := C.tipsy_audio_test_queue_ownership(&result)
@@ -59,8 +56,7 @@ func OpenSLQueueOwnershipFixture() (OpenSLQueueOwnership, bool) {
 }
 
 // OpenSLRetryBackoff contains content-free worker-state metadata from a fake
-// repeated-failure fixture. It demonstrates interruption and error-log
-// limiting; it is not a device timing, CPU, RSS, wakeup, or latency result.
+// repeated-failure fixture, demonstrating interruption and error-log limiting.
 type OpenSLRetryBackoff struct {
 	Callbacks            uint32
 	Queued               uint32
@@ -85,9 +81,8 @@ func openSLRetryBackoffFixture() (OpenSLRetryBackoff, bool) {
 	}, int(rc) == 0
 }
 
-// MutedCaptureCadence contains only fixed-size cadence timing metadata
-// from the fake OpenSL backend. It deliberately carries no PCM, device,
-// address, client, or microphone information.
+// MutedCaptureCadence contains only fixed-size cadence timing metadata from
+// the fake OpenSL backend; it carries no PCM, device, or client information.
 type MutedCaptureCadence struct {
 	Callbacks              uint32
 	CallbackIntervalP50NS  uint64
@@ -102,8 +97,6 @@ type MutedCaptureCadence struct {
 }
 
 // MutedCaptureCadenceFixture runs a bounded fake-host re-enqueue fixture.
-// It is the Android-owned measurement seam for internal/perf. It does not
-// measure CPU, native allocation, RSS, OS wakeups, or end-to-end latency.
 func MutedCaptureCadenceFixture() (MutedCaptureCadence, bool) {
 	var result C.tipsy_audio_muted_cadence_result
 	rc := C.tipsy_audio_test_muted_cadence(&result)
@@ -135,8 +128,8 @@ func audioTestMutedCaptureInterrupts() (uint32, int) {
 }
 
 // audioTestCaptureUnmuteRace deterministically flips mute after a recorder
-// committed a silent-buffer decision. It is a fake-host safety seam: the
-// buffer must stay silent and no unopened backend may be read.
+// committed a silent-buffer decision; the buffer must stay silent and no
+// unopened backend may be read.
 func audioTestCaptureUnmuteRace() int {
 	return int(C.tipsy_audio_test_capture_unmute_race())
 }

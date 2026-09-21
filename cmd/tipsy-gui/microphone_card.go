@@ -3,10 +3,6 @@
 
 package main
 
-// Microphone settings card. Widgets bind to the existing diagnose audio
-// report and persist the lean microphone section. No Pulse, PCM, or JNI
-// logic lives here. This toggle is the RECORD_AUDIO consent surface.
-
 import (
 	"context"
 

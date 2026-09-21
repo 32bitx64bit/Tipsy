@@ -58,8 +58,7 @@ type versionedLibraryCapability struct {
 
 // These descriptors are the Android ABI surface Tipsy owns. A version name is
 // attached to each symbol registration rather than accepted as a library-wide
-// allowlist. LIBC_N and LIBC_O are limited to the bionic symbols that actually
-// use those namespaces in the supported official client.
+// allowlist.
 var versionedLibraryCapabilities = map[string]versionedLibraryCapability{
 	"libc.so": {
 		baseVersion: "LIBC",

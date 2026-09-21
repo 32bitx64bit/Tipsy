@@ -18,7 +18,7 @@ func TestAAssetCloseReleasesBorrowLeaseExactlyOnce(t *testing.T) {
 	var asset unsafe.Pointer
 	asset = newBorrowedAsset(nil, 0, -1, func() {
 		releases.Add(1)
-		// The descriptor is invalid before C enters Go. This exercises a
+		// The descriptor is invalid before C enters Go; this exercises a
 		// re-entrant close while the outer close still owns its allocation.
 		closeAssetForTest(asset)
 	})

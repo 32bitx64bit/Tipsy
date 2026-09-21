@@ -23,7 +23,6 @@ var ErrRendererUnavailable = errors.New("graphics: renderer unavailable")
 
 // UnsupportedRendererError is returned before client startup when a valid
 // renderer cannot be backed by the complete host/platform compatibility path.
-// In particular, finding libvulkan alone is not sufficient Vulkan support.
 type UnsupportedRendererError struct {
 	Renderer Renderer
 	Reason   string
@@ -41,9 +40,8 @@ func (e *UnsupportedRendererError) Error() string {
 
 func (e *UnsupportedRendererError) Unwrap() error { return ErrRendererUnavailable }
 
-// VulkanHostProbe describes the host Vulkan loader/device/WSI probe. It does
-// not by itself mean the Android client's Vulkan surface contract is usable;
-// combine it with the adapter constructed by this build.
+// VulkanHostProbe describes the host Vulkan loader/device/WSI probe; it does
+// not by itself mean the Android client's Vulkan surface contract is usable.
 type VulkanHostProbe struct {
 	Library         bool
 	Loader          bool

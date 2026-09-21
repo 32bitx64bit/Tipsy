@@ -39,15 +39,15 @@ type stubDispatchKey struct {
 	retKind          rune
 }
 
-// stubDispatchLogged dedupes the dispatch-time stub-fallback diagnostic:
-// one log per unique class.name+sig|retKind for the life of the process.
+// stubDispatchLogged dedupes the dispatch-time stub-fallback diagnostic: one
+// log per unique class.name+sig|retKind for the life of the process.
 var stubDispatchLogged sync.Map
 
-// logStubDispatch records that the JNIEnv dispatch path is about to answer
-// an unresolved method through vm.stubCall. Observation-only: it fires after
-// dispatch returned handled=false and before stubCall runs, so every fallback
-// return and side effect is preserved exactly. It never fires for methods
-// vm.dispatch handles (implemented paths, <init>, field getters).
+// logStubDispatch records that the JNIEnv dispatch path is about to answer an
+// unresolved method through vm.stubCall. It fires after dispatch returned
+// handled=false and before stubCall runs, so every fallback return and side
+// effect is preserved exactly. It never fires for methods vm.dispatch handles
+// (implemented paths, <init>, field getters).
 func logStubDispatch(class, name, sig string, retKind rune) {
 	key := stubDispatchKey{class: class, name: name, sig: sig, retKind: retKind}
 	if _, dup := stubDispatchLogged.LoadOrStore(key, struct{}{}); dup {
@@ -58,12 +58,11 @@ func logStubDispatch(class, name, sig string, retKind rune) {
 		"retKind", string(retKind))
 }
 
-// callDispatchOrStub runs vm.dispatch and, when it does not handle the
-// method, applies the vm.stubCall fallback with the deduped diagnostic.
-// Returns (value, handled); behavior is identical to the inline fallback it
-// replaced. logLifecycleStubArgs adds an observation-only diagnostic for the
-// two approved lifecycle identities after logStubDispatch and before
-// stubCall: no dispatch decision, return value, or side effect changes.
+// callDispatchOrStub runs vm.dispatch and, when it does not handle the method,
+// applies the vm.stubCall fallback with the deduped diagnostic. Returns (value,
+// handled). logLifecycleStubArgs adds an observation-only diagnostic for the two
+// approved lifecycle identities after logStubDispatch and before stubCall: no
+// dispatch decision, return value, or side effect changes.
 func callDispatchOrStub(vm *VM, obj C.jobject, class, name, sig string, args *C.jvalue, retKind rune) (C.jobject, bool) {
 	env := unsafe.Pointer(nil)
 	if vm != nil {
@@ -81,15 +80,13 @@ func callDispatchOrStubEnv(vm *VM, env unsafe.Pointer, obj C.jobject, class, nam
 }
 
 // findClassByName is java/lang/ClassLoader.findClass, the engine's
-// ClassLoader-based class resolution (GetMethodID'd during init, called from
-// nativePostClientSettingsLoadedInitialization3 right after
-// FindClass(ApplicationExitInfoCpp)). It resolves from the same class map
-// GoJNI_FindClass serves and returns the canonical Class object
-// (fields["name"] carries the binary name, so classNameOf attributes later
-// GetMethodID/RegisterNatives to the real class instead of the stub's
-// nameless java/lang/Class object). Unknown names mirror FindClass's
-// auto-create with the same diagnostic: one class-resolution policy for
-// both JNIEnv paths. An empty or absent name resolves nothing.
+// ClassLoader-based class resolution. It resolves from the same class map
+// GoJNI_FindClass serves and returns the canonical Class object (fields["name"]
+// carries the binary name, so classNameOf attributes later
+// GetMethodID/RegisterNatives to the real class instead of the stub's nameless
+// java/lang/Class object). Unknown names mirror FindClass's auto-create with
+// the same diagnostic: one class-resolution policy for both JNIEnv paths. An
+// empty or absent name resolves nothing.
 func (vm *VM) findClassByName(env unsafe.Pointer, name string) C.jobject {
 	if name == "" {
 		return jnull()
@@ -433,10 +430,9 @@ func GoJNI_CallA(env *C.JNIEnv, obj C.jobject, clazz C.jclass, methodID C.jmetho
 }
 
 // newDeviceStaticParams is NativeGLJavaInterface.getDeviceStaticParams.
-// DEX instance fields: testDeviceName, appBuildVariant, appVersion,
-// cpu64Bit, deviceName, deviceSku, manufacturer, osVersion. osVersion
-// "26" matches SDK_INT; nativeSetDeviceInfo copies it to BSS 0x7a0e548
-// which Graphics strtol's as Android API (empty auto-stub was 0).
+// Instance fields: testDeviceName, appBuildVariant, appVersion, cpu64Bit,
+// deviceName, deviceSku, manufacturer, osVersion. osVersion "26" matches
+// SDK_INT.
 func (vm *VM) newDeviceStaticParams() C.jobject {
 	vm.mu.Lock()
 	defer vm.mu.Unlock()
@@ -462,8 +458,8 @@ func (vm *VM) fieldGetter(o *Object, name, sig string) (C.jobject, bool) {
 }
 
 // fieldGetterOn resolves one synthetic Java getter. Callers on a JNI callback
-// path must pass that callback's environment so returned String locals stay
-// on the owning native thread; nil preserves the legacy current-env fallback.
+// path must pass that callback's environment so returned String locals stay on
+// the owning native thread; nil preserves the legacy current-env fallback.
 func (vm *VM) fieldGetterOn(env unsafe.Pointer, o *Object, name, sig string) (C.jobject, bool) {
 	if o == nil || !strings.HasPrefix(sig, "()") {
 		return jnull(), false
@@ -779,9 +775,8 @@ func GoJNI_SetField(env *C.JNIEnv, obj C.jobject, clazz C.jclass, fieldID C.jfie
 }
 
 // maxGuestStringUnits bounds GoJNI_NewString's guest-provided length before
-// allocation. 16 Mi UTF-16 units (32 MiB) is far beyond any string the
-// official client constructs through this entry point, and keeps a bogus
-// positive jsize from forcing a multi-gigabyte allocation.
+// allocation. A bogus positive jsize must not force a multi-gigabyte
+// allocation.
 const maxGuestStringUnits = 16 << 20
 
 //export GoJNI_NewString
@@ -814,9 +809,9 @@ func utf16UnitCount(s string) int {
 	return n
 }
 
-// encodeUTF16To writes s directly into a caller-owned UTF-16 buffer. The
-// caller supplies exactly utf16UnitCount(s) units; malformed UTF-8 follows Go
-// range semantics and therefore matches utf16.Encode([]rune(s)).
+// encodeUTF16To writes s directly into a caller-owned UTF-16 buffer. The caller
+// supplies exactly utf16UnitCount(s) units; malformed UTF-8 follows Go range
+// semantics and therefore matches utf16.Encode([]rune(s)).
 func encodeUTF16To(dst []uint16, s string) int {
 	n := 0
 	for _, r := range s {
@@ -864,8 +859,8 @@ func encodeStringCharsPin(o *Object) unsafe.Pointer {
 	if stringCharsPinOverflow(units) {
 		return nil
 	}
-	// Preserve Tipsy's existing terminator-inclusive allocation convention;
-	// GetStringChars itself does not require a trailing zero.
+	// Preserve the terminator-inclusive allocation convention; GetStringChars
+	// itself does not require a trailing zero.
 	count := units + 1
 	p := C.malloc(C.size_t(count * stringCharsUnitBytes()))
 	if p == nil {
@@ -873,11 +868,11 @@ func encodeStringCharsPin(o *Object) unsafe.Pointer {
 	}
 	dst := unsafe.Slice((*uint16)(p), count)
 	// An ordinary Go string has no retained UTF-16 representation. Encode it
-	// straight into the native buffer instead of materializing a temporary
-	// full UTF-16 slice. rawUTF16 is intentionally different: it exists
-	// exactly for a Java String whose unpaired surrogates cannot be recovered
-	// from o.str, so copy those retained code units. Never return a pointer
-	// into a Go []uint16; this buffer is C-owned.
+	// straight into the native buffer instead of materializing a temporary full
+	// UTF-16 slice. rawUTF16 is different: it exists for a Java String whose
+	// unpaired surrogates cannot be recovered from o.str, so copy those retained
+	// code units. Never return a pointer into a Go []uint16; this buffer is
+	// C-owned.
 	written := 0
 	if o.utf16 != nil {
 		written = copy(dst[:units], o.utf16.units)
@@ -983,8 +978,8 @@ func GoJNI_ReleaseStringChars(env *C.JNIEnv, str C.jstring, chars *C.jchar) {
 	}
 	o := vm.get(jobjectToID(uintptr(str)))
 	if o == nil {
-		// Reclaimed or invalid: a pin was already freed on destroy. Do not
-		// free again. GetStringChars no longer returns per-call copies.
+		// Reclaimed or invalid: a pin was already freed on destroy. Do not free
+		// again. GetStringChars no longer returns per-call copies.
 		return
 	}
 	if pin := stringCharsPinOf(o); pin != nil && unsafe.Pointer(chars) == pin {
@@ -1063,10 +1058,9 @@ func GoJNI_GetStringUTFChars(env *C.JNIEnv, str C.jstring, isCopy *C.jboolean) *
 }
 
 // unitRegion validates a JNI string-region request and returns its start and
-// length in UTF-16/code units. Negative start or length is invalid (never
-// reach unsafe.Slice or slice indexing with a negative count). The
-// `start > total || length > total-start` form cannot overflow on huge
-// positive start/length the way `start+length > total` can.
+// length in UTF-16/code units. Negative start or length is invalid. The
+// `start > total || length > total-start` form cannot overflow on huge positive
+// start/length the way `start+length > total` can.
 func unitRegion(start, length, total int) (s, n int, ok bool) {
 	if start < 0 || length < 0 || start > total || length > total-start {
 		return 0, 0, false
@@ -1390,9 +1384,9 @@ func GoJNI_SetArrayRegion(env *C.JNIEnv, array C.jarray, start, length C.jsize, 
 	copy(o.bytes[off:off+n], unsafe.Slice((*byte)(buf), n))
 }
 
-// maxRegisteredNatives bounds one RegisterNatives batch before unsafe.Slice.
-// The official client registers small batches (tens); a bogus positive count
-// must fail with JNI_ERR instead of slicing past the real C array.
+// maxRegisteredNatives bounds one RegisterNatives batch before unsafe.Slice. A
+// bogus positive count must fail with JNI_ERR instead of slicing past the real C
+// array.
 const maxRegisteredNatives = 1 << 14
 
 //export GoJNI_RegisterNatives
@@ -1426,10 +1420,10 @@ func GoJNI_UnregisterNatives(env *C.JNIEnv, clazz C.jclass) C.jint {
 	return C.JNI_OK
 }
 
-// testRegisterNativesCount calls GoJNI_RegisterNatives with a non-nil
-// one-entry native method table and the given count, translating the JNI
-// result to a Go int (0=OK, -1=ERR) because test files in this package
-// cannot name C constants.
+// testRegisterNativesCount calls GoJNI_RegisterNatives with a non-nil one-entry
+// native method table and the given count, translating the JNI result to a Go
+// int (0=OK, -1=ERR) because test files in this package cannot name C
+// constants.
 func testRegisterNativesCount(n int32) int {
 	methods := make([]C.JNINativeMethod, 1)
 	switch GoJNI_RegisterNatives(nil, jclassNull(), &methods[0], C.jint(n)) {

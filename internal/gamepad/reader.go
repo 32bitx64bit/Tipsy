@@ -3,27 +3,19 @@
 
 package gamepad
 
-// DefaultDeadzone is the normalized fallback deadzone applied when a
-// device reports flat==0 for a stick axis. It is also the cap applied
-// to an oversized EVIOCGABS flat: GuliKit 4095 on 0..65535 is ≈12.5%,
-// which swallows firmware gyro-to-right-stick micro-aim.
+// DefaultDeadzone is the normalized fallback deadzone applied when a device
+// reports flat==0 for a stick axis. It is also the cap on an oversized
+// device flat, which would otherwise swallow small deflections.
 const DefaultDeadzone = 0.08
 
-// NormalizeStick maps a raw stick sample to -1..1 using the honest
-// device min/max, with an evdev flat deadzone around centre. rest is the
-// connect-time EVIOCGABS value: when it sits inside the idle band around
-// geometric mid-range it becomes the deadzone origin (GuliKit unsigned
-// sticks rest 1–2k off 32767; a mid-range origin made gyro pitch one-sided
-// and ate yaw toward centre). A rest outside that band is a held stick
-// at open and is ignored. rest==0 on an unsigned range is treated as unset.
-//
-// Gain is symmetric: n=(raw-centre)/half with half=(max-min)/2. Per-side
-// min/max spans made the short side (GuliKit up / the biased yaw side)
-// stronger and turned a rest-crossing overshoot into a bounce. Samples
-// with |raw-centre|<=deadRaw report 0, where deadRaw=min(flat,
-// DefaultDeadzone*half) when flat>0 else DefaultDeadzone*half.
-//
-// The second return reports whether the fallback deadzone was used.
+// NormalizeStick maps a raw stick sample to -1..1 with an evdev flat
+// deadzone around centre. rest is the connect-time EVIOCGABS value: inside
+// the idle band around geometric mid-range it becomes the deadzone origin,
+// otherwise it is ignored, and rest==0 on an unsigned range is unset. Gain
+// is symmetric: n=(raw-centre)/half with half=(max-min)/2. Samples with
+// |raw-centre|<=deadRaw report 0, where deadRaw=min(flat,
+// DefaultDeadzone*half) when flat>0 else DefaultDeadzone*half. The second
+// return reports whether the fallback deadzone was used.
 func NormalizeStick(raw, minimum, maximum, flat, rest int32) (float64, bool) {
 	return normalizeStick(raw, minimum, maximum, flat, rest, false)
 }
@@ -59,8 +51,7 @@ func normalizeStick(raw, minimum, maximum, flat, rest int32, forceRest bool) (fl
 	return n, fallback
 }
 
-// stickCentre is geometric mid-range unless rest looks like an idle
-// bias (inside the capped deadband of mid-range, and not pegged at min).
+// stickCentre is geometric mid-range unless rest looks like an idle bias.
 func stickCentre(minimum, maximum, flat, rest int32) float64 {
 	geo := float64(minimum+maximum) / 2
 	if rest <= minimum || rest > maximum {
@@ -74,9 +65,9 @@ func stickCentre(minimum, maximum, flat, rest int32) float64 {
 	return geo
 }
 
-// stickDeadRaw is the raw-unit stick deadband: device flat when it is
-// positive and at most DefaultDeadzone of half-range, else the 0.08
-// fallback. fallback is true only when flat==0.
+// stickDeadRaw is the raw-unit stick deadband: the device flat capped at
+// DefaultDeadzone of half-range, else the 0.08 fallback. fallback is true
+// only when flat==0.
 func stickDeadRaw(half float64, flat int32) (float64, bool) {
 	cap := DefaultDeadzone * half
 	if flat > 0 {
@@ -89,9 +80,8 @@ func stickDeadRaw(half float64, flat int32) (float64, bool) {
 	return cap, true
 }
 
-// StickFlatNormalized is the Android MotionRange.flat for a stick:
-// device flat in axis units, capped at DefaultDeadzone so the engine's
-// |v|<=flat gate cannot eat gyro-to-stick micro-aim.
+// StickFlatNormalized is the Android MotionRange.flat for a stick: device
+// flat in axis units, capped at DefaultDeadzone.
 func StickFlatNormalized(minimum, maximum, flat int32) float32 {
 	if maximum <= minimum || flat <= 0 {
 		return 0
@@ -107,10 +97,9 @@ func StickFlatNormalized(minimum, maximum, flat int32) float32 {
 	return float32(n)
 }
 
-// NormalizeTrigger maps a raw trigger sample to 0..1 using the honest
-// device min/max. Samples with (raw-min)<=flat report 0. The fallback
-// return mirrors NormalizeStick (true when flat==0 and raw is above the
-// small default deadzone edge is still reported honestly; callers log once).
+// NormalizeTrigger maps a raw trigger sample to 0..1 using the device
+// min/max. Samples with (raw-min)<=flat report 0. The second return
+// reports whether the fallback deadzone was used.
 func NormalizeTrigger(raw, minimum, maximum, flat int32) (float64, bool) {
 	if maximum <= minimum {
 		return 0, false
@@ -134,17 +123,12 @@ func NormalizeTrigger(raw, minimum, maximum, flat int32) (float64, bool) {
 	return t, fallback
 }
 
-// IsTriggerAxis reports whether an ABS axis is trigger-shaped rather than
-// a stick or hat.
-//
-// Signed ranges (min < 0) are sticks or hats. Unsigned 16-bit sticks
-// (span > 4096, e.g. GuliKit / xpadneo Bluetooth Xbox pads at 0..65535)
-// rest near centre and must use NormalizeStick — treating them as
-// triggers maps rest to ~0.5 and makes the pad look stuck/glitchy.
-// Remaining small unsigned ranges (0..255, 0..1023) are triggers when
-// they rest at minimum, and DualShock-style 0..255 sticks when they
-// rest near centre. An unset Value (0) on a 0..255 axis matches trigger
-// idle, which keeps the historical 0..255-is-trigger classification.
+// IsTriggerAxis reports whether an ABS axis is trigger-shaped rather than a
+// stick or hat. Signed ranges (min < 0) are sticks or hats. Unsigned 16-bit
+// ranges (span > 4096) rest near centre and are sticks. Remaining small
+// unsigned ranges (0..255, 0..1023) are triggers when they rest at minimum,
+// and sticks when they rest near centre; an unset Value on a 0..255 axis
+// matches trigger idle.
 func IsTriggerAxis(info AbsInfo) bool {
 	if info.Maximum <= info.Minimum {
 		return false
@@ -186,18 +170,17 @@ type Reader struct {
 	held map[uint16]bool
 	raw  map[uint16]int32
 
-	// mapping selects aim-assist hold (L1 / LT). Zero value means xpad L1
-	// (BTN_TL) only; hid-linear pads must SetMapping so WEST is L1.
+	// mapping selects aim-assist hold. Zero value means xpad L1 (BTN_TL)
+	// only; hid-linear pads must SetMapping so WEST is L1.
 	mapping Mapping
-	// aimRest is the right-stick origin captured on the rising edge of
-	// L1/LT (GuliKit motion assist) when that axis is still at rest.
-	// A stick already aimed is left on connect-time rest so ADS/ZL
-	// cannot invert right→left or down→up. Cleared on release.
+	// aimRest is the right-stick origin captured on the rising edge of the
+	// aim-assist hold while that axis is still at rest. A stick already
+	// aimed is left on connect-time rest so the assist cannot invert its
+	// direction. Cleared on release.
 	aimRest map[uint16]int32
 	aimHeld bool
 
 	// Warn, when non-nil, receives at most one fallback-deadzone notice.
-	// The live hotplug manager wires this to a content-free log line.
 	Warn           func(msg string)
 	warnedFallback bool
 }
@@ -211,8 +194,8 @@ func NewReader(abs map[uint16]AbsInfo) *Reader {
 	return &Reader{Abs: cp, held: make(map[uint16]bool), raw: make(map[uint16]int32)}
 }
 
-// SetMapping installs the connect-time topology (aim-assist L1/LT and
-// right-stick codes). The hotplug manager calls this; tests may too.
+// SetMapping installs the connect-time topology (aim-assist hold and
+// right-stick codes).
 func (r *Reader) SetMapping(m Mapping) {
 	if r == nil {
 		return
@@ -222,11 +205,9 @@ func (r *Reader) SetMapping(m Mapping) {
 
 // Frame is one normalized pad state at a SYN_REPORT boundary.
 type Frame struct {
-	// Buttons holds pressed evdev BTN_* codes.
 	Buttons map[uint16]bool
 	// FaceButtonLayout selects the semantic A/B/X/Y mapping used by MapFrame.
-	// The zero value is Xbox for direct tests and callers that do not apply a
-	// persisted GamepadConfig first.
+	// The zero value is Xbox.
 	FaceButtonLayout FaceButtonLayout
 	// Axes holds normalized values per ABS code: sticks/hats in -1..1,
 	// trigger-shaped axes in 0..1.
@@ -263,9 +244,8 @@ func (r *Reader) Feed(ev InputEvent) *Frame {
 		if _, ok := r.Abs[ev.Code]; ok {
 			r.raw[ev.Code] = ev.Value
 		} else {
-			// Record unknown ABS codes anyway so a device that
-			// reports caps late still moves; normalization uses a
-			// symmetric fallback range only for these unknowns.
+			// Record unknown ABS codes so a device that reports caps late
+			// still moves.
 			r.raw[ev.Code] = ev.Value
 		}
 	case EvSyn:
@@ -326,12 +306,9 @@ func (r *Reader) snapshot() *Frame {
 	return f
 }
 
-// updateAimRest captures the right-stick raw origin when motion-aim hold
-// starts (L1 or LT) so gyro-to-stick is measured from the idle pose at
-// press, not the connect-time Value. An axis already outside the idle
-// band is left alone: capturing a held right/down pose made ZL invert
-// it (firmware spring toward HID centre then read as left/up).
-// Release clears it.
+// updateAimRest captures the right-stick raw origin when the aim-assist
+// hold starts, so assist is measured from the idle pose at press. An axis
+// already outside the idle band is left alone; releasing clears it.
 func (r *Reader) updateAimRest() {
 	held := r.aimAssistHeld()
 	if held && !r.aimHeld {
@@ -395,8 +372,8 @@ func (r *Reader) aimAssistHeld() bool {
 	return v >= 0.15
 }
 
-// DisconnectFrame synthesizes the Phase 1 disconnect state: UP for every
-// held button plus zeroed axes in the same frame.
+// DisconnectFrame synthesizes the disconnect state: UP for every held
+// button plus zeroed axes in the same frame.
 func DisconnectFrame(held map[uint16]bool, axes []uint16) *Frame {
 	f := &Frame{
 		Buttons:    make(map[uint16]bool),
@@ -411,7 +388,7 @@ func DisconnectFrame(held map[uint16]bool, axes []uint16) *Frame {
 }
 
 // isGamepadButton reports whether an EV_KEY code is pad input the reader
-// tracks (diamond/shoulders/start/select/mode/sticks-clicks/DPAD).
+// tracks.
 func isGamepadButton(code uint16) bool {
 	switch code {
 	case BtnSouth, BtnEast, BtnC, BtnNorth, BtnWest, BtnZ,

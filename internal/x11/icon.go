@@ -14,18 +14,13 @@ import (
 )
 
 // tipsyIconPNG is a build-time copy of the canonical repository branding.
-// Keeping the window icon in the binary makes it available to the window
-// manager when Tipsy is launched from a desktop file, AppDir, or arbitrary
-// working directory. The retained EWMH buffer is a WM-sized downscale of
-// this PNG, not the full-resolution decode.
+// The retained EWMH buffer is a WM-sized downscale of this PNG, not the
+// full-resolution decode.
 //
 //go:embed tipsy.png
 var tipsyIconPNG []byte
 
 // windowIconMaxEdge is the long edge of the packed _NET_WM_ICON image.
-// Window-manager title-bar and task-switcher icons do not need the 512×512
-// branding bitmap; keeping that decode resident was the 1.19 MiB Go inuse
-// hotspot in windowIconARGB.
 const windowIconMaxEdge = 64
 
 var (
@@ -35,8 +30,7 @@ var (
 )
 
 // windowIconARGB returns one EWMH _NET_WM_ICON image: width, height, followed
-// by non-premultiplied ARGB pixels in row-major order. The packed buffer is
-// built once from the embedded PNG and reused for every Map/Open.
+// by non-premultiplied ARGB pixels in row-major order.
 func windowIconARGB() ([]uint32, error) {
 	iconOnce.Do(func() {
 		iconData, iconErr = packWindowIconARGB(tipsyIconPNG)

@@ -23,11 +23,9 @@ import (
 	"github.com/tipsy-linux/tipsy/internal/x11"
 )
 
-// testRendererEnv is a deliberately narrow, process-only control for visual
-// compatibility validation. It never writes the Tipsy settings document or
-// Roblox's durable settings files. OpenGL is the sole accepted value because
-// this seam exists to exercise the non-default guest GLES path; Vulkan keeps
-// its ordinary Auto/persisted selection path instead of a second test mode.
+// testRendererEnv is a process-only visual-compatibility control; the sole
+// accepted value is `opengl`. It never writes the Tipsy settings document or
+// Roblox's durable settings files.
 const testRendererEnv = "TIPSY_TEST_RENDERER"
 
 func testOpenGLRequested(getenv func(string) string) (bool, error) {
@@ -45,8 +43,7 @@ func testOpenGLRequested(getenv func(string) string) (bool, error) {
 }
 
 // launchStartedAck gives in-process frontends one deterministic handoff from
-// launcher chrome to the live client. The sync.Once guard makes the API safe
-// if the loop setup is refactored to have more than one entry edge later.
+// launcher chrome to the live client. The sync.Once makes the signal idempotent.
 type launchStartedAck struct {
 	once sync.Once
 	fn   func()
@@ -59,16 +56,15 @@ func (a *launchStartedAck) signal() {
 	a.once.Do(a.fn)
 }
 
-// fullscreenWindow gives the host launch policy a narrow unit-test seam while
-// retaining X11 as the sole owner of the EWMH implementation.
+// fullscreenWindow is implemented by the X11 window, the sole owner of the
+// EWMH fullscreen implementation.
 type fullscreenWindow interface {
 	SetFullscreen(enabled bool) error
 }
 
-// requestStartFullscreen runs after OpenOnDisplay has mapped the X11 window
-// and before any presenter, JNI, or Roblox lifecycle work can interact with
-// it. A disabled policy deliberately sends no remove request, preserving the
-// window manager's normal startup behavior.
+// requestStartFullscreen must run after the X11 window maps and before any
+// presenter, JNI, or Roblox lifecycle work. A disabled policy sends no request,
+// preserving the window manager's normal startup behavior.
 func requestStartFullscreen(w fullscreenWindow, enabled bool) error {
 	if !enabled {
 		return nil
@@ -79,19 +75,16 @@ func requestStartFullscreen(w fullscreenWindow, enabled bool) error {
 	return w.SetFullscreen(true)
 }
 
-// startFullscreenRequested resolves the explicit launch policy together with
-// the persisted, Tipsy-owned setting. Either is an affirmative host request;
-// a default LaunchOptions and a default settings document remain windowed.
+// startFullscreenRequested is true when the explicit launch policy or the
+// persisted Tipsy-owned setting requests fullscreen; both default to windowed.
 func startFullscreenRequested(opt LaunchOptions, settings clientsettings.Settings) bool {
 	return opt.StartFullscreen || settings.StartFullscreen
 }
 
-// closeClientModuleBeforeStart releases a client image only when no
+// closeClientModuleBeforeStart releases the client image only when no
 // GameActivity session was established. Once initializeNativeCode succeeds,
-// Roblox can retain official worker threads beyond terminateNativeCode (the
-// HttpClient thread is one observed example). Unmapping libroblox beneath
-// those threads is unsafe; the process teardown that immediately follows a
-// completed launch is the owner of that mapping instead.
+// Roblox can retain worker threads beyond terminateNativeCode, so unmapping
+// libroblox beneath them is unsafe; process teardown owns that mapping instead.
 func closeClientModuleBeforeStart(clientStarted bool, closeFn func() error) error {
 	if clientStarted || closeFn == nil {
 		return nil
@@ -100,7 +93,7 @@ func closeClientModuleBeforeStart(clientStarted bool, closeFn func() error) erro
 }
 
 // Launch starts the official extracted Android x86-64 client under native X11.
-// It intentionally performs no writes to libroblox.so text.
+// It performs no writes to libroblox.so text.
 func Launch(ctx context.Context, opt LaunchOptions) error {
 	if ctx == nil {
 		ctx = context.Background()
@@ -157,12 +150,9 @@ func Launch(ctx context.Context, opt LaunchOptions) error {
 			jni.SetStutterDiagnostics(false)
 		}()
 	}
-	// Android app-private files are owner-only by default. Keep that invariant
-	// for files the unmodified client creates itself, not only files Tipsy
-	// prepares directly. Scoping this to the storage-prep/import window was
-	// audited and rejected: the native client creates cache, log, and pref
-	// files for the whole session, so save+restore around prep would silently
-	// widen those defaults again.
+	// Android app-private files are owner-only by default. Keep that invariant for
+	// files the unmodified client creates itself, not only files Tipsy prepares
+	// directly, so the session-wide umask stays narrow.
 	oldUmask := syscall.Umask(0o077)
 	defer syscall.Umask(oldUmask)
 	if opt.Width <= 0 {
@@ -171,10 +161,9 @@ func Launch(ctx context.Context, opt LaunchOptions) error {
 	if opt.Height <= 0 {
 		opt.Height = 720
 	}
-	// The official client can survive an isolated small rectangle, but a real
-	// native X11/Vulkan resize drag through sub-720p rectangles reproducibly
-	// crashes before GameActivity can settle its surface update. Keep every
-	// construction boundary on the same X11 logical-pixel floor.
+	// The official client survives an isolated small rectangle, but a real resize
+	// drag through sub-minimum rectangles crashes before GameActivity settles its
+	// surface update. Keep every construction boundary on the same logical-pixel floor.
 	opt.Width, opt.Height = clampRobloxSurfaceSize(opt.Width, opt.Height)
 	started := &launchStartedAck{fn: opt.Started}
 	dir, err := filepath.Abs(runtimeFiles.RootDir)
@@ -189,9 +178,8 @@ func Launch(ctx context.Context, opt LaunchOptions) error {
 		return err
 	}
 	defer releaseClientLock()
-	// Ordinary Android apps cannot promote native work to a real-time policy.
-	// Establish that real kernel privilege limit before loading guest code or
-	// creating its threads; desktop RTPRIO allowances must not leak into it.
+	// Establish the Android app's real-time privilege limit before loading guest
+	// code or creating its threads; desktop RTPRIO allowances must not leak in.
 	if err := initializeAndroidAppScheduling(); err != nil {
 		return err
 	}
@@ -213,15 +201,13 @@ func Launch(ctx context.Context, opt LaunchOptions) error {
 		return fmt.Errorf("test renderer: %w", err)
 	}
 	if testOpenGL {
-		// Keep this process-local: settingsService still owns the persisted
-		// selection and the deferred reconciliation below writes that original
-		// document, never this visual-test choice.
+		// Keep this process-local: the deferred reconciliation rewrites the persisted
+		// selection, never this visual-test choice.
 		settings.Renderer = clientsettings.RendererOpenGL
 		logging.Logger(logging.CatGraphics).Info("transient renderer override", "renderer", clientsettings.RendererOpenGL)
 	}
-	// Roblox may normalize experimental values while shutting down. Reapply an
-	// explicit Tipsy-owned value after the client loop exits, while the launch
-	// lock still excludes GUI settings writes. The next launch also reconciles.
+	// Roblox may normalize experimental values on shutdown. Reapply the Tipsy-owned
+	// value after the loop exits, while the launch lock still excludes GUI writes.
 	defer func() {
 		_ = settingsService.ReconcileWhileClientLocked(context.Background())
 	}()
@@ -234,10 +220,8 @@ func Launch(ctx context.Context, opt LaunchOptions) error {
 		return err
 	}
 	// Install the APK's authoritative CA bundle under Android FilesDir before
-	// native startup. Do not change the process CWD here: an otherwise
-	// identical launch that entered FilesDir caused Roblox's HttpClient thread
-	// to terminate itself during Startup. The remaining relative-open bridge is
-	// a separate Android-ABI concern and must not be papered over with Chdir.
+	// native startup. Do not change the process CWD here: entering FilesDir can
+	// terminate the client's HttpClient thread during Startup.
 	if err := prepareRuntimeFiles(files, assets); err != nil {
 		return fmt.Errorf("runtime TLS files: %w", err)
 	}
@@ -254,10 +238,9 @@ func Launch(ctx context.Context, opt LaunchOptions) error {
 		return fmt.Errorf("x11: %w", err)
 	}
 	defer win.Close()
-	// The mapped X11 window is the complete host-owned fullscreen boundary.
-	// Queue the standard EWMH request before binding a presenter or starting
-	// any Android/JNI/Roblox lifecycle work; later ConfigureNotify geometry
-	// continues through the established resize path.
+	// Queue the EWMH fullscreen request before binding a presenter or starting any
+	// Android/JNI/Roblox lifecycle work; later ConfigureNotify geometry flows
+	// through the established resize path.
 	if err := requestStartFullscreen(win, startFullscreenRequested(opt, settings)); err != nil {
 		return fmt.Errorf("x11 start fullscreen: %w", err)
 	}
@@ -306,11 +289,6 @@ func Launch(ctx context.Context, opt LaunchOptions) error {
 			logging.Logger(logging.CatRuntime).Info("client module close failed", "err", err)
 		}
 	}()
-	// This exact, default-off arm subscribes only to payload-free JNI Home
-	// milestones. Its defer runs before the earlier module-close defer, so all
-	// observers are cancelled and the one bounded aggregate is complete before
-	// Runtime releases a module on an early lifecycle return. It adds no loop
-	// wake, input action, renderer work, or normal-launch observer.
 	startupMeasurement := newStartupMeasurementArm(os.Getenv, time.Now, logging.Logger(logging.CatRuntime).Info)
 	defer startupMeasurement.teardown()
 	if startupMeasurement != nil {
@@ -343,23 +321,19 @@ func Launch(ctx context.Context, opt LaunchOptions) error {
 	}
 	presence := startDiscordPresence(ctx, settingsService.Load, opt.Request.PlaceID, filepath.Join(files, "appData", "logs"))
 	defer stopDiscordPresence(presence)
-	// A successful session means initializeNativeCode has entered the official
-	// client and may have created engine-owned workers. Keep the image mapped
-	// until the CLI/GUI host process exits; do not race those workers with
-	// loader.Module.Close/rawMunmap after the visible window is dismissed.
+	// A successful session means initializeNativeCode entered the official client
+	// and may have created engine-owned workers. Keep the image mapped until the
+	// host process exits; do not race those workers with Close/rawMunmap.
 	clientStarted = true
 	refreshPublication := displayRefreshPublication{version: refreshVersion, current: currentRefreshHz, supported: supportedRefreshHz}
 	if currentRefreshHz <= 0 {
 		refreshPublication.version = 0
 	}
 	resize := session.resize
-	// A window-manager drag can emit a dense ConfigureNotify sequence. Vulkan
-	// observes its native X11 window directly, but replaying GameActivity's
-	// full ANativeWindow/V2/content-rect lifecycle for every intermediate drag
-	// size re-enters the official client before its prior surface update has
-	// settled. Keep only the latest positive geometry until the drag quiesces.
-	// This timer exists only while a resize is pending; the normal event-driven
-	// input path remains timer-free.
+	// A window-manager drag emits a dense ConfigureNotify sequence; replaying
+	// GameActivity's full surface lifecycle for every intermediate size re-enters
+	// the client before its prior update settles. Keep only the latest positive
+	// geometry until the drag quiesces; the timer exists only while one is pending.
 	resizeDebouncer := surfaceResizeDebouncer{
 		minWidth: x11.RobloxMinimumWidth, minHeight: x11.RobloxMinimumHeight,
 	}
@@ -402,16 +376,16 @@ func Launch(ctx context.Context, opt LaunchOptions) error {
 	refreshFocusedText := func(now time.Time) {
 		updated, err := focusedTextSync.refresh(now)
 		if err != nil && !textOverlayErrorLogged {
-			// Text and field identity never enter this diagnostic. Continue the
-			// client honestly; a later version/repaint retries the host View.
+			// Text and field identity never enter this diagnostic; a later version or
+			// repaint retries the host View.
 			logging.Logger(logging.CatX11).Error("focused text overlay unavailable", "err", err)
 			textOverlayErrorLogged = true
 		} else if updated && err == nil {
 			textOverlayErrorLogged = false
 			if focusedTextSync.active && focusedTextSync.seen != textOverlayDiagnosticsVersion && os.Getenv("TIPSY_DIAG") == "1" {
 				diag := focusedTextOverlay.Diagnostics()
-				// Aggregate ink booleans and raw Android color are safe to log;
-				// editor content and glyph identities never enter diagnostics.
+				// Aggregate ink booleans and raw color are safe to log; editor content
+				// and glyph identities never enter diagnostics.
 				logging.Logger(logging.CatX11).Info("focused text overlay paint",
 					"mapped", diag.Mapped,
 					"usesARGB", diag.UsesARGB,
@@ -430,10 +404,9 @@ func Launch(ctx context.Context, opt LaunchOptions) error {
 	defer jni.ClearRobloxDirectKeyTarget()
 	defer jni.ClearRobloxTextInputTarget()
 	defer jni.ClearGameActivityInputTarget()
-	// ConfigureNotify enters the same ordered X11 stream as pointer events.
-	// Update the X11-owned size immediately, but settle the engine-facing
-	// lifecycle after a short quiet period so one manual drag cannot re-enter
-	// V2 for every intermediate rectangle.
+	// ConfigureNotify shares the ordered X11 stream with pointer events. Update the
+	// X11-owned size immediately, but settle the engine-facing lifecycle after a
+	// quiet period so one drag cannot re-enter V2 per intermediate rectangle.
 	cancelResizeInput := x11.OnInput(func(ev x11.InputEvent) {
 		if ev.Kind == x11.InputResize {
 			scheduleSurfaceResize(ev.Width, ev.Height)
@@ -441,34 +414,25 @@ func Launch(ctx context.Context, opt LaunchOptions) error {
 	})
 	defer cancelResizeInput()
 
-	// Everything needed by the in-process client loop is live: X11 and the
-	// exclusive EGL or Vulkan presenter plus its pump were established above,
-	// GameActivity startup succeeded, input targets are wired, and the launch
-	// loop waits on the X11 input wake, the X11 refresh-change wake, and the
-	// focused-text/resize event sources. Immediate failures and --probe return
-	// before this boundary.
+	// Signal only after the loop's event sources are live; immediate failures and
+	// --probe return before this point.
 	started.signal()
 	shutdownClient := func(reason string) {
 		_ = win.Dismiss()
 		_ = win.StopBackgroundPump()
 		presenter.stop()
 		session.shutdown(reason)
-		// The official terminateNativeCode join has completed, while the
-		// package-private path and process-wide client lock are still live.
-		// Treat the payload as opaque: flush file + containing directory only.
+		// terminateNativeCode's join has completed while the client lock is still held.
+		// Treat the payload as opaque: flush only the file and its directory.
 		if err := syncPrivateOpaqueFile(preferences); err != nil {
 			logging.Logger(logging.CatFilesystem).Info("official cookie storage sync failed", "err", err)
 		} else {
 			logging.Logger(logging.CatFilesystem).Info("official cookie storage synchronized")
 		}
 	}
-	// Display-refresh republication is event-driven. The X11 reader wakes this
-	// loop through RefreshReady when the window's refresh generation moves
-	// (move, resize, map/reparent, or RandR change), and refreshFallbackPeriod
-	// bounds how long a lost wake can delay republication. The retired 2s
-	// ticker woke an otherwise idle client twice per second to re-check a
-	// version that only changes on those events. Opt-in diagnostics keep their
-	// exact historical 2s logging cadence.
+	// Display-refresh republication is event-driven: the X11 reader wakes this loop
+	// via RefreshReady when the refresh generation moves (move, resize, reparent,
+	// or RandR), and refreshFallbackPeriod bounds how long a lost wake delays it.
 	var logDiagnostics func()
 	if presentTiming || stutterDiag || os.Getenv("TIPSY_DIAG") == "1" {
 		logDiagnostics = func() {
@@ -525,23 +489,16 @@ func Launch(ctx context.Context, opt LaunchOptions) error {
 }
 
 const (
-	// refreshFallbackPeriod bounds how long a missed X11 refresh wake can
-	// delay display-rate republication. The RefreshReady wake is the primary
-	// path (it follows a move/resize/RandR change by the reader's notify), and
-	// this fallback is deliberately long so an idle client does not wake to
-	// re-check an unchanged generation. 30s cuts the retired 2s wake rate by
-	// 15x while keeping the worst-case staleness of a lost wake bounded.
+	// refreshFallbackPeriod bounds how long a missed X11 refresh wake can delay
+	// republication. It is deliberately long so an idle client does not wake to
+	// re-check an unchanged generation.
 	refreshFallbackPeriod = 30 * time.Second
-	// launchDiagnosticPeriod preserves the historical 2s cadence of the
-	// opt-in present-timing, shared-wait, and TIPSY_DIAG log lines.
+	// launchDiagnosticPeriod is the cadence for the opt-in present-timing,
+	// shared-wait, and TIPSY_DIAG log lines.
 	launchDiagnosticPeriod = 2 * time.Second
 )
 
 // launchLoopSources is the live client loop's event and callback surface.
-// Production values come from the mapped X11 window, the focused-text overlay,
-// the resize debouncer, the display-refresh publication, and the requested
-// diagnostics; tests substitute fakes and short periods so the wake policy can
-// be pinned without launching Roblox.
 type launchLoopSources struct {
 	ctx                context.Context
 	inputReady         <-chan struct{}
@@ -559,11 +516,9 @@ type launchLoopSources struct {
 	diagnosticsTick <-chan time.Time
 }
 
-// runLaunchLoop is the live client event loop. It republishes Android display
-// refresh rates when the X11 refresh generation moves or after the long
-// fallback period, logs diagnostics at the requested cadence when enabled, and
-// runs the focused-text, resize-settle, and input paths with the existing
-// shutdown semantics.
+// runLaunchLoop is the live client event loop: it republishes display refresh
+// rates on refresh-generation change or the fallback period, logs diagnostics
+// when enabled, and runs the focused-text, resize-settle, and input paths.
 func runLaunchLoop(src launchLoopSources, shutdownClient func(reason string), refreshFallback, diagnosticsPeriod time.Duration) error {
 	var refreshFallbackC <-chan time.Time
 	if refreshFallback > 0 {
@@ -599,23 +554,19 @@ func runLaunchLoop(src launchLoopSources, shutdownClient func(reason string), re
 		case <-src.inputReady:
 			if err := src.pump(); err != nil {
 				if err == x11.ErrClosed {
-					// Pump has already unmapped the window, bounding visible close
-					// response independently from native teardown. Stop producers,
-					// then let the official GameActivity destroy/join complete before
-					// the deferred libroblox unmap.
+					// Pump already unmapped the window. Stop producers, then let
+					// GameActivity's destroy/join complete before the deferred unmap.
 					shutdownClient("wm-delete-window")
 					return nil
 				}
-				// Every other pump failure takes the same orderly teardown:
-				// terminateNativeCode must join before the cookie fsync boundary
-				// and the deferred module handoff, exactly like the ctx-done and
-				// WM-delete paths. The pump error stays the returned error.
+				// Every other pump failure uses the same orderly teardown:
+				// terminateNativeCode must join before the cookie fsync boundary and
+				// deferred module handoff. The pump error stays the returned error.
 				shutdownClient("x11-pump-error")
 				return err
 			}
-			// XIM commits and editor-navigation keys mutate the focused snapshot
-			// while Pump notifies subscribers. Paint that version in the same
-			// launch-loop turn rather than waiting for the bounded poll fallback.
+			// XIM commits and editor keys mutate the focused snapshot during Pump;
+			// paint that version in the same turn rather than waiting for the repaint fallback.
 			src.refreshFocusedText(time.Now())
 		}
 	}

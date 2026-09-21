@@ -299,8 +299,8 @@ func TestWalkAPS2StreamApplyRelative(t *testing.T) {
 	}
 }
 
-// packedRelocBenchCount is a synthetic APS2 group (not libroblox.so). 65536
-// RELATIVE records is large enough to show the old []Reloc materialization.
+// packedRelocBenchCount is a synthetic APS2 group large enough to show slice
+// materialization overhead.
 const packedRelocBenchCount = 65536
 
 func encodeAPS2GroupedRelative(count int) []byte {

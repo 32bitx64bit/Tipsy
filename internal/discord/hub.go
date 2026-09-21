@@ -18,7 +18,7 @@ type Settings struct {
 	JoinButton bool
 }
 
-// Options configure a presence hub. Tests substitute Paths, Lookup, Load, and timing.
+// Options configure a presence hub.
 type Options struct {
 	ApplicationID string
 	PID           int

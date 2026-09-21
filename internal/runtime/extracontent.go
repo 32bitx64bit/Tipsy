@@ -23,11 +23,9 @@ import (
 	"github.com/tipsy-linux/tipsy/internal/logging"
 )
 
-// Official Android ExtraContent / rbxasset fetch. Same host and query the
-// engine hardcodes (https://assetdelivery.roblox.com/v1/asset/?id=).
-// FFlag DebugOTAForceSkipContentProvider is True on the public CDN, so the
-// engine will not download these itself via ContentProvider; place them on
-// disk under content / ExtraContent / android before V2Start.
+// Official Android ExtraContent / rbxasset fetch. The engine will not download
+// these itself, so place them on disk under content / ExtraContent / android
+// before V2Start.
 const (
 	officialAssetDeliveryHost = "https://assetdelivery.roblox.com"
 	officialAssetDeliveryPath = "/v1/asset/"
@@ -53,11 +51,9 @@ type otaPatchConfig struct {
 	LocalAssetHash string `json:"LocalAssetHash"`
 }
 
-// EnsureOfficialPatches fetches missing rbxasset ExtraContent named by
-// extracted *PatchConfig JSON (AssetId + LocalAssetURI) from Roblox's
-// official assetdelivery endpoint and writes it under assets/content,
-// assets/ExtraContent, and assets/android. Does not invent files; hash
-// must match LocalAssetHash when the JSON provides one. Never logs bodies.
+// EnsureOfficialPatches fetches the rbxasset ExtraContent named by extracted
+// PatchConfig JSON under assets/content, assets/ExtraContent, and assets/android.
+// It never invents files, enforces LocalAssetHash when present, and never logs bodies.
 func EnsureOfficialPatches(ctx context.Context, assetsDir string) error {
 	if strings.TrimSpace(assetsDir) == "" {
 		return nil
@@ -132,9 +128,8 @@ func ensurePatchFromConfig(ctx context.Context, assetsDir, cfgPath string) error
 	if cacheName, err := otaRbxmCacheName(cfg.AssetID, cfg.AssetVersion); err == nil {
 		dests = append(dests, otaRbxmCacheDests(assetsDir, cacheName)...)
 	}
-	// Bundled ExtraContent (UniversalApp, InExperience) is already on disk
-	// and may not match LocalAssetHash (that hash is for a specific OTA
-	// version). Do not refetch or overwrite a present rbxm.
+	// Bundled ExtraContent may not match LocalAssetHash (that hash targets a
+	// specific OTA version), so a present rbxm is never refetched or overwritten.
 	if have := existingOfficialPatch(dests); have != "" {
 		return placeOfficialPatchCopies(have, dests)
 	}
@@ -203,9 +198,6 @@ func officialPatchDests(assetsDir, rel string) ([]string, error) {
 	return out, nil
 }
 
-// RbxmFileManager 0x24d25fd → 0x56e51e6 joins named folder
-// ota_rbxm_decompressed_cache (0x4f2113) with
-// DataModelPatch_{AssetId}_{AssetVersion}_cache (0x44ccd8).
 const (
 	otaRbxmCacheFolder = "ota_rbxm_decompressed_cache"
 	otaRbxmCachePrefix = "DataModelPatch_"
@@ -244,10 +236,8 @@ func otaRbxmCacheDests(assetsDir, name string) []string {
 }
 
 func otaRbxmCacheRoots(assetsDir string) []string {
-	// Launch: assetsDir is runtime/assets. Named app-storage folders
-	// (OTAPatchBackups, ota_rbxm_decompressed_cache) live under the stable
-	// Android FilesDir returned to the official client via 0x234168a. They are
-	// intentionally separate from replaceable APK/runtime artifacts.
+	// Named app-storage folders live under the stable Android FilesDir, separate
+	// from replaceable APK/runtime artifacts.
 	if filepath.Base(assetsDir) == "assets" {
 		storage := AppStorage()
 		appData := filepath.Join(storage.FilesDir, "appData")
@@ -346,8 +336,7 @@ func fetchOfficialAsset(ctx context.Context, assetID, version string) ([]byte, e
 	if err != nil {
 		return nil, err
 	}
-	// The licensed UA is version-independent, so do not read meta.json from
-	// RuntimeDir just to feed an ignored parameter.
+	// The UA is version-independent; pass "" rather than a version.
 	req.Header.Set("User-Agent", robloxUserAgent(""))
 	req.Header.Set("Accept", "*/*")
 	resp, err := assetHTTPClient.Do(req)

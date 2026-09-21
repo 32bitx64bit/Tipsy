@@ -29,8 +29,8 @@ func drainForInputDiagnostics(t *testing.T, w *Window) {
 	w.mu.Lock()
 	evs, _ := w.drainInputLocked()
 	w.mu.Unlock()
-	// Match Pump's post-subscriber wipe so the diagnostic test never retains
-	// its synthetic text sentinel through the reusable event backing slice.
+	// Match Pump's post-subscriber wipe so the synthetic text sentinel is not
+	// retained through the reusable event backing slice.
 	clear(evs)
 }
 
@@ -87,9 +87,8 @@ func TestInputDrainDiagnosticsCountsBatchesWithoutContent(t *testing.T) {
 
 func TestInputDrainDiagnosticsCountsRingDrops(t *testing.T) {
 	resetInputDrainDiagnostics(t, true)
-	// The 256-slot ring holds 255 queued events; every push beyond that
-	// discards the oldest queued event. Button edges never coalesce, so the
-	// drop count is exact: pushes - 255.
+	// Every push beyond the ring capacity discards the oldest queued event.
+	// Button edges never coalesce, so the drop count is exact.
 	const extra = 9
 	for i := 0; i < TIPSYInputRingLen+extra; i++ {
 		testPushPointer(PointerDown, 1, float32(i), 0)

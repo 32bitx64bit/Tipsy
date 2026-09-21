@@ -345,9 +345,8 @@ func runNativePerfBenchmark(b *testing.B, cfg func(*nativePerfFixture, uint64) n
 	f := newNativePerfFixture(b)
 	b.Cleanup(f.close)
 	b.ResetTimer()
-	// Go's ns/op includes the one native pthread lifecycle for each benchmark
-	// invocation. native-ns/op is the authoritative C monotonic interval: it
-	// contains only the repeated indirect JNIEnv calls below.
+	// Go's ns/op includes the native pthread lifecycle per invocation;
+	// native-ns/op is the authoritative C interval over the JNIEnv calls alone.
 	got := f.run(cfg(f, uint64(b.N)))
 	b.StopTimer()
 	if got.status != nativePerfOK || got.operations != uint64(b.N) {

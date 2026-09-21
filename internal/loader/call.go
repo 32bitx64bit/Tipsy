@@ -54,7 +54,8 @@ func CallP3(fn, a0, a1, a2 uintptr) {
 	C.tipsy_call_p3(ptrFromUintptr(fn), ptrFromUintptr(a0), ptrFromUintptr(a1), ptrFromUintptr(a2))
 }
 
-// ParkPollFutexAddr is the C helper that slices Roblox 0x29cfa14.
+// ParkPollFutexAddr returns the guest futex address the park/poll helper
+// waits on.
 func ParkPollFutexAddr() uintptr {
 	return uintptr(C.tipsy_park_poll_futex_addr())
 }

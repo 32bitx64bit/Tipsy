@@ -17,17 +17,15 @@ import (
 */
 import "C"
 
-// internKey identifies one JNI method or field. Roblox caches jmethodID
-// values, but GetMethodID is also repeated; intern so CallA does not
-// C.GoString the C name/sig on every invoke.
+// internKey identifies one JNI method or field, interned so CallA does not
+// re-parse the C name/sig on every invoke.
 type internKey struct {
 	class, name, sig string
 	static           bool
 }
 
 // callHandler is the per-jmethodID invoke function stored on internedMethod.
-// Fast-path CallA loads this atomically and skips the family chain + name+sig
-// switch. A nil Load means the identity has not been bound yet.
+// A nil Load means the identity has not been bound yet.
 type callHandler func(vm *VM, env unsafe.Pointer, obj C.jobject, args *C.jvalue, retKind rune) (C.jobject, bool)
 
 type internedMethod struct {

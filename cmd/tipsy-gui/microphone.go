@@ -3,18 +3,6 @@
 
 package main
 
-// Microphone settings card backend. The GUI owns widgets only: it binds to
-// the existing diagnose audio report (via guimodel.MicrophoneState) and
-// persists the lean microphone section. It owns no Pulse, PCM, or JNI
-// semantics — those belong to Audio/JNI.
-//
-// The canonical home is the existing settings file
-// ($XDG_CONFIG_HOME/tipsy/config.json) under the "microphone" section
-// shaped exactly as mic.MicrophoneConfig. CLI/mic owns that shape and its
-// merge/defaults/env semantics; this file is a thin adapter.
-// Missing file/key = microphone defaults (allowed). Persist enabled only;
-// an existing source pin is left as-is.
-
 import (
 	"fmt"
 	"os"
@@ -32,8 +20,7 @@ func loadMicrophoneSettings() (guimodel.MicrophoneSettings, error) {
 }
 
 // loadMicrophoneSettingsAt reads the canonical section from path; a missing
-// file means defaults. A malformed section (or a malformed file) yields
-// defaults plus an honest error and leaves the file untouched.
+// file means defaults, a malformed one yields defaults plus an error.
 func loadMicrophoneSettingsAt(path string) (guimodel.MicrophoneSettings, error) {
 	defaults := guimodel.DefaultMicrophoneSettings()
 	data, err := os.ReadFile(path)
@@ -69,8 +56,7 @@ func saveMicrophoneSettingsAt(path string, settings guimodel.MicrophoneSettings)
 
 // mergeMicrophoneSettings updates only the microphone section in one
 // complete config document. The canonical caller runs it under
-// config.UpdateJSON's cross-process lock; the path helper keeps isolated-file
-// tests simple.
+// config.UpdateJSON's cross-process lock.
 func mergeMicrophoneSettings(data []byte, settings guimodel.MicrophoneSettings) ([]byte, error) {
 	cfg, err := mic.ParseMicSection(data)
 	if err != nil {
@@ -95,11 +81,9 @@ func mergeMicrophoneSettingsFromPath(path string, settings guimodel.MicrophoneSe
 	return mergeMicrophoneSettings(data, settings)
 }
 
-// microphoneEffectiveEnabled mirrors the mic-owned kill-switch without
-// caching: TIPSY_MICROPHONE=0|off|false|no (and the DISABLE alias) closes
-// the door however the file is set. Read live so the card always reflects
-// the current environment. Widget-off still wins; env is not used to force
-// the checkbox on.
+// microphoneEffectiveEnabled mirrors the mic-owned kill-switch:
+// TIPSY_MICROPHONE=0|off|false|no (and the DISABLE alias) closes the door
+// regardless of the file. Widget-off still wins; env never forces it on.
 func microphoneEffectiveEnabled(settings guimodel.MicrophoneSettings) bool {
 	if !settings.Enabled {
 		return false

@@ -8,9 +8,8 @@ package android
 import "testing"
 
 // TestWindowResizeUpdatesGeometry pins the ANativeWindow resize contract:
-// Resize changes getWidth/getHeight exactly once to the requested positive
-// geometry, preserves the buffer format, and rejects invalid sizes without
-// mutating the window.
+// Resize changes the geometry once to the requested positive size, preserves
+// the buffer format, and rejects invalid sizes without mutating the window.
 func TestWindowResizeUpdatesGeometry(t *testing.T) {
 	w := NewWindow(1280, 720, nil)
 	if gw, gh := w.Size(); gw != 1280 || gh != 720 {
@@ -22,7 +21,7 @@ func TestWindowResizeUpdatesGeometry(t *testing.T) {
 	if gw, gh := w.Size(); gw != 1920 || gh != 1080 {
 		t.Fatalf("post-resize size = %dx%d, want 1920x1080", gw, gh)
 	}
-	if got := w.Format(); got != 1 { // WINDOW_FORMAT_RGBA_8888, android_bridge.h:41
+	if got := w.Format(); got != 1 { // WINDOW_FORMAT_RGBA_8888
 		t.Fatalf("format = %d, want preserved RGBA_8888 (1)", got)
 	}
 	for _, tc := range [][2]int{{0, 1080}, {1920, 0}, {-1, 100}, {0, 0}} {

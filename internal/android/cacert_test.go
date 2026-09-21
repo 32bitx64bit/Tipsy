@@ -17,24 +17,21 @@ import (
 	"github.com/tipsy-linux/tipsy/internal/loader"
 )
 
-// These tests exercise the exact production path the engine takes:
-// Provider().Lookup (named GOT/PLT resolution, no version-pinned vaddrs)
+// These tests exercise the production resolution path: Provider().Lookup
 // followed by a SysV call through loader.CallP8. Path arguments live in
-// mmap'd memory (never Go heap) so no cgo pointer discipline is involved.
+// mmap'd memory, never the Go heap, so no cgo pointer discipline is involved.
 
-// atFDCWD is Linux AT_FDCWD (-100, fcntl.h). syscall exposes it on Linux
-// only as unexported _AT_FDCWD, so the test names the value directly. It is
-// a var (not const) so uintptr() conversion wraps instead of overflowing.
+// atFDCWD is Linux AT_FDCWD (-100, fcntl.h); syscall only exposes it as
+// unexported _AT_FDCWD. It is a var so uintptr() conversion wraps instead of
+// overflowing.
 var atFDCWD = int64(-100)
 
-// withCABundleOverride pins the shim bundle for one test and releases it.
 func withCABundleOverride(t *testing.T, p string) {
 	t.Helper()
 	SetCABundlePath(p)
 	t.Cleanup(ResetCABundlePath)
 }
 
-// shimAddr resolves one bionic file-open entry through the production table.
 func shimAddr(t *testing.T, sym string) uintptr {
 	t.Helper()
 	a, err := Provider().Lookup("libc.so", sym)
@@ -44,9 +41,9 @@ func shimAddr(t *testing.T, sym string) uintptr {
 	return a
 }
 
-// mmapCString places a NUL-terminated copy of s in anonymous memory and
-// returns its address. The memory is unmapped on test cleanup; every
-// CallP8 invocation is synchronous, so no use-after-free is possible.
+// mmapCString places a NUL-terminated copy of s in anonymous memory, unmapped
+// on cleanup. Every CallP8 invocation is synchronous, so no use-after-free is
+// possible.
 func mmapCString(t *testing.T, s string) uintptr {
 	t.Helper()
 	page := syscall.Getpagesize()
@@ -77,18 +74,17 @@ func mmapBuffer(t *testing.T, n int) ([]byte, uintptr) {
 	return mem[:n], uintptr(unsafe.Pointer(&mem[0]))
 }
 
-// callShim invokes a shim entry through the production CallP8 trampoline.
-// The trampoline returns int64, but the wrapped libc entries return int, so
-// the low 32 bits must be sign-extended (a failing open yields RAX
-// 0xFFFFFFFF, i.e. int64 4294967295 without the conversion).
+// callShim invokes a shim entry through the production CallP8 trampoline. The
+// trampoline returns int64 but the wrapped libc entries return int, so the
+// low 32 bits must be sign-extended.
 func callShim(fn uintptr, args ...uintptr) int {
 	tArgs := make([]uintptr, 8)
 	copy(tArgs, args)
 	return int(int32(loader.CallP8(fn, tArgs[0], tArgs[1], tArgs[2], tArgs[3], tArgs[4], tArgs[5], tArgs[6], tArgs[7])))
 }
 
-// requireNoTreeCACert skips if the test process CWD unexpectedly contains the
-// relative engine path (redirect tests need it absent from host CWD).
+// requireNoTreeCACert skips if the test CWD contains the relative engine
+// path; redirect tests need it absent.
 func requireNoTreeCACert(t *testing.T) {
 	t.Helper()
 	if _, err := os.Lstat(cacertRelativePath); err == nil {
@@ -126,7 +122,6 @@ func readFD(t *testing.T, fd int) []byte {
 	return b
 }
 
-// writeBundle creates a bundle file with known bytes and pins the override.
 func writeBundle(t *testing.T, content string) {
 	t.Helper()
 	bundle := filepath.Join(t.TempDir(), "cacert.pem")
@@ -207,7 +202,6 @@ func TestTipsyOpenLeavesOtherPathsAlone(t *testing.T) {
 	}
 	writeBundle(t, "unused bundle")
 
-	// Absolute non-matching path passes through with content intact.
 	plain := filepath.Join(t.TempDir(), "other.pem")
 	if err := os.WriteFile(plain, []byte("plain bytes"), 0o600); err != nil {
 		t.Fatal(err)
@@ -221,10 +215,8 @@ func TestTipsyOpenLeavesOtherPathsAlone(t *testing.T) {
 		t.Fatalf("passthrough content=%q", got)
 	}
 
-	// Near-miss relative inputs are NOT redirected: the shim reports
-	// failure, and the Go side proves the same input is genuinely ENOENT.
 	for _, miss := range []string{
-		"exe/cacert.pem",    // bare form never observed; must stay untouched
+		"exe/cacert.pem",
 		"./exe/cacert.pem/", // trailing slash
 		"./exe/cacert.pem.bak",
 		"./EXE/cacert.pem",   // case differs
@@ -253,7 +245,6 @@ func TestTipsyOpenAtDirfdSemantics(t *testing.T) {
 	openat := shimAddr(t, "openat")
 	atFDCWD := uintptr(atFDCWD)
 
-	// AT_FDCWD + exact input redirects.
 	fd := callShim(openat, atFDCWD, mmapCString(t, cacertRelativePath),
 		uintptr(syscall.O_RDONLY), 0, 0, 0, 0, 0)
 	if fd < 0 {
@@ -263,8 +254,6 @@ func TestTipsyOpenAtDirfdSemantics(t *testing.T) {
 		t.Fatalf("openat redirected content=%q", got)
 	}
 
-	// Explicit dirfd + exact input does NOT redirect: dirfd wins, and the
-	// entry is absent under that directory.
 	emptydir := t.TempDir()
 	df, err := os.Open(emptydir)
 	if err != nil {
@@ -278,7 +267,6 @@ func TestTipsyOpenAtDirfdSemantics(t *testing.T) {
 		t.Fatal("openat with explicit dirfd was redirected; dirfd must be preserved")
 	}
 
-	// Explicit dirfd + dirfd-relative input resolves against the fd (decoy).
 	decoydir := t.TempDir()
 	if err := os.MkdirAll(filepath.Join(decoydir, "exe"), 0o700); err != nil {
 		t.Fatal(err)
@@ -323,7 +311,6 @@ func TestTipsyOpenPreservesFlagsAndMode(t *testing.T) {
 	}
 	writeBundle(t, "flag bundle")
 
-	// O_CLOEXEC survives the redirect.
 	fd := callShim(shimAddr(t, "open"), mmapCString(t, cacertRelativePath),
 		uintptr(syscall.O_RDONLY|syscall.O_CLOEXEC), 0, 0, 0, 0, 0, 0)
 	if fd < 0 {
@@ -338,7 +325,6 @@ func TestTipsyOpenPreservesFlagsAndMode(t *testing.T) {
 		t.Fatal("O_CLOEXEC lost across the redirect")
 	}
 
-	// Variadic mode forwards exactly on the passthrough path (O_CREAT).
 	mk := filepath.Join(t.TempDir(), "created.pem")
 	fd = callShim(shimAddr(t, "open"), mmapCString(t, mk),
 		uintptr(syscall.O_WRONLY|syscall.O_CREAT|syscall.O_EXCL), uintptr(0o600), 0, 0, 0, 0, 0)
@@ -367,8 +353,6 @@ func TestTipsyOpenMissingBundleIsHonestENOENT(t *testing.T) {
 	if _, serr := os.Stat(absent); !os.IsNotExist(serr) {
 		t.Fatalf("test precondition: %v", serr)
 	}
-	// The same absent absolute path fails with ENOENT on the Go side,
-	// proving the condition the shim returns honestly is ENOENT.
 	if _, gerr := os.Open(absent); !errors.Is(gerr, os.ErrNotExist) {
 		t.Fatalf("absent bundle precondition: %v", gerr)
 	}
@@ -395,7 +379,6 @@ func TestTipsyOpenMissingBundleIsHonestENOENT(t *testing.T) {
 		}
 	}
 
-	// fopen with a missing bundle returns NULL.
 	stream := loader.CallP8(shimAddr(t, "fopen"), mmapCString(t, cacertRelativePath),
 		mmapCString(t, "r"), 0, 0, 0, 0, 0, 0)
 	if stream != 0 {
@@ -430,9 +413,8 @@ func TestTipsyFopenRedirectsExactPath(t *testing.T) {
 }
 
 func TestFileOpenSymbolsResolveToTipsyShim(t *testing.T) {
-	// Every entry must resolve through the Tipsy table. Behavior (redirect
-	// works, near-misses fail) proves these are the shim, not host glibc:
-	// a host fallback could never remap the exact relative input.
+	// Every entry must resolve through the Tipsy table; a host fallback could
+	// never remap the exact relative input.
 	for _, name := range []string{"open", "openat", "fopen", "__open_2", "__openat_2"} {
 		shimAddr(t, name)
 	}

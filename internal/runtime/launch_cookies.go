@@ -15,18 +15,16 @@ import (
 	"github.com/tipsy-linux/tipsy/internal/logging"
 )
 
-// setRobloxPreferencesFile follows NativeHelper.P -> el/y.f: the parameter is
-// an Android SharedPreferences NAME, not a filesystem path. "rbx.prefs" is only
-// the APK's logging tag. Cookie persistence is the separate CookieProtocol.
+// setRobloxPreferencesFile sets an Android SharedPreferences NAME (not a
+// filesystem path). Cookie persistence is handled separately by CookieProtocol.
 func setRobloxPreferencesFile(mod *loader.Module, env *jni.Env) {
 	class := env.FindClass("com/roblox/engine/jni/NativeSettingsInterface")
 	callRobloxJNI(mod, env.Raw(), class, setPreferencesFileSym, env.NewStringUTF(robloxPreferencesID))
 }
 
-// configureRobloxCookieBridge implements the APK's Java-owned lifecycle:
-// MainGameActivity.onCreate restores scoped cookies before native creation;
-// NativeHelper initializes CookieProtocol's official callback. Cookie content
-// never enters diagnostics, flags, account stubs, or engine memory patches.
+// configureRobloxCookieBridge restores scoped cookies before native creation
+// and registers the engine's cookie callback. Cookie content never enters
+// diagnostics, flags, account stubs, or engine memory patches.
 func configureRobloxCookieBridge(vm *jni.VM, mod *loader.Module, env *jni.Env, path string) error {
 	const registerSym = "Java_com_roblox_universalapp_cookie_JNICookieProtocol_updateOnSetCookieHandler"
 	register, err := mod.Lookup(registerSym)
@@ -62,9 +60,9 @@ func configureRobloxCookieBridge(vm *jni.VM, mod *loader.Module, env *jni.Env, p
 	return nil
 }
 
-// restoreRobloxCookieHeader preserves rh/w0.V0 -> R0's ordered JNI contract.
-// The native cookie setter filters against its configured origin; calling
-// restore before nativeSetBaseUrl silently discards valid saved cookies.
+// restoreRobloxCookieHeader must run after nativeSetBaseUrl: the native cookie
+// setter filters against its configured origin, so restoring first silently
+// discards valid saved cookies.
 func restoreRobloxCookieHeader(env *jni.Env, header string, invoke func(symbol string, settings, first, second uintptr) error) error {
 	settings := env.FindClass("com/roblox/engine/jni/NativeSettingsInterface")
 	if err := invoke("Java_com_roblox_engine_jni_NativeSettingsInterface_nativeSetBaseUrl", settings, env.NewStringUTF(robloxBaseURL), env.NewStringUTF("https://api.roblox.com/")); err != nil {
@@ -73,9 +71,9 @@ func restoreRobloxCookieHeader(env *jni.Env, header string, invoke func(symbol s
 	return invoke("Java_com_roblox_engine_jni_NativeSettingsInterface_nativeSetMultipleCookies", settings, env.NewStringUTF(robloxBaseURL), env.NewStringUTF(header))
 }
 
-// logNativeCookieRestoreState is an opt-in, read-only check of the named APK
-// cookie getter. It emits only record counts and auth-category presence, never
-// cookie names, values, URLs, paths, account data, or raw native strings.
+// logNativeCookieRestoreState is an opt-in, read-only check that emits only
+// record counts and auth-category presence, never cookie names, values, URLs,
+// paths, account data, or raw native strings.
 func logNativeCookieRestoreState(mod *loader.Module, env *jni.Env, phase string) {
 	if os.Getenv("TIPSY_AUTH_RESTORE_DIAGNOSTICS") != "1" {
 		return

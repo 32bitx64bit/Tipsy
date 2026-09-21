@@ -59,8 +59,7 @@ type runMeta struct {
 }
 
 // runnerBuild identifies the exact direct-test-binary runner that produced a
-// report. It is build provenance only, not evidence that any client binary
-// shares the runner's timing or debug symbols.
+// report. It is build provenance only.
 type runnerBuild struct {
 	Executable string `json:"executable,omitempty"`
 	SHA256     string `json:"sha256,omitempty"`
@@ -89,10 +88,10 @@ type fixtureMetric struct {
 	Unit  string  `json:"unit"`
 }
 
-// controllerIdleReadiness is the exact bounded ReadyPump empty-watch
-// aggregate emitted by BenchmarkControllerIdleReadiness. It is deliberately
-// separate from process rusage context switches and from physical input
-// latency; the latter cannot be derived from an empty private directory.
+// controllerIdleReadiness is the bounded ReadyPump empty-watch aggregate
+// emitted by BenchmarkControllerIdleReadiness. It is separate from process
+// rusage context switches and from physical input latency, which cannot be
+// derived from an empty private directory.
 type controllerIdleReadiness struct {
 	InitialRescans  *float64 `json:"initial_rescans,omitempty"`
 	HotplugRescans  *float64 `json:"hotplug_rescans,omitempty"`
@@ -675,9 +674,8 @@ func usageFromRusage(ru *syscall.Rusage) *processUsage {
 		VoluntaryContextSwitches:   ru.Nvcsw,
 		InvoluntaryContextSwitches: ru.Nivcsw,
 	}
-	// Linux ru_maxrss is KiB. Tipsy's baseline runner is Linux-only; keeping
-	// the conversion next to the scope prevents a host RSS claim from being
-	// silently copied to a platform with different rusage semantics.
+	// Linux ru_maxrss is KiB; the baseline runner is Linux-only, so the
+	// conversion stays next to the scope that requires it.
 	if runtime.GOOS == "linux" && ru.Maxrss > 0 {
 		u.MaxRSSBytes = ru.Maxrss * 1024
 	}

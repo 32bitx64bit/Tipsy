@@ -11,10 +11,8 @@ package jni
 */
 import "C"
 
-// X11DisplayPhysicalSizeMM returns the X server's reported physical
-// screen size in millimeters for the display pointer (Xlib Display*),
-// or 0,0 when the server does not expose one. dpy comes from the x11
-// package Window the launcher already opened.
+// X11DisplayPhysicalSizeMM returns the X server's reported physical screen size
+// in millimeters for the Xlib Display*, or 0,0 when the server exposes none.
 func X11DisplayPhysicalSizeMM(dpy uintptr) (int, int) {
 	if dpy == 0 {
 		return 0, 0

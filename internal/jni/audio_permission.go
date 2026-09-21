@@ -41,11 +41,9 @@ var (
 )
 
 // microphoneDoorOpen is the process-wide RECORD_AUDIO / hasSystemFeature
-// microphone door. Canonical Go probe is mic.Allowed() after file then env
-// (file < env). Unreadable config falls back to defaults, same as CLI.
-// Capture still lazy-opens in OpenSL, not here. OpenSL C getenv remains a
-// native kill-switch: file-off without env denies JNI even if the recorder
-// could still open when the engine ignores permission.
+// microphone door: mic.Allowed() after file then env (file < env), with an
+// unreadable config falling back to defaults. Capture still lazy-opens in
+// OpenSL, not here.
 func microphoneDoorOpen() bool {
 	cfg, err := mic.LoadMicrophoneConfigFile(config.Paths().ConfigFile)
 	if err != nil {
@@ -231,8 +229,8 @@ func (vm *VM) handleRequestPermissions(o *Object, class string, args *C.jvalue) 
 	}
 	vm.mu.Unlock()
 
-	// Invoke the Activity callback synchronously (Tipsy is the platform;
-	// there is no UI prompt). Call the family handler directly: going through
+	// Invoke the Activity callback synchronously (Tipsy is the platform; there
+	// is no UI prompt). Call the family handler directly: going through
 	// vm.dispatch would create a package-init cycle with dispatchFamilies.
 	cbClass := class
 	if o != nil && o.class != nil && o.class.name != "" {

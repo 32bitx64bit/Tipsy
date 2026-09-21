@@ -28,14 +28,12 @@ func defaultAuthorityDependencies() authorityDependencies {
 	return authorityDependencies{identifyOfficialRelease: identifyOfficialRelease}
 }
 
-// resolveAuthority is the single app-level trust decision. A GitHub-built
-// artifact — an AppImage that AppRun launched from its own payload, the
-// Flatpak, or a root-owned repository package — whose build-info.json carries
-// an official releaseKind is OfficialVerified using the compiled Roblox
-// signer floor. Cryptographic admission stays in release CI (cosign) and in
-// the package manager's signature check at install; the running binary cannot
-// usefully attest itself. Local builds of any medium and developer wraps
-// require explicit --development consent.
+// resolveAuthority is the single app-level trust decision. An artifact whose
+// build-info.json carries an official releaseKind is OfficialVerified using
+// the compiled Roblox signer floor. Cryptographic admission stays in release
+// CI and in the package manager's signature check at install; the running
+// binary cannot usefully attest itself. Local builds of any medium and
+// developer wraps require explicit --development consent.
 func resolveAuthority(ctx context.Context, cfg *config.Config, deps authorityDependencies) (authorityResolution, error) {
 	if ctx == nil {
 		ctx = context.Background()
@@ -60,7 +58,6 @@ func generationStoreRoot() string {
 	return setupsvc.GenerationStoreDir(filepath.Clean(runtimeDir()))
 }
 
-// runtimeDir is factored for app tests while retaining the XDG installation location.
 var runtimeDir = func() string {
 	return filepath.Join(config.Paths().DataDir, "runtime")
 }

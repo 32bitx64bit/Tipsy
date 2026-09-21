@@ -58,9 +58,9 @@ var redactPatterns = []struct {
 	},
 }
 
-// ASCII-insensitive needles that must catch every TestRedact secret form.
-// "pwd" is extra so the password regex cannot be skipped. Fail-closed: if a
-// protected line might not contain one of these, do not skip the regexes.
+// ASCII-insensitive needles that must catch every secret form. "pwd" is extra
+// so the password regex cannot be skipped. Fail-closed: if a protected line
+// might not contain one of these, do not skip the regexes.
 var redactNeedles = []string{
 	"pass",
 	"pwd",
@@ -112,7 +112,7 @@ func mayContainSecret(s string) bool {
 	return false
 }
 
-// Redact never leak cookies/tokens/passwords.
+// Redact strips cookies, tokens, and passwords.
 func Redact(s string) string {
 	if s == "" || !mayContainSecret(s) {
 		return s

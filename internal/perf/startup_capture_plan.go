@@ -1,9 +1,8 @@
 package perf
 
 // StartupBuildCapturePlan keeps startup/build timing separate from gameplay
-// evidence. It describes exactly which phases are runnable from a checkout
-// without opening user-owned package/account state and which need an owning
-// subsystem to supply a bounded content-free seam.
+// evidence. It states which phases are runnable from a checkout and which
+// need an owning subsystem to supply a bounded content-free seam.
 type StartupBuildCapturePlan struct {
 	Diagnostic   StartupCaptureMode `json:"diagnostic"`
 	CleanControl StartupCaptureMode `json:"clean_control"`

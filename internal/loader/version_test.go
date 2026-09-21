@@ -119,7 +119,7 @@ func TestGNUVersionDefinitionAndSymbolVisibilityRetained(t *testing.T) {
 		version: "LIBTIPSY_PRIVATE_1", exports: []string{"JNI_OnLoad"}, hidden: true,
 	}}})
 	// st_other is independent from the GNU versym hidden bit and must survive
-	// dynamic-symbol parsing for future ABI/visibility policy checks.
+	// dynamic-symbol parsing.
 	raw[vaDynsym+24+5] = byte(elf.STV_PROTECTED)
 	m, err := Open(writeSyntheticELF(t, "libdefinition.so", raw), mapRes{})
 	if err != nil {

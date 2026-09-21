@@ -34,7 +34,6 @@ func TestAuditMUTF8BoundaryCases(t *testing.T) {
 	}
 }
 func TestAuditMUTF8EveryUnicodeScalar(t *testing.T) {
-	// Chunked strings avoid a million tiny allocations in this exhaustive test.
 	var chunk strings.Builder
 	for r := rune(0); r <= utf8.MaxRune; r++ {
 		if r >= 0xd800 && r <= 0xdfff {

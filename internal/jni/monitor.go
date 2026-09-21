@@ -11,8 +11,8 @@ import (
 )
 
 // All monitor metadata uses VM.mu. Cond.Wait releases it while a contender
-// sleeps, so the global VM lock is never held while waiting for an owner.
-// env is the actual native-thread JNIEnv identity, NOT a Go goroutine ID.
+// sleeps, so the VM lock is never held while waiting for an owner. env is the
+// native-thread JNIEnv identity, not a Go goroutine ID.
 type jniMonitor struct {
 	owner uintptr
 	depth int
@@ -35,9 +35,8 @@ func (vm *VM) monitorEnter(env unsafe.Pointer, id int64) bool {
 		m = &jniMonitor{cond: sync.NewCond(&vm.mu)}
 		vm.monitors[id] = m
 	}
-	// One VM-owned edge for every successful/pending enter, including
-	// recursive enters. It keeps identity alive while an owner or waiter
-	// exists even when ordinary JNI references disappear.
+	// One VM-owned edge per successful or pending enter, including recursive
+	// enters; it keeps identity alive while an owner or waiter exists.
 	o.heapRefs++
 	for m.owner != 0 && m.owner != key {
 		m.cond.Wait()

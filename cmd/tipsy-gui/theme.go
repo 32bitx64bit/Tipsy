@@ -134,8 +134,7 @@ func brandIcon() *qt.QIcon {
 
 // brandIconFallbackNames are theme names tried, in order, when no brand PNG
 // exists on disk. System packages install "tipsy"; the last entry is a neutral
-// executable icon. A gamepad theme default (applications-games) must never be
-// used, because that is exactly what hides a missing brand file.
+// executable icon.
 func brandIconFallbackNames() []string {
 	return []string{"tipsy", "application-x-executable"}
 }
@@ -150,8 +149,7 @@ func brandIconPath() string {
 
 // brandIconCandidates returns the locations searched for the brand PNG, in
 // priority order. exeDir may be empty when os.Executable fails. Flatpak only
-// exports icons named after the app id, so the app-id filenames are searched
-// in addition to tipsy.png; the GUI itself never sees the exported name.
+// exports icons named after the app id, so those filenames are also searched.
 func brandIconCandidates(exeDir string) []string {
 	var candidates []string
 	if override := os.Getenv("TIPSY_ICON_PATH"); override != "" {

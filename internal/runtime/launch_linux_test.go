@@ -374,9 +374,9 @@ func assertNumericAggregateType(t *testing.T, typ reflect.Type) {
 }
 
 func TestInputDispatchInterval(t *testing.T) {
-	// The launch loop waits on Window.InputReady rather than a 4ms Pump ticker.
+	// The launch loop waits on Window.InputReady rather than a poll ticker.
 	// Size() cannot change without InputResize on this X11 backend
-	// (ConfigureNotify always enters the ring), so a poll fallback is not used.
+	// (ConfigureNotify always enters the ring), so no poll fallback is used.
 	ch := (&x11.Window{}).InputReady()
 	if ch == nil {
 		t.Fatal("launch loop needs a selectable X11 InputReady channel")
@@ -1050,7 +1050,6 @@ func TestPostExitAppResumePreservesDestinationAndDoesNotInventLeave(t *testing.T
 	resume.observe(jni.NativeHelperLifecycleEvent{Kind: jni.NativeHelperGameLoadedEvent, PlaceID: 10})
 	resume.observe(jni.NativeHelperLifecycleEvent{Kind: jni.NativeHelperGameLoadedEvent, PlaceID: 0})
 	resume.observe(jni.NativeHelperLifecycleEvent{Kind: jni.NativeHelperGameLoadedEvent, PlaceID: 0})
-	// Current APK xk/a -> xk/c -> fi/e.z passes protocol, payload, topic.
 	// A foreground event has no Navigations/Destination or place payload.
 	want := []appForegroundEvent{{Protocol: "AppInput", Payload: "", Topic: "Focused"}}
 	if !reflect.DeepEqual(got, want) {
@@ -1430,10 +1429,8 @@ func TestClientModuleLifetimeRetainsStartedImage(t *testing.T) {
 }
 
 // TestTextInputHandshakeConstants pins the exact Java→native handshake
-// identities (§88): the engine-registered setInputConnectionNative
-// class+name+sig (DEX ground truth, classes2.dex method table) and the named
-// nativePassText dynsym + ABI. Any drift from the official descriptors must
-// fail loudly here, never silently rewire.
+// identities. Any drift from the official descriptors must fail loudly here,
+// never silently rewire.
 func TestTextInputHandshakeConstants(t *testing.T) {
 	if setInputConnectionName != "setInputConnectionNative" {
 		t.Fatalf("setInputConnectionName=%q", setInputConnectionName)
@@ -1645,11 +1642,9 @@ func TestGameActivityInputTargetWiring(t *testing.T) {
 }
 
 // TestPlatformParamsMatchesPointerDeviceMode pins the coherence contract:
-// PlatformParams must present exactly the pointer identity the input
-// dispatchers present — the official APK derives both keyboard and mouse from
-// android.hardware.type.pc, while touchscreen is independent. All three are
-// driven by the same source of truth (TIPSY_INPUT_DEVICE). X11 defaults to the
-// PC profile; touch remains an explicit Android-phone A/B control.
+// PlatformParams must present exactly the pointer identity the input dispatchers
+// present. All three are driven by the same source of truth (TIPSY_INPUT_DEVICE);
+// X11 defaults to the PC profile and touch selects the Android-phone identity.
 func TestPlatformParamsMatchesPointerDeviceMode(t *testing.T) {
 	vm, err := jni.NewVM()
 	if err != nil {
@@ -1761,9 +1756,9 @@ func TestSurfaceResizeIgnoresInvalidSizes(t *testing.T) {
 // TestSurfaceResizeDebouncerDeliversOnlyTheSettledDragSize models a title-bar
 // resize drag. The X11 window may receive every intermediate ConfigureNotify,
 // but the Android/GameActivity lifecycle must receive only the final stable
-// geometry: repeating the full V2 update for every 10ms drag rectangle
-// crashes the current official client. This generic unit deliberately has no
-// Roblox floor; the production floor is covered separately below.
+// geometry: repeating the full V2 update for every drag rectangle crashes the
+// current official client. This generic unit has no Roblox floor; the production
+// floor is covered separately below.
 func TestSurfaceResizeDebouncerDeliversOnlyTheSettledDragSize(t *testing.T) {
 	s := newSeededResize(1280, 720)
 	var d surfaceResizeDebouncer
@@ -1870,11 +1865,9 @@ func TestRobloxSurfaceResizeStormSettlesAtAValidGeometry(t *testing.T) {
 }
 
 // TestSurfaceResizeDeliversOncePerDeltaInOrder pins the exact per-delta
-// delivery: one genuine delta runs buffers → DisplayMetrics → cmds 3,4 →
-// V2 surface bridge → cmd 5 → content-rect callback {0,0,w,h} →
-// insets callback, exactly once; an
-// unchanged size re-delivers nothing; the next genuine delta repeats the
-// sequence once.
+// delivery: one genuine delta runs buffers → DisplayMetrics → cmds 3,4 → the V2
+// surface bridge → cmd 5 → the content-rect and insets callbacks, exactly once;
+// an unchanged size re-delivers nothing; the next genuine delta repeats it once.
 func TestSurfaceResizeDeliversOncePerDeltaInOrder(t *testing.T) {
 	s := newSeededResize(1280, 720)
 	s.observe(1920, 1080)
@@ -1942,9 +1935,8 @@ func (w pipeCommandWriter) WriteCommand(cmd byte) error {
 }
 
 // TestSurfaceResizePipeDeliversCommandBytes runs the production sink through
-// its owned command-writer interface: one delta writes exactly command bytes
-// 3,4,5 once, an unchanged size writes nothing, and a second delta writes them
-// again. internal/android separately pins descriptor validation.
+// its owned command-writer interface: one delta writes command bytes 3,4,5 once,
+// an unchanged size writes nothing, and a second delta writes them again.
 func TestSurfaceResizePipeDeliversCommandBytes(t *testing.T) {
 	var pipeFDs [2]int
 	if err := syscall.Pipe2(pipeFDs[:], syscall.O_CLOEXEC|syscall.O_NONBLOCK); err != nil {
@@ -2202,10 +2194,10 @@ func TestLaunchLoopCadenceConstants(t *testing.T) {
 	}
 }
 
-// TestLaunchLoopRefreshWakeIsEventDriven pins H2: with diagnostics off there is
-// no standing 2s republish wake. One refresh generation change wakes exactly
-// one republish, an unchanged generation does not re-query, and a second
-// change republishes again.
+// TestLaunchLoopRefreshWakeIsEventDriven pins that with diagnostics off there is
+// no standing republish wake. One refresh generation change wakes exactly one
+// republish, an unchanged generation does not re-query, and a second change
+// republishes again.
 func TestLaunchLoopRefreshWakeIsEventDriven(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -2244,8 +2236,8 @@ func TestLaunchLoopRefreshWakeIsEventDriven(t *testing.T) {
 		done <- runLaunchLoop(src, func(reason string) { shutdowns <- reason }, time.Hour, launchDiagnosticPeriod)
 	}()
 
-	// A nil diagnostics callback disables the 2s diagnostic ticker even when
-	// the production period is passed, so an idle loop must stay asleep.
+	// A nil diagnostics callback disables the diagnostic ticker even when a
+	// period is passed, so an idle loop must stay asleep.
 	time.Sleep(2200 * time.Millisecond)
 	mu.Lock()
 	gotQueries, gotPublished := queries, published
@@ -2308,8 +2300,8 @@ func TestLaunchLoopRefreshWakeIsEventDriven(t *testing.T) {
 }
 
 // TestLaunchLoopDiagnosticsKeepOptInCadence pins that an enabled diagnostic
-// callback still runs on its own ticker (the production period is pinned at 2s
-// above) while refresh republication stays event-driven.
+// callback still runs on its own ticker while refresh republication stays
+// event-driven.
 func TestLaunchLoopDiagnosticsKeepOptInCadence(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -2337,9 +2329,7 @@ func TestLaunchLoopDiagnosticsKeepOptInCadence(t *testing.T) {
 }
 
 // TestLaunchLoopDiagnosticsUseInjectedClock ties the aggregate logger to the
-// existing diagnostics turn without sleeping for a wall-clock ticker. The
-// production source leaves diagnosticsTick nil, so this is a test-only clock
-// seam rather than a new launch-loop wake source.
+// existing diagnostics turn without sleeping for a wall-clock ticker.
 func TestLaunchLoopDiagnosticsUseInjectedClock(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()

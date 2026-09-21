@@ -12,11 +12,9 @@ import (
 	"testing"
 )
 
-// The tests drive callDispatchOrStub — the exact production path GoJNI_CallA
-// uses for every method call — because cgo is unsupported in this package's
-// test files. jnull()/nil arguments mirror a static methodID-carried class
-// call; the methodID class field resolves the class in GoJNI_CallA and the
-// dispatch key in vm.dispatch does not need it.
+// The tests drive callDispatchOrStub — the production path GoJNI_CallA uses for
+// every method call — because cgo is unsupported in this package's test files.
+// jnull()/nil arguments mirror a static methodID-carried class call.
 
 func resetStubDispatchForTest() {
 	stubDispatchLogged.Range(func(k, _ any) bool {
@@ -91,8 +89,8 @@ func TestStubDispatchAbsentOnImplemented(t *testing.T) {
 	resetStubDispatchForTest()
 	buf := captureLogs(t)
 
-	// Implemented dispatch path: handled without stubCall, no diagnostic,
-	// and the real return value is unchanged (8 GiB smuggled as jobject).
+	// Implemented dispatch path: handled without stubCall, no diagnostic, and
+	// the real return value is unchanged.
 	v, handled := callDispatchOrStub(vm, jnull(), "com/roblox/client/LocalStorageManager", "getAllocatableBytes", "()J", nil, 'J')
 	if !handled {
 		t.Fatal("implemented getAllocatableBytes reported unhandled")
@@ -104,8 +102,8 @@ func TestStubDispatchAbsentOnImplemented(t *testing.T) {
 		t.Fatalf("diagnostic fired on implemented path: %s", buf.String())
 	}
 
-	// Stub fallback return unchanged: 'L' still yields the normal empty
-	// String object from stubCall, with exactly one diagnostic recorded.
+	// Stub fallback return unchanged: 'L' still yields the empty String object
+	// from stubCall, with exactly one diagnostic recorded.
 	v2, handled := callDispatchOrStub(vm, jnull(), "tipsy/test/StubRet", "mystery", "()Ljava/lang/String;", nil, 'L')
 	if handled {
 		t.Fatal("stub fallback reported handled")

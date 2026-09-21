@@ -63,7 +63,6 @@ func TestErrorForErrnoPermissionIsActionable(t *testing.T) {
 	if !strings.Contains(err.Error(), "input group") {
 		t.Fatalf("EACCES error must carry the actionable hint, got %q", err.Error())
 	}
-	// Other errnos must not masquerade as permission errors.
 	other := ErrorForErrno("/dev/input/event0", unix.ENODEV)
 	if errors.Is(other, ErrPermissionDenied) {
 		t.Fatalf("ENODEV must not map to ErrPermissionDenied: %v", other)
@@ -81,8 +80,6 @@ func TestOpenDeviceMissingIsHonestFailure(t *testing.T) {
 }
 
 func TestPermissionDeniedNeverYieldsPad(t *testing.T) {
-	// Deterministic shape check without touching real ACLs: an
-	// EACCES-flavoured ScanResult must still carry zero pads.
 	res := ScanResult{Denied: []string{"/dev/input/event0"}}
 	if len(res.Pads) != 0 {
 		t.Fatal("denied result must carry zero pads")

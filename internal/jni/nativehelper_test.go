@@ -10,11 +10,9 @@ import (
 	"testing"
 )
 
-// TestNativeHelperOnAppReady drives the exact production dispatch path the
-// engine's CallVoidMethod takes for
-// com/roblox/client/startup/NativeHelper.gameActivity_onAppReady(Ljava/lang/String;)V:
-// the call is handled, the engine-provided step name is received and
-// recorded (never invented), and nothing else in the class is claimed.
+// TestNativeHelperOnAppReady drives the gameActivity_onAppReady(Ljava/lang/String;)V
+// dispatch: the call is handled, the engine-provided step name is recorded
+// (never invented), and no other class is claimed.
 func TestNativeHelperOnAppReady(t *testing.T) {
 	vm, err := NewVM()
 	if err != nil {
@@ -48,26 +46,21 @@ func TestNativeHelperOnAppReady(t *testing.T) {
 		t.Fatalf("log missing onAppReady record: %s", out)
 	}
 
-	// The identity joins implementedMethods, so GetMethodID stops logging
-	// it as missing (the contract exists on the Java side now).
+	// The identity joins implementedMethods so GetMethodID stops logging it as missing.
 	if !isImplementedMethod("gameActivity_onAppReady", "(Ljava/lang/String;)V") {
 		t.Fatal("gameActivity_onAppReady missing from implementedMethods")
 	}
 
-	// Other classes with the same method name are not NativeHelper's
-	// contract.
+	// Other classes with the same method name are not NativeHelper's contract.
 	if _, handled := vm.dispatch(idToJobject(h.id), "java/io/File", "gameActivity_onAppReady", "(Ljava/lang/String;)V", testPackObjectArg(s.id)); handled {
 		t.Fatal("non-NativeHelper class handled by NativeHelper dispatch")
 	}
 }
 
-// TestNativeHelperOnScreenOrientationChanged drives the exact production
-// dispatch path the engine's CallVoidMethod takes for
-// com/roblox/client/startup/NativeHelper.gameActivity_onScreenOrientationChanged(IZ)V
-// (GetMethodID'd AND called at startup, launch logs): the call is handled,
-// the engine-provided orientation and requestDefault flag are received and
-// recorded (never invented, never reported as applied), and nothing else
-// in the class is claimed.
+// TestNativeHelperOnScreenOrientationChanged drives the
+// gameActivity_onScreenOrientationChanged(IZ)V dispatch: the call is handled,
+// the orientation and requestDefault flag are recorded, and no other class is
+// claimed.
 func TestNativeHelperOnScreenOrientationChanged(t *testing.T) {
 	vm, err := NewVM()
 	if err != nil {
@@ -100,26 +93,20 @@ func TestNativeHelperOnScreenOrientationChanged(t *testing.T) {
 		t.Fatalf("log missing onScreenOrientationChanged record: %s", out)
 	}
 
-	// The identity joins implementedMethods, so GetMethodID stops logging
-	// it as missing (the contract exists on the Java side now).
+	// The identity joins implementedMethods so GetMethodID stops logging it as missing.
 	if !isImplementedMethod("gameActivity_onScreenOrientationChanged", "(IZ)V") {
 		t.Fatal("gameActivity_onScreenOrientationChanged missing from implementedMethods")
 	}
 
-	// Other classes with the same method name are not NativeHelper's
-	// contract.
+	// Other classes with the same method name are not NativeHelper's contract.
 	if _, handled := vm.dispatch(idToJobject(h.id), "java/io/File", "gameActivity_onScreenOrientationChanged", "(IZ)V", testPackTwoInts(4, 0)); handled {
 		t.Fatal("non-NativeHelper class handled by NativeHelper dispatch")
 	}
 }
 
-// TestNativeHelperOnGameLoaded drives the exact production dispatch path
-// the engine's CallVoidMethod takes for
-// com/roblox/client/startup/NativeHelper.gameActivity_onGameLoaded(J)V
-// (GetMethodID'd AND called for every loaded DataModel, launch logs: J=0
-// for Home at startup, then the joined place id): the call is handled, the
-// engine-provided place id is received and recorded (never invented), and
-// nothing else in the class is claimed.
+// TestNativeHelperOnGameLoaded drives the gameActivity_onGameLoaded(J)V
+// dispatch: the call is handled, the engine-provided place id is recorded, and
+// no other class is claimed.
 func TestNativeHelperOnGameLoaded(t *testing.T) {
 	vm, err := NewVM()
 	if err != nil {
@@ -133,8 +120,6 @@ func TestNativeHelperOnGameLoaded(t *testing.T) {
 	vm.mu.Unlock()
 
 	countBefore, _ := NativeHelperGameLoaded()
-	// The live-observed startup value first, then a distinct place id to
-	// prove the record tracks the engine's announcement verbatim.
 	v, handled := vm.dispatch(idToJobject(h.id), nativeHelperClass, "gameActivity_onGameLoaded", "(J)V", packJlong(0))
 	if !handled {
 		t.Fatal("gameActivity_onGameLoaded not handled by dispatchNativeHelper")
@@ -157,22 +142,18 @@ func TestNativeHelperOnGameLoaded(t *testing.T) {
 		t.Fatalf("log missing onGameLoaded record: %s", out)
 	}
 
-	// The identity joins implementedMethods, so GetMethodID stops logging
-	// it as missing (the contract exists on the Java side now).
+	// The identity joins implementedMethods so GetMethodID stops logging it as missing.
 	if !isImplementedMethod("gameActivity_onGameLoaded", "(J)V") {
 		t.Fatal("gameActivity_onGameLoaded missing from implementedMethods")
 	}
 
-	// Other classes with the same method name are not NativeHelper's
-	// contract.
+	// Other classes with the same method name are not NativeHelper's contract.
 	if _, handled := vm.dispatch(idToJobject(h.id), "java/io/File", "gameActivity_onGameLoaded", "(J)V", packJlong(0)); handled {
 		t.Fatal("non-NativeHelper class handled by NativeHelper dispatch")
 	}
 }
 
-// TestAppReadyStepNameSanitized proves the log-safety boundary: the
-// engine-provided step string is capped and control bytes never reach the
-// log line.
+// TestAppReadyStepNameSanitized proves the log-safety boundary: the step string is capped and control bytes never reach the log line.
 func TestAppReadyStepNameSanitized(t *testing.T) {
 	if got := appReadyStepName("Landing"); got != "Landing" {
 		t.Fatalf("plain step = %q, want Landing", got)
@@ -188,10 +169,8 @@ func TestAppReadyStepNameSanitized(t *testing.T) {
 	}
 }
 
-// TestNativeHelperOnDidLogInReceived drives the exact production dispatch
-// path for gameActivity_onDidLogInReceived(Ljava/lang/String;)V: the call
-// is handled, planted DID_LOG_IN JSON fills NativeUser getters, and the
-// payload is never logged.
+// TestNativeHelperOnDidLogInReceived drives the gameActivity_onDidLogInReceived(Ljava/lang/String;)V
+// dispatch: the JSON fills NativeUser getters and the payload is never logged.
 func TestNativeHelperOnDidLogInReceived(t *testing.T) {
 	vm, err := NewVM()
 	if err != nil {
@@ -242,9 +221,7 @@ func TestNativeHelperOnDidLogInReceived(t *testing.T) {
 	}
 }
 
-// TestNativeHelperOnDidLogInReceivedMalformedLeavesSnapshot pins that empty
-// or malformed JSON still handles the void call and does not wipe a
-// previously planted snapshot (and does not crash).
+// TestNativeHelperOnDidLogInReceivedMalformedLeavesSnapshot pins that malformed JSON still handles the call without wiping a planted snapshot or crashing.
 func TestNativeHelperOnDidLogInReceivedMalformedLeavesSnapshot(t *testing.T) {
 	vm, err := NewVM()
 	if err != nil {

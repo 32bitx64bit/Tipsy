@@ -53,9 +53,8 @@ func (c *MicrophoneConfig) SetEnabled(v bool) { c.Enabled = v }
 func (c *MicrophoneConfig) SetSource(v string) { c.Source = strings.TrimSpace(v) }
 
 // Allowed reports whether capture is allowed after whatever overlay
-// produced c. True iff enabled. This is the canonical Go door; JNI still
-// duplicates env-only parsing this slice and should later call Allowed()
-// / EffectiveConfig. OpenSL C getenv remains the native kill-switch.
+// produced c. True iff enabled. This is the canonical Go door; OpenSL C
+// getenv remains the native kill-switch.
 func (c MicrophoneConfig) Allowed() bool { return c.Enabled }
 
 // SourcePinned reports whether a non-default source pin is set. Diagnose

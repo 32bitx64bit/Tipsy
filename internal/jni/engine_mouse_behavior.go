@@ -5,51 +5,14 @@
 
 // Engine MouseBehavior authority.
 //
-// Roblox exports exactly one lock-state native,
-// NativeInputInterface.nativeGetMainWindowIsMouseLockedCenter, and its body
-// is literally
+// The exported lock-state boolean collapses Enum.MouseBehavior into a single
+// "centered" answer, so a cursor locked at its current position reports as
+// unlocked. This file reads that enum directly.
 //
-//	s   = getSingleton(4)
-//	obj = *(void**)(s + OFF_PTR)
-//	return *(int32_t*)(obj + OFF_ENUM) == 1
-//
-// Enum.MouseBehavior is Default = 0, LockCenter = 1, LockCurrentPosition = 2,
-// so that `cmpl $0x1` reports a game sitting in LockCurrentPosition as "not
-// locked". Place 79966250354565 ("Project 12 [BODY CAM!]") holds 2 for the
-// whole time it is in first person -- 1,545 measured polls, LockCenter never
-// once -- while the exported boolean was false on all 548 of Tipsy's probes.
-// That is the measured bug; see
-// .tipsy-private/docs/investigations/mouse-behavior-enum-measurement-2026-09-20.md.
-//
-// This file reads that one word, and nothing else.
-//
-// # ADR 0010 exception (owner-granted, reads only)
-//
-// ADR 0010 bans engine hooks. The owner granted a single narrow exception for
-// "read-only engine state, purely read only, and very targeted", with an
-// explicit worry about anti-cheat. The boundaries this file keeps:
-//
-//   - Zero writes anywhere in Roblox's address space: no hooks, trampolines,
-//     patches or NOPs. Every access here is a load.
-//   - No new threads and no polling loop. The read happens only at the call
-//     sites that already invoke RobloxMainWindowMouseLocked(), at exactly the
-//     cadence they already had, so the process's behavioural footprint is
-//     unchanged.
-//   - No ptrace, no /proc/self/mem, no mprotect, no signal handlers, no
-//     mapping or permission changes. internal/loader maps libroblox into this
-//     process, so the word is already mapped and readable: a plain aligned
-//     load is the entire mechanism. /proc/self/maps is read (read-only, and
-//     only when an address is seen for the first time) purely as a guard so a
-//     mis-decode can never dereference a wild pointer.
-//   - Every constant is decoded at runtime from the bytes of the exported
-//     symbol and cached once. Nothing is hardcoded: the live client's object
-//     offset is +0xb00 while the stale tree in ~/.local/share/tipsy/runtime/
-//     uses +0xa10, so a pinned offset would read the wrong field of the right
-//     object and return plausible garbage.
-//   - Fail closed. A byte pattern that does not match, a NULL object, an
-//     out-of-range value or a read that disagrees with the engine's own
-//     exported boolean disables this authority and hands the decision back to
-//     the boolean getter, loudly.
+// The access is strictly read-only, adds no threads and no polling, and fails
+// closed: any shape mismatch, NULL object, out-of-range value, or disagreement
+// with the exported boolean disables this authority and returns the decision
+// to the boolean getter.
 package jni
 
 import (
@@ -68,19 +31,18 @@ import (
 	"github.com/tipsy-linux/tipsy/internal/logging"
 )
 
-// MouseBehavior is Roblox's Enum.MouseBehavior, the property the exported
+// MouseBehavior is the engine's Enum.MouseBehavior, the property the exported
 // getter collapses into a boolean.
 type MouseBehavior uint8
 
 const (
-	// MouseBehaviorDefault is a free pointer: the engine wants no lock at
-	// all and the host pointer may leave the window.
+	// MouseBehaviorDefault is a free pointer; the host pointer may leave the
+	// window.
 	MouseBehaviorDefault MouseBehavior = 0
-	// MouseBehaviorLockCenter is first person / shift lock: the engine
-	// freezes its cursor at the viewport center.
+	// MouseBehaviorLockCenter freezes the cursor at the viewport center.
 	MouseBehaviorLockCenter MouseBehavior = 1
-	// MouseBehaviorLockCurrentPosition freezes the engine cursor exactly
-	// where it already was. The exported boolean cannot see it.
+	// MouseBehaviorLockCurrentPosition freezes the cursor where it already
+	// was; the exported boolean cannot see it.
 	MouseBehaviorLockCurrentPosition MouseBehavior = 2
 )
 
@@ -101,17 +63,16 @@ func (b MouseBehavior) String() string {
 // getter. Addresses are live process addresses, never file vaddrs.
 type mouseBehaviorLayout struct {
 	getter      uintptr // the exported symbol the decode started from
-	accessor    uintptr // getSingleton
-	singleton   uintptr // the .bss static the accessor selects for index
+	accessor    uintptr // the singleton accessor
+	singleton   uintptr // the static the accessor selects for index
 	index       uint32  // the accessor index the getter passes
-	pivot       uint8   // the accessor's cmp immediate
+	pivot       uint8   // the accessor's compare immediate
 	objOffset   uint32  // singleton + objOffset holds the object pointer
 	enumOffset  uint32  // object + enumOffset holds MouseBehavior
 	lockedValue uint8   // the value the exported boolean compares against
 }
 
-// Decode windows: the getter body and the accessor body, exactly the sizes
-// the measurement harness proved sufficient on the live client.
+// Decode windows: the getter body and the accessor body.
 const (
 	mouseBehaviorGetterWindow   = 0x80
 	mouseBehaviorAccessorWindow = 0x60
@@ -122,13 +83,6 @@ const (
 var errMouseBehaviorShape = errors.New("engine getter does not match the decoded shape")
 
 // decodeMouseBehaviorGetter decodes the exported getter body.
-//
-// The shape clang emits for this function is
-//
-//	mov   $imm32,%edi        bf imm32          the getSingleton index
-//	call  rel32              e8 rel32          getSingleton
-//	mov   disp32(%rbx),%rax  48 8b 83 disp32   the object pointer
-//	cmpl  $imm8,disp32(%rax) 83 b8 disp32 imm8 MouseBehavior == LockCenter
 //
 // addr is the live address the code was read from, so the call target comes
 // out as a live address too.
@@ -193,18 +147,9 @@ func decodeMouseBehaviorGetter(code []byte, addr uintptr) (mouseBehaviorLayout, 
 	return out, nil
 }
 
-// decodeSingletonAccessor decodes getSingleton(index).
-//
-// The two singletons are clang function-local statics, so the accessor is a
-// register select over two fixed .bss addresses rather than a heap call:
-//
-//	cmp   $imm8,%ebx     83 fb imm8
-//	lea   A(%rip),%rcx   48 8d 0d rel32
-//	lea   B(%rip),%rax   48 8d 05 rel32
-//	cmove %rcx,%rax      48 0f 44 c1
-//
-// The result is A when the caller's index equals the pivot and B otherwise,
-// which is why index 4 needs no call and no breakpoint.
+// decodeSingletonAccessor decodes the singleton accessor. It returns the
+// selected static address for index; pivot is the accessor's compare
+// immediate.
 func decodeSingletonAccessor(code []byte, addr uintptr, index uint32) (singleton uintptr, pivot uint8, err error) {
 	for i := 0; i+24 <= len(code); i++ {
 		if code[i] != 0x83 || code[i+1] != 0xFB {
@@ -237,8 +182,8 @@ func decodeSingletonAccessor(code []byte, addr uintptr, index uint32) (singleton
 }
 
 // engineMemory is the read-only window onto the already-mapped engine image.
-// Production reads this process's own memory; tests substitute an arena, so
-// every decode and fail-closed path is exercised without a live client.
+// Tests substitute an arena so every decode and fail-closed path is exercised
+// without a live client.
 type engineMemory interface {
 	bytes(addr uintptr, n int) ([]byte, bool)
 	u64(addr uintptr) (uint64, bool)
@@ -247,12 +192,10 @@ type engineMemory interface {
 
 var engineMem engineMemory = liveEngineMemory{}
 
-// liveEngineMemory loads from this process. internal/loader mapped libroblox
-// here (file-backed MAP_FIXED, internal/loader/mmap.go), so the engine's
-// .text and .bss are ordinary readable pages of this address space. Nothing
-// is written, no mapping or protection is touched, and every access is
-// guarded by engineReadable so a mis-decode fails closed instead of taking
-// the process down.
+// liveEngineMemory loads from this process. The engine image is already
+// mapped here, so its .text and .bss are ordinary readable pages of this
+// address space. Nothing is written and no mapping or protection is touched;
+// every access is guarded by engineReadable so a mis-decode fails closed.
 type liveEngineMemory struct{}
 
 func (liveEngineMemory) bytes(addr uintptr, n int) ([]byte, bool) {
@@ -280,11 +223,9 @@ func (liveEngineMemory) u32(addr uintptr) (uint32, bool) {
 
 type engineAddrRange struct{ lo, hi uintptr }
 
-// engineMaps caches this process's readable mappings. It is the guard that
-// keeps a mis-decoded address from being dereferenced: an address outside
-// every readable mapping is reported unavailable rather than loaded. The
-// snapshot is refreshed only when an address misses, i.e. once per new
-// object pointer -- roughly once per session -- and never on the hot path.
+// engineMaps caches this process's readable mappings so a mis-decoded address
+// is reported unavailable rather than dereferenced. The snapshot is refreshed
+// only when an address misses, never on the hot path.
 var engineMaps struct {
 	mu     sync.Mutex
 	ranges []engineAddrRange
@@ -357,8 +298,7 @@ func readProcSelfMaps() ([]engineAddrRange, error) {
 }
 
 // mouseBehaviorAuthority caches the decode and carries the fail-closed
-// latches. The decode runs once per resolved getter address and is reused;
-// nothing here is re-derived per probe.
+// latches. The decode runs once per resolved getter address and is reused.
 var mouseBehaviorAuthority struct {
 	mu        sync.Mutex
 	attempted bool
@@ -366,31 +306,24 @@ var mouseBehaviorAuthority struct {
 	layout    *mouseBehaviorLayout
 
 	// disabled latches the authority off: a decode failure, an out-of-range
-	// value, or the engine's own exported boolean disagreeing with the read.
+	// value, or the exported boolean disagreeing with the read.
 	disabled atomic.Bool
-	// seen latches on the first valid read. It is what retires the zoom
-	// heuristic: once the engine has answered for real, guessing is over.
+	// seen latches on the first valid read and retires the zoom heuristic.
 	seen     atomic.Bool
 	mismatch atomic.Int32
 }
 
-// engineMouseBehaviorMismatchLimit is how many consecutive disagreements
-// with the exported boolean count as a racy sample rather than a broken
-// decode. The word is read and the getter called microseconds apart without
-// the engine's own lock, so a single straddled transition is expected; three
-// in a row is not, and disables the read.
+// engineMouseBehaviorMismatchLimit is how many consecutive disagreements with
+// the exported boolean count as a broken decode rather than a racy sample.
 const engineMouseBehaviorMismatchLimit = 3
 
-// EngineMouseBehavior reads the engine's live UserInputService.MouseBehavior.
+// EngineMouseBehavior reads the engine's live MouseBehavior.
 //
-// It is a read and only a read: the constants come from decoding the bytes of
-// the exported getter once, and each probe is two aligned loads of memory
-// internal/loader already mapped into this process. ok is false when the
-// authority is unavailable for any reason -- not yet wired, decode failed,
-// the object pointer is still NULL (it appears ~0.2 s after the pointer lock
-// handshake), the value is out of range, or the validator has disabled it.
-// An unavailable read is never reported as Default: a dead read and a game
-// that wants a free pointer are different facts.
+// ok is false when the authority is unavailable for any reason -- not yet
+// wired, decode failed, the object pointer is still NULL, the value is out of
+// range, or the validator has disabled it. An unavailable read is never
+// reported as Default: a dead read and a game that wants a free pointer are
+// different facts.
 func EngineMouseBehavior() (MouseBehavior, bool) {
 	if mouseBehaviorAuthority.disabled.Load() {
 		return MouseBehaviorDefault, false
@@ -421,7 +354,6 @@ func EngineMouseBehavior() (MouseBehavior, bool) {
 }
 
 // engineMouseBehaviorProbe is the production read behind a test seam.
-// Production never replaces it.
 var engineMouseBehaviorProbe = EngineMouseBehavior
 
 // mouseBehaviorLayoutFor returns the cached decode for getter, decoding once
@@ -454,11 +386,9 @@ func mouseBehaviorLayoutFor(getter uintptr) *mouseBehaviorLayout {
 	return mouseBehaviorAuthority.layout
 }
 
-// decodeMouseBehavior walks the exported symbol's own instructions in the
-// live image. Nothing is read from disk: the stale client in
-// ~/.local/share/tipsy/runtime/ has a different object offset (+0xa10 against
-// the live +0xb00), and a decode that trusted it would read the wrong field
-// of the right object.
+// decodeMouseBehavior walks the exported symbol's own instructions in the live
+// image. Nothing is read from disk, so the decode always matches the client
+// that is actually loaded.
 func decodeMouseBehavior(getter uintptr) (mouseBehaviorLayout, error) {
 	code, ok := engineMem.bytes(getter, mouseBehaviorGetterWindow)
 	if !ok {
@@ -484,11 +414,10 @@ func decodeMouseBehavior(getter uintptr) (mouseBehaviorLayout, error) {
 	return layout, nil
 }
 
-// engineMouseBehaviorAgrees is the validator that made this exception safe to
-// take: the engine's own exported boolean polices Tipsy's read. The word and
-// the boolean must agree on the `== LockCenter` case; a disagreement means
-// either a straddled transition (rare, tolerated) or a decode that is not
-// reading what the getter reads (fatal to the authority).
+// engineMouseBehaviorAgrees is the validator: the exported boolean polices
+// this read. The word and the boolean must agree on the LockCenter case; a
+// disagreement is either a straddled transition (tolerated) or a decode that
+// is not reading what the getter reads (fatal to the authority).
 func engineMouseBehaviorAgrees(value MouseBehavior, locked bool) bool {
 	if (value == MouseBehaviorLockCenter) == locked {
 		mouseBehaviorAuthority.mismatch.Store(0)
@@ -509,8 +438,7 @@ func engineMouseBehaviorAgrees(value MouseBehavior, locked bool) bool {
 
 // disableEngineMouseBehavior fails the authority closed for the rest of the
 // process and says so loudly. Everything falls back to the exported boolean
-// and the heuristics it drives; an honest, noisy loss of a capability beats a
-// silent wrong answer about where the operator's cursor belongs.
+// and the heuristics it drives.
 func disableEngineMouseBehavior(reason string) {
 	if mouseBehaviorAuthority.disabled.Swap(true) {
 		return
@@ -522,16 +450,14 @@ func disableEngineMouseBehavior(reason string) {
 }
 
 // engineBehaviorAuthoritative reports whether the enum authority has produced
-// at least one valid read in this process and has not been disabled. It is
-// the gate that retires the wheel-driven zoom heuristic: while the engine is
-// answering for real, Tipsy never guesses.
+// at least one valid read in this process and has not been disabled. It gates
+// the wheel-driven zoom heuristic.
 func engineBehaviorAuthoritative() bool {
 	return mouseBehaviorAuthority.seen.Load() && !mouseBehaviorAuthority.disabled.Load()
 }
 
-// resetEngineMouseBehavior drops the decode and every latch. Teardown uses it
-// so a re-wired target re-decodes against the image it actually has; tests
-// use it to start from a known state.
+// resetEngineMouseBehavior drops the decode and every latch so a re-wired
+// target re-decodes against the image it actually has.
 func resetEngineMouseBehavior() {
 	mouseBehaviorAuthority.mu.Lock()
 	mouseBehaviorAuthority.attempted = false

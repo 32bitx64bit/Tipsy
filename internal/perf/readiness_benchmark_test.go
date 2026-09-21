@@ -12,8 +12,8 @@ const controllerIdleReadinessDuration = 75 * time.Millisecond
 
 // BenchmarkControllerIdleReadiness runs the bounded, content-free ReadyPump
 // empty-watch fixture. The aggregate proves only the fixture's owner-side
-// startup/rescan/readiness/shutdown counts; it is not physical input latency,
-// client-process CPU, a legacy-ticker comparison, or gameplay evidence.
+// counts; it is not physical input latency, client-process CPU, or gameplay
+// evidence.
 func BenchmarkControllerIdleReadiness(b *testing.B) {
 	if runtime.GOOS != "linux" {
 		b.Skip("ReadyPump empty-watch fixture is Linux-only")

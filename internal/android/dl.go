@@ -165,15 +165,7 @@ func lookupHandle(handle unsafe.Pointer, sym string) uintptr {
 
 // providerDlopenSonames are system libraries Tipsy serves in-process that the
 // official client also opens at runtime through dlopen/dlsym instead of a
-// relocation-time binding. libroblox.so has no undefined SL_IID_* /
-// slCreateEngine symbols: FMOD's OpenSL ES output plug-in
-// (fmod_output_opensl.cpp, .rodata "libOpenSLES.so", "slCreateEngine",
-// "SL_IID_ENGINE", "SL_IID_PLAY", "SL_IID_RECORD",
-// "SL_IID_ANDROIDSIMPLEBUFFERQUEUE", "SL_IID_ANDROIDCONFIGURATION") dlopen's
-// the library and dlsym's those names. A NULL handle sent FMOD to its Java
-// AudioTrack output, which FMOD documents as having no recording. Only the
-// soname a live failure named is listed; libraries the client probes for
-// availability (libaaudio.so, libvulkan.so) stay honest failures.
+// relocation-time binding.
 var providerDlopenSonames = map[string]bool{"libOpenSLES.so": true}
 
 func openRegistered(filename string) unsafe.Pointer {
@@ -206,10 +198,8 @@ var (
 )
 
 // logDlopenRefused reports each soname the client tried to dlopen and Tipsy
-// refused, once. The refusal is the honest answer (no fake handles), but
-// the client rarely says why a feature went missing when a runtime dlopen
-// fails (FMOD silently fell back from OpenSL to AudioTrack), so it has to be
-// visible in Tipsy's log.
+// refused, once. The client rarely reports why a feature went missing when a
+// runtime dlopen fails, so refusals must be visible in the log.
 func logDlopenRefused(base string) {
 	dlopenRefusedMu.Lock()
 	seen := dlopenRefusedSeen[base]

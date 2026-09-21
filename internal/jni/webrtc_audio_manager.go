@@ -20,28 +20,23 @@ import (
 )
 
 // Java role of WebRTC's legacy Android AudioDeviceModule
-// (org.webrtc.voiceengine.WebRtcAudioManager, upstream
-// modules/audio_device/android/java/.../WebRtcAudioManager.java and the
-// C++ owner modules/audio_device/android/audio_manager.cc).
+// (org.webrtc.voiceengine.WebRtcAudioManager).
 //
 // The native AudioManager constructor RegisterNatives
 // nativeCacheAudioParameters(IIIZZZZZZZIIJ)V on this class and then
 // NewObject("<init>", "(J)V", this). On Android the Java constructor reads the
 // device's audio properties and immediately calls that native back; the C++
-// side stores the values as playout/record AudioParameters and layer flags,
-// and AudioDeviceModuleImpl::CreatePlatformSpecificObjects picks OpenSL ES for
-// both directions when lowLatencyOutput && lowLatencyInput (and the device is
-// not blacklisted for OpenSL ES). Later adm->Init() needs Java init()Z == true.
+// side stores the values as playout/record AudioParameters and layer flags, and
+// AudioDeviceModuleImpl::CreatePlatformSpecificObjects picks OpenSL ES for both
+// directions when lowLatencyOutput && lowLatencyInput.
 //
-// Tipsy answers with honest host values: 48 kHz mono both ways, no hardware
-// AEC/AGC/NS (WebRTC's software APM does the work; Android also hardcodes
-// hardwareAGC=false), low-latency in+out so the engine reaches Tipsy's OpenSL
-// bridge (internal/android/opensles.c), no pro-audio, no AAudio (SDK 26 has
-// none and Tipsy does not bump it), 480 frames per buffer (one WebRTC 10 ms
-// block at 48 kHz). Roblox's fork adds setMicrophoneMute(Z)V; live capture
-// is FMOD's OpenSL recorder (§276), which start/stops recording itself, but
-// the method is GetMethodID'd on this live class so it stays a real mute
-// gate into the same OpenSL recorder.
+// Tipsy answers with host values: 48 kHz mono both ways, no hardware AEC/AGC/NS
+// (WebRTC's software APM does the work), low-latency in+out so the engine
+// reaches Tipsy's OpenSL bridge (internal/android/opensles.c), no pro-audio, no
+// AAudio (SDK 26 has none and Tipsy does not bump it), 480 frames per buffer
+// (one WebRTC 10 ms block at 48 kHz). Roblox's fork adds setMicrophoneMute(Z)V;
+// live capture is FMOD's OpenSL recorder, but the method is GetMethodID'd on
+// this live class so it stays a real mute gate into the same OpenSL recorder.
 const webRtcAudioManagerClass = "org/webrtc/voiceengine/WebRtcAudioManager"
 
 const (
@@ -52,9 +47,9 @@ const (
 	webRtcInitializedField  = "tipsy.webrtcAudioManagerInitialized"
 )
 
-// Host audio parameters cached into the native AudioManager. Never HW
-// effects: Tipsy has no hardware AEC/NS, and claiming one would make WebRTC
-// skip its own echo canceller.
+// Host audio parameters cached into the native AudioManager. Never HW effects:
+// Tipsy has no hardware AEC/NS, and claiming one would make WebRTC skip its own
+// echo canceller.
 const (
 	webRtcSampleRateHz    int32 = 48000
 	webRtcOutputChannels  int32 = 1
@@ -136,13 +131,12 @@ func (vm *VM) dispatchWebRtcAudioManager(o *Object, class, name, sig string, arg
 		return jnull(), true
 	case "isCommunicationModeEnabled()Z":
 		// Android: audioManager.getMode() == MODE_IN_COMMUNICATION.
-		// AppRtcDeviceWrapper.wrapStartCommunication, which would flip that
-		// mode, is never called on this client (live voice is FMOD OpenSL).
-		// Upstream only warns when this is false.
+		// wrapStartCommunication, which would flip that mode, is never called
+		// on this client. Upstream only warns when this is false.
 		return jniBool(false), true
 	case "isDeviceBlacklistedForOpenSLESUsage()Z":
-		// WebRtcAudioUtils.BLACKLISTED_OPEN_SL_ES_MODELS is a phone model
-		// list; Tipsy's OpenSL bridge is the intended path.
+		// WebRtcAudioUtils.BLACKLISTED_OPEN_SL_ES_MODELS is a phone model list;
+		// Tipsy's OpenSL bridge is the intended path.
 		return jniBool(false), true
 	case "setMicrophoneMute(Z)V":
 		// Process-wide OpenSL capture mute; logged only when the gate flips.
@@ -160,8 +154,8 @@ func (vm *VM) dispatchWebRtcAudioManager(o *Object, class, name, sig string, arg
 // constructWebRtcAudioManager is WebRtcAudioManager(long nativeAudioManager):
 // remember the native owner, then synchronously call the registered
 // nativeCacheAudioParameters exactly as the Java constructor does. Without a
-// registered native there is nothing honest to call; the C++ side will then
-// RTC_CHECK its invalid parameters, which is the truthful failure.
+// registered native there is nothing to call; the C++ side will then RTC_CHECK
+// its invalid parameters, which is the truthful failure.
 func (vm *VM) constructWebRtcAudioManager(o *Object, args *C.jvalue) C.jobject {
 	var handle int64
 	if args != nil {

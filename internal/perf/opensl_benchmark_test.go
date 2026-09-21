@@ -10,8 +10,8 @@ import (
 )
 
 // BenchmarkOpenSLQueueOwnership executes Audio's bounded fake-player queue
-// fixture. Its reported custom metrics are C bridge storage/copy counters,
-// not allocator CPU, RSS, OS wakeups, device latency, or FPS measurements.
+// fixture. Its custom metrics are C bridge storage/copy counters, not
+// allocator CPU, RSS, OS wakeups, device latency, or FPS measurements.
 func BenchmarkOpenSLQueueOwnership(b *testing.B) {
 	silenceAudioFixtureLogs(b)
 	b.ReportAllocs()
@@ -45,7 +45,7 @@ func BenchmarkOpenSLQueueOwnership(b *testing.B) {
 }
 
 // BenchmarkMutedCaptureCadence runs only Audio's fake-muted recorder fixture.
-// Callback interval and callback-to-requeue data describe that fixture's host
+// Callback interval and callback-to-requeue data describe that fixture's
 // cadence and synchronous re-enqueue work, not microphone/device latency or
 // OS wakeups; no microphone is opened or read.
 func BenchmarkMutedCaptureCadence(b *testing.B) {
@@ -77,9 +77,8 @@ func BenchmarkMutedCaptureCadence(b *testing.B) {
 }
 
 // silenceAudioFixtureLogs keeps a high-iteration synthetic fixture from
-// turning its intentional content-free lifecycle diagnostics into benchmark
-// I/O. It is confined to this direct test binary and restores the prior logger
-// before the package process exits.
+// turning its content-free lifecycle diagnostics into benchmark I/O. It is
+// confined to this test binary and restores the prior logger on exit.
 func silenceAudioFixtureLogs(b *testing.B) {
 	b.Helper()
 	prior := slog.Default()

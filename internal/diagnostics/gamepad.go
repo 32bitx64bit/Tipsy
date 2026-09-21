@@ -20,7 +20,7 @@ const gamepadPermissionHint = "add user to input group and relogin; check udev r
 
 // GamepadPad is one accessible pad: name/vendor/product/capabilities only.
 // Field shapes are kept for the doctor formatter and GUI card; Detail is
-// now usually empty (mapping verbosity deleted, see below).
+// usually empty.
 type GamepadPad struct {
 	Path    string `json:"path"`
 	Name    string `json:"name"`
@@ -43,8 +43,7 @@ type GamepadInfo struct {
 	Note           string            `json:"note,omitempty"`
 }
 
-// gamepadScanFunc enumerates evdev nodes. Test seam; production always calls
-// gamepad.Scan. It never synthesizes a device.
+// gamepadScanFunc enumerates evdev nodes. It never synthesizes a device.
 var gamepadScanFunc = gamepad.Scan
 
 func gamepadDir() string { return gamepad.InputNodeDir }
@@ -60,16 +59,13 @@ func gamepadEnabledLive() (bool, string) {
 	}
 }
 
-// gamepadPathLive reports the effective feed-in arm. Pads are direct-only in
-// the lean build: any TIPSY_GAMEPAD_PATH value is parsed-but-ignored and the
-// effective arm is always direct.
+// gamepadPathLive reports the effective feed-in arm: pads are direct-only, so
+// any TIPSY_GAMEPAD_PATH value is parsed-but-ignored.
 func gamepadPathLive() (string, string) {
 	return "direct", os.Getenv("TIPSY_GAMEPAD_PATH")
 }
 
-// gamepadEnvKeys lists the lean TIPSY_GAMEPAD* variables the diagnose facts
-// report. Removed v1 keys (per-stick deadzone/invert, rumble) are ignored
-// everywhere and no longer reported.
+// gamepadEnvKeys lists the TIPSY_GAMEPAD* variables the diagnose facts report.
 var gamepadEnvKeys = []string{
 	"TIPSY_GAMEPAD", "TIPSY_GAMEPAD_PATH", "TIPSY_GAMEPAD_DEBUG",
 	"TIPSY_GAMEPAD_DEADZONE",
@@ -149,8 +145,7 @@ func gamepadDiagnoseStatus(info GamepadInfo) string {
 }
 
 // diagnoseGamepad builds the `tipsy diagnose gamepad` report. Aliases pad
-// and controller canonicalize here. One caps line per pad; per-pad
-// mapping-verbosity and per-axis dumps are deleted vs v1.
+// and controller canonicalize here. One caps line per pad.
 func diagnoseGamepad() *SubsystemReport {
 	info := probeGamepad()
 	status := gamepadDiagnoseStatus(info)
@@ -234,8 +229,8 @@ func effectiveEnabledWord(killSwitchOn, fileOn bool) string {
 }
 
 // describeGamepadPad renders one connect-time snapshot content-free: the one
-// caps line (topology + advertised Android sets). Mapping detail verbosity
-// is deleted; Detail stays empty for formatter/GUI shape compatibility.
+// caps line (topology + advertised Android sets). Detail stays empty for
+// formatter/GUI shape compatibility.
 func describeGamepadPad(p gamepad.DeviceInfo) GamepadPad {
 	m := p.Mapping
 	if m.Name == "" {

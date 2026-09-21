@@ -17,9 +17,8 @@ func resetArgCaptureForTest() {
 	})
 }
 
-// setDiagnosticsForTest toggles the cached TIPSY_DIAG flag for one test.
-// diagnosticsEnabled is cached at process start, so t.Setenv alone cannot
-// flip it after init.
+// setDiagnosticsForTest toggles the cached TIPSY_DIAG flag for one test; it is
+// cached at process start, so t.Setenv alone cannot flip it after init.
 func setDiagnosticsForTest(t *testing.T, on bool) {
 	t.Helper()
 	prev := diagnosticsOn.Load()
@@ -42,8 +41,8 @@ func TestFindClassNameDiagnostic(t *testing.T) {
 	if !handled || v == 0 {
 		t.Fatalf("findClass behavior changed: handled=%v v=%d", handled, v)
 	}
-	// Dispatch semantics untouched: the canonical object is returned and
-	// the same name resolves to the same object again.
+	// Dispatch semantics untouched: the canonical object is returned and the
+	// same name resolves again.
 	v2, _ := callFindClass(t, vm, n1)
 	if v2 != v {
 		t.Fatalf("repeat findClass = %d, want canonical %d", v2, v)
@@ -85,9 +84,8 @@ func TestLifecycleHandleDiagnostic(t *testing.T) {
 	// Same value dedupes; a distinct value records a new line.
 	_, _ = callDispatchOrStub(vm, jnull(), glc, "gameLoadedCallback", "(J)V", packJlong(0x123456789), 'V')
 	_, _ = callDispatchOrStub(vm, jnull(), glc, "gameLoadedCallback", "(J)V", packJlong(4886718345+7), 'V')
-	// NativeHelper.gameActivity_onGameLoaded(J)V is now received and
-	// recorded by the dispatchNativeHelper receiver (nativehelper.go), not
-	// the stub path: handled, counted, and logged as onGameLoaded.
+	// NativeHelper.gameActivity_onGameLoaded(J)V is received and recorded by the
+	// dispatchNativeHelper receiver, not the stub path: handled, counted, logged.
 	glBefore, _ := NativeHelperGameLoaded()
 	if _, handled = callDispatchOrStub(vm, jnull(), "com/roblox/client/startup/NativeHelper", "gameActivity_onGameLoaded", "(J)V", packJlong(77), 'V'); !handled {
 		t.Fatal("onGameLoaded receiver missing: expected handled")
@@ -126,8 +124,7 @@ func TestArgCaptureFiltered(t *testing.T) {
 	buf := captureLogs(t)
 
 	glc := "com/roblox/engine/jni/NativeGLJavaInterface"
-	// Real user-adjacent identity: handled from the DID_LOG_IN snapshot
-	// (empty before login) and never argument-captured.
+	// User-adjacent identity: handled, but never argument-captured.
 	_, _ = callDispatchOrStub(vm, jnull(), "com/roblox/engine/jni/user/NativeUserJavaInterface", "getUsername", "()Ljava/lang/String;", nil, 'L')
 	_, _ = callDispatchOrStub(vm, jnull(), "com/roblox/engine/jni/user/NativeUserJavaInterface", "gameLoadedCallback", "(J)V", packJlong(9), 'V')
 	// Lookalike identities: wrong sig, wrong class.

@@ -18,8 +18,7 @@ import (
 	"time"
 )
 
-// Android ConnectivityManager.TYPE_* / NetworkCapabilities constants
-// (AOSP android.net; SDK 26). Roblox DEX 2.734.917 GetMethodIDs these.
+// Android ConnectivityManager/NetworkCapabilities constants (AOSP android.net).
 const (
 	typeMobile   int32 = 0
 	typeWifi     int32 = 1
@@ -38,15 +37,11 @@ const (
 )
 
 // hostNetworkUp reports whether the Linux host has a non-loopback interface
-// that is up with a unicast address. This is host reachability, not Roblox
-// auth and not a security bypass.
+// that is up with a unicast address. This is host reachability, not auth.
 var hostNetworkUp = detectHostNetwork
 
 // hostNetworkTTL bounds how long one interface scan may answer connectivity
-// queries. The engine polls several ConnectivityManager/Network getters per
-// frame; net.Interfaces() is a syscall-backed scan, so a short honest cache
-// keeps polling from becoming a hot path while network changes still show up
-// within the TTL, not fabricated or sticky forever.
+// queries; network changes still show up within the TTL.
 const hostNetworkTTL = 2 * time.Second
 
 var hostNetworkCache struct {
@@ -55,9 +50,8 @@ var hostNetworkCache struct {
 	up      bool
 }
 
-// probeHostNetworkFn is the interface scan behind the cache. It is a package
-// variable so tests can count probes without real interfaces; production
-// never replaces it.
+// probeHostNetworkFn is the interface scan behind the cache; a package
+// variable so tests can substitute it.
 var probeHostNetworkFn = probeHostNetwork
 
 func detectHostNetwork() bool {
@@ -72,8 +66,7 @@ func detectHostNetwork() bool {
 	return up
 }
 
-// resetHostNetworkCacheForTest forgets the cached result. Test seam only;
-// production never resets within a process.
+// resetHostNetworkCacheForTest forgets the cached result. Test seam only.
 func resetHostNetworkCacheForTest() {
 	hostNetworkCache.mu.Lock()
 	hostNetworkCache.checked = time.Time{}
@@ -145,9 +138,8 @@ func classIs(o *Object, name string) bool {
 	return false
 }
 
-// seedConnectivity writes the static class/field snapshot directly without
-// vm.mu: it is called only from seedClasses during NewVM, before globalVM is
-// published and before any other goroutine can observe the VM.
+// seedConnectivity writes the static class/field snapshot without vm.mu: it
+// runs only from seedClasses during NewVM, before globalVM is published.
 func (vm *VM) seedConnectivity() {
 	object := vm.classes["java/lang/Object"]
 	for _, name := range []string{
@@ -211,10 +203,7 @@ func (vm *VM) seedConnectivity() {
 }
 
 // enumField returns the seeded enum singleton for class.name. It does not
-// lock: every caller must already hold vm.mu for reading — the write lock from
-// newNetworkInfoLocked's *Locked callers, or a read lock from
-// dispatchConnectivity's getState/getDetailedState. Taking RLock here while a
-// caller holds the write side would self-deadlock.
+// lock: callers must already hold vm.mu; taking RLock here would self-deadlock.
 func (vm *VM) enumField(class, name string) C.jobject {
 	cls := vm.classes[class]
 	if cls == nil || cls.obj == nil {
@@ -320,15 +309,11 @@ func connectivityIdentity(class, name, sig string) bool {
 		"android/net/NetworkCapabilities":
 		return true
 	}
-	// Context.getSystemService(Class) is answered here so the Class overload
-	// is not lost when the receiver is an Activity rather than a net type.
 	return name == "getSystemService" && sig == "(Ljava/lang/Class;)Ljava/lang/Object;"
 }
 
-// dispatchConnectivity is reached from the family chain in resolveDispatch,
-// whose callers (GoJNI_CallA, callDispatchOrStubEnv, VM.dispatch) never hold
-// vm.mu. Shared Object.field reads therefore copy under vm.mu.RLock; new
-// objects are built and mutated with vm.mu held.
+// dispatchConnectivity's callers never hold vm.mu. Shared field reads copy
+// under vm.mu.RLock; new objects are built and mutated with vm.mu held.
 func (vm *VM) dispatchConnectivity(o *Object, class, name, sig string, args *C.jvalue) (C.jobject, bool) {
 	if !connectivityIdentity(class, name, sig) {
 		return jnull(), false

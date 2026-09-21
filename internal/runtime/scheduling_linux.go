@@ -31,16 +31,11 @@ type schedulingCapabilityData struct {
 	inheritable uint32
 }
 
-// initializeAndroidAppScheduling establishes the ordinary Android app's
-// real-time privilege limit in this client process. Call before guest loading
-// or any guest thread creation; concurrent scheduler/capability changes are
-// outside this startup contract. The hard-limit reduction lasts until exit.
-//
-// AOSP bionic pthread.h documents that ordinary apps cannot promote themselves
-// to a real-time policy. Using the real resource limit preserves libc/kernel
-// validation and EPERM, without changing nice, affinity, or priority queries.
-// Existing real-time threads and CAP_SYS_NICE would bypass this boundary, so
-// incompatible startup is reported before changing the limit.
+// initializeAndroidAppScheduling reduces the real-time privilege limit to the
+// ordinary Android app's; the reduction lasts until exit. Call before guest
+// loading or any guest thread creation. Pre-existing real-time threads or
+// CAP_SYS_NICE would bypass this boundary, so incompatible startup is reported
+// first.
 func initializeAndroidAppScheduling() error {
 	if err := checkAndroidAppSchedulingThreads(); err != nil {
 		return fmt.Errorf("initialize Android app scheduling: %w", err)

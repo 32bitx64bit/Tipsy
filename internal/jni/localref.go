@@ -17,10 +17,9 @@ import (
 	"unsafe"
 )
 
-// localFrame is one JNI local-reference frame. refs maps object id → count
-// of local refs in this frame. Field-held IDs without a remaining global or
-// local ref can dangle after DeleteLocalRef / PopLocalFrame; that matches
-// real JNI. This VM does not scan Object.fields (no GC).
+// localFrame is one JNI local-reference frame; refs maps object id to the count
+// of local refs in this frame. Field-held IDs with no remaining ref can dangle,
+// matching real JNI; this VM does not scan Object.fields.
 type localFrame struct {
 	refs map[int64]int
 }
@@ -200,9 +199,8 @@ func (vm *VM) unpinHeapLocked(id int64) {
 	vm.maybeReclaimLocked(id)
 }
 
-// replaceHeapEdgeLocked updates a holder→target heap edge. oldID/newID are
-// jobject identities previously pinned from this holder, never primitive
-// int64 field values such as networkHandle.
+// replaceHeapEdgeLocked updates a holder-to-target heap edge. oldID/newID are
+// jobject identities pinned from this holder, never primitive int64 field values.
 func (vm *VM) replaceHeapEdgeLocked(holder *Object, oldID, newID int64) {
 	if vm == nil || holder == nil {
 		return
@@ -404,9 +402,8 @@ func (vm *VM) deleteGlobalRefLocked(id int64) {
 	if o == nil || o.immortal {
 		return
 	}
-	// A second DeleteGlobalRef for an already-deleted opaque handle is invalid
-	// JNI caller behavior. Keep that failure harmless here rather than
-	// underflowing another live reference's multiplicity.
+	// A second DeleteGlobalRef on an already-deleted handle is invalid JNI
+	// caller behavior; keep it harmless rather than underflowing a live reference.
 	if o.globalRefs <= 0 {
 		return
 	}

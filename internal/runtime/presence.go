@@ -31,18 +31,8 @@ func startDiscordPresence(ctx context.Context, load func(context.Context) (clien
 			return discord.Settings{Enabled: s.DiscordRichPresence, JoinButton: s.DiscordJoinButton}, nil
 		},
 	})
-	// Place-id sources, in the order the official client produces them:
-	//   1. launch URI seed (below);
-	//   2. JNI StartGameParams.placeId for website/protocol joins (ignores 0);
-	//   3. JNI NativeHelper.gameActivity_onGameLoaded(J)V — the engine's own
-	//      per-DataModel announcement. This is the only source that fires for
-	//      in-client Home → Play joins (no StartGameParams) and for leaving
-	//      back to Home (0). Live sessions show the matching FLog
-	//      `onGameLoaded: placeId:N` line is written to the Player log file
-	//      only and never crosses liblog, so the liblog observer below is a
-	//      secondary path, not the one that carries the transition.
-	// The 250 ms Player-log file follower is not started. logsDir remains on
-	// the signature so launch.go's call site is unchanged.
+	// Place-id sources in priority order: launch URI seed, JNI StartGameParams
+	// (nonzero), then the per-DataModel onGameLoaded announcement.
 	jni.SetPlaceIDListener(hub.SetPlaceID)
 	jni.SetGameLoadedListener(hub.SetLoadedPlaceID)
 	android.SetLogTextObserver(func(text string) {

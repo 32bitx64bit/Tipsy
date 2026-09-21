@@ -11,13 +11,9 @@ import (
 	"testing"
 )
 
-// Voice-chat Phase 6: capture rides the same Pulse/PipeWire server as
-// playback. Pin --socket=pulseaudio in the source manifest and in the
-// rendered release manifest (no flatpak needed, same render seam as
-// TestBuildFlatpakRendersManifestForBothModes / gamepad_test.go).
-//
-// Like the existing flatpak tests, this relies on go test running with
-// the package directory as the working directory.
+// Capture rides the same Pulse/PipeWire server as playback. Pin
+// --socket=pulseaudio in the source manifest and in the rendered release
+// manifest (same render seam as TestBuildFlatpakRendersManifestForBothModes).
 func TestFlatpakManifestAllowsPulseCapture(t *testing.T) {
 	raw, err := os.ReadFile("io.github.tipsy_linux.Tipsy.yaml")
 	if err != nil {

@@ -14,16 +14,15 @@ import (
 	"github.com/tipsy-linux/tipsy/internal/clientsettings"
 )
 
-// fastFlagSettingsStore is deliberately separate from the ordinary Settings
-// model. Fast Flags are an explicit advanced override surface; opening or
-// cancelling this dialog must not modify the graphics/settings draft.
+// fastFlagSettingsStore is separate from the ordinary Settings model: opening
+// or cancelling this dialog must not modify the graphics/settings draft.
 type fastFlagSettingsStore interface {
 	LoadFastFlags(context.Context) ([]clientsettings.FastFlag, error)
 	SaveFastFlags(context.Context, []clientsettings.FastFlag) error
 }
 
 // ownerNotifyingService keeps the optional advanced-settings boundary visible
-// through the GUI's existing service wrapper without expanding guimodel.Service.
+// without expanding guimodel.Service.
 func (s ownerNotifyingService) LoadFastFlags(ctx context.Context) ([]clientsettings.FastFlag, error) {
 	store, ok := s.Service.(fastFlagSettingsStore)
 	if !ok {
@@ -40,9 +39,8 @@ func (s ownerNotifyingService) SaveFastFlags(ctx context.Context, flags []client
 	return store.SaveFastFlags(ctx, flags)
 }
 
-// LoadFastFlags and SaveFastFlags are thin presentation adapters. The shared
-// client-settings service owns validation, locking, atomic persistence, and
-// launch-time override policy.
+// LoadFastFlags and SaveFastFlags are thin presentation adapters; the shared
+// client-settings service owns validation, locking, and persistence.
 func (s *productionService) LoadFastFlags(ctx context.Context) ([]clientsettings.FastFlag, error) {
 	if s == nil || s.settings == nil {
 		return nil, errors.New("custom Fast Flag settings service is unavailable")
@@ -81,9 +79,8 @@ func (w *mainWindow) showFastFlagEditor() {
 	}
 	flags, err := store.LoadFastFlags(context.Background())
 	if err != nil {
-		// Do not echo a filesystem or validation error in a UI that contains
-		// user-entered settings. The backing service keeps the detailed local
-		// diagnostic; this surface needs only an actionable, content-free error.
+		// Do not echo a filesystem or validation error here; the backing
+		// service keeps the detailed local diagnostic.
 		qt.QMessageBox_Warning(w.win.QWidget, "Could not load custom Fast Flags", "Custom Fast Flags could not be loaded. Check that Tipsy's settings folder is writable, then try again.")
 		return
 	}
@@ -247,8 +244,8 @@ func prepareFastFlagsForSave(flags []clientsettings.FastFlag) ([]clientsettings.
 			return nil, errors.New("each Fast Flag name can appear only once")
 		}
 		seen[name] = struct{}{}
-		// Values remain byte-for-byte as entered. This is important for string
-		// flags; the shared service validates their printable, bounded shape.
+		// Values stay byte-for-byte as entered; the shared service validates
+		// their printable, bounded shape.
 		prepared = append(prepared, clientsettings.FastFlag{Name: name, Value: flag.Value})
 	}
 	return prepared, nil
@@ -295,8 +292,8 @@ func (editor *fastFlagEditor) confirmSave() {
 		return
 	}
 	if editor.save == nil || editor.save(context.Background(), flags) != nil {
-		// Save failures can include paths and implementation details. Keep user
-		// input opaque on this surface while preserving the entries for retry.
+		// Save failures can include paths and implementation details; keep this
+		// surface opaque while preserving the entries for retry.
 		editor.notice.SetText("Could not save custom Fast Flags. Review the entries and check that Tipsy's settings folder is writable, then try again.")
 		setObjectName(editor.notice.QObject, "noticeError")
 		refreshStyle(editor.notice.QWidget)

@@ -10,9 +10,8 @@ import (
 	"testing"
 )
 
-// The tests drive callDispatchOrStub — the exact production path
-// GoJNI_CallA uses — per the stubdispatch_test.go convention. The name
-// argument is a real jstring packed with the production packJobject helper.
+// The tests drive callDispatchOrStub — the production path GoJNI_CallA uses.
+// The name argument is a real jstring packed with the packJobject helper.
 
 const findClassSig = "(Ljava/lang/String;)Ljava/lang/Class;"
 

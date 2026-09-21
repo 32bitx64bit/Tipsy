@@ -47,8 +47,8 @@ func (e *Env) NewStringUTF(s string) uintptr {
 	return uintptr(str)
 }
 
-// NewString stores s on a java/lang/String without a cgo CString copy.
-// Use this for large payloads (client-settings JSON).
+// NewString stores s on a java/lang/String without a cgo CString copy. Use
+// this for large payloads.
 func (e *Env) NewString(s string) uintptr {
 	if e == nil || e.vm == nil {
 		return 0
@@ -59,10 +59,9 @@ func (e *Env) NewString(s string) uintptr {
 	return uintptr(idToJobject(o.id))
 }
 
-// DeleteLocalRef drops a JNI local created by this Env. NULL env or NULL
-// jobject is a no-op. Immortal objects and global refs stay alive, matching
-// JNI. Inverted-JNI callers (Tipsy calling Roblox natives) must release
-// NewString locals the Java caller would drop when the native method returns.
+// DeleteLocalRef drops a JNI local created by this Env. NULL env or jobject
+// is a no-op. Immortal objects and global refs stay alive, matching JNI.
+// Inverted-JNI callers must release NewString locals the Java caller would drop.
 func (e *Env) DeleteLocalRef(obj uintptr) {
 	if e == nil || e.vm == nil || obj == 0 {
 		return
@@ -167,8 +166,8 @@ func (e *Env) PutField(obj uintptr, name string, val any) {
 	}
 }
 
-// BoolField reads a boolean field previously stored on a Tipsy jobject
-// (PutField). Missing objects or fields read false.
+// BoolField reads a boolean field stored on a Tipsy jobject (PutField).
+// Missing objects or fields read false.
 func (e *Env) BoolField(obj uintptr, name string) bool {
 	if e == nil || e.vm == nil || obj == 0 {
 		return false

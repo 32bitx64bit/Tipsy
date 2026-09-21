@@ -93,9 +93,9 @@ func BindEGL(x *x11.Window) (*EGL, error) {
 	return e, nil
 }
 
-// Swap presents the current back buffer on the calling thread (EGL owner).
-// This is for Tipsy's own pre-client frames only: once the Roblox RenderJob
-// presents, it is the sole presenter on the XID and must not be fought.
+// Swap presents the current back buffer on the calling thread (EGL owner), for
+// Tipsy's own frames only; once the client RenderJob presents it is the sole
+// presenter on the XID and must not be fought.
 func (e *EGL) Swap() error {
 	if e == nil {
 		return ErrClosed
@@ -133,9 +133,9 @@ func (e *EGL) ReleaseCurrent() error {
 	return nil
 }
 
-// StartSwapThread presents one sentinel frame on a C pthread, then yields
-// the window: it never presents again and retires permanently on the first
-// client-presented frame, so the Roblox RenderJob is the sole presenter.
+// StartSwapThread presents one sentinel frame on a C pthread, then yields the
+// window: it never presents again and retires permanently on the first
+// client-presented frame.
 func (e *EGL) StartSwapThread() error {
 	if e == nil {
 		return ErrClosed
@@ -148,9 +148,8 @@ func (e *EGL) StartSwapThread() error {
 	if e.swap != 0 {
 		return nil
 	}
-	// The capacity-1 channel is registered before the C thread exists so a
-	// retirement that races the first probe cannot be lost. The C thread
-	// resolves this handle exactly once, on retirement.
+	// Register the capacity-1 channel before the C thread exists so a
+	// retirement that races the first probe cannot be lost.
 	wake := make(chan struct{}, 1)
 	handle := cgo.NewHandle(wake)
 	p := C.tipsy_egl_swap_thread_start(C.uintptr_t(e.x11Display), C.ulong(e.x11XID),
@@ -161,9 +160,8 @@ func (e *EGL) StartSwapThread() error {
 		return fmt.Errorf("graphics: swap thread")
 	}
 	e.swap = uintptr(p)
-	// Register before releasing e.mu or starting the watcher. The Android EGL
-	// shim can therefore bind its created guest surface to this exact XID before
-	// its first successful swap, while Stop unregisters before C join/free.
+	// Register before releasing e.mu or starting the watcher; Stop unregisters
+	// before C join/free.
 	e.swapGuest = eglGuestSwaps.register(e, e.x11XID)
 	e.swapWake = wake
 	e.swapHandle = uintptr(handle)
@@ -173,17 +171,13 @@ func (e *EGL) StartSwapThread() error {
 	return nil
 }
 
-// swapHandoffLogMessage is emitted exactly once per EGL instance when the C
-// sentinel swap thread retires on a client-presented frame.
+// swapHandoffLogMessage is emitted once per EGL instance when the C sentinel
+// swap thread retires on a client-presented frame.
 const swapHandoffLogMessage = "client presenter detected on window; Tipsy swap thread retired"
 
 // watchSwapHandoff turns the C sentinel thread's single retirement event into
-// the one handoff log. It parks on the C wake (or the stop signal) with no
-// timer and no polling; wake is the capacity-1 coalesced channel resolved by
-// GoEGLHandoff, and stop is closed by stopSwapThreadLocked after the C thread
-// is joined. It exits once the thread is stopped, the handoff is observed, or
-// the wake is no longer owned by this start (a restarted thread's watcher owns
-// e.swapWake).
+// the one handoff log. It exits on stop, on handoff, or when wake is no longer
+// owned by this start.
 func (e *EGL) watchSwapHandoff(wake <-chan struct{}, stop <-chan struct{}, done chan struct{}) {
 	defer close(done)
 	for {
@@ -217,8 +211,7 @@ func (e *EGL) watchSwapHandoff(wake <-chan struct{}, stop <-chan struct{}, done 
 }
 
 // SwapHandedOff reports whether the swap thread detected a client-presented
-// frame on the window and permanently stopped presenting. After handoff the
-// Roblox RenderJob is the only presenter on the XID.
+// frame and permanently stopped presenting.
 func (e *EGL) SwapHandedOff() bool {
 	if e == nil {
 		return false
@@ -245,9 +238,8 @@ func (e *EGL) swapHandoffStatsLocked() swapHandoffStats {
 }
 
 // guestSwapSurfaceCreated is called only by the generation-checking router.
-// Holding e.mu through the C condition update establishes the required
-// join-before-free lifetime: Stop holds the same mutex, unregisters, then
-// joins before a matching callback can reach the C allocation.
+// Holding e.mu through the C condition update gives the required
+// join-before-free lifetime: Stop holds e.mu, unregisters, then joins.
 func (e *EGL) guestSwapSurfaceCreated(delivery guestSwapDelivery) bool {
 	id := delivery.identity
 	if !id.valid() || delivery.registrationGeneration == 0 {
@@ -259,18 +251,15 @@ func (e *EGL) guestSwapSurfaceCreated(delivery guestSwapDelivery) bool {
 		e.swapGuest.generation != delivery.registrationGeneration {
 		return false
 	}
-	// A router callback can be delayed outside its mutex while the same target
-	// registration observes a newer lifetime using the same EGL handle. Never
-	// let the delayed callback replace that newer surface in EGL state.
+	// A delayed callback must not replace a newer surface in EGL state.
 	if e.swapGuestSurface.identity.valid() &&
 		e.swapGuestSurface.registrationGeneration == delivery.registrationGeneration &&
 		e.swapGuestSurface.identity.generation > id.generation {
 		return false
 	}
 	if C.tipsy_egl_swap_thread_set_guest_signal_available(C.uintptr_t(e.swap), 1) == 0 {
-		// A verified guest swap has already retired the sentinel. Retain later
-		// surface lifecycle identity for replacement/destroy ordering, but do
-		// not revive C handoff work or accept another swap callback.
+		// The sentinel already retired: keep surface lifecycle identity, but
+		// never revive C handoff work or accept another swap callback.
 		if !e.swapHandoffStatsLocked().Retired {
 			return false
 		}
@@ -299,8 +288,7 @@ func (e *EGL) guestSwapSurfaceDestroyed(delivery guestSwapDelivery) {
 		return
 	}
 	e.swapGuestSurface = guestSwapDelivery{}
-	// The next surface may be registered later. Until then the C fallback is
-	// still bounded by its fixed probe limit and can be interrupted by Stop.
+	// The C fallback stays bounded by its probe limit until Stop interrupts it.
 	_ = C.tipsy_egl_swap_thread_set_guest_signal_available(C.uintptr_t(e.swap), 0)
 }
 
@@ -318,17 +306,15 @@ func (e *EGL) stopSwapThreadLocked() error {
 	if e.swap == 0 {
 		return nil
 	}
-	// Remove callback reachability before asking C to stop. A callback that
-	// already obtained a router snapshot blocks on e.mu and sees swap cleared
-	// after join; a later callback has no registration to resolve at all.
+	// Remove callback reachability before asking C to stop: a callback holding
+	// a router snapshot then finds no registration to resolve.
 	eglGuestSwaps.unregister(e.swapGuest)
 	e.swapGuest = nil
 	e.swapGuestSurface = guestSwapDelivery{}
 	fail := C.tipsy_egl_swap_thread_stop(C.uintptr_t(e.swap))
 	e.swap = 0
-	// pthread_join above means the C thread can no longer call GoEGLHandoff,
-	// so the handle is safe to delete. Clearing swapWake makes the watcher's
-	// ownership check fail even if a token raced the stop.
+	// After pthread_join the C thread can no longer call GoEGLHandoff, so the
+	// handle is safe to delete; clearing swapWake fails the watcher's check.
 	if e.swapHandle != 0 {
 		cgo.Handle(e.swapHandle).Delete()
 		e.swapHandle = 0

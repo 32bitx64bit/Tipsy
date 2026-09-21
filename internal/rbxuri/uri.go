@@ -38,9 +38,8 @@ type Request struct {
 	hasWebsiteLaunch   bool
 }
 
-// StartGameParams.joinRequestType integers used by
-// nativeAppBridgeV2StartGameWithParam. These are the official Android JNI
-// AutoValue ordinals (place, follow-user, private server, specific instance).
+// StartGameParams.joinRequestType integers, in official Android JNI ordinal
+// order (place, follow-user, private server, specific instance).
 const (
 	JoinRequestPlace         int32 = 0
 	JoinRequestFollowUser    int32 = 1
@@ -123,10 +122,10 @@ func (r Request) IsPrivateServerShare() bool {
 	return r.ShareCode != "" && strings.EqualFold(r.ShareType, "Server")
 }
 
-// WebLoginURI is the string handed to JNIWebLoginProtocol. After a successful
-// Go redeem, that is the Android deep link (the ticket is one-shot and must
-// not be replayed). If redeem failed, the original roblox-player: URI is kept
-// so the official client can try the same ticket.
+// WebLoginURI is the string handed to the official web-login protocol. After a
+// successful Go redeem it is the Android deep link, because the ticket is
+// one-shot and must not be replayed; if redeem failed the original
+// roblox-player: URI is kept so the client can try the same ticket.
 func (r Request) WebLoginURI() string {
 	if r.HasTicket() && !r.TicketRedeemed && r.Scheme == "roblox-player" && r.Original != "" {
 		return r.Original
@@ -179,7 +178,7 @@ func (r Request) Summary() string {
 
 // JoinRequestType is the StartGameParams.joinRequestType for this launch.
 // Specific-server jobs and profile follows must not fall through to a
-// place-only RequestGame (ordinal 0): that matchmakes a random instance.
+// place-only RequestGame, which matchmakes a random instance.
 func (r Request) JoinRequestType() int32 {
 	if r.GameInstanceID != "" {
 		return JoinRequestGameInstance
@@ -431,7 +430,7 @@ func pathUnescape(value string) string {
 }
 
 // playerFieldKeys are the named roblox-player: fields. gameinfo values may
-// contain '+' (and must not be query-unescaped, which would turn '+' into space).
+// contain '+', so they must not be query-unescaped.
 var playerFieldKeys = map[string]struct{}{
 	"launchmode":               {},
 	"gameinfo":                 {},
@@ -534,7 +533,7 @@ func applyPlaceLauncherIdentity(req *Request) {
 }
 
 // instanceIDFromQuery returns a specific-server job id. Numeric gameId values
-// are universe/place identifiers, not job UUIDs, and must not be forwarded as
+// are place identifiers, not job UUIDs, and must not be forwarded as
 // StartGameParams.gameId.
 func instanceIDFromQuery(q url.Values) string {
 	if v := firstQuery(q, "gameinstanceid", "gameInstanceId", "jobid", "jobId"); v != "" {

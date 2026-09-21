@@ -62,8 +62,8 @@ func TestNewStringRejectsNegativeLength(t *testing.T) {
 	if _, err := NewVM(); err != nil {
 		t.Fatal(err)
 	}
-	// A negative jsize used to panic in make([]uint16, n) across the
-	// //export boundary; the invalid request must return NULL instead.
+	// A negative jsize must return NULL instead of panicking in make([]uint16,
+	// n) across the //export boundary.
 	if s := uintptr(GoJNI_NewString(nil, nil, -1)); s != 0 {
 		t.Fatalf("NewString(len=-1) = %#x, want NULL", s)
 	}
@@ -146,7 +146,7 @@ func TestArrayRegionRejectsNegativeLength(t *testing.T) {
 	arrHandle := jarrayOf(idToJobject(arr))
 	var buf [4]byte
 
-	// Negative length used to slip past the off+n check and panic in
+	// A negative length must not slip past the off+n check and panic in
 	// unsafe.Slice / the reverse slice expression.
 	GoJNI_GetArrayRegion(nil, arrHandle, 0, -1, unsafe.Pointer(&buf[0]), 'B')
 	GoJNI_SetArrayRegion(nil, arrHandle, 0, -1, unsafe.Pointer(&buf[0]), 'B')

@@ -8,9 +8,8 @@ import (
 	"testing"
 )
 
-// fakeGuestSwapTarget is the controlled, content-free seam for the Android
-// bridge contract. It captures only window/display/surface/generation and the
-// callback order; it never creates an EGL context or simulates client pixels.
+// fakeGuestSwapTarget is the controlled seam for the Android bridge contract.
+// It captures only window/display/surface/generation and the callback order.
 type fakeGuestSwapTarget struct {
 	mu       sync.Mutex
 	current  guestSwapIdentity

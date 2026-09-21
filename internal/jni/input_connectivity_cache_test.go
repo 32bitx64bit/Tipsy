@@ -11,10 +11,9 @@ import (
 	"time"
 )
 
-// TestHostNetworkDetectionIsTTLCached pins the connectivity cache contract:
-// repeated ConnectivityManager/Network queries within the TTL share one
-// interface scan, a changed host state is visible once the TTL expires, and
-// the cached value is never invented (it always mirrors the last real probe).
+// TestHostNetworkDetectionIsTTLCached pins the cache contract: repeated queries
+// within the TTL share one interface scan, a changed host state is visible once
+// the TTL expires, and the cached value always mirrors the last real probe.
 func TestHostNetworkDetectionIsTTLCached(t *testing.T) {
 	orig := probeHostNetworkFn
 	t.Cleanup(func() {
@@ -43,8 +42,8 @@ func TestHostNetworkDetectionIsTTLCached(t *testing.T) {
 		t.Fatalf("probe calls = %d, want 1 within TTL", got)
 	}
 
-	// Expire the cache without sleeping the TTL: a real network change must
-	// be observable after the TTL, never sticky.
+	// Expire the cache without sleeping the TTL: a real network change must be
+	// observable once the TTL passes.
 	hostNetworkCache.mu.Lock()
 	hostNetworkCache.checked = time.Now().Add(-hostNetworkTTL - time.Second)
 	hostNetworkCache.mu.Unlock()

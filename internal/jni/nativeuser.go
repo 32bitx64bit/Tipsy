@@ -20,19 +20,18 @@ import (
 	"github.com/tipsy-linux/tipsy/internal/logging"
 )
 
-// nativeUserClass is the engine's Java user-snapshot surface.
-// Official Android getPlatformName is ""; Computer-only Playable Devices
-// need Enum.Platform.Windows (owner-licensed spoof). Other NativeUser
-// getters return the DID_LOG_IN snapshot from
-// NativeHelper.gameActivity_onDidLogInReceived, or honest zeros before that
-// callback supplies a JSON object.
+// nativeUserClass is the engine's Java user-snapshot surface. Official Android
+// getPlatformName is ""; Computer-only Playable Devices need
+// Enum.Platform.Windows (owner-licensed spoof). Other NativeUser getters return
+// the DID_LOG_IN snapshot from NativeHelper.gameActivity_onDidLogInReceived, or
+// zero values before that callback supplies a JSON object.
 const nativeUserClass = "com/roblox/engine/jni/user/NativeUserJavaInterface"
 
 const nativeUserPlatformName = "Windows"
 
-// nativeUserSnapshot is the process-wide Java user identity the engine
-// already logged as DID_LOG_IN. Only official JSON fields are stored.
-// Nothing here is logged except the allowed aggregate in applyNativeUserLoginJSON.
+// nativeUserSnapshot is the process-wide Java user identity the engine already
+// logged as DID_LOG_IN. Only official JSON fields are stored. Nothing here is
+// logged except the allowed aggregate in applyNativeUserLoginJSON.
 type nativeUserSnapshot struct {
 	UserID                int64
 	HasUserID             bool
@@ -64,8 +63,8 @@ func nativeUserSnapshotCopy() nativeUserSnapshot {
 	return snap
 }
 
-// NativeUserTheme is the DID_LOG_IN theme string for host WebView chrome.
-// Empty before login or when the official JSON omitted it.
+// NativeUserTheme is the DID_LOG_IN theme string for host WebView chrome. Empty
+// before login or when the official JSON omitted it.
 func NativeUserTheme() string {
 	return nativeUserSnapshotCopy().Theme
 }
@@ -139,9 +138,9 @@ func jsonRawString(raw map[string]json.RawMessage, key string) (string, bool) {
 	return s, true
 }
 
-// parseNativeUserLoginJSON reads one official DID_LOG_IN object. Unknown
-// keys are ignored. Empty or malformed input returns ok=false so the
-// process-wide snapshot stays unchanged. The payload itself is never logged.
+// parseNativeUserLoginJSON reads one official DID_LOG_IN object. Unknown keys
+// are ignored. Empty or malformed input returns ok=false so the process-wide
+// snapshot stays unchanged. The payload itself is never logged.
 func parseNativeUserLoginJSON(payload string) (nativeUserSnapshot, bool) {
 	var raw map[string]json.RawMessage
 	if err := json.Unmarshal([]byte(payload), &raw); err != nil || raw == nil {
@@ -188,10 +187,9 @@ func parseNativeUserLoginJSON(payload string) (nativeUserSnapshot, bool) {
 	return snap, true
 }
 
-// applyNativeUserLoginJSON stores a process-wide NativeUser snapshot from
-// the official gameActivity_onDidLogInReceived JSON. Malformed or empty
-// payloads leave the snapshot unchanged. The raw JSON, names, and ids are
-// never logged.
+// applyNativeUserLoginJSON stores a process-wide NativeUser snapshot from the
+// official gameActivity_onDidLogInReceived JSON. Malformed or empty payloads
+// leave the snapshot unchanged. The raw JSON, names, and ids are never logged.
 func applyNativeUserLoginJSON(payload string) {
 	snap, ok := parseNativeUserLoginJSON(payload)
 	if !ok {
@@ -204,9 +202,8 @@ func applyNativeUserLoginJSON(payload string) {
 		"membershipType", snap.MembershipType)
 }
 
-// ResetNativeUserForTest clears the DID_LOG_IN snapshot and interned
-// getter strings to the pre-login state. Test seam: production snapshots
-// are engine statements and are never cleared.
+// ResetNativeUserForTest clears the DID_LOG_IN snapshot and interned getter
+// strings to the pre-login state. Test seam.
 func ResetNativeUserForTest() {
 	storeNativeUserSnapshot(nativeUserSnapshot{})
 	immortalNativeUserPlatform = nil

@@ -48,11 +48,10 @@ func TestStartGameParamsPlaceIDNotifiesListener(t *testing.T) {
 	}
 }
 
-// TestGameLoadedPlaceIDNotifiesListener drives the production
-// dispatchNativeHelper path for gameActivity_onGameLoaded(J)V and proves the
-// engine-provided place id reaches SetGameLoadedListener verbatim — including
-// 0, which is the client's own "back to Home" statement and must not be
-// filtered the way an empty StartGameParams is.
+// TestGameLoadedPlaceIDNotifiesListener drives the dispatchNativeHelper path
+// for gameActivity_onGameLoaded(J)V and proves the place id reaches
+// SetGameLoadedListener verbatim, including 0 (back to Home), which is not
+// filtered like an empty StartGameParams.
 func TestGameLoadedPlaceIDNotifiesListener(t *testing.T) {
 	t.Cleanup(func() { SetGameLoadedListener(nil) })
 	var (
@@ -74,7 +73,7 @@ func TestGameLoadedPlaceIDNotifiesListener(t *testing.T) {
 	vm.mu.Unlock()
 	recv := idToJobject(h.id)
 
-	// Live Home → Play → Home → Play sequence (2026-09-06 launch log).
+	// Live Home → Play → Home → Play sequence.
 	for i, want := range []int64{0, 18667984660, 0, 8735521924} {
 		if _, handled := vm.dispatch(recv, nativeHelperClass, "gameActivity_onGameLoaded", "(J)V", packJlong(want)); !handled {
 			t.Fatalf("step %d: gameActivity_onGameLoaded not handled", i)
@@ -87,9 +86,8 @@ func TestGameLoadedPlaceIDNotifiesListener(t *testing.T) {
 		t.Fatalf("listener calls=%d, want 4", calls.Load())
 	}
 
-	// Lookalike identities are not NativeHelper's contract and must not
-	// notify: another class, another signature, and the sibling
-	// NativeGLJavaInterface.gameLoadedCallback capture path.
+	// Lookalike identities must not notify: another class, another signature,
+	// and the sibling NativeGLJavaInterface.gameLoadedCallback capture path.
 	before := calls.Load()
 	_, _ = vm.dispatch(recv, "com/roblox/client/startup/NotNativeHelper", "gameActivity_onGameLoaded", "(J)V", packJlong(5))
 	_, _ = vm.dispatch(recv, nativeHelperClass, "gameActivity_onGameLoaded", "(JI)V", packJlong(5))

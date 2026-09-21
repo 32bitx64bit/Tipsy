@@ -60,8 +60,8 @@ const (
 	BtnDpadLeft  = 0x222
 	BtnDpadRight = 0x223
 
-	// Bluetooth Xbox-compatible pads (GuliKit XW, some xpadneo nodes)
-	// advertise Menu/View as keyboard keys instead of BTN_START/SELECT.
+	// Bluetooth Xbox-compatible pads advertise Menu/View as keyboard keys
+	// instead of BTN_START/SELECT.
 	KeyMenu = 139 // KEY_MENU
 	KeyBack = 158 // KEY_BACK
 

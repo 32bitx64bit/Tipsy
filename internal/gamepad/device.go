@@ -21,9 +21,7 @@ import (
 // InputNodeDir is the default evdev directory.
 const InputNodeDir = "/dev/input"
 
-// MaxGamepads caps simultaneous pads (lean single-pad build, 2026-09-12).
-//
-// Deterministic assignment (documented, tested): the lowest-sorted
+// MaxGamepads caps simultaneous pads: the lowest-sorted
 // /dev/input/event* gamepad is player 1 (device id 1) and keeps it until it
 // disconnects. A second simultaneous pad is ignored honestly (logged once,
 // never delivered, never faked); unplug the first pad to use the second.
@@ -38,7 +36,7 @@ var (
 	ErrPermissionDenied = errors.New("gamepad: permission denied on /dev/input/event* (add user to input group and relogin; Flatpak needs --device=all)")
 )
 
-// PermissionHint is the actionable EACCES guidance (plan §§4/7).
+// PermissionHint is the actionable EACCES guidance.
 const PermissionHint = "add user to input group and relogin; Flatpak needs --device=all"
 
 // ErrorForErrno maps an open failure to its honest error: EACCES becomes
@@ -140,7 +138,6 @@ func Scan(dir string) (ScanResult, error) {
 				res.Denied = append(res.Denied, node)
 				continue
 			}
-			// Honest skip: vanished node, non-evdev, etc.
 			continue
 		}
 		if !IsGamepadKeyBits(info.keyBits) {
@@ -320,8 +317,8 @@ func ioctlGetAbs(fd int, code uint16) (AbsInfo, error) {
 	return AbsInfo{Value: raw[0], Minimum: raw[1], Maximum: raw[2], Fuzz: raw[3], Flat: raw[4], Resolution: raw[5]}, nil
 }
 
-// inputWatch owns one inotify fd. Its caller owns Close and is responsible for
-// serializing device reads, rescans, closes, and reopens. Drain is deliberately
+// inputWatch owns one inotify fd. Its caller owns Close and is responsible
+// for serializing device reads, rescans, closes, and reopens. Drain is
 // content-free: it only tells the caller that a directory reconciliation is
 // needed, never exposing an input event or filename.
 type inputWatch struct {
@@ -398,10 +395,6 @@ func (w *inputWatch) Drain() (changed, invalid bool, err error) {
 // that need recovery must provide it explicitly. Close stop to end the watch
 // goroutine. The callback must be quick and never block: it triggers
 // Manager.Rescan.
-//
-// Lives here (not hotplug.go) only because inotify needs x/sys/unix Linux
-// symbols while hotplug.go stays portable; the !linux twin in
-// device_stub.go reports honestly unavailable.
 func watchInputDir(dir string, stop <-chan struct{}, onEvent func()) error {
 	if dir == "" {
 		dir = InputNodeDir

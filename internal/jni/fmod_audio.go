@@ -29,36 +29,31 @@ const fmodAudioClass = "org/fmod/AudioDevice"
 
 // Host output figures answered to org/fmod/FMOD.getOutputSampleRate()I and
 // getOutputBlockSize()I (Android: AudioManager PROPERTY_OUTPUT_SAMPLE_RATE /
-// PROPERTY_OUTPUT_FRAMES_PER_BUFFER). PipeWire's shipped defaults
-// (default.clock.rate / default.clock.quantum); the OpenSL bridge opens the
-// Pulse endpoint at whatever rate the client then asks for.
+// PROPERTY_OUTPUT_FRAMES_PER_BUFFER), matching PipeWire's shipped defaults.
 const (
 	fmodHostOutputSampleRate  = 48000
 	fmodHostOutputBlockFrames = 1024
 )
 
-// TIPSY_FMOD_OUTPUT=audiotrack keeps FMOD on its Java AudioTrack output (the
-// path verified since §104) by answering "no low-latency output" to both
-// FMOD and PackageManager. Diagnostics only: AudioTrack has no recording, so
-// voice input is off in that mode. Anything else (default) describes the
-// host as it is.
+// TIPSY_FMOD_OUTPUT=audiotrack keeps FMOD on its Java AudioTrack output by
+// answering "no low-latency output" to both FMOD and PackageManager.
+// Diagnostics only: AudioTrack has no recording, so voice input is off in that
+// mode. Anything else (default) describes the host as it is.
 const fmodOutputEnv = "TIPSY_FMOD_OUTPUT"
 
 // hostAudioLowLatency reports whether Tipsy describes the host output as
-// low-latency (Android PackageManager FEATURE_AUDIO_LOW_LATENCY,
-// "android.hardware.audio.low_latency"). The host bridge is PipeWire with a
-// 1024-frame quantum; OpenSL players open Pulse with a 50 ms target; and the
-// WebRTC ADM parameters (§275) already assert low-latency output and input.
-// PackageManager and org/fmod/FMOD.supportsLowLatency must not disagree.
+// low-latency (Android PackageManager FEATURE_AUDIO_LOW_LATENCY). The host
+// bridge is PipeWire with a 1024-frame quantum. PackageManager and
+// org/fmod/FMOD.supportsLowLatency must not disagree.
 func hostAudioLowLatency() bool {
 	return !strings.EqualFold(strings.TrimSpace(os.Getenv(fmodOutputEnv)), "audiotrack")
 }
 
-// fmodSupportsLowLatency mirrors org.fmod.FMOD.supportsLowLatency(): the
-// device declares FEATURE_AUDIO_LOW_LATENCY, the output block size is known
-// and at most 1024 frames, and no Bluetooth output (Tipsy tracks none).
-// FMOD's Android autodetect picks its OpenSL ES output when this is true and
-// AAudio is unavailable; otherwise AudioTrack, which has no recording.
+// fmodSupportsLowLatency mirrors org.fmod.FMOD.supportsLowLatency(): the device
+// declares FEATURE_AUDIO_LOW_LATENCY, the output block size is known and at
+// most 1024 frames, and no Bluetooth output. FMOD's Android autodetect picks
+// its OpenSL ES output when this is true and AAudio is unavailable; otherwise
+// AudioTrack, which has no recording.
 func fmodSupportsLowLatency() bool {
 	return hostAudioLowLatency() &&
 		fmodHostOutputBlockFrames > 0 && fmodHostOutputBlockFrames <= 1024
@@ -66,14 +61,9 @@ func fmodSupportsLowLatency() bool {
 
 // FmodInit plays the Java side of org.fmod.FMOD.init(Context): it stores the
 // application Context in the static gContext that checkInit()Z reads. The
-// official APK does this itself, natively unobservable, in
-// com.roblox.client.startup.NativeHelper (classes2.dex: NativeHelper.P
-// invoke-static org/fmod/FMOD.init(Context)) at startup; Tipsy runs no DEX,
-// so the call has to be made here at the same phase. FMOD's Android output
-// selection (run 282, 2026-09-12) is checkInit → supportsAAudio → …: with
-// checkInit false it never evaluates supportsLowLatency() (whose Java body
-// needs gContext) and settles on AudioTrack, which has no recording.
-// Returns false, with nothing stored, when the context is not a live VM
+// official APK does this itself in com.roblox.client.startup.NativeHelper at
+// startup; Tipsy runs no DEX, so the call has to be made here at the same
+// phase. Returns false, with nothing stored, when the context is not a live VM
 // object — no fake initialized state.
 func (vm *VM) FmodInit(contextObj uintptr) bool {
 	vm.mu.Lock()
@@ -125,7 +115,7 @@ type fmodAudioFormat struct {
 // The APK's AudioDevice.init arguments are channels, rate, DSP block frames,
 // and block count. AudioTrack is always streaming signed 16-bit PCM here.
 func fmodFormat(channels, rate, frames, blocks int32) (fmodAudioFormat, error) {
-	// The observed output is stereo. Surround needs an explicit Android to
+	// Only mono and stereo are supported; surround needs an explicit Android to
 	// Pulse channel map before it can be advertised as supported.
 	if (channels != 1 && channels != 2) ||
 		rate < 8000 || rate > 384000 || frames <= 0 || blocks <= 0 {
@@ -170,9 +160,9 @@ func (p *fmodPulsePlayback) write(data []byte) error {
 
 func (p *fmodPulsePlayback) close() { C.pa_simple_free(p.stream) }
 
-// The official Java AudioTrack.write blocks on FMOD's audio thread. Match
-// that backpressure; do not start an unbounded goroutine/PCM queue. The device
-// mutex serializes init/write/close without holding the VM mutex during I/O.
+// The official Java AudioTrack.write blocks on FMOD's audio thread. Match that
+// backpressure; do not start an unbounded goroutine/PCM queue. The device mutex
+// serializes init/write/close without holding the VM mutex during I/O.
 type fmodAudioDevice struct {
 	mu          sync.Mutex
 	format      fmodAudioFormat
@@ -266,9 +256,8 @@ func (vm *VM) fmodDevice(o *Object) *fmodAudioDevice {
 }
 
 func (vm *VM) dispatchFmodAudio(o *Object, class, name, sig string, args *C.jvalue) (C.jobject, bool) {
-	// These two predicates were called before the observed AudioDevice
-	// fallback. Keep the APK semantics: no invented initialized context or
-	// Android low-latency feature. The seeded SDK is 26, below AAudio's 27.
+	// No invented initialized context or Android low-latency feature. The
+	// seeded SDK is 26, below AAudio's 27.
 	if class == "org/fmod/FMOD" {
 		switch name + sig {
 		case "checkInit()Z":
@@ -283,19 +272,11 @@ func (vm *VM) dispatchFmodAudio(o *Object, class, name, sig string, args *C.jval
 			vm.mu.Unlock()
 			return fmodHelperBool(name, sdk >= 27), true
 		case "supportsLowLatency()Z":
-			// Live GetMethodID at experience start (2026-09-12 voice session).
-			// Run 281 (2026-09-12): with this false FMOD never dlopen'd
-			// libOpenSLES.so and opened its AudioTrack output, which has
-			// no recording — hence the empty record-driver list behind
-			// `RobloxAudioDevice::InitRecording No input audio format!`.
 			return fmodHelperBool(name, fmodSupportsLowLatency()), true
 		case "getOutputSampleRate()I":
 			// Java: AudioManager.getProperty(PROPERTY_OUTPUT_SAMPLE_RATE).
-			// FMOD's OpenSL/AAudio outputs size their device stream from
-			// these two helpers (Java returns 0 when unknown, which makes
-			// FMOD guess). The host figures are PipeWire's defaults
-			// (default.clock.rate 48000, default.clock.quantum 1024) and
-			// match the 48 kHz the AudioTrack path already observed.
+			// FMOD's OpenSL/AAudio outputs size their device stream from these
+			// two helpers; Java returns 0 when unknown, which makes FMOD guess.
 			logFmodHelper(name, fmodHostOutputSampleRate)
 			return idToJobject(fmodHostOutputSampleRate), true
 		case "getOutputBlockSize()I":

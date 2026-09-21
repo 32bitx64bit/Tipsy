@@ -10,9 +10,8 @@ const (
 	optionalLookupMaxRetry   = 30 * time.Second
 )
 
-// optionalLookup backs off only automatic, failure-prone diagnostic reads.
-// An explicit Refresh remains prompt, and a success immediately restores the
-// normal automatic path.
+// optionalLookup backs off only automatic, failure-prone diagnostic reads; an
+// explicit Refresh stays prompt and a success restores the automatic path.
 type optionalLookup struct {
 	failures   int
 	retryAfter time.Time

@@ -90,8 +90,8 @@ func ShowWebViewOverlay(p WebViewOpen) error {
 	assets := webViewOverlay.assets
 	webViewOverlay.Unlock()
 	_, _ = SetPointerLock(false)
-	// The GTK child owns its cursor. Changing the parent here leaks the host
-	// cursor into Roblox after Back and overrides a valid LeftAlt policy.
+	// The GTK child owns its cursor; changing the parent here leaks the host
+	// cursor into Roblox.
 
 	urlC := C.CString(p.URL)
 	defer C.free(unsafe.Pointer(urlC))
@@ -145,9 +145,9 @@ func ShowWebViewOverlay(p WebViewOpen) error {
 		secure = &secA[0]
 		httpOnly = &httpA[0]
 	}
-	// Publish presentation state while the open is queued. A fast local page
-	// may call back from GTK immediately after queuing; its dismissal must
-	// observe this presentation rather than race the visible assignment.
+	// Publish presentation state while the open is queued: a fast local page
+	// can call back from GTK immediately, and its dismissal must observe this
+	// presentation rather than race the visible assignment.
 	webViewOverlay.Lock()
 	rc := C.tipsy_webview_overlay_open(C.ulong(parent), C.int(width), C.int(height),
 		urlC, themeC, titleC, assetsC, names, values, domains, paths, secure, httpOnly, C.int(n))

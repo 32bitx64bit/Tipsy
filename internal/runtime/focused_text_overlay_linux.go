@@ -17,9 +17,8 @@ import (
 )
 
 const (
-	// focusedTextOverlayPollInterval is the retired always-on launch-loop
-	// period (62 Hz). The loop now uses a nil channel while no textbox is
-	// focused and focusedTextOverlayRepaint (4 Hz) only while one is.
+	// focusedTextOverlayPollInterval is a reference period, not the active loop
+	// rate.
 	focusedTextOverlayPollInterval = 16 * time.Millisecond
 	focusedTextOverlayRepaint      = 250 * time.Millisecond
 	rbxFallbackFontRatio           = float32(0.795)
@@ -72,8 +71,8 @@ type focusedTextFontContract struct {
 	letterSpacingEm float32
 }
 
-// focusedTextFontResolver mirrors RbxKeyboard's APK asset lookup. Its map and
-// paths contain style metadata only; editor content never enters it.
+// focusedTextFontResolver resolves font style metadata from APK assets; editor
+// content never enters its map or paths.
 type focusedTextFontResolver struct {
 	assetsDir string
 	mapped    map[int32]focusedTextFontContract
@@ -90,9 +89,8 @@ func newFocusedTextFontResolver(assetsDir string) focusedTextFontResolver {
 		return r
 	}
 	for _, record := range records {
-		// Font names are untrusted package data at this boundary. The official
-		// helper only resolves a leaf below content/fonts; never let a malformed
-		// mapping escape that asset directory.
+		// Font names are untrusted package data; a malformed mapping must not escape
+		// the content/fonts asset directory.
 		if record.Font == "" || filepath.Base(record.Font) != record.Font ||
 			!finitePositiveFloat32(record.FromRbxFontRatio) {
 			continue
@@ -100,9 +98,8 @@ func newFocusedTextFontResolver(assetsDir string) focusedTextFontResolver {
 		fontFile := filepath.Join(assetsDir, "content", "fonts", record.Font)
 		info, err := os.Lstat(fontFile)
 		if err != nil || !info.Mode().IsRegular() {
-			// RbxKeyboard uses the mapped contract only when Typeface loading
-			// succeeds. A missing/non-file asset is therefore a fallback, not a
-			// request for a similarly named host font.
+			// A missing or non-file asset is a fallback, never a similarly named
+			// host font.
 			continue
 		}
 		r.mapped[record.Enum] = focusedTextFontContract{
@@ -142,9 +139,8 @@ type focusedTextOverlaySink interface {
 	Update(x11.FocusedTextSnapshot) error
 }
 
-// focusedTextOverlaySync stores only content-free invalidation state. The
-// source's sensitive snapshot is requested solely when it will be painted and
-// falls out of scope immediately after sink.Update returns.
+// focusedTextOverlaySync stores only content-free invalidation state; the
+// sensitive snapshot is taken only to paint and dropped after sink.Update.
 type focusedTextOverlaySync struct {
 	sink       focusedTextOverlaySink
 	version    func() uint64
@@ -168,10 +164,8 @@ func (s *focusedTextOverlaySync) refresh(now time.Time) (bool, error) {
 	if s == nil || s.sink == nil || s.version == nil || s.snapshot == nil {
 		return false, nil
 	}
-	// The engine->Java property callback has already returned before Runtime
-	// reaches this loop. Complete the APK's UI-thread half now: call the named
-	// nativeGetTextBoxInfo export on dedicated Main, then consume the resulting
-	// version. JNI coalesces requests and rejects stale focus sessions.
+	// Refresh the textbox info, then read the resulting version. JNI coalesces
+	// requests and rejects stale focus sessions.
 	jni.RefreshRbxTextOverlayInfo()
 	version := s.version()
 	periodic := s.active && (s.lastRender.IsZero() || now.Sub(s.lastRender) >= focusedTextOverlayRepaint)
@@ -181,8 +175,7 @@ func (s *focusedTextOverlaySync) refresh(now time.Time) (bool, error) {
 	snapshot := s.snapshot()
 	text := snapshot.Text
 	if !snapshot.Active {
-		// The JNI contract already guarantees this; keep the compositor's
-		// inactive boundary fail-closed if a future source regresses.
+		// Keep the inactive boundary fail-closed in case a source regresses.
 		text = ""
 	}
 	font := s.fonts.resolve(snapshot.Font)
@@ -217,8 +210,8 @@ func (s *focusedTextOverlaySync) refresh(now time.Time) (bool, error) {
 		CursorVisible:      snapshot.CursorVisible,
 		IncludeFontPadding: snapshot.IncludeFontPadding,
 	}
-	// Consume the snapshot's own generation so a concurrent edit between the
-	// cheap version read and snapshot copy is never accidentally skipped.
+	// Track the snapshot's own generation so a concurrent edit between the version
+	// read and the snapshot copy is not skipped.
 	s.seen = snapshot.Version
 	s.active = snapshot.Active && snapshot.Configured
 	s.lastRender = now

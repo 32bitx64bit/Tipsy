@@ -13,15 +13,10 @@ import "C"
 import "runtime/cgo"
 
 // GoEGLHandoff is invoked once by the C sentinel swap thread when it finishes.
-// A verified guest swap normally retires it immediately. A host without the
-// Android guest-swap bridge can instead finish through the strictly bounded
-// readback fallback. The callback is an event, never a Go polling source.
-//
-// It must not block the C pthread, so the wake is a non-blocking token on the
-// instance's capacity-1 coalesced channel. The uintptr is a cgo.Handle for
-// that channel; StopSwapThread deletes the handle only after pthread_join, and
-// the C thread can only call this before returning, so Value can never see a
-// deleted handle.
+// It must not block the C pthread, so it only posts a non-blocking token on
+// the instance's capacity-1 coalesced channel. The uintptr is a cgo.Handle for
+// that channel; StopSwapThread deletes the handle only after pthread_join, so
+// Value can never see a deleted handle.
 //
 //export GoEGLHandoff
 func GoEGLHandoff(handle C.uintptr_t) {
@@ -50,13 +45,12 @@ func GoEGLGuestSurfaceCreated(window, display, surface C.uintptr_t) C.uint64_t {
 }
 
 // GoEGLGuestSwap accepts only a successful Android EGL swap whose complete
-// window/surface/generation identity belongs to the active sentinel. It wakes
-// the C thread through its mutex/condition, rather than sampling window pixels
-// or accessing Roblox memory. It returns 1 exactly once per accepted surface,
-// 0 for an unknown/stale or temporarily rejected surface, and -1 when that
-// exact live surface remains tracked but its target handoff is already done.
-// The Android bridge retains lifecycle tracking in the latter case while
-// stopping its recurring C-to-Go swap callbacks.
+// window/surface/generation identity belongs to the active sentinel. It
+// returns 1 exactly once per accepted surface, 0 for an unknown/stale or
+// temporarily rejected surface, and -1 when that exact live surface remains
+// tracked but its target handoff is already done. The Android bridge retains
+// lifecycle tracking in the latter case while stopping its recurring C-to-Go
+// swap callbacks.
 //
 //export GoEGLGuestSwap
 func GoEGLGuestSwap(window, display, surface C.uintptr_t, generation C.uint64_t) C.int {

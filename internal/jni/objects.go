@@ -21,13 +21,11 @@ type Object struct {
 	class *Class
 	str   string
 	// utf16 is present only when str cannot losslessly represent the Java
-	// String's UTF-16 code units (an unpaired surrogate). Ordinary strings
-	// continue to derive units when a JNI string operation needs them rather
-	// than retaining a second representation as a cache.
+	// String's UTF-16 code units (an unpaired surrogate); it is not a conversion cache.
 	utf16 *rawUTF16
-	// charsPin is a C.malloc UTF-16 buffer plus the existing NUL terminator.
+	// charsPin is a C.malloc UTF-16 buffer plus the existing NUL terminator;
 	// GetStringChars returns it with isCopy=JNI_FALSE. It is not a Go slice.
-	// Access only with atomic.LoadPointer / StorePointer / SwapPointer.
+	// Access only with atomic Load/Store/SwapPointer.
 	charsPin    unsafe.Pointer
 	fields      map[string]any
 	elems       []int64
@@ -86,9 +84,7 @@ func (vm *VM) newObjectLocked(cls *Class) *Object {
 
 func (vm *VM) newStringOn(env unsafe.Pointer, s string) *Object {
 	cls := vm.classes["java/lang/String"]
-	// Strings have their immutable payload in str. Keep fields nil until an
-	// actual field write needs one rather than paying for an empty map per
-	// short-lived JNI string local.
+	// Strings keep their immutable payload in str; fields stays nil until a write needs one.
 	o := &Object{id: vm.allocID(), class: cls, str: s}
 	vm.objects[o.id] = o
 	vm.addLocalOnLocked(env, o.id)

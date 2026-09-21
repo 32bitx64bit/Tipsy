@@ -13,8 +13,8 @@ import "C"
 
 import "unsafe"
 
-// testAudioWorkerThreadName spawns one real OpenSL stream worker and returns
-// the name it set on itself, or "" if it never became "tip.opensles".
+// testAudioWorkerThreadName spawns one OpenSL stream worker and returns the
+// name it set on itself, or "" if it never set one.
 func testAudioWorkerThreadName() string {
 	buf := make([]byte, 32)
 	if C.tipsy_test_audio_worker_thread_name((*C.char)(unsafe.Pointer(&buf[0])), C.size_t(len(buf))) != 0 {

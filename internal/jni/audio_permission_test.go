@@ -12,17 +12,16 @@ import (
 	"testing"
 )
 
-// isolateMicrophoneConfigHome points config.Paths() at an empty XDG tree
-// so tests never read the developer's real config.json. Missing file is
-// defaults (enabled).
+// isolateMicrophoneConfigHome points config.Paths() at an empty XDG tree so
+// tests never read the developer's real config.json. Missing file is defaults
+// (enabled).
 func isolateMicrophoneConfigHome(t *testing.T) {
 	t.Helper()
 	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
 }
 
-// writeMicrophoneConfigFile plants one settings file with a microphone
-// section under an isolated XDG_CONFIG_HOME. Production resolves the same path
-// via internal/config; tests must never touch the real home.
+// writeMicrophoneConfigFile plants one settings file with a microphone section
+// under an isolated XDG_CONFIG_HOME. Tests must never touch the real home.
 func writeMicrophoneConfigFile(t *testing.T, body string) {
 	t.Helper()
 	dir := filepath.Join(t.TempDir(), "tipsy")

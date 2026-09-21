@@ -242,9 +242,8 @@ func TestOpenFDRejectsClosedOrReusedSourceDescriptor(t *testing.T) {
 	if err := descriptor.File.File.Close(); err != nil {
 		t.Fatal(err)
 	}
-	// Opening another file commonly reuses the numeric descriptor. The os.File
-	// state still marks the authenticated authority closed, so reuse cannot
-	// redirect Dup to an unrelated file.
+	// Opening another file commonly reuses the numeric descriptor, which must
+	// not redirect Dup to an unrelated file.
 	replacement, err := os.Open("/dev/null")
 	if err != nil {
 		t.Fatal(err)

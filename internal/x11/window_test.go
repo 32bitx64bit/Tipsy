@@ -157,9 +157,8 @@ func TestRobloxWindowBrandingProperties(t *testing.T) {
 }
 
 // TestRobloxWindowMinimumGeometry applies the floor at the actual X11
-// boundary. WM_NORMAL_HINTS is the protocol consulted by the window manager
-// for the user's title-bar drag. The valid resize storm confirms the hint does
-// not turn this production window into a fixed-size one.
+// boundary via WM_NORMAL_HINTS, the protocol the window manager consults for
+// the user's title-bar drag.
 func TestRobloxWindowMinimumGeometry(t *testing.T) {
 	ensureDisplay(t)
 	requireProbe(t)
@@ -324,7 +323,6 @@ func TestOpenPumpClose(t *testing.T) {
 		t.Fatalf("Pump: %v", err)
 	}
 
-	// Idempotent close is checked after defer Close via a second call below.
 	if err := w.Close(); err != nil {
 		t.Fatalf("first Close: %v", err)
 	}

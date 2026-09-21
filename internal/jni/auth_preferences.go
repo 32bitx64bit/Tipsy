@@ -21,9 +21,9 @@ import (
 const cookieProtocolClass = "com/roblox/universalapp/cookie/CookieProtocol"
 const cookieHandlerClass = cookieProtocolClass + "$OnSetCookieHandlerImpl"
 
-// Cookie persistence implements the Java side of the APK's CookieProtocol.
-// The payload is handled only by this transport and its private serializer;
-// diagnostic messages contain fixed identities and success/failure only.
+// Cookie persistence implements the Java side of CookieProtocol. The payload
+// stays within this transport and its private serializer; diagnostics carry
+// fixed identities and success/failure only.
 var authCookies struct {
 	sync.Mutex
 	vm         *VM
@@ -32,8 +32,8 @@ var authCookies struct {
 	registered bool
 }
 
-// ImportAuthSetCookies writes official HTTPS Set-Cookie headers into the
-// private cookie store before native restore. It never logs header values.
+// ImportAuthSetCookies writes HTTPS Set-Cookie headers into the private cookie
+// store before native restore. It never logs header values.
 func ImportAuthSetCookies(path, baseURL, origin string, headers []string) error {
 	store, err := openAuthCookieStore(path, baseURL)
 	if err != nil {
@@ -46,8 +46,8 @@ func ImportAuthSetCookies(path, baseURL, origin string, headers []string) error 
 }
 
 // ConfigureAuthCookies opens the private cookie store before native startup.
-// It never invents an authenticated value. The registered official callback is
-// the only writer; RestoreAuthCookies returns only unexpired scoped cookies.
+// The registered callback is the only writer; RestoreAuthCookies returns only
+// unexpired scoped cookies.
 func (vm *VM) ConfigureAuthCookies(path, baseURL string) error {
 	store, err := openAuthCookieStore(path, baseURL)
 	if err != nil {
@@ -83,8 +83,8 @@ type AuthCookie struct {
 	Expires  time.Time
 }
 
-// CopyAuthCookiesForWebView returns a snapshot of unexpired cookies scoped
-// to the official origin. Values are for the overlay cookie manager only.
+// CopyAuthCookiesForWebView returns a snapshot of unexpired cookies scoped to
+// the origin, for the overlay cookie manager only.
 func CopyAuthCookiesForWebView() []AuthCookie {
 	authCookies.Lock()
 	defer authCookies.Unlock()
@@ -107,8 +107,6 @@ func CopyAuthCookiesForWebView() []AuthCookie {
 }
 
 // SetAuthCookieRegistration prepares the Java-owned CookieProtocol constructor.
-// Runtime completes it after the named native client-settings initialization;
-// Tipsy emulates that Java phase directly instead of running the async loader.
 func (vm *VM) SetAuthCookieRegistration(fn func()) {
 	authCookies.Lock()
 	defer authCookies.Unlock()
@@ -118,8 +116,7 @@ func (vm *VM) SetAuthCookieRegistration(fn func()) {
 }
 
 // CompleteAuthCookieInitialization runs once on Runtime's startup thread after
-// real client-settings initialization, never while a native worker waits for
-// the Main thread from inside a Java callback.
+// client-settings initialization, never from inside a Java callback.
 func (e *Env) CompleteAuthCookieInitialization() {
 	authCookies.Lock()
 	ready := e != nil && authCookies.vm == e.vm && !authCookies.registered && authCookies.register != nil
@@ -133,8 +130,8 @@ func (e *Env) CompleteAuthCookieInitialization() {
 	}
 }
 
-// StoreAuthCookies receives official Set-Cookie strings. It deliberately
-// returns fixed errors; neither native values nor filesystem names are logged.
+// StoreAuthCookies receives Set-Cookie strings. It returns fixed errors;
+// neither values nor filesystem names are logged.
 func (vm *VM) StoreAuthCookies(url string, cookies []string) error {
 	authCookies.Lock()
 	defer authCookies.Unlock()
@@ -189,8 +186,8 @@ func (vm *VM) dispatchAuthCookies(o *Object, class, name, sig string, args *C.jv
 	return jnull(), true
 }
 
-// JNI test harness uses the exact two-object callback ABI without native
-// client values; Go test files cannot import C.
+// testAuthCookieArgs builds the two-object callback ABI; Go test files cannot
+// import C.
 func testAuthCookieArgs(first, second int64) *C.jvalue {
 	args := make([]C.jvalue, 2)
 	jvalueSetL(&args[0], idToJobject(first))

@@ -11,10 +11,6 @@ import (
 	"unsafe"
 )
 
-// Synthetic-image layout for the read-only MouseBehavior authority. The
-// offsets mirror the live client (object +0xb00, behavior +0x88) but nothing
-// here is pinned to it: every constant is re-derived by the decoder from the
-// bytes these helpers lay down, which is exactly what the decode is for.
 const (
 	fakeGetterOff   = 0x1000
 	fakeAccessorOff = 0x2000
@@ -24,12 +20,11 @@ const (
 	fakeImageSize   = 0x8000
 )
 
-// fakeGetterShape is the getter body the decoder expects, as data.
 type fakeGetterShape struct {
-	index      uint32 // the getSingleton index in `mov $imm,%edi`
-	objOffset  uint32 // `mov disp32(%rbx),%rax`
-	enumOffset uint32 // `cmpl $imm8,disp32(%rax)`
-	locked     uint8  // the immediate the boolean compares against
+	index      uint32
+	objOffset  uint32
+	enumOffset uint32
+	locked     uint8
 }
 
 var fakeLiveShape = fakeGetterShape{
@@ -39,11 +34,7 @@ var fakeLiveShape = fakeGetterShape{
 	locked:     uint8(MouseBehaviorLockCenter),
 }
 
-// fakeEngineImage is one readable allocation standing in for the engine's
-// mapped .text and .bss. It is a real address in this process, so
-// engineReadable's /proc/self/maps guard accepts it exactly as it accepts the
-// live client's mappings, and every decode and fail-closed path is exercised
-// without a live engine.
+// fakeEngineImage is one readable allocation standing in for engine memory.
 type fakeEngineImage struct {
 	base unsafe.Pointer
 	mem  []byte
@@ -52,8 +43,7 @@ type fakeEngineImage struct {
 func newFakeEngineImage(t *testing.T) *fakeEngineImage {
 	t.Helper()
 	mem := make([]byte, fakeImageSize)
-	// img.mem holds the backing array for the life of the image, so the
-	// addresses img.addr returns stay valid and readable.
+	// img.mem holds the backing array for the image's life, keeping the addresses img.addr returns valid and readable.
 	return &fakeEngineImage{base: unsafe.Pointer(&mem[0]), mem: mem}
 }
 
@@ -101,45 +91,38 @@ func (img *fakeEngineImage) u32(addr uintptr) (uint32, bool) {
 	return binary.LittleEndian.Uint32(b), true
 }
 
-// writeGetter lays down the clang shape byte for byte.
 func (img *fakeEngineImage) writeGetter(s fakeGetterShape) {
 	g := img.mem[fakeGetterOff:]
-	g[0] = 0xBF // mov $imm32,%edi
+	g[0] = 0xBF
 	binary.LittleEndian.PutUint32(g[1:], s.index)
-	g[5] = 0xE8 // call rel32
+	g[5] = 0xE8
 	binary.LittleEndian.PutUint32(g[6:], uint32(int32(fakeAccessorOff-(fakeGetterOff+10))))
-	copy(g[10:], []byte{0x48, 0x8B, 0x83}) // mov disp32(%rbx),%rax
+	copy(g[10:], []byte{0x48, 0x8B, 0x83})
 	binary.LittleEndian.PutUint32(g[13:], s.objOffset)
-	copy(g[17:], []byte{0x83, 0xB8}) // cmpl $imm8,disp32(%rax)
+	copy(g[17:], []byte{0x83, 0xB8})
 	binary.LittleEndian.PutUint32(g[19:], s.enumOffset)
 	g[23] = s.locked
 }
 
-// writeAccessor lays down clang's `cmp/lea/lea/cmove` static pair.
 func (img *fakeEngineImage) writeAccessor(pivot uint8) {
 	a := img.mem[fakeAccessorOff:]
-	copy(a[0:], []byte{0x83, 0xFB, pivot}) // cmp $imm8,%ebx
-	copy(a[3:], []byte{0x48, 0x8D, 0x0D})  // lea A(%rip),%rcx
+	copy(a[0:], []byte{0x83, 0xFB, pivot})
+	copy(a[3:], []byte{0x48, 0x8D, 0x0D})
 	binary.LittleEndian.PutUint32(a[6:], uint32(int32(fakeSingletonA-(fakeAccessorOff+10))))
-	copy(a[10:], []byte{0x48, 0x8D, 0x05}) // lea B(%rip),%rax
+	copy(a[10:], []byte{0x48, 0x8D, 0x05})
 	binary.LittleEndian.PutUint32(a[13:], uint32(int32(fakeSingletonB-(fakeAccessorOff+17))))
-	copy(a[17:], []byte{0x48, 0x0F, 0x44, 0xC1}) // cmove %rcx,%rax
+	copy(a[17:], []byte{0x48, 0x0F, 0x44, 0xC1})
 }
 
-// setSingleton writes the object pointer the chosen static holds. The static
-// itself is a .bss slot, so the pointer lives at static + objOffset.
 func (img *fakeEngineImage) setSingleton(which int, obj uintptr) {
 	binary.LittleEndian.PutUint64(img.mem[which+int(fakeLiveShape.objOffset):], uint64(obj))
 }
 
-// setBehavior writes the MouseBehavior word inside the object.
 func (img *fakeEngineImage) setBehavior(value uint32) {
 	binary.LittleEndian.PutUint32(img.mem[fakeObjectOff+fakeLiveShape.enumOffset:], value)
 }
 
-// writeWildAccessor lays down the static-pair shape but points both statics
-// far outside the image, so the decoded singleton address is not inside any
-// readable mapping of this process.
+// writeWildAccessor points both statics far outside the image, so the decoded singleton address is not in any readable mapping.
 func (img *fakeEngineImage) writeWildAccessor(pivot uint8) {
 	a := img.mem[fakeAccessorOff:]
 	copy(a[0:], []byte{0x83, 0xFB, pivot})
@@ -150,8 +133,6 @@ func (img *fakeEngineImage) writeWildAccessor(pivot uint8) {
 	copy(a[17:], []byte{0x48, 0x0F, 0x44, 0xC1})
 }
 
-// useFakeEngineMemory substitutes the synthetic image for the live engine
-// memory for one test.
 func useFakeEngineMemory(t *testing.T, img *fakeEngineImage) {
 	t.Helper()
 	old := engineMem
@@ -159,10 +140,7 @@ func useFakeEngineMemory(t *testing.T, img *fakeEngineImage) {
 	t.Cleanup(func() { engineMem = old })
 }
 
-// wireFakeEngineTarget points the direct target's exported lock getter at the
-// synthetic image, which is the only symbol EngineMouseBehavior needs. Only
-// that address is ever dereferenced: no recording native is involved, so
-// RobloxMainWindowMouseLocked must not be called on this target.
+// wireFakeEngineTarget points the target's exported lock getter at the synthetic image; only that address is dereferenced, so RobloxMainWindowMouseLocked must not be called.
 func wireFakeEngineTarget(t *testing.T, img *fakeEngineImage) {
 	t.Helper()
 	installEngineMouseBehaviorProbe(t, EngineMouseBehavior)
@@ -177,8 +155,7 @@ func wireFakeEngineTarget(t *testing.T, img *fakeEngineImage) {
 	})
 }
 
-// buildLiveShape lays down the live client's measured shape and returns the
-// image ready for a decode.
+// buildLiveShape lays down the getter and accessor and returns the image ready for a decode.
 func buildLiveShape(t *testing.T, pivot uint8) *fakeEngineImage {
 	t.Helper()
 	img := newFakeEngineImage(t)
@@ -187,11 +164,7 @@ func buildLiveShape(t *testing.T, pivot uint8) *fakeEngineImage {
 	return img
 }
 
-// TestDecodeMouseBehaviorGetterBothSingletonBranches pins the accessor's
-// cmove: index == pivot selects A, anything else selects B. The live client
-// passes index 4 against pivot 3, so the second branch is the one that
-// matters, but both are part of the shape and a decoder that only ever
-// returned one of them would be guessing.
+// TestDecodeMouseBehaviorGetterBothSingletonBranches pins the accessor's cmove: index == pivot selects A, anything else selects B.
 func TestDecodeMouseBehaviorGetterBothSingletonBranches(t *testing.T) {
 	for _, tc := range []struct {
 		name  string
@@ -235,9 +208,7 @@ func TestDecodeMouseBehaviorGetterBothSingletonBranches(t *testing.T) {
 	}
 }
 
-// TestDecodeMouseBehaviorGetterFailsClosed pins every rejection. A decode
-// that guesses instead of failing would read the wrong field of the right
-// object and return plausible garbage, which is worse than no answer at all.
+// TestDecodeMouseBehaviorGetterFailsClosed pins every rejection: a decode that guesses would return plausible garbage, which is worse than no answer.
 func TestDecodeMouseBehaviorGetterFailsClosed(t *testing.T) {
 	cases := []struct {
 		name  string
@@ -264,9 +235,7 @@ func TestDecodeMouseBehaviorGetterFailsClosed(t *testing.T) {
 	}
 }
 
-// TestDecodeMouseBehaviorRejectsMissingInstructions pins the three "no
-// instruction found" failures: without them a body that merely resembles the
-// getter would decode into offsets that are not the getter's.
+// TestDecodeMouseBehaviorRejectsMissingInstructions pins the missing-instruction failures: without them a resembling body would decode into wrong offsets.
 func TestDecodeMouseBehaviorRejectsMissingInstructions(t *testing.T) {
 	t.Run("no singleton fetch", func(t *testing.T) {
 		img := newFakeEngineImage(t)
@@ -294,9 +263,7 @@ func TestDecodeMouseBehaviorRejectsMissingInstructions(t *testing.T) {
 	})
 }
 
-// TestDecodeSingletonAccessorRejectsUnknownShape pins the accessor half: the
-// two function-local statics are the whole reason index 4 needs no call and
-// no breakpoint, so a body that is not that shape must not be walked.
+// TestDecodeSingletonAccessorRejectsUnknownShape pins that a body which is not the static-pair shape must not be walked.
 func TestDecodeSingletonAccessorRejectsUnknownShape(t *testing.T) {
 	for _, tc := range []struct {
 		name string
@@ -320,14 +287,11 @@ func TestDecodeSingletonAccessorRejectsUnknownShape(t *testing.T) {
 	}
 }
 
-// TestDecodeMouseBehaviorRejectsUnreadableBodies pins the guard that keeps a
-// mis-decode from dereferencing a wild address: an unreadable body is a
-// decode error, never a crash.
+// TestDecodeMouseBehaviorRejectsUnreadableBodies pins that an unreadable body is a decode error, never a wild dereference or crash.
 func TestDecodeMouseBehaviorRejectsUnreadableBodies(t *testing.T) {
 	t.Run("getter body unreadable", func(t *testing.T) {
 		img := buildLiveShape(t, 3)
 		useFakeEngineMemory(t, img)
-		// An address outside the image has no readable bytes.
 		if _, err := decodeMouseBehavior(img.addr(fakeImageSize + 0x1000)); err == nil {
 			t.Fatal("decoded a getter body that is not readable")
 		}
@@ -335,8 +299,7 @@ func TestDecodeMouseBehaviorRejectsUnreadableBodies(t *testing.T) {
 	t.Run("accessor body unreadable", func(t *testing.T) {
 		img := newFakeEngineImage(t)
 		img.writeGetter(fakeLiveShape)
-		// Point the call at an address whose 0x60-byte window falls outside
-		// the image, so the getter decodes but the accessor cannot be read.
+		// Point the call outside the image so the getter decodes but the accessor cannot be read.
 		outside := int32(fakeImageSize + 0x800)
 		g := img.mem[fakeGetterOff:]
 		binary.LittleEndian.PutUint32(g[6:], uint32(outside-(fakeGetterOff+10)))
@@ -347,8 +310,7 @@ func TestDecodeMouseBehaviorRejectsUnreadableBodies(t *testing.T) {
 	})
 	t.Run("singleton slot outside a mapping", func(t *testing.T) {
 		img := buildLiveShape(t, 3)
-		// Point both statics far outside the image, so the decoded singleton
-		// address is not inside any readable mapping of this process.
+		// Point both statics far outside the image so the decoded singleton address is not in a readable mapping.
 		img.writeWildAccessor(3)
 		useFakeEngineMemory(t, img)
 		if _, err := decodeMouseBehavior(img.addr(fakeGetterOff)); err == nil {
@@ -357,8 +319,7 @@ func TestDecodeMouseBehaviorRejectsUnreadableBodies(t *testing.T) {
 	})
 }
 
-// TestEngineMouseBehaviorReadsTheEnumWord is the whole point of the
-// authority: the value the exported boolean cannot see.
+// TestEngineMouseBehaviorReadsTheEnumWord covers the value the exported boolean cannot see.
 func TestEngineMouseBehaviorReadsTheEnumWord(t *testing.T) {
 	for _, value := range []uint32{0, 1, 2} {
 		t.Run(MouseBehavior(value).String(), func(t *testing.T) {
@@ -382,9 +343,7 @@ func TestEngineMouseBehaviorReadsTheEnumWord(t *testing.T) {
 	}
 }
 
-// TestEngineMouseBehaviorNULLObjectIsUnavailable pins the pre-onGameLoaded
-// window: the object pointer appears about 0.2 s after the pointer lock
-// handshake, and a dead read must never be reported as Default.
+// TestEngineMouseBehaviorNULLObjectIsUnavailable pins that a NULL object read is unavailable, never reported as Default.
 func TestEngineMouseBehaviorNULLObjectIsUnavailable(t *testing.T) {
 	img := buildLiveShape(t, 3)
 	// setSingleton is deliberately not called: the static holds NULL.
@@ -403,9 +362,7 @@ func TestEngineMouseBehaviorNULLObjectIsUnavailable(t *testing.T) {
 	}
 }
 
-// TestEngineMouseBehaviorOutOfRangeDisablesAuthority pins fail-closed: a word
-// that is not an Enum.MouseBehavior value disables the read for the rest of
-// the process rather than being reinterpreted.
+// TestEngineMouseBehaviorOutOfRangeDisablesAuthority pins fail-closed: an out-of-range word disables the read rather than being reinterpreted.
 func TestEngineMouseBehaviorOutOfRangeDisablesAuthority(t *testing.T) {
 	img := buildLiveShape(t, 3)
 	img.setSingleton(fakeSingletonB, img.addr(fakeObjectOff))
@@ -426,10 +383,7 @@ func TestEngineMouseBehaviorOutOfRangeDisablesAuthority(t *testing.T) {
 	}
 }
 
-// TestEngineMouseBehaviorValidatorIsPolicedByTheExportedBoolean is the
-// exception's safety argument. The engine's own boolean is the reference:
-// agreement resets the counter, three consecutive disagreements disable the
-// authority, and one straddled transition is tolerated.
+// TestEngineMouseBehaviorValidatorIsPolicedByTheExportedBoolean pins the reference boolean: agreement resets the counter, three consecutive disagreements disable the authority, one straddled transition is tolerated.
 func TestEngineMouseBehaviorValidatorIsPolicedByTheExportedBoolean(t *testing.T) {
 	img := buildLiveShape(t, 3)
 	img.setSingleton(fakeSingletonB, img.addr(fakeObjectOff))
@@ -437,7 +391,6 @@ func TestEngineMouseBehaviorValidatorIsPolicedByTheExportedBoolean(t *testing.T)
 	useFakeEngineMemory(t, img)
 	wireFakeEngineTarget(t, img)
 
-	// 2 against a false getter is the measured Project 12 case: it agrees.
 	if !engineMouseBehaviorAgrees(MouseBehaviorLockCurrentPosition, false) {
 		t.Fatal("LockCurrentPosition disagreed with a false getter")
 	}
@@ -445,7 +398,6 @@ func TestEngineMouseBehaviorValidatorIsPolicedByTheExportedBoolean(t *testing.T)
 		t.Fatalf("mismatch=%d after agreement, want 0", n)
 	}
 
-	// A straddled transition is tolerated once, then twice.
 	for i := 1; i <= 2; i++ {
 		if engineMouseBehaviorAgrees(MouseBehaviorDefault, true) {
 			t.Fatalf("disagreement %d was reported as agreement", i)
@@ -457,7 +409,6 @@ func TestEngineMouseBehaviorValidatorIsPolicedByTheExportedBoolean(t *testing.T)
 			t.Fatalf("disagreement %d disabled the authority early", i)
 		}
 	}
-	// The third disables it.
 	if engineMouseBehaviorAgrees(MouseBehaviorDefault, true) {
 		t.Fatal("third disagreement was reported as agreement")
 	}
@@ -468,8 +419,6 @@ func TestEngineMouseBehaviorValidatorIsPolicedByTheExportedBoolean(t *testing.T)
 		t.Fatal("a disabled authority still reported itself authoritative")
 	}
 
-	// Agreement after a disable would be meaningless, and reset proves it:
-	// the counter, the seen latch and the disabled latch all clear.
 	resetEngineMouseBehavior()
 	if mouseBehaviorAuthority.disabled.Load() || mouseBehaviorAuthority.seen.Load() ||
 		mouseBehaviorAuthority.mismatch.Load() != 0 ||
@@ -481,10 +430,7 @@ func TestEngineMouseBehaviorValidatorIsPolicedByTheExportedBoolean(t *testing.T)
 	}
 }
 
-// TestEngineMouseBehaviorAgreementResetsTheCounter pins the other half: a
-// disagreement followed by an agreement must not count toward the limit, so a
-// session that straddles transitions often but never persistently never loses
-// the authority.
+// TestEngineMouseBehaviorAgreementResetsTheCounter pins that a disagreement followed by an agreement does not count toward the disable limit.
 func TestEngineMouseBehaviorAgreementResetsTheCounter(t *testing.T) {
 	for i := 0; i < 8; i++ {
 		if engineMouseBehaviorAgrees(MouseBehaviorDefault, true) {
@@ -503,9 +449,7 @@ func TestEngineMouseBehaviorAgreementResetsTheCounter(t *testing.T) {
 	resetEngineMouseBehavior()
 }
 
-// TestResetEngineMouseBehaviorClearsEveryLatch pins the teardown contract:
-// the decoded layout belongs to the image that is about to be unmapped, so a
-// re-wired target must decode against the bytes it actually has.
+// TestResetEngineMouseBehaviorClearsEveryLatch pins the teardown contract: a re-wired target must decode against the bytes it actually has.
 func TestResetEngineMouseBehaviorClearsEveryLatch(t *testing.T) {
 	img := buildLiveShape(t, 3)
 	img.setSingleton(fakeSingletonB, img.addr(fakeObjectOff))
@@ -525,8 +469,7 @@ func TestResetEngineMouseBehaviorClearsEveryLatch(t *testing.T) {
 	}
 }
 
-// TestEngineMouseBehaviorDisabledByDefaultFailsClosed pins the starting
-// state: an unwired process has no authority and must say so.
+// TestEngineMouseBehaviorDisabledByDefaultFailsClosed pins that an unwired process reports no authority.
 func TestEngineMouseBehaviorDisabledByDefaultFailsClosed(t *testing.T) {
 	resetEngineMouseBehavior()
 	if got, ok := EngineMouseBehavior(); ok || got != MouseBehaviorDefault {
@@ -537,9 +480,7 @@ func TestEngineMouseBehaviorDisabledByDefaultFailsClosed(t *testing.T) {
 	}
 }
 
-// TestEngineMouseBehaviorUnwiredTargetIsUnavailable pins the other fail-closed
-// entry: the exported getter address is the only anchor, so a zero one means
-// no decode at all.
+// TestEngineMouseBehaviorUnwiredTargetIsUnavailable pins that a zero getter address means no decode.
 func TestEngineMouseBehaviorUnwiredTargetIsUnavailable(t *testing.T) {
 	resetEngineMouseBehavior()
 	ClearRobloxDirectInputTarget()

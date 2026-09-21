@@ -111,8 +111,8 @@ func retainedAPKCandidates(storeRoot string, allowLegacyDevelopment bool) ([]str
 	if len(paths) != 0 || !allowLegacyDevelopment {
 		return paths, nil
 	}
-	// This is a one-way development migration source only. The selected files
-	// are cryptographically reverified and copied into a fresh generation;
+	// One-way development migration source only: the selected files are
+	// cryptographically reverified and copied into a fresh generation, so
 	// neither their path nor the legacy tree becomes launch authority.
 	legacyDir := filepath.Join(runtimeDir(), "apk")
 	paths, err = regularAPKFiles(legacyDir, false)

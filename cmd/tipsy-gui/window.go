@@ -319,13 +319,13 @@ func (w *mainWindow) selectPage(index int) {
 		w.runDoctor()
 	}
 	if index == 2 && w.integrationStatus != nil {
-		// Another install may have adopted or released the launcher since
-		// this window opened; re-read the desktop before showing the row.
+		// Another install may have adopted or released the launcher since this
+		// window opened; re-read the desktop before showing the row.
 		w.refreshIntegration()
 	}
 	if index == 2 && w.controllerPadRows != nil {
-		// Fresh pad enumeration each time Settings opens; observation
-		// only, no pad is opened for input.
+		// Fresh pad enumeration each time Settings opens; observation only,
+		// no pad is opened for input.
 		w.refreshControllerPadsAutomatically()
 	}
 	if index == 2 && w.microphoneEnable != nil {

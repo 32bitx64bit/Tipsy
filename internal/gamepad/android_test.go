@@ -74,7 +74,6 @@ func TestXboxGoldenRecordedStream(t *testing.T) {
 	if math.Abs(float64(af.Axes[AndroidAxisX])-0.5) > 0.01 {
 		t.Fatalf("AXIS_X ≈0.5, got %v", af.Axes[AndroidAxisX])
 	}
-	// Right stick feeds Z/RZ and mirrors RX/RY from the same sample.
 	if math.Abs(float64(af.Axes[AndroidAxisZ])-0.5) > 0.01 {
 		t.Fatalf("AXIS_Z ≈0.5, got %v", af.Axes[AndroidAxisZ])
 	}
@@ -87,14 +86,12 @@ func TestXboxGoldenRecordedStream(t *testing.T) {
 	if math.Abs(float64(af.Axes[AndroidAxisLTrigger])-1) > 1e-9 {
 		t.Fatalf("full left trigger must be 1, got %v", af.Axes[AndroidAxisLTrigger])
 	}
-	// Hat/DPAD duality: HAT_X axis plus DPAD_RIGHT key from one motion.
 	if af.Axes[AndroidAxisHatX] != 1 {
 		t.Fatalf("HAT_X must be 1, got %v", af.Axes[AndroidAxisHatX])
 	}
 	if !af.Buttons[AndroidDpadRight] {
 		t.Fatalf("hat-right must also set DPAD_RIGHT: %+v", af.Buttons)
 	}
-	// Honest ranges: reported axes present, unreported axes absent (never zero-filled).
 	if _, ok := af.Range(AndroidAxisGas); ok {
 		t.Fatal("unreported GAS axis must be absent, never zero-filled")
 	}
@@ -227,10 +224,6 @@ func TestMapFrameIntoWarmAllocations(t *testing.T) {
 }
 
 // TestPositionalDiamondMapping pins BTN compass → BUTTON letters.
-// (The duplicate PS-family recorded stream is deleted vs v1: one golden per
-// path — the Xbox stream above covers buttons, sticks, triggers, hats,
-// duality, and honest ranges. The sony label itself stays pinned in
-// quirks_test.go.)
 func TestPositionalDiamondMapping(t *testing.T) {
 	cases := []struct {
 		ev   uint16
@@ -335,7 +328,6 @@ func TestSupportedSetsFollowDevice(t *testing.T) {
 			t.Fatalf("supported motions must include axis %d: %v", a, mots)
 		}
 	}
-	// A stick-less trigger-less pad advertises neither.
 	bare := SupportedMotions(Mapping{RightX: NoAxis, RightY: NoAxis, TriggerL: NoAxis, TriggerR: NoAxis}, map[uint16]bool{})
 	if len(bare) != 0 {
 		t.Fatalf("bare pad must advertise zero motions, got %v", bare)
@@ -373,7 +365,7 @@ func gulikitDevice() (DeviceInfo, Mapping) {
 	return info, m
 }
 
-// TestGuliKitUnsignedStickRest pins the live GuliKit Bluetooth Xbox node:
+// TestGuliKitUnsignedStickRest pins the GuliKit Bluetooth Xbox node:
 // 0..65535 sticks must rest at 0 (not ~0.5 trigger-normalized), Z/RZ stay
 // 0..1 triggers, KEY_MENU is START, and HAT0 advertises DPAD keys.
 func TestGuliKitUnsignedStickRest(t *testing.T) {
@@ -405,7 +397,6 @@ func TestGuliKitUnsignedStickRest(t *testing.T) {
 	if got, ok := af.Range(AndroidAxisX); !ok || math.Abs(float64(got.Flat)-DefaultDeadzone) > 0.002 {
 		t.Fatalf("GuliKit advertised stick flat = %v, want capped %v so engine |v|<=flat cannot eat gyro-to-stick", got, DefaultDeadzone)
 	}
-	// Gyro-scale right-stick mix: 3000 counts inside device flat 4095.
 	r2 := NewReader(info.Abs)
 	gyro := feedStream(t, r2, [][]byte{
 		EncodeInputEvent(EvAbs, AbsRX, 32767+3000),
@@ -415,8 +406,6 @@ func TestGuliKitUnsignedStickRest(t *testing.T) {
 	if math.Abs(float64(ag.Axes[AndroidAxisZ])) < 0.05 {
 		t.Fatalf("GuliKit gyro-scale RX must reach AXIS_Z, got %v", ag.Axes[AndroidAxisZ])
 	}
-	// Toward geometric centre (the hard side with a mid-range origin):
-	// RX rest 30737 +3000 and RY rest 34497 −3000 must both move.
 	r3 := NewReader(info.Abs)
 	hard := feedStream(t, r3, [][]byte{
 		EncodeInputEvent(EvAbs, AbsRX, 30737+3000),

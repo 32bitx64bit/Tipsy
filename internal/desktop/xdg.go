@@ -25,13 +25,9 @@ type Env struct {
 // DefaultDataDirs is the specification default for XDG_DATA_DIRS.
 var DefaultDataDirs = []string{"/usr/local/share", "/usr/share"}
 
-// EnvFromOS builds the resolution view from the process environment.
-//
-// Inside a Flatpak sandbox XDG_DATA_HOME points at the app's private
-// ~/.var/app/<id>/data, which is not where the desktop looks for launchers.
-// The host user's ~/.local/share is used instead (reachable when the manifest
-// grants xdg-data/applications), and the host export directories are added
-// so a system-level view is at least attempted.
+// EnvFromOS builds the resolution view from the process environment. Inside a
+// Flatpak sandbox the host user's ~/.local/share and the host export
+// directories are used instead of the app's private data directory.
 func EnvFromOS() Env {
 	home := os.Getenv("HOME")
 	if home == "" {

@@ -26,21 +26,17 @@ type Config struct {
 	DataDir       string   `json:"dataDir,omitempty"`
 	LogLevel      string   `json:"logLevel,omitempty"`
 	LogCategories []string `json:"logCategories,omitempty"`
-	// Gamepad carries the persisted controller section verbatim. Input owns
-	// its shape/defaults/merge rules (see internal/gamepad GamepadConfig
-	// under the "gamepad" key); this package only preserves the bytes
-	// across atomic read-modify-write cycles. Missing or null means
-	// defaults (on, device-flat deadzone baseline, Xbox face-button layout).
-	// Never edited by hand for engine behavior: it shapes host stick
-	// calibration and labelled face-button translation only, never
+	// Gamepad carries the persisted controller section verbatim; Input owns
+	// its shape/defaults/merge rules under the "gamepad" key. This package
+	// only preserves the bytes across atomic read-modify-write cycles; a
+	// missing or null section means defaults. It never touches
 	// GlobalBasicSettings_13.xml.
 	Gamepad json.RawMessage `json:"gamepad,omitempty"`
-	// Microphone carries the persisted capture-door section verbatim.
-	// CLI/mic owns its shape/defaults/merge rules (see internal/mic
-	// MicrophoneConfig under the "microphone" key); this package only
-	// preserves the bytes across atomic read-modify-write cycles. Missing
-	// or null means defaults (allowed; OpenSL still lazy-opens). Never
-	// PCM, and never a Pulse source name in this package.
+	// Microphone carries the persisted capture-door section verbatim; CLI/mic
+	// owns its shape/defaults/merge rules under the "microphone" key. This
+	// package only preserves the bytes across atomic read-modify-write
+	// cycles; missing or null means defaults. Never PCM or a Pulse source
+	// name.
 	Microphone         json.RawMessage     `json:"microphone,omitempty"`
 	DevelopmentConsent *DevelopmentConsent `json:"developmentConsent,omitempty"`
 }
@@ -145,14 +141,11 @@ func Update(fn func(*Config) error) error {
 }
 
 // UpdateJSON applies fn to the complete config JSON document while holding
-// the cross-process config lock. Unlike Update, it deliberately preserves
-// top-level fields that Config does not model yet. It is for owners of a
-// namespaced section (for example gamepad or microphone) that must update
-// that section without clobbering another Settings window's newer write.
-//
-// A missing document is supplied as nil. Existing documents must be
-// owner-private JSON objects; malformed, null, array, and scalar documents
-// are refused rather than being replaced with a partial settings file.
+// the cross-process config lock. Unlike Update, it preserves top-level fields
+// that Config does not model yet, for owners of a namespaced section. A
+// missing document is supplied as nil; existing documents must be
+// owner-private JSON objects, and malformed, null, array, and scalar
+// documents are refused rather than replaced with a partial settings file.
 func UpdateJSON(fn func([]byte) ([]byte, error)) error {
 	if fn == nil {
 		return errors.New("config JSON update function is nil")

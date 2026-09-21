@@ -323,9 +323,8 @@ func TestVulkanCreateSwapchainPreservesActualSurfaceCapability(t *testing.T) {
 		})
 	}
 
-	// Extended KHR present modes are valid capability observations. The adapter
-	// keeps the client request unchanged; this only prevents diagnostics from
-	// falsely calling an otherwise valid host list malformed.
+	// Extended KHR present modes are valid observations: the adapter keeps the
+	// client request unchanged instead of calling the host list malformed.
 	for _, requested := range []uint32{sharedDemand, sharedContinuous, fifoLatestReady} {
 		got := testVulkanPresentModeCapability([]uint32{fifo, requested}, success, success, 2, false, requested)
 		if got.probe.status != verified || got.probe.result != success || got.probe.modeCount != 2 ||

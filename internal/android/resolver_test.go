@@ -249,7 +249,7 @@ func TestFflushIsWrapper(t *testing.T) {
 }
 
 func TestBionicSFFlush(t *testing.T) {
-	// Roblox uses bionic FILE size 152: &__sF[1] is not glibc &FILE[1].
+	// Roblox uses the bionic FILE layout, so &__sF[1] is not glibc &FILE[1].
 	if rc := fflushBionicIndex(1); rc != 0 {
 		t.Fatalf("fflush(&__sF[1])=%d", rc)
 	}

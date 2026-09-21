@@ -13,9 +13,8 @@ var (
 	onGameLoadedEq    = []byte("onGameLoaded: placeId = ")
 )
 
-// parseOnGameLoadedPlaceID extracts the numeric place id from a named
-// DataModel/NativeDM FLog line. It never returns the rest of the line
-// (no tickets, cookies, user ids, job ids, or addresses).
+// parseOnGameLoadedPlaceID extracts only the numeric place id from an FLog
+// line; it never returns the rest of the line (no tickets, cookies, or user ids).
 func parseOnGameLoadedPlaceID(line []byte) (int64, bool) {
 	if id, ok := parsePrefixedInt64(line, onGameLoadedColon); ok {
 		return id, true

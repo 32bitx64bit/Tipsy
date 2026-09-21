@@ -16,9 +16,8 @@ import "C"
 import "unsafe"
 
 // SetInputDrainDiagnostics enables the bounded X11 input-drain observer. It
-// is disabled by default. Normal paths retain one enabled-gate load but do
-// not take clocks, mutate counters, allocate, or retain input data. Production
-// enables it only through exact TIPSY_STUTTER_DIAG=1 before window creation.
+// is disabled by default; normal paths do not take clocks, mutate counters,
+// allocate, or retain input data.
 func SetInputDrainDiagnostics(enabled bool) {
 	v := C.int(0)
 	if enabled {
@@ -48,8 +47,7 @@ func inputDrainDurationFromC(raw C.tipsy_x11_input_drain_duration_stats) InputDr
 }
 
 // InputDrainSnapshot returns aggregate-only counters. With reset true, each
-// counter is atomically exchanged, so a live pump can continue recording and
-// a caller can use adjacent bounded intervals without storing raw input.
+// counter is atomically exchanged, so a live pump can keep recording.
 func InputDrainSnapshot(reset bool) InputDrainStats {
 	var raw C.tipsy_x11_input_drain_stats
 	r := C.int(0)
