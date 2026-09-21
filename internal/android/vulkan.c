@@ -324,6 +324,7 @@ static void tipsy_vkDestroyDevice(TipsyVkDevice device, const void *pAllocator);
 static void tipsy_vkDestroySurfaceKHR(TipsyVkInstance instance, TipsyVkSurfaceKHR surface,
 	const void *pAllocator);
 static void tipsy_vkDestroyInstance(TipsyVkInstance instance, const void *pAllocator);
+static void vk_device_procs_publish(TipsyVkDevice device);
 
 static int hide_host_wsi_name(const char *name)
 {
@@ -1010,6 +1011,9 @@ static TipsyVkResult tipsy_vkCreateDevice(TipsyVkPhysicalDevice physicalDevice,
 	result = host_vkCreateDevice(physicalDevice, pCreateInfo, pAllocator, pDevice);
 	tipsy_vk_output_device_created(physicalDevice,
 		result == TIPSY_VK_SUCCESS && pDevice != NULL ? *pDevice : NULL, result);
+	if (result == TIPSY_VK_SUCCESS && pDevice != NULL) {
+		vk_device_procs_publish(*pDevice);
+	}
 	return result;
 }
 
@@ -1095,6 +1099,101 @@ static void *resolve_device_proc(TipsyVkDevice device, const char *name)
 	return p;
 }
 
+/*
+ * Device-level wrappers resolve their host entry once per device instead of
+ * on every call: loader vkGetDeviceProcAddr is a name search (~230 ns
+ * measured) and vkAcquireNextImageKHR runs every frame. An entry is published
+ * by a release store of its device and retired before that device is
+ * destroyed. Vulkan forbids using a device concurrently with its destruction,
+ * so lookups need no lock. Devices beyond the table use the per-call path.
+ */
+#define TIPSY_VK_DEVICE_PROC_SLOTS 4u
+typedef struct {
+	_Atomic(TipsyVkDevice) device;
+	tipsy_vkDestroySwapchain_fn destroy_swapchain;
+	tipsy_vkGetSwapchainImages_fn get_swapchain_images;
+	tipsy_vkAcquireNextImage_fn acquire_next_image;
+	tipsy_vkAcquireNextImage2_fn acquire_next_image2;
+	tipsy_vkGetDeviceQueue_fn get_device_queue;
+	tipsy_vkGetDeviceQueue2_fn get_device_queue2;
+	tipsy_vkDestroyDevice_fn destroy_device;
+} TipsyVkDeviceProcs;
+
+static TipsyVkDeviceProcs vk_device_procs[TIPSY_VK_DEVICE_PROC_SLOTS];
+static pthread_mutex_t vk_device_procs_mu = PTHREAD_MUTEX_INITIALIZER;
+static void *(*test_resolve_device_proc)(TipsyVkDevice, const char *);
+
+static void *vk_device_procs_resolve(TipsyVkDevice device, const char *name)
+{
+	if (test_resolve_device_proc != NULL) {
+		return test_resolve_device_proc(device, name);
+	}
+	return resolve_device_proc(device, name);
+}
+
+static const TipsyVkDeviceProcs *vk_device_procs_find(TipsyVkDevice device)
+{
+	uint32_t i;
+	if (device == NULL) {
+		return NULL;
+	}
+	for (i = 0; i < TIPSY_VK_DEVICE_PROC_SLOTS; i++) {
+		if (atomic_load_explicit(&vk_device_procs[i].device, memory_order_acquire) == device) {
+			return &vk_device_procs[i];
+		}
+	}
+	return NULL;
+}
+
+static void vk_device_procs_publish(TipsyVkDevice device)
+{
+	TipsyVkDeviceProcs *slot = NULL;
+	uint32_t i;
+	if (device == NULL) {
+		return;
+	}
+	pthread_mutex_lock(&vk_device_procs_mu);
+	for (i = 0; i < TIPSY_VK_DEVICE_PROC_SLOTS; i++) {
+		if (atomic_load_explicit(&vk_device_procs[i].device, memory_order_relaxed) == NULL) {
+			slot = &vk_device_procs[i];
+			break;
+		}
+	}
+	if (slot != NULL) {
+		slot->destroy_swapchain = (tipsy_vkDestroySwapchain_fn)
+			vk_device_procs_resolve(device, "vkDestroySwapchainKHR");
+		slot->get_swapchain_images = (tipsy_vkGetSwapchainImages_fn)
+			vk_device_procs_resolve(device, "vkGetSwapchainImagesKHR");
+		slot->acquire_next_image = (tipsy_vkAcquireNextImage_fn)
+			vk_device_procs_resolve(device, "vkAcquireNextImageKHR");
+		slot->acquire_next_image2 = (tipsy_vkAcquireNextImage2_fn)
+			vk_device_procs_resolve(device, "vkAcquireNextImage2KHR");
+		slot->get_device_queue = (tipsy_vkGetDeviceQueue_fn)
+			vk_device_procs_resolve(device, "vkGetDeviceQueue");
+		slot->get_device_queue2 = (tipsy_vkGetDeviceQueue2_fn)
+			vk_device_procs_resolve(device, "vkGetDeviceQueue2");
+		slot->destroy_device = (tipsy_vkDestroyDevice_fn)
+			vk_device_procs_resolve(device, "vkDestroyDevice");
+		atomic_store_explicit(&slot->device, device, memory_order_release);
+	}
+	pthread_mutex_unlock(&vk_device_procs_mu);
+}
+
+static void vk_device_procs_retire(TipsyVkDevice device)
+{
+	uint32_t i;
+	if (device == NULL) {
+		return;
+	}
+	pthread_mutex_lock(&vk_device_procs_mu);
+	for (i = 0; i < TIPSY_VK_DEVICE_PROC_SLOTS; i++) {
+		if (atomic_load_explicit(&vk_device_procs[i].device, memory_order_relaxed) == device) {
+			atomic_store_explicit(&vk_device_procs[i].device, NULL, memory_order_release);
+		}
+	}
+	pthread_mutex_unlock(&vk_device_procs_mu);
+}
+
 static void tipsy_vkDestroySurfaceKHR(TipsyVkInstance instance,
 	TipsyVkSurfaceKHR surface, const void *pAllocator)
 {
@@ -1123,8 +1222,11 @@ static void tipsy_vkDestroyInstance(TipsyVkInstance instance, const void *pAlloc
 static void tipsy_vkGetDeviceQueue(TipsyVkDevice device, uint32_t queueFamilyIndex,
 	uint32_t queueIndex, TipsyVkQueue *pQueue)
 {
-	tipsy_vkGetDeviceQueue_fn fn =
-		(tipsy_vkGetDeviceQueue_fn)resolve_device_proc(device, "vkGetDeviceQueue");
+	const TipsyVkDeviceProcs *procs = vk_device_procs_find(device);
+	tipsy_vkGetDeviceQueue_fn fn = procs != NULL ? procs->get_device_queue : NULL;
+	if (fn == NULL) {
+		fn = (tipsy_vkGetDeviceQueue_fn)resolve_device_proc(device, "vkGetDeviceQueue");
+	}
 	if (fn == NULL) {
 		GoAndroid_LogMissing("vkGetDeviceQueue");
 		return;
@@ -1139,8 +1241,11 @@ static void tipsy_vkGetDeviceQueue(TipsyVkDevice device, uint32_t queueFamilyInd
 static void tipsy_vkGetDeviceQueue2(TipsyVkDevice device,
 	const TipsyVkDeviceQueueInfo2 *pQueueInfo, TipsyVkQueue *pQueue)
 {
-	tipsy_vkGetDeviceQueue2_fn fn =
-		(tipsy_vkGetDeviceQueue2_fn)resolve_device_proc(device, "vkGetDeviceQueue2");
+	const TipsyVkDeviceProcs *procs = vk_device_procs_find(device);
+	tipsy_vkGetDeviceQueue2_fn fn = procs != NULL ? procs->get_device_queue2 : NULL;
+	if (fn == NULL) {
+		fn = (tipsy_vkGetDeviceQueue2_fn)resolve_device_proc(device, "vkGetDeviceQueue2");
+	}
 	if (fn == NULL) {
 		GoAndroid_LogMissing("vkGetDeviceQueue2");
 		return;
@@ -1224,8 +1329,11 @@ static TipsyVkResult tipsy_vkCreateSwapchainKHR(TipsyVkDevice device, const Tips
 static void tipsy_vkDestroySwapchainKHR(TipsyVkDevice device, uint64_t swapchain,
 	const void *pAllocator)
 {
-	tipsy_vkDestroySwapchain_fn fn = (tipsy_vkDestroySwapchain_fn)
-		resolve_device_proc(device, "vkDestroySwapchainKHR");
+	const TipsyVkDeviceProcs *procs = vk_device_procs_find(device);
+	tipsy_vkDestroySwapchain_fn fn = procs != NULL ? procs->destroy_swapchain : NULL;
+	if (fn == NULL) {
+		fn = (tipsy_vkDestroySwapchain_fn)resolve_device_proc(device, "vkDestroySwapchainKHR");
+	}
 	if (fn == NULL) {
 		GoAndroid_LogMissing("vkDestroySwapchainKHR");
 		return;
@@ -1237,11 +1345,14 @@ static void tipsy_vkDestroySwapchainKHR(TipsyVkDevice device, uint64_t swapchain
 static TipsyVkResult tipsy_vkGetSwapchainImagesKHR(TipsyVkDevice device, uint64_t swapchain,
 	uint32_t *pSwapchainImageCount, uint64_t *pSwapchainImages)
 {
-	tipsy_vkGetSwapchainImages_fn fn;
+	const TipsyVkDeviceProcs *procs = vk_device_procs_find(device);
+	tipsy_vkGetSwapchainImages_fn fn = procs != NULL ? procs->get_swapchain_images : NULL;
 	TipsyVkResult result;
 	uint32_t count = 0;
-	fn = (tipsy_vkGetSwapchainImages_fn)
-		resolve_device_proc(device, "vkGetSwapchainImagesKHR");
+	if (fn == NULL) {
+		fn = (tipsy_vkGetSwapchainImages_fn)
+			resolve_device_proc(device, "vkGetSwapchainImagesKHR");
+	}
 	if (fn == NULL) {
 		GoAndroid_LogMissing("vkGetSwapchainImagesKHR");
 		return TIPSY_VK_ERROR_INITIALIZATION_FAILED;
@@ -1258,10 +1369,13 @@ static TipsyVkResult tipsy_vkGetSwapchainImagesKHR(TipsyVkDevice device, uint64_
 static TipsyVkResult tipsy_vkAcquireNextImageKHR(TipsyVkDevice device, uint64_t swapchain,
 	uint64_t timeout, uint64_t semaphore, uint64_t fence, uint32_t *pImageIndex)
 {
-	tipsy_vkAcquireNextImage_fn fn;
+	const TipsyVkDeviceProcs *procs = vk_device_procs_find(device);
+	tipsy_vkAcquireNextImage_fn fn = procs != NULL ? procs->acquire_next_image : NULL;
 	TipsyVkResult result;
-	fn = (tipsy_vkAcquireNextImage_fn)
-		resolve_device_proc(device, "vkAcquireNextImageKHR");
+	if (fn == NULL) {
+		fn = (tipsy_vkAcquireNextImage_fn)
+			resolve_device_proc(device, "vkAcquireNextImageKHR");
+	}
 	if (fn == NULL) {
 		GoAndroid_LogMissing("vkAcquireNextImageKHR");
 		return TIPSY_VK_ERROR_INITIALIZATION_FAILED;
@@ -1275,9 +1389,12 @@ static TipsyVkResult tipsy_vkAcquireNextImageKHR(TipsyVkDevice device, uint64_t 
 static TipsyVkResult tipsy_vkAcquireNextImage2KHR(TipsyVkDevice device,
 	const TipsyVkAcquireNextImageInfoKHR *pAcquireInfo, uint32_t *pImageIndex)
 {
-	tipsy_vkAcquireNextImage2_fn fn;
+	const TipsyVkDeviceProcs *procs = vk_device_procs_find(device);
+	tipsy_vkAcquireNextImage2_fn fn = procs != NULL ? procs->acquire_next_image2 : NULL;
 	TipsyVkResult result;
-	fn = (tipsy_vkAcquireNextImage2_fn)resolve_device_proc(device, "vkAcquireNextImage2KHR");
+	if (fn == NULL) {
+		fn = (tipsy_vkAcquireNextImage2_fn)resolve_device_proc(device, "vkAcquireNextImage2KHR");
+	}
 	if (fn == NULL) {
 		GoAndroid_LogMissing("vkAcquireNextImage2KHR");
 		return TIPSY_VK_ERROR_INITIALIZATION_FAILED;
@@ -1447,12 +1564,17 @@ static TipsyVkResult tipsy_vkQueuePresentKHR(TipsyVkQueue queue, const void *pPr
 
 static void tipsy_vkDestroyDevice(TipsyVkDevice device, const void *pAllocator)
 {
-	tipsy_vkDestroyDevice_fn fn = (tipsy_vkDestroyDevice_fn)
-		resolve_device_proc(device, "vkDestroyDevice");
+	const TipsyVkDeviceProcs *procs = vk_device_procs_find(device);
+	tipsy_vkDestroyDevice_fn fn = procs != NULL ? procs->destroy_device : NULL;
+	if (fn == NULL) {
+		fn = (tipsy_vkDestroyDevice_fn)resolve_device_proc(device, "vkDestroyDevice");
+	}
 	if (fn == NULL) {
 		GoAndroid_LogMissing("vkDestroyDevice");
 		return;
 	}
+	/* Retire first: the host may hand this handle to the next device. */
+	vk_device_procs_retire(device);
 	tipsy_vk_output_device_destroying(device);
 	fn(device, pAllocator);
 }
@@ -1834,6 +1956,75 @@ void *tipsy_test_vk_resolve_create_swapchain(void)
 	// A non-NULL bogus device proves the loader path is taken before any
 	// device-dispatch lookup could dereference it.
 	return (void *)resolve_create_swapchain((TipsyVkDevice)1);
+}
+
+static uint32_t test_device_proc_resolves;
+
+static void *tipsy_test_vk_device_proc_resolver(TipsyVkDevice device, const char *name)
+{
+	(void)name;
+	test_device_proc_resolves++;
+	return (void *)((uintptr_t)device + 1u);
+}
+
+/* Drives the device entry-point table with fake handles and a counting
+ * resolver. Returns 0 when each device resolves once, lookups stay cached,
+ * overflow falls back, and retired slots are reused; otherwise the failing
+ * step, or -1 when a live device already occupies the table. */
+int tipsy_test_vk_device_proc_cache(void)
+{
+	TipsyVkDevice devices[TIPSY_VK_DEVICE_PROC_SLOTS + 1u];
+	uint32_t i;
+	int step = 0;
+
+	for (i = 0; i < TIPSY_VK_DEVICE_PROC_SLOTS; i++) {
+		if (atomic_load_explicit(&vk_device_procs[i].device, memory_order_acquire) != NULL) {
+			return -1;
+		}
+	}
+	for (i = 0; i <= TIPSY_VK_DEVICE_PROC_SLOTS; i++) {
+		devices[i] = (TipsyVkDevice)(uintptr_t)(0xd000u + 0x10u * i);
+	}
+	test_resolve_device_proc = tipsy_test_vk_device_proc_resolver;
+	test_device_proc_resolves = 0;
+	vk_device_procs_publish(devices[0]);
+	if (test_device_proc_resolves != 7u) {
+		step = 1;
+		goto out;
+	}
+	for (i = 0; i < 1000u; i++) {
+		const TipsyVkDeviceProcs *procs = vk_device_procs_find(devices[0]);
+		if (procs == NULL || procs->acquire_next_image == NULL) {
+			step = 2;
+			goto out;
+		}
+	}
+	if (test_device_proc_resolves != 7u) {
+		step = 3;
+		goto out;
+	}
+	for (i = 1; i <= TIPSY_VK_DEVICE_PROC_SLOTS; i++) {
+		vk_device_procs_publish(devices[i]);
+	}
+	if (vk_device_procs_find(devices[TIPSY_VK_DEVICE_PROC_SLOTS]) != NULL) {
+		step = 4;
+		goto out;
+	}
+	vk_device_procs_retire(devices[0]);
+	if (vk_device_procs_find(devices[0]) != NULL) {
+		step = 5;
+		goto out;
+	}
+	vk_device_procs_publish(devices[TIPSY_VK_DEVICE_PROC_SLOTS]);
+	if (vk_device_procs_find(devices[TIPSY_VK_DEVICE_PROC_SLOTS]) == NULL) {
+		step = 6;
+	}
+out:
+	for (i = 0; i <= TIPSY_VK_DEVICE_PROC_SLOTS; i++) {
+		vk_device_procs_retire(devices[i]);
+	}
+	test_resolve_device_proc = NULL;
+	return step;
 }
 
 int tipsy_test_vk_proc_is_wrapped(const char *name)

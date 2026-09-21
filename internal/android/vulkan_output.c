@@ -6,8 +6,11 @@
  * swapchain image being presented, then presents that same image once.  The
  * guest device request is never enlarged.  There is no private X11 child,
  * extra swapchain, image copy, or second present.  Unpublished frames skip
- * the overlay mutex.  Guest submit wrappers do not take the overlay lock
- * unless the host reports device loss.
+ * the overlay mutex, and so does any acquire whose image has no overlay
+ * semaphore to recycle.  Guest submit wrappers do not take the overlay lock
+ * unless the host reports device loss.  Text updates never drain the queue:
+ * each source image owns a staging slot guarded by its own fence, and the
+ * shared foreground image is ordered by barriers on the one output queue.
  */
 #define VK_USE_PLATFORM_XCB_KHR
 #define VK_USE_PLATFORM_XLIB_KHR
@@ -55,6 +58,11 @@ typedef struct TipsyVkSourceImageState {
 	VkFence fence;
 	uint32_t completion_reusable;
 	uint32_t in_flight;
+	/* command holds a replayable draw-only recording for this rectangle and
+	 * foreground epoch. A recording that uploads is never replayed. */
+	uint32_t recorded;
+	uint32_t recorded_epoch;
+	int recorded_x, recorded_y, recorded_width, recorded_height;
 } TipsyVkSourceImageState;
 
 typedef struct TipsyVkOutputPair {
@@ -76,9 +84,12 @@ typedef struct TipsyVkOutputPair {
 	VkDescriptorSet descriptor;
 	VkSampler sampler;
 
+	/* One staging slot per source image: a slot is rewritten only after that
+	 * image's fence proves its previous copy finished. */
 	VkBuffer staging;
 	VkDeviceMemory staging_memory;
 	void *staging_map;
+	VkDeviceSize staging_slot_stride;
 	VkImage foreground;
 	VkDeviceMemory foreground_memory;
 	VkImageView foreground_view;
@@ -86,6 +97,8 @@ typedef struct TipsyVkOutputPair {
 	uint32_t foreground_height;
 	uint64_t foreground_generation;
 	uint32_t foreground_initialized;
+	/* Advances whenever the foreground image, view, or descriptor changes. */
+	uint32_t foreground_epoch;
 } TipsyVkOutputPair;
 
 typedef struct TipsyVkOutputDispatch {
@@ -191,6 +204,9 @@ static TipsyVkOutputState tipsy_output = {
 
 static _Atomic uint32_t output_route_ready;
 static _Atomic uint32_t output_foreground_retained;
+/* Bit i: active source image i has an overlay completion semaphore that only
+ * its next acquire may recycle. Other acquires skip the output mutex. */
+static _Atomic uint32_t output_completion_pending;
 
 static TipsyVkOutputTransactionFixture *test_transaction_fixture;
 static int test_transaction_overlay_live = 1;
@@ -203,6 +219,20 @@ static void tipsy_vk_output_note_overlay_retained_locked(void)
 {
 	atomic_store_explicit(&output_foreground_retained,
 		tipsy_output.active.foreground != VK_NULL_HANDLE, memory_order_release);
+}
+
+static void tipsy_vk_output_note_completion_pending_locked(void)
+{
+	uint32_t pending = 0;
+	uint32_t i;
+	if (tipsy_output.active.active) {
+		for (i = 0; i < tipsy_output.active.source_count; i++) {
+			if (!tipsy_output.active.source[i].completion_reusable) {
+				pending |= 1u << i;
+			}
+		}
+	}
+	atomic_store_explicit(&output_completion_pending, pending, memory_order_release);
 }
 
 static int tipsy_vk_output_overlay_live(void)
@@ -239,10 +269,22 @@ static int tipsy_vk_output_foreground_acquire(
 
 static void tipsy_vk_output_foreground_release(uintptr_t lease)
 {
-	if (test_transaction_fixture != NULL) return;
+	if (test_transaction_fixture != NULL) {
+		if (lease != 0) test_transaction_fixture->lease_release_calls++;
+		return;
+	}
 	if (tipsy_focused_text_frame_release != NULL) {
 		tipsy_focused_text_frame_release(lease);
 	}
+}
+
+/* The leased pixels are read only by the staging copy. Releasing right after
+ * it keeps the rasterizer from waiting on this thread's submit and present. */
+static void tipsy_vk_output_release_lease(uintptr_t *lease)
+{
+	if (*lease == 0) return;
+	tipsy_vk_output_foreground_release(*lease);
+	*lease = 0;
 }
 
 #define LOAD_INSTANCE(field, name, loaded) do { \
@@ -628,6 +670,7 @@ static void tipsy_vk_output_destroy_foreground_locked(TipsyVkOutputPair *pair)
 	pair->staging = VK_NULL_HANDLE;
 	pair->staging_memory = VK_NULL_HANDLE;
 	pair->staging_map = NULL;
+	pair->staging_slot_stride = 0;
 	pair->foreground = VK_NULL_HANDLE;
 	pair->foreground_memory = VK_NULL_HANDLE;
 	pair->foreground_view = VK_NULL_HANDLE;
@@ -635,6 +678,7 @@ static void tipsy_vk_output_destroy_foreground_locked(TipsyVkOutputPair *pair)
 	pair->foreground_height = 0;
 	pair->foreground_generation = 0;
 	pair->foreground_initialized = 0;
+	pair->foreground_epoch++;
 	tipsy_vk_output_note_overlay_retained_locked();
 }
 
@@ -965,6 +1009,7 @@ void tipsy_vk_output_swapchain_created(void *device_ptr,
 	}
 	tipsy_output.active = pair;
 	tipsy_output.pending_swapchain_qualified = 0;
+	tipsy_vk_output_note_completion_pending_locked();
 	pthread_mutex_unlock(&tipsy_output.mutex);
 }
 
@@ -1098,8 +1143,16 @@ void tipsy_vk_output_acquire_observed(void *device_ptr, uint64_t swapchain,
 	TipsyVkSourceImageState *source;
 	(void)semaphore;
 	(void)fence;
-	if (result != VK_ERROR_DEVICE_LOST &&
-		atomic_load_explicit(&output_route_ready, memory_order_acquire) == 0) {
+	if (result == VK_SUCCESS || result == VK_SUBOPTIMAL_KHR) {
+		/* Only an image whose overlay semaphore awaits this re-acquire has
+		 * state to update; every other acquire stays off the output mutex. */
+		if (image_index == NULL || *image_index >= 32u ||
+			atomic_load_explicit(&output_route_ready, memory_order_acquire) == 0 ||
+			(atomic_load_explicit(&output_completion_pending, memory_order_acquire) &
+				(1u << *image_index)) == 0) {
+			return;
+		}
+	} else if (result != VK_ERROR_DEVICE_LOST) {
 		return;
 	}
 	pthread_mutex_lock(&tipsy_output.mutex);
@@ -1110,6 +1163,7 @@ void tipsy_vk_output_acquire_observed(void *device_ptr, uint64_t swapchain,
 		*image_index < tipsy_output.active.source_count) {
 		source = &tipsy_output.active.source[*image_index];
 		source->completion_reusable = 1;
+		tipsy_vk_output_note_completion_pending_locked();
 	}
 	if (result == VK_ERROR_DEVICE_LOST) {
 		tipsy_output.device_lost = 1;
@@ -1137,14 +1191,20 @@ void tipsy_vk_output_submit2_observed(void *queue, uint32_t count,
 	tipsy_vk_output_submit_observed(queue, count, submits_ptr, result);
 }
 
-static VkResult tipsy_vk_output_wait_pair_fences_locked(TipsyVkOutputPair *pair)
+/* Waits only for fences with a submitted overlay batch. A fence reset for a
+ * submit that then failed never signals, so it must not be waited on. A zero
+ * timeout polls and returns VK_TIMEOUT while any overlay work is pending. */
+static VkResult tipsy_vk_output_wait_pair_fences_locked(TipsyVkOutputPair *pair,
+	uint64_t timeout)
 {
 	uint32_t i;
 	VkResult result;
 	for (i = 0; i < pair->source_count; i++) {
-		if (pair->source[i].fence == VK_NULL_HANDLE) continue;
+		if (!pair->source[i].in_flight || pair->source[i].fence == VK_NULL_HANDLE) {
+			continue;
+		}
 		result = tipsy_output.vk.wait_fences(tipsy_output.device, 1,
-			&pair->source[i].fence, VK_TRUE, UINT64_MAX);
+			&pair->source[i].fence, VK_TRUE, timeout);
 		if (result != VK_SUCCESS) return result;
 		pair->source[i].in_flight = 0;
 	}
@@ -1155,6 +1215,9 @@ static VkResult tipsy_vk_output_create_foreground_locked(TipsyVkOutputPair *pair
 	const struct tipsy_focused_text_frame *frame)
 {
 	VkDeviceSize bytes = (VkDeviceSize)frame->width * (VkDeviceSize)frame->height * 4u;
+	/* 256-byte slots keep every copy offset texel- and copy-aligned. */
+	VkDeviceSize slot_stride = (bytes + 255u) & ~(VkDeviceSize)255u;
+	VkDeviceSize staging_bytes = slot_stride * pair->source_count;
 	VkBufferCreateInfo buffer_info;
 	VkMemoryRequirements buffer_requirements;
 	VkMemoryAllocateInfo allocation;
@@ -1178,7 +1241,7 @@ static VkResult tipsy_vk_output_create_foreground_locked(TipsyVkOutputPair *pair
 	}
 	memset(&buffer_info, 0, sizeof(buffer_info));
 	buffer_info.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
-	buffer_info.size = bytes;
+	buffer_info.size = staging_bytes;
 	buffer_info.usage = VK_BUFFER_USAGE_TRANSFER_SRC_BIT;
 	buffer_info.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
 	result = tipsy_output.vk.create_buffer(tipsy_output.device, &buffer_info,
@@ -1200,7 +1263,7 @@ static VkResult tipsy_vk_output_create_foreground_locked(TipsyVkOutputPair *pair
 		pair->staging_memory, 0);
 	if (result != VK_SUCCESS) return result;
 	result = tipsy_output.vk.map_memory(tipsy_output.device, pair->staging_memory,
-		0, bytes, 0, &pair->staging_map);
+		0, staging_bytes, 0, &pair->staging_map);
 	if (result != VK_SUCCESS) return result;
 
 	memset(&image_info, 0, sizeof(image_info));
@@ -1257,13 +1320,16 @@ static VkResult tipsy_vk_output_create_foreground_locked(TipsyVkOutputPair *pair
 	write.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
 	write.pImageInfo = &descriptor_image;
 	tipsy_output.vk.update_descriptor_sets(tipsy_output.device, 1, &write, 0, NULL);
+	pair->foreground_epoch++;
+	pair->staging_slot_stride = slot_stride;
 	pair->foreground_width = (uint32_t)frame->width;
 	pair->foreground_height = (uint32_t)frame->height;
 	return VK_SUCCESS;
 }
 
 static int tipsy_vk_output_prepare_foreground_locked(TipsyVkOutputPair *pair,
-	const struct tipsy_focused_text_frame *frame, int *upload)
+	uint32_t source_index, const struct tipsy_focused_text_frame *frame,
+	int *upload)
 {
 	size_t bytes;
 	if (frame == NULL || frame->rgba == NULL || frame->lease == 0 ||
@@ -1273,24 +1339,30 @@ static int tipsy_vk_output_prepare_foreground_locked(TipsyVkOutputPair *pair,
 		(size_t)frame->height > SIZE_MAX / (size_t)frame->stride) {
 		return 0;
 	}
-	*upload = pair->foreground_generation != frame->generation;
+	*upload = pair->foreground == VK_NULL_HANDLE ||
+		pair->foreground_generation != frame->generation;
 	if (!*upload) {
-		return pair->foreground != VK_NULL_HANDLE;
+		return 1;
 	}
-	if (tipsy_vk_output_wait_pair_fences_locked(pair) != VK_SUCCESS) {
-		return 0;
-	}
-	if (pair->foreground_width != (uint32_t)frame->width ||
+	if (pair->foreground == VK_NULL_HANDLE ||
+		pair->foreground_width != (uint32_t)frame->width ||
 		pair->foreground_height != (uint32_t)frame->height) {
+		/* A new size replaces the image, view, and descriptor that earlier
+		 * overlay draws may still read, so only this rare path waits. */
+		if (tipsy_vk_output_wait_pair_fences_locked(pair, UINT64_MAX) != VK_SUCCESS) {
+			return 0;
+		}
 		tipsy_vk_output_destroy_foreground_locked(pair);
 		if (tipsy_vk_output_create_foreground_locked(pair, frame) != VK_SUCCESS) {
 			tipsy_vk_output_destroy_foreground_locked(pair);
 			return 0;
 		}
 	}
+	/* The caller proved this source image's fence signaled, so the previous
+	 * copy out of its slot is complete. The upload commits after submit. */
 	bytes = (size_t)frame->stride * (size_t)frame->height;
-	memcpy(pair->staging_map, frame->rgba, bytes);
-	pair->foreground_generation = frame->generation;
+	memcpy((uint8_t *)pair->staging_map +
+		(size_t)source_index * (size_t)pair->staging_slot_stride, frame->rgba, bytes);
 	return 1;
 }
 
@@ -1348,10 +1420,19 @@ static VkResult tipsy_vk_output_record_locked(TipsyVkOutputPair *pair,
 	if (scissor_w == 0 || scissor_h == 0) {
 		return VK_ERROR_INITIALIZATION_FAILED;
 	}
+	if (!upload && source->recorded &&
+		source->recorded_epoch == pair->foreground_epoch &&
+		source->recorded_x == foreground->x && source->recorded_y == foreground->y &&
+		source->recorded_width == foreground->width &&
+		source->recorded_height == foreground->height) {
+		/* The caller proved the previous submit finished; an unchanged
+		 * draw-only recording is resubmitted as is. */
+		return VK_SUCCESS;
+	}
+	source->recorded = 0;
 
 	memset(&begin, 0, sizeof(begin));
 	begin.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
-	begin.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
 	result = tipsy_output.vk.reset_command_buffer(command, 0);
 	if (result != VK_SUCCESS) return result;
 	result = tipsy_output.vk.begin_command_buffer(command, &begin);
@@ -1367,6 +1448,7 @@ static VkResult tipsy_vk_output_record_locked(TipsyVkOutputPair *pair,
 				VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
 			VK_PIPELINE_STAGE_TRANSFER_BIT);
 		memset(&upload_region, 0, sizeof(upload_region));
+		upload_region.bufferOffset = (VkDeviceSize)source_index * pair->staging_slot_stride;
 		upload_region.imageSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
 		upload_region.imageSubresource.layerCount = 1;
 		upload_region.imageExtent.width = pair->foreground_width;
@@ -1423,14 +1505,22 @@ static VkResult tipsy_vk_output_record_locked(TipsyVkOutputPair *pair,
 		VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
 		VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT);
 	result = tipsy_output.vk.end_command_buffer(command);
-	if (result == VK_SUCCESS && upload) pair->foreground_initialized = 1;
-	return result;
+	if (result != VK_SUCCESS) return result;
+	source->recorded = !upload;
+	source->recorded_epoch = pair->foreground_epoch;
+	source->recorded_x = foreground->x;
+	source->recorded_y = foreground->y;
+	source->recorded_width = foreground->width;
+	source->recorded_height = foreground->height;
+	return VK_SUCCESS;
 }
 
+/* Polls rather than draining the queue: an unpublished foreground is freed by
+ * the first present that finds its earlier overlay draws finished. */
 static void tipsy_vk_output_clear_foreground_locked(TipsyVkOutputPair *pair)
 {
 	if (pair->foreground == VK_NULL_HANDLE) return;
-	if (tipsy_vk_output_wait_pair_fences_locked(pair) != VK_SUCCESS) return;
+	if (tipsy_vk_output_wait_pair_fences_locked(pair, 0) != VK_SUCCESS) return;
 	tipsy_vk_output_destroy_foreground_locked(pair);
 }
 
@@ -1465,7 +1555,9 @@ int tipsy_vk_output_present(void *queue_ptr, const void *present_info_ptr,
 	VkResult fence_ready;
 	uint32_t source_index;
 	uint32_t i;
+	uintptr_t lease = 0;
 	int acquired = 0;
+	int prepared;
 	int upload = 0;
 
 	if (guest_result == NULL || host_present == NULL || queue_ptr == NULL) return 0;
@@ -1492,6 +1584,7 @@ int tipsy_vk_output_present(void *queue_ptr, const void *present_info_ptr,
 		test_transaction_fixture != NULL) {
 		acquired = tipsy_vk_output_foreground_acquire(&foreground);
 	}
+	if (acquired == 1) lease = foreground.lease;
 	if (test_transaction_fixture != NULL) {
 		test_transaction_fixture->present_mutex_locks++;
 	}
@@ -1540,7 +1633,11 @@ int tipsy_vk_output_present(void *queue_ptr, const void *present_info_ptr,
 		goto direct;
 	}
 	source->in_flight = 0;
-	if (!tipsy_vk_output_prepare_foreground_locked(pair, &foreground, &upload)) {
+	prepared = tipsy_vk_output_prepare_foreground_locked(pair, source_index,
+		&foreground, &upload);
+	/* foreground.rgba is invalid from here; only its geometry is used. */
+	tipsy_vk_output_release_lease(&lease);
+	if (!prepared) {
 		goto direct;
 	}
 	if (tipsy_vk_output_record_locked(pair, source_index, &foreground,
@@ -1579,8 +1676,13 @@ int tipsy_vk_output_present(void *queue_ptr, const void *present_info_ptr,
 		}
 		goto handled_failure;
 	}
+	if (upload) {
+		pair->foreground_generation = foreground.generation;
+		pair->foreground_initialized = 1;
+	}
 	source->in_flight = 1;
 	source->completion_reusable = 0;
+	tipsy_vk_output_note_completion_pending_locked();
 	guest = *info;
 	guest.waitSemaphoreCount = 1;
 	guest.pWaitSemaphores = &source->completion;
@@ -1594,7 +1696,6 @@ int tipsy_vk_output_present(void *queue_ptr, const void *present_info_ptr,
 	}
 	*guest_result = present_result;
 	pthread_mutex_unlock(&tipsy_output.mutex);
-	tipsy_vk_output_foreground_release(foreground.lease);
 	return 1;
 
 device_lost:
@@ -1603,19 +1704,19 @@ device_lost:
 	tipsy_vk_output_quarantine_locked(pair);
 	*guest_result = VK_ERROR_DEVICE_LOST;
 	pthread_mutex_unlock(&tipsy_output.mutex);
-	tipsy_vk_output_foreground_release(foreground.lease);
+	tipsy_vk_output_release_lease(&lease);
 	return 1;
 
 handled_failure:
 	tipsy_vk_output_quarantine_locked(pair);
 	*guest_result = failure_result;
 	pthread_mutex_unlock(&tipsy_output.mutex);
-	tipsy_vk_output_foreground_release(foreground.lease);
+	tipsy_vk_output_release_lease(&lease);
 	return 1;
 
 direct:
 	pthread_mutex_unlock(&tipsy_output.mutex);
-	tipsy_vk_output_foreground_release(foreground.lease);
+	tipsy_vk_output_release_lease(&lease);
 	return 0;
 }
 
@@ -1763,8 +1864,11 @@ static VKAPI_ATTR VkResult VKAPI_CALL tipsy_vk_output_fixture_wait_fences(
 	(void)count;
 	(void)fences;
 	(void)wait_all;
-	(void)timeout;
-	if (test_transaction_scenario == TIPSY_VK_OUTPUT_TX_FRAME_BUSY) {
+	if (timeout != 0 && test_transaction_fixture != NULL) {
+		test_transaction_fixture->blocking_fence_waits++;
+	}
+	if (test_transaction_scenario == TIPSY_VK_OUTPUT_TX_FRAME_BUSY ||
+		test_transaction_scenario == TIPSY_VK_OUTPUT_TX_UNPUBLISHED_TEARDOWN_BUSY) {
 		return VK_TIMEOUT;
 	}
 	return VK_SUCCESS;
@@ -1783,6 +1887,7 @@ static VKAPI_ATTR VkResult VKAPI_CALL tipsy_vk_output_fixture_begin_command(
 {
 	(void)command;
 	(void)info;
+	test_transaction_fixture->record_calls++;
 	return VK_SUCCESS;
 }
 
@@ -1833,6 +1938,9 @@ static VKAPI_ATTR VkResult VKAPI_CALL tipsy_vk_output_fixture_present(
 	(void)queue;
 	tipsy_vk_output_fixture_operation(test_transaction_fixture, 3);
 	test_transaction_fixture->guest_present_calls++;
+	if (test_transaction_fixture->lease_release_calls != 0) {
+		test_transaction_fixture->lease_released_before_present = 1;
+	}
 	if (info != NULL && info->waitSemaphoreCount == 1 &&
 		info->pWaitSemaphores != NULL &&
 		info->pWaitSemaphores[0] == test_transaction_original_wait) {
@@ -2025,6 +2133,7 @@ static void tipsy_vk_output_fixture_arm_pair(uint8_t *staging)
 	tipsy_output.active.pipeline_layout = (VkPipelineLayout)(uintptr_t)0x4f;
 	tipsy_output.active.descriptor = (VkDescriptorSet)(uintptr_t)0x50;
 	tipsy_output.active.staging_map = staging;
+	tipsy_output.active.staging_slot_stride = 4;
 	tipsy_output.active.foreground = (VkImage)(uintptr_t)0x51;
 	tipsy_output.active.foreground_width = 1;
 	tipsy_output.active.foreground_height = 1;
@@ -2066,8 +2175,19 @@ void tipsy_test_vk_output_transaction_fixture(uint32_t scenario,
 	test_transaction_frame_y = 3;
 	test_transaction_frame_width = 1;
 	test_transaction_frame_height = 1;
+	if (scenario == TIPSY_VK_OUTPUT_TX_SUCCESS) {
+		/* The previous frame's overlay draw on another image is still on
+		 * the GPU; uploading into image 0 must not wait for it. */
+		tipsy_output.active.source_count = 2;
+		tipsy_output.active.source[1] = tipsy_output.active.source[0];
+		tipsy_output.active.source[1].image = (VkImage)(uintptr_t)0x55;
+		tipsy_output.active.source[1].fence = (VkFence)(uintptr_t)0x56;
+		tipsy_output.active.source[1].completion_reusable = 0;
+		tipsy_output.active.source[1].in_flight = 1;
+	}
 	if (scenario == TIPSY_VK_OUTPUT_TX_UNPUBLISHED ||
-		scenario == TIPSY_VK_OUTPUT_TX_UNPUBLISHED_TEARDOWN) {
+		scenario == TIPSY_VK_OUTPUT_TX_UNPUBLISHED_TEARDOWN ||
+		scenario == TIPSY_VK_OUTPUT_TX_UNPUBLISHED_TEARDOWN_BUSY) {
 		test_transaction_overlay_live = 0;
 		if (scenario == TIPSY_VK_OUTPUT_TX_UNPUBLISHED) {
 			tipsy_output.active.foreground = VK_NULL_HANDLE;
@@ -2075,9 +2195,13 @@ void tipsy_test_vk_output_transaction_fixture(uint32_t scenario,
 			tipsy_output.active.foreground_width = 0;
 			tipsy_output.active.foreground_height = 0;
 			tipsy_output.active.foreground_initialized = 0;
+		} else {
+			/* An earlier overlay draw is still owned by the GPU. */
+			tipsy_output.active.source[0].in_flight = 1;
 		}
 	}
 	tipsy_vk_output_note_overlay_retained_locked();
+	tipsy_vk_output_note_completion_pending_locked();
 	atomic_store_explicit(&output_route_ready, 1, memory_order_release);
 	pthread_mutex_unlock(&tipsy_output.mutex);
 
@@ -2096,7 +2220,8 @@ void tipsy_test_vk_output_transaction_fixture(uint32_t scenario,
 		(void *)tipsy_vk_output_fixture_present, &result);
 	if (!handled) result = tipsy_vk_output_fixture_present(test_transaction_queue,
 		&present);
-	if (scenario == TIPSY_VK_OUTPUT_TX_UNPUBLISHED_TEARDOWN) {
+	if (scenario == TIPSY_VK_OUTPUT_TX_UNPUBLISHED_TEARDOWN ||
+		scenario == TIPSY_VK_OUTPUT_TX_UNPUBLISHED_TEARDOWN_BUSY) {
 		uint32_t first_locks = out->present_mutex_locks;
 		(void)tipsy_vk_output_present(test_transaction_queue, &present,
 			(void *)tipsy_vk_output_fixture_present, &result);
@@ -2118,6 +2243,7 @@ void tipsy_test_vk_output_transaction_fixture(uint32_t scenario,
 	memcpy((unsigned char *)&tipsy_output + state_offset, saved_state,
 		sizeof(saved_state));
 	tipsy_vk_output_note_overlay_retained_locked();
+	tipsy_vk_output_note_completion_pending_locked();
 	atomic_store_explicit(&output_route_ready, saved_route_ready,
 		memory_order_release);
 	pthread_mutex_unlock(&tipsy_output.mutex);
@@ -2214,6 +2340,20 @@ void tipsy_test_vk_output_overlay_geometry_fixture(
 	out->empty.quarantined = !tipsy_output.active.ready;
 	out->empty.device_terminal = tipsy_output.device_lost;
 	out->empty.returned_result = result;
+	pthread_mutex_unlock(&tipsy_output.mutex);
+
+	/* Same rectangle and generation as the second present: the draw-only
+	 * recording is resubmitted without being recorded again. */
+	test_transaction_frame_x = 4;
+	test_transaction_frame_y = 5;
+	test_transaction_fixture = &out->repeat;
+	result = VK_ERROR_INITIALIZATION_FAILED;
+	individual = VK_SUCCESS;
+	tipsy_vk_output_fixture_drive_present(&present, &result);
+	pthread_mutex_lock(&tipsy_output.mutex);
+	out->repeat.quarantined = !tipsy_output.active.ready;
+	out->repeat.device_terminal = tipsy_output.device_lost;
+	out->repeat.returned_result = result;
 	test_transaction_fixture = NULL;
 	test_transaction_scenario = 0;
 	test_transaction_overlay_live = 1;
@@ -2224,6 +2364,7 @@ void tipsy_test_vk_output_overlay_geometry_fixture(
 	memcpy((unsigned char *)&tipsy_output + state_offset, saved_state,
 		sizeof(saved_state));
 	tipsy_vk_output_note_overlay_retained_locked();
+	tipsy_vk_output_note_completion_pending_locked();
 	atomic_store_explicit(&output_route_ready, saved_route_ready,
 		memory_order_release);
 	pthread_mutex_unlock(&tipsy_output.mutex);

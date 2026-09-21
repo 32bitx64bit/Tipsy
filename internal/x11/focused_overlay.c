@@ -17,7 +17,15 @@
 #include <stdlib.h>
 #include <string.h>
 
+/*
+ * Font loading and Pango drawing happen on the writer-owned Cairo surface
+ * with no reader-visible lock held, so a compositor's frame acquire waits at
+ * most for the final pixel copy into rgba, never for a font load.
+ */
 struct tipsy_focused_overlay {
+	/* Serializes update, query, and free; frame readers never take it. The
+	 * published frame below changes only while it is held. */
+	pthread_mutex_t writer;
 	pthread_mutex_t mutex;
 	pthread_cond_t readers_done;
 	unsigned readers;
@@ -25,8 +33,10 @@ struct tipsy_focused_overlay {
 	int x, y, width, height, stride;
 	uint64_t version, generation;
 	uint8_t *rgba;
+	/* Writer-owned raster state. */
 	cairo_surface_t *surface;
 	cairo_t *cr;
+	int surface_width, surface_height;
 	PangoFontDescription *font_desc;
 	double font_px;
 	int font_id;
@@ -69,26 +79,40 @@ static void close_font(struct tipsy_focused_overlay *o) {
 	o->font_id = 0;
 }
 
-static void clear_pixels(struct tipsy_focused_overlay *o) {
-	if (o->rgba != NULL) wipe(o->rgba, (size_t)o->stride * (size_t)o->height);
-	if (o->cr != NULL) {
-		cairo_save(o->cr);
-		cairo_set_operator(o->cr, CAIRO_OPERATOR_CLEAR);
-		cairo_paint(o->cr);
-		cairo_restore(o->cr);
-		cairo_surface_flush(o->surface);
-	}
+static void clear_surface(struct tipsy_focused_overlay *o) {
+	if (o->cr == NULL) return;
+	cairo_save(o->cr);
+	cairo_set_operator(o->cr, CAIRO_OPERATOR_CLEAR);
+	cairo_paint(o->cr);
+	cairo_restore(o->cr);
+	cairo_surface_flush(o->surface);
 }
 
 static void discard_surface(struct tipsy_focused_overlay *o) {
-	clear_pixels(o);
+	clear_surface(o);
 	if (o->cr != NULL) cairo_destroy(o->cr);
 	o->cr = NULL;
 	if (o->surface != NULL) cairo_surface_destroy(o->surface);
 	o->surface = NULL;
-	if (o->rgba != NULL) free(o->rgba);
-	o->rgba = NULL;
-	o->x = o->y = o->width = o->height = o->stride = 0;
+	o->surface_width = o->surface_height = 0;
+}
+
+static void wait_readers_locked(struct tipsy_focused_overlay *o) {
+	while (o->readers != 0) pthread_cond_wait(&o->readers_done, &o->mutex);
+}
+
+/* Unpublishes o, then wipes its frame once every lease returns. The published
+ * lock is dropped first so other acquires return immediately meanwhile. */
+static void unpublish_and_wipe(struct tipsy_focused_overlay *o) {
+	pthread_mutex_lock(&published_mutex);
+	pthread_mutex_lock(&o->mutex);
+	tipsy_focused_overlay_clear_publish_locked(o);
+	pthread_mutex_unlock(&published_mutex);
+	wait_readers_locked(o);
+	if (o->rgba != NULL) wipe(o->rgba, (size_t)o->stride * (size_t)o->height);
+	o->version = 0;
+	pthread_mutex_unlock(&o->mutex);
+	clear_surface(o);
 }
 
 static PangoFontDescription *font_description(const char *file, double px,
@@ -135,14 +159,12 @@ static int open_font(struct tipsy_focused_overlay *o, double px, int font_id,
 	return 0;
 }
 
-static int ensure_surface(struct tipsy_focused_overlay *o, int x, int y,
-	int width, int height) {
+static int ensure_surface(struct tipsy_focused_overlay *o, int width, int height) {
 	if (width < 1 || height < 1 || width > INT32_MAX / 4 ||
 		(size_t)height > SIZE_MAX / ((size_t)width * 4)) return -1;
-	if (o->surface != NULL && o->x == x && o->y == y && o->width == width &&
-		o->height == height) return 0;
+	if (o->surface != NULL && o->surface_width == width &&
+		o->surface_height == height) return 0;
 	discard_surface(o);
-	o->x = x; o->y = y; o->width = width; o->height = height; o->stride = width * 4;
 	o->surface = cairo_image_surface_create(CAIRO_FORMAT_ARGB32, width, height);
 	if (o->surface == NULL || cairo_surface_status(o->surface) != CAIRO_STATUS_SUCCESS) {
 		discard_surface(o); return -1;
@@ -151,8 +173,30 @@ static int ensure_surface(struct tipsy_focused_overlay *o, int x, int y,
 	if (o->cr == NULL || cairo_status(o->cr) != CAIRO_STATUS_SUCCESS) {
 		discard_surface(o); return -1;
 	}
-	o->rgba = calloc((size_t)o->stride, (size_t)height);
-	if (o->rgba == NULL) { discard_surface(o); return -1; }
+	o->surface_width = width;
+	o->surface_height = height;
+	return 0;
+}
+
+static void convert_to_rgba(struct tipsy_focused_overlay *o);
+
+/* Caller holds published_mutex and mutex, and no reader holds the frame:
+ * the finished surface becomes the reader-visible frame at x,y. */
+static int publish_pixels_locked(struct tipsy_focused_overlay *o, int x, int y) {
+	int width = o->surface_width, height = o->surface_height;
+	if (o->rgba == NULL || o->width != width || o->height != height) {
+		if (o->rgba != NULL) {
+			wipe(o->rgba, (size_t)o->stride * (size_t)o->height);
+			free(o->rgba);
+		}
+		o->rgba = calloc((size_t)width * 4, (size_t)height);
+		if (o->rgba == NULL) {
+			o->x = o->y = o->width = o->height = o->stride = 0;
+			return -1;
+		}
+	}
+	o->x = x; o->y = y; o->width = width; o->height = height; o->stride = width * 4;
+	convert_to_rgba(o);
 	return 0;
 }
 
@@ -190,9 +234,10 @@ static int rasterize(struct tipsy_focused_overlay *o, const unsigned char *text,
 	int text_len, int cursor_byte, uint32_t argb, int x_alignment, int y_alignment,
 	int multiline, int wrapped, int editable, int cursor_visible, double spacing,
 	int left, int top, int right, int bottom, int include_font_padding) {
-	int content_width = o->width - left - right, content_height = o->height - top - bottom;
+	int width = o->surface_width, height = o->surface_height;
+	int content_width = width - left - right, content_height = height - top - bottom;
 	if (content_width < 1 || content_height < 1) return -1;
-	clear_pixels(o);
+	clear_surface(o);
 	cairo_save(o->cr);
 	cairo_set_operator(o->cr, CAIRO_OPERATOR_OVER);
 	cairo_rectangle(o->cr, left, top, content_width, content_height);
@@ -221,15 +266,15 @@ static int rasterize(struct tipsy_focused_overlay *o, const unsigned char *text,
 	if (box.height < 1) box.height = (int)ceil(o->font_px);
 	int box_top = top;
 	if (y_alignment == 1) box_top = top + (content_height - box.height) / 2;
-	else if (y_alignment == 2) box_top = o->height - bottom - box.height;
+	else if (y_alignment == 2) box_top = height - bottom - box.height;
 	int origin_y = box_top - box.y, origin_x = left - box.x;
 	if (!multi) {
-		if (x_alignment == 1) origin_x = o->width - right - box.width - box.x;
+		if (x_alignment == 1) origin_x = width - right - box.width - box.x;
 		else if (x_alignment == 2) origin_x = left + (content_width - box.width) / 2 - box.x;
 		PangoRectangle strong, weak;
 		pango_layout_get_cursor_pos(layout, cursor_byte, &strong, &weak);
 		int cursor_x = origin_x + PANGO_PIXELS(strong.x);
-		if (cursor_x > o->width - right) origin_x -= cursor_x - (o->width - right);
+		if (cursor_x > width - right) origin_x -= cursor_x - (width - right);
 		if (cursor_x < left) origin_x += left - cursor_x;
 	}
 	cairo_set_source_rgba(o->cr, ((argb >> 16) & 255) / 255.0,
@@ -249,14 +294,20 @@ static int rasterize(struct tipsy_focused_overlay *o, const unsigned char *text,
 	o->line_box_height = box.height;
 	o->baseline_y = origin_y + PANGO_PIXELS(pango_layout_get_baseline(layout));
 	g_object_unref(layout); cairo_restore(o->cr);
-	convert_to_rgba(o);
 	return 0;
 }
 
 uintptr_t tipsy_focused_overlay_new(void) {
 	struct tipsy_focused_overlay *o = calloc(1, sizeof(*o));
-	if (o == NULL || pthread_mutex_init(&o->mutex, NULL) != 0 ||
-		pthread_cond_init(&o->readers_done, NULL) != 0) { free(o); return 0; }
+	if (o == NULL) return 0;
+	if (pthread_mutex_init(&o->writer, NULL) != 0) { free(o); return 0; }
+	if (pthread_mutex_init(&o->mutex, NULL) != 0) {
+		pthread_mutex_destroy(&o->writer); free(o); return 0;
+	}
+	if (pthread_cond_init(&o->readers_done, NULL) != 0) {
+		pthread_mutex_destroy(&o->mutex); pthread_mutex_destroy(&o->writer);
+		free(o); return 0;
+	}
 	return (uintptr_t)o;
 }
 
@@ -268,45 +319,56 @@ int tipsy_focused_overlay_update(uintptr_t ptr, int visible, uint64_t version,
 	const unsigned char *text, int text_len, int cursor_byte) {
 	struct tipsy_focused_overlay *o = (struct tipsy_focused_overlay *)ptr;
 	if (o == NULL) return -1;
-	pthread_mutex_lock(&published_mutex); pthread_mutex_lock(&o->mutex);
-	while (o->readers != 0) pthread_cond_wait(&o->readers_done, &o->mutex);
+	pthread_mutex_lock(&o->writer);
 	if (!visible) {
-		tipsy_focused_overlay_clear_publish_locked(o);
-		clear_pixels(o); o->requested_argb = 0;
+		unpublish_and_wipe(o); o->requested_argb = 0;
 		o->glyph_pixels = o->caret_pixels = o->antialias_pixels = o->bright_pixels = 0;
-		o->version = 0; pthread_mutex_unlock(&o->mutex); pthread_mutex_unlock(&published_mutex); return 0;
+		pthread_mutex_unlock(&o->writer); return 0;
 	}
 	if (width < 1 || height < 1 || font_px <= 0 || text == NULL || text_len < 0 ||
 		cursor_byte < 0 || cursor_byte > text_len || left < 0 || top < 0 || right < 0 || bottom < 0) {
-		pthread_mutex_unlock(&o->mutex); pthread_mutex_unlock(&published_mutex); return -1;
+		pthread_mutex_unlock(&o->writer); return -1;
 	}
+	/* Only a writer changes the published frame, so it is read here unlocked.
+	 * An unchanged repaint therefore never waits on a reader. */
 	int dirty = !o->published || o->version != version || o->x != x || o->y != y ||
 		o->width != width || o->height != height;
-	if (dirty && (ensure_surface(o, x, y, width, height) != 0 ||
+	if (dirty && (ensure_surface(o, width, height) != 0 ||
 		open_font(o, font_px, font_id, font_file) != 0 ||
 		rasterize(o, text, text_len, cursor_byte, argb, x_alignment, y_alignment,
 			multiline, wrapped, editable, cursor_visible, spacing, left, top, right,
 			bottom, include_font_padding) != 0)) {
-		tipsy_focused_overlay_clear_publish_locked(o);
-		clear_pixels(o);
-		pthread_mutex_unlock(&o->mutex); pthread_mutex_unlock(&published_mutex); return -1;
+		unpublish_and_wipe(o);
+		pthread_mutex_unlock(&o->writer); return -1;
 	}
-	if (dirty) { o->version = version; o->generation++; o->requested_argb = argb; }
+	pthread_mutex_lock(&published_mutex); pthread_mutex_lock(&o->mutex);
+	if (dirty) {
+		wait_readers_locked(o);
+		if (publish_pixels_locked(o, x, y) != 0) {
+			tipsy_focused_overlay_clear_publish_locked(o);
+			pthread_mutex_unlock(&o->mutex); pthread_mutex_unlock(&published_mutex);
+			clear_surface(o);
+			pthread_mutex_unlock(&o->writer); return -1;
+		}
+		o->version = version; o->generation++; o->requested_argb = argb;
+	}
 	tipsy_focused_overlay_mark_live_locked();
 	o->published = 1; published_overlay = o;
 	pthread_mutex_unlock(&o->mutex); pthread_mutex_unlock(&published_mutex);
+	pthread_mutex_unlock(&o->writer);
 	return 0;
 }
 
 void tipsy_focused_overlay_free(uintptr_t ptr) {
 	struct tipsy_focused_overlay *o = (struct tipsy_focused_overlay *)ptr;
 	if (o == NULL) return;
-	pthread_mutex_lock(&published_mutex); pthread_mutex_lock(&o->mutex);
-	tipsy_focused_overlay_clear_publish_locked(o);
-	while (o->readers != 0) pthread_cond_wait(&o->readers_done, &o->mutex);
+	pthread_mutex_lock(&o->writer);
+	unpublish_and_wipe(o);
 	discard_surface(o); close_font(o);
-	pthread_mutex_unlock(&o->mutex); pthread_mutex_unlock(&published_mutex);
-	pthread_cond_destroy(&o->readers_done); pthread_mutex_destroy(&o->mutex); wipe(o, sizeof(*o)); free(o);
+	free(o->rgba); o->rgba = NULL;
+	pthread_mutex_unlock(&o->writer);
+	pthread_cond_destroy(&o->readers_done); pthread_mutex_destroy(&o->mutex);
+	pthread_mutex_destroy(&o->writer); wipe(o, sizeof(*o)); free(o);
 }
 
 int tipsy_focused_text_frame_acquire(struct tipsy_focused_text_frame *out) {
@@ -341,7 +403,8 @@ int tipsy_focused_overlay_query(uintptr_t ptr,
 	int published;
 	if (o == NULL || out == NULL) return 0;
 	memset(out, 0, sizeof(*out));
-	pthread_mutex_lock(&o->mutex);
+	/* The writer lock pins the published frame; readers only read it. */
+	pthread_mutex_lock(&o->writer);
 	if (o->rgba != NULL) measure(o, o->requested_argb);
 	out->x = o->x;
 	out->y = o->y;
@@ -357,19 +420,19 @@ int tipsy_focused_overlay_query(uintptr_t ptr,
 	out->line_box_height = o->line_box_height;
 	out->baseline_y = o->baseline_y;
 	published = o->published;
-	pthread_mutex_unlock(&o->mutex);
+	pthread_mutex_unlock(&o->writer);
 	return published;
 }
 
 int tipsy_focused_overlay_test_foreground_alpha(uintptr_t ptr, int x, int y, unsigned long *alpha) {
 	struct tipsy_focused_overlay *o = (struct tipsy_focused_overlay *)ptr;
 	if (o == NULL || alpha == NULL) return -1;
-	pthread_mutex_lock(&o->mutex);
+	pthread_mutex_lock(&o->writer);
 	if (o->rgba == NULL || x < 0 || y < 0 || x >= o->width || y >= o->height) {
-		pthread_mutex_unlock(&o->mutex);
+		pthread_mutex_unlock(&o->writer);
 		return -1;
 	}
 	*alpha = o->rgba[(size_t)y * o->stride + (size_t)x * 4 + 3];
-	pthread_mutex_unlock(&o->mutex);
+	pthread_mutex_unlock(&o->writer);
 	return 0;
 }

@@ -17,6 +17,7 @@ import (
 
 	"github.com/tipsy-linux/tipsy/internal/android"
 	"github.com/tipsy-linux/tipsy/internal/clientsettings"
+	"github.com/tipsy-linux/tipsy/internal/graphics"
 	"github.com/tipsy-linux/tipsy/internal/jni"
 	"github.com/tipsy-linux/tipsy/internal/loader"
 	"github.com/tipsy-linux/tipsy/internal/logging"
@@ -261,7 +262,10 @@ func Launch(ctx context.Context, opt LaunchOptions) error {
 	if err := requestStartFullscreen(win, startFullscreenRequested(opt, settings)); err != nil {
 		return fmt.Errorf("x11 start fullscreen: %w", err)
 	}
-	presenter, err := bindClientPresenter(win, settings)
+	// One host probe (a throwaway Vulkan instance) serves the whole launch:
+	// the presenter and the client's renderer flags resolve the same snapshot.
+	rendererCaps := graphics.ProbeRendererCapabilities()
+	presenter, err := bindClientPresenter(win, settings, rendererCaps)
 	if err != nil {
 		return fmt.Errorf("renderer: %w", err)
 	}
@@ -337,7 +341,7 @@ func Launch(ctx context.Context, opt LaunchOptions) error {
 	refreshVersion := win.RefreshVersion()
 	currentRefreshHz, supportedRefreshHz := presenter.refreshRates()
 	session, err := startGameActivity(ctx, vm, mod, aw, files, cache, preferences, obb, assets, ver,
-		opt.Width, opt.Height, currentRefreshHz, supportedRefreshHz, opt.Request, testOpenGL)
+		opt.Width, opt.Height, currentRefreshHz, supportedRefreshHz, opt.Request, testOpenGL, rendererCaps)
 	if err != nil {
 		return err
 	}
