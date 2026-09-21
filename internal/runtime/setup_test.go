@@ -18,6 +18,7 @@ import (
 
 	"github.com/tipsy-linux/tipsy/internal/apk"
 	"github.com/tipsy-linux/tipsy/internal/clientsettings"
+	"github.com/tipsy-linux/tipsy/internal/graphics"
 )
 
 func TestRuntimeDir(t *testing.T) {
@@ -257,7 +258,7 @@ func TestLoadAndroidAppOverridesLeavesOrdinaryLaunchInertAndTestOverrideTransien
 	t.Setenv(luaLogEnv, "")
 	cachePath := filepath.Join(t.TempDir(), "ClientAppSettings.json")
 
-	ordinary, err := loadAndroidAppOverrides(context.Background(), cachePath, false)
+	ordinary, err := loadAndroidAppOverrides(context.Background(), cachePath, false, graphics.ProbeRendererCapabilities())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -268,7 +269,7 @@ func TestLoadAndroidAppOverridesLeavesOrdinaryLaunchInertAndTestOverrideTransien
 		t.Fatalf("ordinary launch invented OpenGL controls: %v", ordinary.values)
 	}
 
-	strict, err := loadAndroidAppOverrides(context.Background(), cachePath, true)
+	strict, err := loadAndroidAppOverrides(context.Background(), cachePath, true, graphics.ProbeRendererCapabilities())
 	if err != nil {
 		t.Fatal(err)
 	}

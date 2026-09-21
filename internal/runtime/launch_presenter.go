@@ -491,8 +491,8 @@ func configureVulkanPresentationPolicy(settings clientsettings.Settings) {
 		"unthrottledPresentation", settings.NeedsUnthrottledPresentation())
 }
 
-func bindClientPresenter(win *x11.Window, settings clientsettings.Settings) (*clientPresenter, error) {
-	resolved, err := graphics.ProbeRendererCapabilities().Resolve(graphics.Renderer(settings.Renderer))
+func bindClientPresenter(win *x11.Window, settings clientsettings.Settings, caps graphics.RendererCapabilities) (*clientPresenter, error) {
+	resolved, err := caps.Resolve(graphics.Renderer(settings.Renderer))
 	if err != nil {
 		return nil, err
 	}

@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 func validFocusedTextSnapshot() FocusedTextSnapshot {
@@ -232,6 +233,111 @@ func TestFocusedTextForegroundPaddingGravityWrapAndZeroAlpha(t *testing.T) {
 	if state := o.queryForTest(); state.TextAlpha != 0 || state.PaintedPixels != 0 {
 		t.Fatalf("zero alpha = %+v", state)
 	}
+}
+
+func TestFocusedTextRepaintDoesNotWaitForForegroundLease(t *testing.T) {
+	o := newFocusedTextOverlayForTest(t, 320, 180)
+	s := validFocusedTextSnapshot()
+	if err := o.Update(s); err != nil {
+		t.Fatal(err)
+	}
+	lease, ok := acquireFocusedTextForegroundForTest()
+	if !ok {
+		t.Fatal("no foreground lease")
+	}
+	defer lease.release()
+	// The launch loop repaints an unchanged field periodically; that must not
+	// wait for a compositor still reading the published frame.
+	done := make(chan error, 1)
+	go func() { done <- o.Update(s) }()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("unchanged repaint waited for a held foreground lease")
+	}
+}
+
+func TestFocusedTextHideUnpublishesBeforeWaitingForLease(t *testing.T) {
+	o := newFocusedTextOverlayForTest(t, 320, 180)
+	s := validFocusedTextSnapshot()
+	if err := o.Update(s); err != nil {
+		t.Fatal(err)
+	}
+	lease, ok := acquireFocusedTextForegroundForTest()
+	if !ok {
+		t.Fatal("no foreground lease")
+	}
+	s.Active = false
+	done := make(chan error, 1)
+	go func() { done <- o.Update(s) }()
+	deadline := time.Now().Add(5 * time.Second)
+	for focusedTextOverlayLiveForTest() {
+		if time.Now().After(deadline) {
+			lease.release()
+			t.Fatal("hide did not unpublish while a lease was held")
+		}
+		time.Sleep(time.Millisecond)
+	}
+	// Other presents see no overlay at once instead of queueing behind it.
+	if extra, ok := acquireFocusedTextForegroundForTest(); ok {
+		extra.release()
+		lease.release()
+		t.Fatal("unpublished overlay handed out a new lease")
+	}
+	select {
+	case err := <-done:
+		lease.release()
+		t.Fatalf("hide wiped pixels that were still leased (err=%v)", err)
+	case <-time.After(50 * time.Millisecond):
+	}
+	lease.release()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("hide did not finish after the lease was released")
+	}
+}
+
+func TestFocusedTextNewTextWaitsForLeasedPixels(t *testing.T) {
+	o := newFocusedTextOverlayForTest(t, 320, 180)
+	s := validFocusedTextSnapshot()
+	if err := o.Update(s); err != nil {
+		t.Fatal(err)
+	}
+	first, ok := acquireFocusedTextForegroundForTest()
+	if !ok {
+		t.Fatal("no foreground lease")
+	}
+	s.Version++
+	s.Text, s.CursorUTF16 = "tipsyok!", 8
+	done := make(chan error, 1)
+	go func() { done <- o.Update(s) }()
+	select {
+	case err := <-done:
+		first.release()
+		t.Fatalf("new text replaced pixels that were still leased (err=%v)", err)
+	case <-time.After(50 * time.Millisecond):
+	}
+	first.release()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("new text was not published after the lease was released")
+	}
+	second, ok := acquireFocusedTextForegroundForTest()
+	if !ok || second.generation <= first.generation {
+		t.Fatalf("second lease = %+v ok=%v first=%+v", second, ok, first)
+	}
+	second.release()
 }
 
 func TestFocusedTextSurfaceRejectsMissingOfficialFont(t *testing.T) {

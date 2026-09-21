@@ -17,6 +17,7 @@ import (
 	"unsafe"
 
 	"github.com/tipsy-linux/tipsy/internal/clientsettings"
+	"github.com/tipsy-linux/tipsy/internal/graphics"
 	"github.com/tipsy-linux/tipsy/internal/logging"
 )
 
@@ -312,14 +313,14 @@ type androidAppOverrides struct {
 }
 
 // loadAndroidAppOverrides resolves Tipsy's local settings once while the
-// client lock is held. Explicit OpenGL controls are separated for the APK's
-// external override path; all other settings retain the ordinary AndroidApp
-// response merge.
-func loadAndroidAppOverrides(ctx context.Context, cachePath string, testOpenGL bool) (androidAppOverrides, error) {
+// client lock is held, against the launch's host renderer snapshot. Explicit
+// OpenGL controls are separated for the APK's external override path; all
+// other settings retain the ordinary AndroidApp response merge.
+func loadAndroidAppOverrides(ctx context.Context, cachePath string, testOpenGL bool, caps graphics.RendererCapabilities) (androidAppOverrides, error) {
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	overrides, overrideErr := clientsettings.New().LoadOverrides(ctx)
+	overrides, overrideErr := clientsettings.New().LoadOverrides(ctx, caps)
 	if overrideErr != nil {
 		// A settings-permission/symlink failure must not prevent use of the
 		// official client settings; the rejected override is simply not applied.
