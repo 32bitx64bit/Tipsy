@@ -22,8 +22,8 @@ func hasUnpairedSurrogate(units []uint16) bool {
 	return false
 }
 
-// Go range and []rune have the same replacement policy for malformed UTF-8.
-// Java's raw, unpaired UTF-16 surrogates are handled separately by the caller.
+// Go range and []rune share a replacement policy for malformed UTF-8; unpaired
+// UTF-16 surrogates are handled separately by the caller.
 func modifiedUTF8StringLength(s string) (int, bool) {
 	const maxInt = int(^uint(0) >> 1)
 	n := 0

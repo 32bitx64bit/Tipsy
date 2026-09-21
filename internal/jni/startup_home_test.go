@@ -31,9 +31,9 @@ func dispatchStartupHomeAppReady(t *testing.T, vm *VM, receiver *Object, step st
 	}
 }
 
-// TestStartupHomeDataModelExactIdentityAndDiscordCoexistence proves the new
-// Home DataModel stream filters the existing composable lifecycle fanout. It
-// neither replaces nor consumes Discord's existing GameLoadedListener.
+// TestStartupHomeDataModelExactIdentityAndDiscordCoexistence proves the Home
+// DataModel stream filters the existing lifecycle fanout without replacing
+// GameLoadedListener.
 func TestStartupHomeDataModelExactIdentityAndDiscordCoexistence(t *testing.T) {
 	vm, err := NewVM()
 	if err != nil {
@@ -55,8 +55,8 @@ func TestStartupHomeDataModelExactIdentityAndDiscordCoexistence(t *testing.T) {
 	SetGameLoadedListener(func(int64) { discordCalls.Add(1) })
 	t.Cleanup(func() { SetGameLoadedListener(nil) })
 
-	// AppReady alone is a distinct Java callback, and a nonzero GameLoaded is
-	// an experience DataModel; neither may be relabelled as Home DataModel.
+	// AppReady is a distinct callback and a nonzero GameLoaded is an experience
+	// DataModel; neither may be relabelled as Home DataModel.
 	dispatchStartupHomeAppReady(t, vm, receiver, "Home")
 	if _, handled := vm.dispatch(idToJobject(receiver.id), nativeHelperClass, "gameActivity_onGameLoaded", "(J)V", packJlong(1)); !handled {
 		t.Fatal("nonzero gameActivity_onGameLoaded was not handled")
@@ -75,8 +75,8 @@ func TestStartupHomeDataModelExactIdentityAndDiscordCoexistence(t *testing.T) {
 		t.Fatalf("Discord GameLoadedListener calls = %d, want 2", got)
 	}
 
-	// Only NativeHelper's exact method/signature can reach the lifecycle
-	// stream. A sibling capture path remains unrelated.
+	// Only NativeHelper's exact method/signature reaches the lifecycle stream; a
+	// sibling capture path stays unrelated.
 	before := len(got)
 	_, _ = vm.dispatch(idToJobject(receiver.id), "java/io/File", "gameActivity_onGameLoaded", "(J)V", packJlong(0))
 	_, _ = vm.dispatch(idToJobject(receiver.id), nativeHelperClass, "gameActivity_onGameLoaded", "(JI)V", packJlong(0))
@@ -90,9 +90,8 @@ func TestStartupHomeDataModelExactIdentityAndDiscordCoexistence(t *testing.T) {
 }
 
 // TestStartupHomeReadyExactIdentityAndRegistrationOrder proves the only
-// current Home-ready classification is the APK's named AppReady `Home`
-// transition. Nearby navigator names are intentionally rejected: they also
-// occur after a Games return and cannot mean Home by themselves.
+// Home-ready classification is the AppReady `Home` transition; nearby navigator
+// names are rejected.
 func TestStartupHomeReadyExactIdentityAndRegistrationOrder(t *testing.T) {
 	vm, err := NewVM()
 	if err != nil {
@@ -150,8 +149,7 @@ func TestStartupHomeReadyExactIdentityAndRegistrationOrder(t *testing.T) {
 }
 
 // TestStartupHomeSubscriptionsAreReentrantAndHaveBoundedLifetime proves a
-// consumer may tear down from its callback and that it sees no later event.
-// This matches the normal arm-teardown shape without blocking the JNI caller.
+// consumer may tear down from its callback and sees no later event.
 func TestStartupHomeSubscriptionsAreReentrantAndHaveBoundedLifetime(t *testing.T) {
 	vm, err := NewVM()
 	if err != nil {
@@ -191,8 +189,7 @@ func TestStartupHomeSubscriptionsAreReentrantAndHaveBoundedLifetime(t *testing.T
 }
 
 // TestStartupHomeSubscriptionsConcurrentSubscribeCancel exercises both
-// registries under concurrent registration, dispatch, and teardown. Run it
-// with -race to cover the JNI session handoff's normal concurrent shape.
+// registries under concurrent registration, dispatch, and teardown under -race.
 func TestStartupHomeSubscriptionsConcurrentSubscribeCancel(t *testing.T) {
 	const workers = 24
 	var calls atomic.Int64

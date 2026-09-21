@@ -22,8 +22,7 @@ const (
 
 // VerityStatus is queried only on an already authenticated pinned descriptor.
 // It is a capability result, never package identity and never a reason to
-// reopen the path. Enabling fs-verity is deliberately left to a later
-// filesystem-specific staging adapter.
+// reopen the path.
 func (p *PinnedFile) VerityStatus() (FSVerityStatus, error) {
 	if p == nil || p.File == nil {
 		return FSVerityUnavailable, fmt.Errorf("integrity: pinned file is closed")

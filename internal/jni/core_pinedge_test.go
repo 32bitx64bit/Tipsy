@@ -9,9 +9,8 @@ import "testing"
 
 // TestNewObjectArrayPinAccounting documents why NewObjectArray seeds one heap
 // edge (and one pin) per slot: each slot is independently replaceable via
-// SetObjectArrayElement, and replacement unpins exactly one edge. Collapsing
-// the initial fill to a single pin would free a still-referenced target when
-// one slot is overwritten.
+// SetObjectArrayElement, and replacement unpins exactly one edge. A single
+// shared pin would free a still-referenced target when a slot is overwritten.
 func TestNewObjectArrayPinAccounting(t *testing.T) {
 	vm, err := NewVM()
 	if err != nil {

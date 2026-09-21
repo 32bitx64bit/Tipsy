@@ -14,8 +14,8 @@ import (
 )
 
 // TestTimeline observes the live Roblox window for a period and prints a
-// per-second state timeline (black vs content, distinct frame hashes).
-// Roblox-window-only evidence. Gated: TIPSY_TIMELINE=1, TIPSY_TIMELINE_SECS.
+// per-second state timeline. Evidence is Roblox-window-only. Gated:
+// TIPSY_TIMELINE=1, TIPSY_TIMELINE_SECS.
 func TestTimeline(t *testing.T) {
 	if os.Getenv("TIPSY_TIMELINE") != "1" {
 		t.Skip("set TIPSY_TIMELINE=1")

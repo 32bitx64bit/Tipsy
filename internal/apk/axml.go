@@ -260,7 +260,6 @@ func parseAXML(data []byte) (*xmlElem, error) {
 		}
 		start = int(headerSize)
 	} else if typ != resStringPoolType {
-		// Some producers omit the outer RES_XML wrapper.
 		start = 0
 		end = len(data)
 	}
@@ -309,7 +308,6 @@ func parseAXML(data []byte) (*xmlElem, error) {
 				stack = stack[:len(stack)-1]
 			}
 		case resXMLStartNamespaceType, resXMLEndNamespaceType, resXMLCDATAType:
-			// Parsed structurally by walking other chunks; values come from attributes.
 		}
 		next := pos + int(csize)
 		if next <= pos {
@@ -370,7 +368,6 @@ func parseStartElement(chunk []byte, headerSize uint16, pool *stringPool, resMap
 		attrNS := binary.LittleEndian.Uint32(chunk[off:])
 		attrName := binary.LittleEndian.Uint32(chunk[off+4:])
 		rawValue := binary.LittleEndian.Uint32(chunk[off+8:])
-		// Res_value at off+12: size u16, res0 u8, dataType u8, data u32
 		dataType := chunk[off+15]
 		data := binary.LittleEndian.Uint32(chunk[off+16:])
 
@@ -520,7 +517,6 @@ func decodeUTF16String(b []byte) (string, error) {
 }
 
 func decodeUTF8String(b []byte) (string, error) {
-	// UTF-8 entries: encoded UTF-16 char length, then UTF-8 byte length, then bytes, then 0.
 	rest := b
 	_, n, err := decodeUTF8Length(rest)
 	if err != nil {
@@ -594,8 +590,8 @@ func newAXMLEncoder(utf8 bool) *axmlEncoder {
 		utf8:  utf8,
 		index: make(map[string]uint32),
 	}
-	// Resource-mapped android attribute names first so the resource map
-	// lines up with string-pool indices (AOSP convention).
+	// Resource-mapped android attribute names first so the resource map lines
+	// up with string-pool indices.
 	for _, name := range androidAttrOrder {
 		e.addMapped(name, androidAttrIDs[name])
 	}
@@ -710,7 +706,6 @@ func (e *axmlEncoder) encodeNamespace(start bool) []byte {
 	if !start {
 		typ = resXMLEndNamespaceType
 	}
-	// ResXMLTree_node: header + lineNumber + comment, then prefix + uri.
 	payload := make([]byte, 0, 16)
 	payload = appendU32(payload, 1) // lineNumber
 	payload = appendU32(payload, stringUnset)
@@ -831,16 +826,13 @@ func appendChunk(dst []byte, typ uint16, headerSize uint16, payload []byte) []by
 	dst = appendU16(dst, typ)
 	dst = appendU16(dst, headerSize)
 	dst = appendU32(dst, uint32(size))
-	// headerSize may be > 8; payload is the rest after the 8-byte chunk header.
-	// Callers pass payload as everything after the 8-byte ResChunk_header,
-	// and headerSize as the node/pool header size. Pad so the chunk body
-	// occupies headerSize-8 bytes before payload if needed.
+	// Callers pass payload as everything after the 8-byte chunk header, and
+	// headerSize as the node/pool header size; pad the body to headerSize-8.
 	bodyNeed := int(headerSize) - chunkHeaderSz
 	if bodyNeed < 0 {
 		bodyNeed = 0
 	}
 	if len(payload) < bodyNeed {
-		// Should not happen; keep encoder honest.
 		pad := make([]byte, bodyNeed-len(payload))
 		payload = append(payload, pad...)
 	}

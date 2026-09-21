@@ -16,8 +16,8 @@ import (
 )
 
 // GameActivityWriteCommandSymbol is the public native_app_glue command API.
-// Prefer this named function whenever the authenticated client exports it: the
-// client's own GameActivity glue then owns the android_app layout.
+// Prefer it whenever the authenticated client exports it: the client's own
+// glue then owns the android_app layout.
 const GameActivityWriteCommandSymbol = "android_app_write_cmd"
 
 // GameActivityCommandStage identifies the fail-closed command-bridge stage.
@@ -62,19 +62,17 @@ type gameActivityCommandABI struct {
 	msgwriteOffset uintptr
 }
 
-// This is a guarded descriptor for the public GameActivity native_app_glue
-// LP64 layout used by the current official client. It is a last resort after
-// the named android_app_write_cmd export. Both fields are safely read and must
-// validate as opposite ends of the same live pipe before any byte is written.
-// A future layout change therefore fails closed here; it is never guessed from
-// a Roblox version string, hash, BSS address, or text signature.
+// Guarded descriptor for the public GameActivity native_app_glue LP64
+// layout, a last resort after the named android_app_write_cmd export. Both
+// fields must validate as opposite ends of the same live pipe before any
+// byte is written, so a layout change fails closed.
 var gameActivityCommandABIs = [...]gameActivityCommandABI{
 	{name: "game-activity-native-app-glue-lp64-v1", msgreadOffset: 0x150, msgwriteOffset: 0x154},
 }
 
 // GameActivityCommandWriter delivers NativeAppGlueAppCmd bytes without
-// exposing android_app fields to Runtime. namedWrite is preferred when present;
-// otherwise abi is the validated public-layout compatibility descriptor.
+// exposing android_app fields to Runtime. namedWrite is preferred when
+// present; otherwise abi is the validated compatibility descriptor.
 type GameActivityCommandWriter struct {
 	handle     uintptr
 	namedWrite uintptr
@@ -108,8 +106,8 @@ func NewGameActivityCommandWriter(handle, namedWrite uintptr) (*GameActivityComm
 }
 
 // WriteCommand writes exactly one NativeAppGlueAppCmd byte. Descriptor-backed
-// writers re-read and revalidate both pipe endpoints on every call so a closed,
-// replaced, or changed-layout fd cannot receive an unchecked command.
+// writers revalidate both pipe endpoints on every call so a closed, replaced,
+// or changed-layout fd cannot receive an unchecked command.
 func (w *GameActivityCommandWriter) WriteCommand(cmd byte) error {
 	if w == nil || w.handle < 0x10000 {
 		return commandError(GameActivityCommandHandle, "", errors.New("writer is not initialized"))
@@ -183,8 +181,8 @@ func readGameActivityFD(handle, offset uintptr) (int, error) {
 	n, err := unix.ProcessVMReadv(os.Getpid(), []unix.Iovec{local}, []unix.RemoteIovec{{Base: handle + offset, Len: len(raw)}}, 0)
 	if err != nil || n != len(raw) {
 		// Some managed Linux environments deny process_vm_readv even for the
-		// calling process. /proc/self/mem provides the same bounded, non-faulting
-		// read and returns an error for an unmapped descriptor address.
+		// calling process; /proc/self/mem provides the same bounded,
+		// non-faulting read and errors on an unmapped descriptor address.
 		memFD, openErr := unix.Open("/proc/self/mem", unix.O_RDONLY|unix.O_CLOEXEC, 0)
 		if openErr != nil {
 			if err != nil {

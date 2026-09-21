@@ -33,10 +33,10 @@ func installWebRtcRecorder(t *testing.T, vm *VM) {
 	}
 }
 
-// The constructor must call the registered native synchronously, with the
-// exact upstream argument order (IIIZZZZZZZIIJ) and the honest host values.
-// The recorder has the real JNI prototype, so stack placement of arguments
-// seven onward is proven, not assumed.
+// The constructor must call the registered native synchronously, with the exact
+// upstream argument order (IIIZZZZZZZIIJ) and the host values. The recorder has
+// the real JNI prototype, so stack placement of arguments seven onward is
+// proven, not assumed.
 func TestWebRtcAudioManagerConstructorCachesParameters(t *testing.T) {
 	vm, err := NewVM()
 	if err != nil {
@@ -72,8 +72,8 @@ func TestWebRtcAudioManagerConstructorCachesParameters(t *testing.T) {
 	if rec.params != want {
 		t.Fatalf("parameters = %+v, want %+v", rec.params, want)
 	}
-	// Pin the honest values themselves: 48 kHz mono, no HW effects, OpenSL
-	// both ways, no AAudio, one 10 ms block per buffer.
+	// Pin the values themselves: 48 kHz mono, no HW effects, OpenSL both ways,
+	// no AAudio, one 10 ms block per buffer.
 	if want.SampleRate != 48000 || want.OutputChannels != 1 || want.InputChannels != 1 {
 		t.Fatalf("format changed: %+v", want)
 	}
@@ -218,9 +218,8 @@ func TestWebRtcAudioManagerInitDisposeBlacklist(t *testing.T) {
 	}
 }
 
-// isCommunicationModeEnabled stays false: AppRtcDeviceWrapper is never
-// invoked on this client, and live voice does not put AudioManager into
-// MODE_IN_COMMUNICATION.
+// isCommunicationModeEnabled stays false: this client never enters
+// communication mode.
 func TestWebRtcAudioManagerCommunicationModeOff(t *testing.T) {
 	vm, err := NewVM()
 	if err != nil {

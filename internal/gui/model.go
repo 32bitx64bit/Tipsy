@@ -196,14 +196,11 @@ type ApplyResult struct {
 	FrameRateNote   string
 }
 
-// ControllerSettings is the lean controller surface (simplified
-// 2026-09-12). It is presentation-neutral widget state: enable plus one
+// ControllerSettings is presentation-neutral widget state: enable plus one
 // global stick floor both sticks share. Validation and widget defaults live
 // here; the persisted section shape, merge rules, and calibration semantics
 // live in the Input-owned gamepad package. Missing values always mean
-// gamepad defaults (enabled, device-flat baseline). No per-game profiles,
-// no per-stick sliders, no Y-invert, no rumble preference (deleted vs v1,
-// see gamepad-simplify-2026-09-12.md).
+// gamepad defaults (enabled, device-flat baseline).
 type ControllerSettings struct {
 	Enabled  bool
 	Deadzone float64
@@ -211,9 +208,8 @@ type ControllerSettings struct {
 
 const (
 	// DefaultControllerDeadzone is the widget default when no persisted
-	// calibration exists: 0 selects the honest device-flat baseline (the
-	// small 0.08 reader fallback underneath still applies when a device
-	// reports flat=0).
+	// calibration exists: 0 selects the device-flat baseline, and the reader
+	// fallback still applies when a device reports flat=0.
 	DefaultControllerDeadzone = 0.0
 	// MaxControllerDeadzone caps the deadzone slider (0.0-0.5).
 	MaxControllerDeadzone = 0.5

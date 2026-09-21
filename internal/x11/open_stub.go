@@ -36,9 +36,8 @@ func dismissLocked(w *Window) error {
 	return nil
 }
 
-// setCursorVisibleLocked tracks the cursor policy without native X11 so
-// CursorHidden stays meaningful on stub builds. 0 is visible (inherited),
-// 1 is the hidden marker.
+// setCursorVisibleLocked tracks the cursor policy without native X11.
+// 0 is visible (inherited), 1 is the hidden marker.
 func setCursorVisibleLocked(w *Window, visible bool) {
 	if visible {
 		w.cursor = 0

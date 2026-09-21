@@ -50,11 +50,9 @@ func TestNormalizeStickCentreAndFlat(t *testing.T) {
 	if v, _ := NormalizeStick(0, -32768, 32767, 255, 0); v != 0 {
 		t.Fatalf("centre must be 0, got %v", v)
 	}
-	// Within flat (±255 of centre ~0) → 0.
 	if v, _ := NormalizeStick(200, -32768, 32767, 255, 0); v != 0 {
 		t.Fatalf("within flat must be 0, got %v", v)
 	}
-	// Half deflection: 16383/32767 ≈ 0.5 from rest 0 to max.
 	v, fb := NormalizeStick(16383, -32768, 32767, 255, 0)
 	if fb {
 		t.Fatal("flat>0 must not use fallback")
@@ -74,14 +72,11 @@ func TestNormalizeStickCentreAndFlat(t *testing.T) {
 }
 
 func TestNormalizeStickCapsOversizedFlat(t *testing.T) {
-	// GuliKit unsigned 16-bit sticks: flat 4095 ≈ 12.5% would eat
-	// firmware gyro-to-right-stick micro-aim. Cap at 0.08 (≈2621 raw).
 	const min, max, flat int32 = 0, 65535, 4095
 	centre := int32((min + max) / 2) // 32767
 	if v, fb := NormalizeStick(centre, min, max, flat, 0); v != 0 || fb {
 		t.Fatalf("rest must stay 0 without fallback, got %v,%v", v, fb)
 	}
-	// 3000 counts is inside device flat 4095 but outside the 0.08 cap.
 	v, fb := NormalizeStick(centre+3000, min, max, flat, 0)
 	if fb {
 		t.Fatal("flat>0 must not use fallback")
@@ -98,9 +93,6 @@ func TestNormalizeStickCapsOversizedFlat(t *testing.T) {
 }
 
 func TestNormalizeStickIdleRestBias(t *testing.T) {
-	// Live GuliKit RY rests at 34497, not 32767. A mid-range deadzone
-	// ate gyro toward centre (look down / look right) while the easy
-	// side (look up) passed — "mostly up", side-to-side mushy.
 	const min, max, flat, rest int32 = 0, 65535, 4095, 34497
 	if v, _ := NormalizeStick(rest, min, max, flat, rest); v != 0 {
 		t.Fatalf("idle rest must be 0, got %v", v)
@@ -116,14 +108,12 @@ func TestNormalizeStickIdleRestBias(t *testing.T) {
 	if math.Abs(math.Abs(up)-math.Abs(down)) > 0.002 {
 		t.Fatalf("equal-count gyro must have equal |n|, up=%v down=%v", up, down)
 	}
-	// Held stick at open must not become the origin.
 	if v, _ := NormalizeStick(32767, min, max, flat, 50000); v != 0 {
 		t.Fatalf("held-stick Value must not recenter, geo rest got %v", v)
 	}
 }
 
 func TestNormalizeStickFallbackDeadzone(t *testing.T) {
-	// flat==0 → small default deadzone (≈0.08 of half range ≈ 2621 raw).
 	if v, fb := NormalizeStick(1000, -32768, 32767, 0, 0); v != 0 || !fb {
 		t.Fatalf("small raw must be deadzoned with fallback, got %v,%v", v, fb)
 	}
@@ -144,7 +134,6 @@ func TestNormalizeTrigger(t *testing.T) {
 	if math.Abs(v-128.0/255) > 0.02 {
 		t.Fatalf("half pull ≈0.5, got %v", v)
 	}
-	// flat edge: within flat → 0.
 	if v, _ := NormalizeTrigger(3, 0, 255, 8); v != 0 {
 		t.Fatalf("within flat must be 0, got %v", v)
 	}
@@ -163,7 +152,6 @@ func TestIsTriggerAxis(t *testing.T) {
 	if IsTriggerAxis(AbsInfo{Minimum: 5, Maximum: 5}) {
 		t.Fatal("degenerate range must not classify as trigger")
 	}
-	// GuliKit / xpadneo Bluetooth Xbox: unsigned 16-bit sticks, analog 10-bit triggers.
 	if IsTriggerAxis(AbsInfo{Minimum: 0, Maximum: 65535, Value: 32768, Flat: 4095}) {
 		t.Fatal("unsigned 16-bit stick must not classify as trigger")
 	}
@@ -179,7 +167,6 @@ func TestIsTriggerAxis(t *testing.T) {
 }
 
 func TestNormalizeUnsignedStick(t *testing.T) {
-	// GuliKit rest ~32768 on 0..65535 with flat 4095 → 0, not ~0.5.
 	if v, _ := NormalizeStick(32768, 0, 65535, 4095, 0); v != 0 {
 		t.Fatalf("unsigned stick centre must be 0, got %v", v)
 	}
@@ -206,7 +193,6 @@ func TestReaderButtonAndSynBoundary(t *testing.T) {
 	if !f.Buttons[BtnSouth] {
 		t.Fatalf("BTN_SOUTH must be held, got %v", f.Buttons)
 	}
-	// Release + SYN → empty.
 	r.Feed(InputEvent{Type: EvKey, Code: BtnSouth, Value: 0})
 	f = r.Feed(InputEvent{Type: EvSyn, Code: SynReport})
 	if f == nil || len(f.Buttons) != 0 {
@@ -245,8 +231,6 @@ func TestReaderAimAssistRecenter(t *testing.T) {
 	info, m := gulikitDevice()
 	r := NewReader(info.Abs)
 	r.SetMapping(m)
-	// Pose is 1263 counts off connect-time RX rest (30737). Without
-	// recenter, 32000-3000 stays inside the 0.08 band of 30737.
 	press := feedStream(t, r, [][]byte{
 		EncodeInputEvent(EvAbs, AbsRX, 32000),
 		EncodeInputEvent(EvAbs, AbsRY, 34497),
@@ -279,8 +263,6 @@ func TestReaderAimAssistDoesNotInvertHeldStick(t *testing.T) {
 	info, m := gulikitDevice()
 	r := NewReader(info.Abs)
 	r.SetMapping(m)
-	// Physical aim right (RX 50000) then analog ZL: capturing that
-	// pose as origin made firmware spring toward HID 32767 read as left.
 	right := feedStream(t, r, [][]byte{
 		EncodeInputEvent(EvAbs, AbsRX, 50000),
 		EncodeInputEvent(EvAbs, AbsRY, 34497),
@@ -300,7 +282,6 @@ func TestReaderAimAssistDoesNotInvertHeldStick(t *testing.T) {
 
 	r2 := NewReader(info.Abs)
 	r2.SetMapping(m)
-	// Physical aim down (RY toward min) then ZL must not become look-up.
 	down := feedStream(t, r2, [][]byte{
 		EncodeInputEvent(EvAbs, AbsRX, 30737),
 		EncodeInputEvent(EvAbs, AbsRY, 15000),

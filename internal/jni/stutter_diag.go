@@ -27,8 +27,7 @@ const (
 	jniCallFamilies
 )
 
-// JNIStutterStats counts Java-call-family entries at the C bridge, before the
-// cgo callback can obscure the originating native OS thread name.
+// JNIStutterStats counts Java-call-family entries at the C bridge.
 type JNIStutterStats struct {
 	Calls [jniThreadClasses][jniCallFamilies]uint64
 }
@@ -39,10 +38,6 @@ func SetStutterDiagnostics(enabled bool) {
 		v = 1
 	}
 	C.tipsy_jni_stutter_diag_set_enabled(v)
-	// String-path correlation follows the same explicit, default-off runtime
-	// lifecycle. Its snapshot is intentionally separate so existing callers
-	// keep their fixed stutter aggregate schema until the runtime logger opts
-	// into the new content-free fields.
 	SetStringDiagnostics(enabled)
 }
 

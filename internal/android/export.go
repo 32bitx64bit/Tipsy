@@ -267,8 +267,8 @@ func GoAndroid_AssetOpen(filename *C.char, mode C.int) unsafe.Pointer {
 
 //export GoAndroid_AssetClosed
 func GoAndroid_AssetClosed(releaseToken C.uintptr_t) {
-	// The C ABI supplies an opaque per-handle token only. In particular, no
-	// asset buffer, content, path, byte count, or native handle crosses here.
+	// The C ABI supplies an opaque per-handle token only; no asset buffer,
+	// content, path, byte count, or native handle crosses here.
 	releaseAssetBorrow(uintptr(releaseToken))
 }
 
@@ -301,8 +301,8 @@ func GoAndroid_dlclose(handle unsafe.Pointer) C.int {
 }
 
 // GoAndroid_dlerror returns a fresh C string owned by the caller, or NULL when
-// no error is pending. The C shim caches one pointer per OS thread and frees it
-// exactly once on the next call, so no Go-side cache can be raced.
+// no error is pending. The C shim frees the previous per-thread pointer exactly
+// once on the next call, so no Go-side cache can be raced.
 //
 //export GoAndroid_dlerror
 func GoAndroid_dlerror() *C.char {
@@ -313,7 +313,7 @@ func GoAndroid_dlerror() *C.char {
 	return C.CString(msg)
 }
 
-// testDlErrorC reads the message through the C shim, whose per-thread buffer
+// testDlErrorC reads the message through the C shim; the per-thread buffer
 // stays owned by C.
 func testDlErrorC() string {
 	p := C.tipsy_dlerror()
@@ -323,8 +323,6 @@ func testDlErrorC() string {
 	return C.GoString(p)
 }
 
-// testGoDlErrorAndFree exercises the direct Go export and frees the fresh
-// C string exactly once, as an embedding caller would.
 func testGoDlErrorAndFree() string {
 	p := GoAndroid_dlerror()
 	if p == nil {

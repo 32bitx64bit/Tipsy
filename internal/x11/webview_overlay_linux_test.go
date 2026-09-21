@@ -17,8 +17,8 @@ import (
 	"github.com/tipsy-linux/tipsy/internal/rbxuri"
 )
 
-// Exercise the registered close publisher rather than just an injected hide
-// function, without starting GTK or using a Roblox/account-bearing page.
+// Exercise the registered close publisher rather than an injected hide
+// function, without starting GTK or Roblox.
 func TestWebViewURIJoinDismissesBeforeStartGame(t *testing.T) {
 	for _, raw := range []string{
 		"roblox://experiences/start?placeId=1818",
@@ -107,8 +107,8 @@ func setTestWebViewPresentation(t *testing.T) {
 	})
 }
 
-// This owns a separate host window and uses only synthetic local content.
-// It validates real GTK cursor transitions without mouse injection or Roblox.
+// This owns a separate host window and uses only synthetic local content;
+// it validates real GTK cursor transitions.
 func TestWebViewHostCursorPreservesParentPolicy(t *testing.T) {
 	if os.Getenv("TIPSY_WEBVIEW_HOST_TEST") != "1" {
 		t.Skip("set TIPSY_WEBVIEW_HOST_TEST=1 on an X11 display")
@@ -185,10 +185,9 @@ func TestWebViewHostCursorPreservesParentPolicy(t *testing.T) {
 	}
 }
 
-// This owns two short-lived synthetic host windows. It pins the lifecycle
-// that matters after a browser-originated join: the child is unmapped before
-// StartGame, and destroying that first host cannot leave an old WebKit child
-// above a replacement host's Home surface.
+// This owns two short-lived synthetic host windows and pins the post-join
+// lifecycle: the child is unmapped before StartGame, and destroying the first
+// host cannot leave an old WebKit child above a replacement host.
 func TestWebViewJoinHandoffAndHostRecreation(t *testing.T) {
 	if os.Getenv("TIPSY_WEBVIEW_HOST_TEST") != "1" {
 		t.Skip("set TIPSY_WEBVIEW_HOST_TEST=1 on an X11 display")

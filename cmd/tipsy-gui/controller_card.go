@@ -3,17 +3,6 @@
 
 package main
 
-// Controller settings card (lean, simplified 2026-09-12). Widgets bind to
-// the existing diagnose gamepad report and persist the lean gamepad section.
-// No mapping, deadzone, rumble, or feed-in logic lives here.
-//
-// Deleted vs controller v1 (honest list, see
-// gamepad-simplify-2026-09-12.md): per-stick deadzone sliders (one global
-// slider), Y-invert checkboxes, the disabled rumble checkbox, and the local
-// test-input readout (start/stop, stick bars, button lamps). The card shows
-// the connected-pad enumeration and three controls: enable, face-button
-// layout, and deadzone.
-
 import (
 	"context"
 	"fmt"
@@ -131,8 +120,7 @@ func (w *mainWindow) newDeadzoneRow(accessible string) (*qt.QSlider, *qt.QLabel)
 	setObjectName(value.QObject, "mutedText")
 	slider.OnValueChanged(func(v int) {
 		value.SetText(fmt.Sprintf("%.2f", float64(v)/100))
-		// Persist on every change (not just slider release) so keyboard
-		// adjustments save too. Each write is one small atomic file.
+		// Persist on every change so keyboard adjustments save too.
 		w.persistControllerSettings()
 	})
 	return slider, value
@@ -318,9 +306,8 @@ func (w *mainWindow) refreshControllerPadsWithPolicy(explicit bool) {
 	w.setLabelText(w.controllerPadNote, strings.Join(lines, "\n"))
 }
 
-// stopControllerTest is kept for window-lifetime compatibility: the lean
-// card never opens a pad, so this only resets button text/state when called
-// while leaving the Settings page.
+// stopControllerTest only resets button text/state; the card never opens a
+// pad.
 func (w *mainWindow) stopControllerTest(message string) {
 	if w.controllerProbe != nil {
 		w.controllerProbe.close()

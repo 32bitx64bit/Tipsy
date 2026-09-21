@@ -11,8 +11,8 @@ import (
 	"github.com/tipsy-linux/tipsy/internal/gamepad"
 )
 
-// stubGamepadScan replaces the evdev enumeration for one test. Production
-// always calls gamepad.Scan; the stub never synthesizes input content.
+// stubGamepadScan replaces the evdev enumeration for one test. The stub never
+// synthesizes input content.
 func stubGamepadScan(t *testing.T, fn func(dir string) (gamepad.ScanResult, error)) {
 	t.Helper()
 	old := gamepadScanFunc
@@ -187,8 +187,7 @@ func TestDiagnoseGamepadPathState(t *testing.T) {
 		return gamepad.ScanResult{}, nil
 	})
 	t.Setenv("TIPSY_GAMEPAD", "1")
-	// Lean build: every selector value is parsed-but-ignored, effective arm
-	// always direct.
+	// Every selector value is parsed-but-ignored; the effective arm is direct.
 	for _, raw := range []string{"", "direct", "gameactivity", "both", "bogus"} {
 		t.Setenv("TIPSY_GAMEPAD_PATH", raw)
 		text := FormatSubsystem(Diagnose(context.Background(), "gamepad"))
@@ -266,7 +265,7 @@ func TestDoctorGamepadEnvReported(t *testing.T) {
 	t.Setenv("TIPSY_GAMEPAD", "1")
 	t.Setenv("TIPSY_GAMEPAD_PATH", "both")
 	rep := Doctor(context.Background())
-	// Lean build: the selector is parsed-but-ignored, effective arm direct.
+	// The selector is parsed-but-ignored; the effective arm is direct.
 	if rep.Gamepad.PathSelector != "direct" {
 		t.Fatalf("doctor gamepad path = %q, want direct", rep.Gamepad.PathSelector)
 	}

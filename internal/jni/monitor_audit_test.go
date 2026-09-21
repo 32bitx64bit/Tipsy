@@ -18,8 +18,7 @@ func TestAuditMonitorRecursionAndOwnership(t *testing.T) {
 		t.Fatal(err)
 	}
 	a := testNewByteObject(vm, []byte{1})
-	// Explicit identities test the monitor bookkeeping independently of
-	// native pthread attachment, which has its own integration tests.
+	// Explicit identities test the monitor bookkeeping without native pthread attachment.
 	var tokens [2]byte
 	e1, e2 := unsafe.Pointer(&tokens[0]), unsafe.Pointer(&tokens[1])
 	if !vm.monitorEnter(e1, a) || !vm.monitorEnter(e1, a) {

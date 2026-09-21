@@ -6,10 +6,10 @@ import (
 	"io"
 )
 
-// Android packed relocation dynamic tags.
-// AOSP: DT_ANDROID_REL=0x6000000f, DT_ANDROID_RELSZ=0x60000010,
-// DT_ANDROID_RELA=0x60000011, DT_ANDROID_RELASZ=0x60000012.
-// Historical notes often pair DT_ANDROID_REL / DT_ANDROID_RELA as 0x6000000f / 0x60000010.
+// Android packed relocation dynamic tags: DT_ANDROID_REL=0x6000000f,
+// DT_ANDROID_RELSZ=0x60000010, DT_ANDROID_RELA=0x60000011,
+// DT_ANDROID_RELASZ=0x60000012. Some tooling pairs DT_ANDROID_REL /
+// DT_ANDROID_RELA as 0x6000000f / 0x60000010 instead.
 const (
 	dtAndroidRel    elf.DynTag = 0x6000000f
 	dtAndroidRelsz  elf.DynTag = 0x60000010
@@ -35,7 +35,7 @@ func summarizeRelocs(f *elf.File) RelocationSummary {
 		sum.AndroidRELA = true
 		sum.AndroidPacked = true
 	}
-	// Historical pairing: 0x60000010 as DT_ANDROID_RELA when 0x60000011 is absent.
+	// Fallback pairing: 0x60000010 as DT_ANDROID_RELA when 0x60000011 is absent.
 	if hasDynTag(ents, dtAndroidRelsz) && !hasDynTag(ents, dtAndroidRela) {
 		sum.AndroidPacked = true
 	}

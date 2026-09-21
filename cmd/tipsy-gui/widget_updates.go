@@ -5,8 +5,8 @@ package main
 
 import qt "github.com/mappu/miqt/qt6"
 
-// These setters make the hot state paths idempotent. Besides avoiding needless
-// Qt layout/style work, they avoid re-emitting widget signals during hydration.
+// These setters make the hot state paths idempotent and avoid re-emitting
+// widget signals during hydration.
 func (w *mainWindow) setLabelText(label *qt.QLabel, text string) bool {
 	if label == nil || label.Text() == text {
 		w.metrics.widgetSkipped.Add(1)

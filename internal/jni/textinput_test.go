@@ -15,10 +15,9 @@ import (
 )
 
 // resetTextInputConnectionForTest clears the Tipsy-owned connection state
-// (object handle, activation, and transition counts). Test seam only;
-// production never resets within a process. Keyboard announcements are
-// untouched. It lives in the test files because production never needs it;
-// testRbxRecReset bridges the C witness reset.
+// (object handle, activation, and transition counts). Test seam only.
+// Keyboard announcements are untouched. It lives in the test files because
+// production never needs it; testRbxRecReset bridges the C witness reset.
 func resetTextInputConnectionForTest() {
 	textConnection.mu.Lock()
 	textConnection.connID = 0
@@ -118,10 +117,9 @@ func TestStringGetBytesUTF8EmptyAndUnsupported(t *testing.T) {
 	}
 }
 
-// keyboardTestObjects builds the two payload objects for a showKeyboard
-// call: a [B initial-bytes object and one NativeTextBoxInfo object.
-// Contents are fixed non-secret markers; the privacy test below uses its
-// own secret payload.
+// keyboardTestObjects builds the two payload objects for a showKeyboard call:
+// a [B initial-bytes object and one NativeTextBoxInfo object. Contents are
+// fixed non-secret markers; the privacy test below uses its own secret payload.
 func keyboardTestObjects(t *testing.T, vm *VM, initBytes []byte, boxes int) (initID, boxesID int64) {
 	t.Helper()
 	vm.mu.Lock()
@@ -150,10 +148,9 @@ func wireRecordingRbxTextTarget(t *testing.T, vm *VM) {
 	t.Cleanup(ClearRobloxTextInputTarget)
 }
 
-// TestRbxTextOverlaySnapshotCapturesAPKConfig drives the exact
-// NativeTextBoxInfo constructor plus a genuine showKeyboard session. The
-// render-facing snapshot is transient, complete, uses UTF-16 selection, and
-// is wiped on hide.
+// TestRbxTextOverlaySnapshotCapturesAPKConfig drives the NativeTextBoxInfo
+// constructor plus a genuine showKeyboard session. The render-facing snapshot
+// is transient, complete, uses UTF-16 selection, and is wiped on hide.
 func TestRbxTextOverlaySnapshotCapturesAPKConfig(t *testing.T) {
 	vm, err := NewVM()
 	if err != nil {
@@ -326,8 +323,8 @@ func TestRbxTextBoxInfoRefreshRunsAfterCallbackAndReleasesLocalRef(t *testing.T)
 			1, 1, 0xffddeeff, 16, 0, 0, false, false, true))
 	const sentinel = "safe-secret"
 	initID, _ := keyboardTestObjects(t, vm, []byte(sentinel), 0)
-	// Exact DEX behavior: Z=false still focuses/shows the EditText but skips
-	// applying the show payload's NativeTextBoxInfo.
+	// Z=false still focuses/shows the EditText but skips applying the show
+	// payload's NativeTextBoxInfo.
 	vm.dispatch(jnull(), nativeGLClass, "showKeyboard", showKeyboardSig,
 		testPackKeyboardArgs(201, 0, initID, info.id))
 	if before := CurrentRbxTextOverlay(); !before.Active || before.Configured {
@@ -407,7 +404,6 @@ func TestRbxTextBoxInfoRefreshRejectsStaleFocusSession(t *testing.T) {
 		testRbxRecordPassFn(), 0, 0, getterFn,
 		func(fn, a0, a1, a2, a3, a4, a5, a6, a7 uintptr) int64 {
 			// Simulate the engine changing focus while its getter is in flight.
-			// Even a recycled native handle cannot defeat the session generation.
 			beginRbxTextEditor(301, "", false, rbxTextBoxConfig{})
 			return info.id
 		})
@@ -473,7 +469,7 @@ func TestRbxTextBoxInfoRefreshMissingAndNullFailOnce(t *testing.T) {
 	}
 }
 
-// TestNativeTextBoxInfoTextColorIsVerbatimARGB pins the current APK contract:
+// TestNativeTextBoxInfoTextColorIsVerbatimARGB pins the current contract:
 // constructor integer slot 8 is Android packed ARGB and neither the full nor
 // copy constructor invents an alpha/default when the raw value is zero.
 func TestNativeTextBoxInfoTextColorIsVerbatimARGB(t *testing.T) {
@@ -505,9 +501,7 @@ func TestNativeTextBoxInfoTextColorIsVerbatimARGB(t *testing.T) {
 // TestRbxTextDeliveryReleasesJStringLocals pins the local-reference contract
 // for the RbxKeyboard delivery path: one Java String is created per edit,
 // shared by the synchronous selection-sync and nativePassText calls, and
-// released before returning. Live String objects must not grow with
-// keystrokes (the previous code created two never-released locals per edit,
-// each carrying the complete editor snapshot).
+// released before returning. Live String objects must not grow with keystrokes.
 func TestRbxTextDeliveryReleasesJStringLocals(t *testing.T) {
 	vm, err := NewVM()
 	if err != nil {
@@ -574,10 +568,10 @@ func TestRbxTextDeliveryReleasesJStringLocals(t *testing.T) {
 	}
 }
 
-// TestRbxKeyboardEditorCommitUTF16 drives the complete desktop adapter:
-// an engine-owned showKeyboard session seeds the hidden editor, genuine
-// committed UTF-8 updates the exact nativePassText ABI, and Java cursor
-// offsets count UTF-16 code units rather than UTF-8 bytes or Go runes.
+// TestRbxKeyboardEditorCommitUTF16 drives the complete desktop adapter: an
+// engine-owned showKeyboard session seeds the hidden editor, genuine
+// committed UTF-8 updates the nativePassText ABI, and Java cursor offsets
+// count UTF-16 code units rather than UTF-8 bytes or Go runes.
 func TestRbxKeyboardEditorCommitUTF16(t *testing.T) {
 	vm, err := NewVM()
 	if err != nil {
@@ -735,9 +729,8 @@ func TestX11TextNeedsEngineFocus(t *testing.T) {
 	}
 }
 
-// TestShowKeyboardNativeHelper drives the exact production dispatch path
-// for NativeHelper.gameActivity_showKeyboard(JZ[BL...NativeTextBoxInfo;)V
-// (live-observed in the login focus storm): handled, counted, aggregates
+// TestShowKeyboardNativeHelper drives the dispatch path for
+// NativeHelper.gameActivity_showKeyboard: handled, counted, aggregates
 // recorded, log line emitted, nothing fabricated or acted on.
 func TestShowKeyboardNativeHelper(t *testing.T) {
 	vm, err := NewVM()
@@ -787,13 +780,11 @@ func TestShowKeyboardNativeHelper(t *testing.T) {
 		t.Fatal("gameActivity_hideKeyboard missing from implementedMethods")
 	}
 
-	// Wrong class with the same name/sig is not the contract.
 	if _, handled := vm.dispatch(idToJobject(h.id), "java/io/File",
 		"gameActivity_showKeyboard", showKeyboardSig,
 		testPackKeyboardArgs(1, 0, initID, boxesID)); handled {
 		t.Fatal("non-text class handled by text-input dispatch")
 	}
-	// Wrong sig on the right class stays unhandled.
 	if _, handled := vm.dispatch(idToJobject(h.id), nativeHelperClass,
 		"gameActivity_showKeyboard", "(JZ)V",
 		testPackKeyboardArgs(1, 0, initID, boxesID)); handled {
@@ -802,8 +793,7 @@ func TestShowKeyboardNativeHelper(t *testing.T) {
 }
 
 // TestShowHideKeyboardNativeGL drives the NativeGLJavaInterface half of the
-// contract (showKeyboard/hideKeyboard, called first in the live storm):
-// same receive-and-record semantics, shared counters.
+// contract: same receive-and-record semantics, shared counters.
 func TestShowHideKeyboardNativeGL(t *testing.T) {
 	vm, err := NewVM()
 	if err != nil {
@@ -932,7 +922,6 @@ func TestTextInputConnectionLifecycle(t *testing.T) {
 		t.Fatalf("Ensure = %d, want stable %d", got, conn)
 	}
 
-	// Second show on the fallback class keeps the stable object.
 	if _, handled := vm.dispatch(jnull(), nativeHelperClass,
 		"gameActivity_showKeyboard", showKeyboardSig,
 		testPackKeyboardArgs(43, 0, initID, boxesID)); !handled {
@@ -951,12 +940,10 @@ func TestTextInputConnectionLifecycle(t *testing.T) {
 	}
 }
 
-// TestTextInputSetStateTransitions drives the exact production dispatch
-// path for the engine→Java GameTextInput contract
-// (InputConnection.setState(State)V, setSoftKeyboardActive(ZI)V,
-// restartInput()V — DEX-proven classes2.dex descriptors): each call is
-// handled, counted, and recorded as opaque aggregates only, with a
-// trigger-gated log line and void receiver-echo semantics.
+// TestTextInputSetStateTransitions drives the dispatch path for the
+// engine→Java GameTextInput contract: each call is handled, counted, and
+// recorded as opaque aggregates only, with a trigger-gated log line and void
+// receiver-echo semantics.
 func TestTextInputSetStateTransitions(t *testing.T) {
 	vm, err := NewVM()
 	if err != nil {
@@ -1021,18 +1008,15 @@ func TestTextInputSetStateTransitions(t *testing.T) {
 		}
 	}
 
-	// Wrong class with the same name/sig is not the contract.
 	if _, handled := vm.dispatch(idToJobject(conn.id), "java/io/File",
 		"setState", setStateSig, testPackObjectArg(state.id)); handled {
 		t.Fatal("non-InputConnection class handled by text-connection dispatch")
 	}
-	// Wrong sig on the right class stays unhandled.
 	if _, handled := vm.dispatch(idToJobject(conn.id), gameTextInputConnectionClass,
 		"setState", "(Lcom/google/androidgamesdk/gametextinput/State;I)V",
 		testPackObjectArg(state.id)); handled {
 		t.Fatal("wrong-sig setState handled by text-connection dispatch")
 	}
-	// Nil-arg setState degrades to a zero ref without a panic.
 	if _, handled := vm.dispatch(jnull(), gameTextInputConnectionClass,
 		"setState", setStateSig, nil); !handled {
 		t.Fatal("nil-arg setState not handled")
@@ -1076,11 +1060,9 @@ func TestTextInputNeverLogsStateContent(t *testing.T) {
 }
 
 // TestTextInputCommitStaysHonestWhenSilent pins the no-synthesis rule: even
-// with recorded State transitions, there is no commit source — committed
-// text stays zero, no commit is pending, and none of the Java→native
-// commit identities has a Tipsy-side caller wired (no RegisterNatives
-// entries without the engine). The official nativePassText route is never
-// fed from keystrokes or thin air.
+// with recorded State transitions, there is no commit source — committed text
+// stays zero, no commit is pending, and none of the Java→native commit
+// identities has a Tipsy-side caller wired.
 func TestTextInputCommitStaysHonestWhenSilent(t *testing.T) {
 	vm, err := NewVM()
 	if err != nil {
@@ -1103,10 +1085,9 @@ func TestTextInputCommitStaysHonestWhenSilent(t *testing.T) {
 	}
 }
 
-// TestTextInputPhysicalKeyPathUntouched proves the commit-source work leaves
-// the official physical-key route intact: a real Q press/release edge still
-// delivers the exact nativePassKeyEvent(ZIIZ)V ABI while State counts and
-// the commit gate do not move.
+// TestTextInputPhysicalKeyPathUntouched proves the physical-key route stays
+// intact: a real Q press/release edge still delivers the nativePassKeyEvent
+// ABI while State counts and the commit gate do not move.
 func TestTextInputPhysicalKeyPathUntouched(t *testing.T) {
 	const env, class = uintptr(0x1234), uintptr(0x9abc)
 	wireRecordingDirectKeyTarget(t, env, class)

@@ -19,8 +19,8 @@ type FocusedTextSnapshot struct {
 	CursorVisible bool
 	Multiline     bool
 	TextWrapped   bool
-	// IncludeFontPadding is Android TextView's line-box policy. The APK's
-	// RbxKeyboard retains the platform default (true).
+	// IncludeFontPadding is Android TextView's line-box policy; RbxKeyboard
+	// retains the platform default (true).
 	IncludeFontPadding bool
 	Text               string
 	CursorUTF16        int
@@ -46,9 +46,8 @@ type FocusedTextSnapshot struct {
 }
 
 // FocusedTextOverlayDiagnostics contains only privacy-safe render metadata.
-// It deliberately exposes neither text nor glyph identities. Pixel counts are
-// transient compositor health signals and are cleared when focus ownership
-// ends.
+// It exposes neither text nor glyph identities; pixel counts are transient
+// compositor health signals cleared when focus ownership ends.
 type FocusedTextOverlayDiagnostics struct {
 	Mapped            bool
 	UsesARGB          bool
@@ -97,8 +96,8 @@ func prepareFocusedTextPaint(s FocusedTextSnapshot, clientWidth, clientHeight in
 		return focusedTextPaint{}
 	}
 	// The APK multiplies layout values by density before this boundary and
-	// Java float-to-int truncates them. Runtime supplies those final px values;
-	// truncation here preserves the exact conversion and avoids rounding drift.
+	// Java float-to-int truncates them; truncation here preserves that exact
+	// conversion and avoids rounding drift.
 	x := int(s.X)
 	y := int(s.Y)
 	w := int(s.Width)
@@ -152,8 +151,8 @@ func prepareFocusedTextPaint(s FocusedTextSnapshot, clientWidth, clientHeight in
 	if fontSize <= 0 {
 		return focusedTextPaint{}
 	}
-	// The Pango font cache is intentionally bounded even if a corrupt platform
-	// payload supplies an extreme value. Geometry remains APK-derived.
+	// The Pango font cache is intentionally bounded even if a corrupt payload
+	// supplies an extreme value.
 	if fontSize > 256 {
 		fontSize = 256
 	}
@@ -196,8 +195,7 @@ func finitePositive(v float32) bool { return finite(v) && v > 0 }
 
 func passwordTextInputType(inputType int32) bool {
 	// Exact RbxKeyboard mapping: Password (5), NewPassword (9), and the
-	// feature-branch new-password autofill type (10). Visible-password (6)
-	// deliberately remains visible.
+	// new-password autofill type (10). Visible-password (6) stays visible.
 	return inputType == 5 || inputType == 9 || inputType == 10
 }
 

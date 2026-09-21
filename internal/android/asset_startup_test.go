@@ -15,9 +15,7 @@ import (
 )
 
 // assertAssetStartupCacheInvariants independently scans the authoritative maps
-// rather than reusing production counters or indexes. It deliberately belongs
-// in tests: normal open/close maintenance must not rediscover this information
-// by walking every successful cache entry or blob.
+// rather than reusing production counters or indexes.
 func assertAssetStartupCacheInvariants(t testing.TB, cache *assetCache) {
 	t.Helper()
 
@@ -238,8 +236,6 @@ func TestAssetStartupNativeCloseUnderBudgetPressure(t *testing.T) {
 	}
 }
 
-// cachedBytesLockedForTest keeps assertions under the cache lock without
-// putting a production full-cache diagnostic scan back on the open/close path.
 func (c *assetCache) cachedBytesLockedForTest() int64 {
 	c.mu.RLock()
 	defer c.mu.RUnlock()

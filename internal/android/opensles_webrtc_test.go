@@ -13,15 +13,9 @@ import (
 	"testing"
 )
 
-// The bridge must answer the capability probes a client runs before it
-// creates a stream the way Android's OpenSL ES (frameworks/wilhelm) does:
-// QueryNumSupportedInterfaces / QuerySupportedInterfaces enumerate exactly
-// the interfaces GetInterface hands out, unknown object classes and
-// extensions are refused honestly, OutputMix reports the single default
-// output device, an interface the class lacks is FEATURE_UNSUPPORTED with a
-// cleared out pointer, and an unknown configuration key is
-// PARAMETER_INVALID instead of a blind success. Every refused request is
-// logged once (deduplicated) so the live trace shows what the client probes.
+// The bridge must answer pre-stream capability probes the way Android's
+// OpenSL ES does: enumeration matches GetInterface, unknown classes,
+// extensions, and keys are refused, and refusals are logged once.
 func TestOpenSLProbeShape(t *testing.T) {
 	allowMicrophone(t)
 	var buf bytes.Buffer
@@ -61,20 +55,15 @@ func TestOpenSLProbeShape(t *testing.T) {
 			t.Fatalf("probe diagnostics missing %q:\n%s", want, logs)
 		}
 	}
-	// The engine PLAY probe ran four times; the once-table keeps one line.
 	if got := strings.Count(logs, "engine GetInterface(PLAY)"); got != 1 {
 		t.Fatalf("refused-interface diagnostic logged %d times, want 1", got)
 	}
 }
 
-// The bridge must serve WebRTC's legacy Android ADM exactly as upstream
-// opensles_player.cc / opensles_recorder.cc drive OpenSL ES: engine option
-// + no interfaces, OutputMix sink with a NULL format, required
-// {ANDROIDCONFIGURATION, BUFFERQUEUE, VOLUME} on the player and
-// {ANDROIDSIMPLEBUFFERQUEUE, ANDROIDCONFIGURATION} on the recorder,
-// configuration before Realize, two buffers primed before the state change,
-// re-enqueue from the callback, and a stop sequence whose Clear leaves the
-// queue at count 0 / index 0.
+// The bridge must serve WebRTC's legacy Android ADM as upstream drives
+// OpenSL ES: engine with no interfaces, NULL-format OutputMix sink,
+// required interfaces, configuration before Realize, two primed buffers,
+// callback re-enqueue, and Clear leaving the queue empty.
 func TestOpenSLWebRtcShape(t *testing.T) {
 	allowMicrophone(t)
 	r := audioTestWebRtcShape()

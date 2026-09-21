@@ -14,17 +14,17 @@ import (
 	"github.com/tipsy-linux/tipsy/internal/x11"
 )
 
-// The tests drive the production direct-pad dispatch and frame paths;
-// cgo is unsupported in test files, so the fake engine natives are the
-// recording C functions exposed via test hooks in gamepad.go.
+// The tests drive the production direct-pad dispatch and frame paths; cgo is
+// unsupported in test files, so the fake engine natives are the recording C
+// functions exposed via test hooks in gamepad.go.
 
 func selectGamepadPath(t *testing.T, value string) {
 	t.Helper()
 	t.Setenv("TIPSY_GAMEPAD_PATH", value)
 	t.Setenv("TIPSY_GAMEPAD", "")
-	// Isolate the persisted gamepad section: the pump resolves the
-	// effective config from the real settings file, which must never leak
-	// into (or out of) unit tests.
+	// Isolate the persisted gamepad section: the pump resolves the effective
+	// config from the real settings file, which must never leak into (or out
+	// of) unit tests.
 	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
 	ResetGamepadInputPath()
 	t.Cleanup(ResetGamepadInputPath)
@@ -87,8 +87,7 @@ func TestGamepadPathDefaultDirect(t *testing.T) {
 }
 
 // TestGamepadPathAlwaysDirect pins the lean simplification: the selector is
-// parsed-but-ignored, so every value (including legacy gameactivity/both)
-// still feeds direct.
+// parsed-but-ignored, so every value still feeds direct.
 func TestGamepadPathAlwaysDirect(t *testing.T) {
 	for _, env := range []string{"direct", "gameactivity", "both", "bogus", ""} {
 		t.Run("path="+env, func(t *testing.T) {
@@ -118,7 +117,7 @@ func TestGamepadTypeForName(t *testing.T) {
 		name string
 		want int
 	}{
-		{"Microsoft X-Box 360 pad", 0}, // hyphenated: the engine's own contains("XBOX") misses it too
+		{"Microsoft X-Box 360 pad", 0}, // hyphenated: contains("XBOX") misses it too
 		{"Xbox Wireless Controller", 3},
 		{"Sony DualSense Wireless Controller", 2},
 		{"Sony DualSense", 2},
@@ -145,8 +144,7 @@ func TestGamepadTypeForName(t *testing.T) {
 }
 
 // TestDirectGamepadButtonABI pins nativeGamepadButtonEvent(III)V as
-// (deviceId, keyCode, down) with DOWN=1 (ground-truth hole c presumption,
-// verified live in-experience).
+// (deviceId, keyCode, down) with DOWN=1.
 func TestDirectGamepadButtonABI(t *testing.T) {
 	selectGamepadPath(t, "direct")
 	wireRecordingDirectGamepadTarget(t, 0x1234, 0x5678)
@@ -175,8 +173,8 @@ func TestDirectGamepadButtonABI(t *testing.T) {
 }
 
 // TestDirectGamepadAxisABI pins nativeGamepadAxisEvent(IIFFF)V as
-// (deviceId, axisId, f1, f2, f3) with the singles pattern (axis,0,0,value)
-// matching every observed hat/trigger emission.
+// (deviceId, axisId, f1, f2, f3) with the singles pattern
+// (axis,0,0,value) matching every hat/trigger emission.
 func TestDirectGamepadAxisABI(t *testing.T) {
 	selectGamepadPath(t, "direct")
 	wireRecordingDirectGamepadTarget(t, 0x1234, 0x5678)
@@ -220,19 +218,19 @@ func TestDirectGamepadConnectDisconnectABI(t *testing.T) {
 	}
 }
 
-// xboxPadCaps builds the Xbox capability lists the pump would derive from
-// the gamepad package: full probe key set incl. digital L2/R2 + MODE, and
-// the stick/trigger/hat motion set (Z/RZ sticks, no GAS/BRAKE).
+// xboxPadCaps builds the Xbox capability lists the pump would derive from the
+// gamepad package: full probe key set incl. digital L2/R2 + MODE, and the
+// stick/trigger/hat motion set (Z/RZ sticks, no GAS/BRAKE).
 func xboxPadCaps() (keys []int, motions []int) {
 	keys = []int{96, 97, 99, 100, 19, 20, 21, 22, 103, 102, 106, 107, 109, 108, 104, 105, 110}
 	motions = []int{0, 1, 11, 14, 15, 16, 17, 18}
 	return keys, motions
 }
 
-// TestGamepadCapabilitySequence pins the connect-time E() replay: every
-// probed key/motion with its honest supported bit (third arg -1 for the
-// motion seeds), the hat extra (dev, 15|16, 1, sup, type), and the L2/R2 +
-// MODE extras only when present.
+// TestGamepadCapabilitySequence pins the connect-time replay: every probed
+// key/motion with its supported bit (third arg -1 for the motion seeds), the hat
+// extra (dev, 15|16, 1, sup, type), and the L2/R2 + MODE extras only when
+// present.
 func TestGamepadCapabilitySequence(t *testing.T) {
 	selectGamepadPath(t, "direct")
 	wireRecordingDirectGamepadTarget(t, 0x1234, 0x5678)
@@ -246,8 +244,8 @@ func TestGamepadCapabilitySequence(t *testing.T) {
 	if len(rec) != 14+3+10+2+1 {
 		t.Fatalf("recorded %d calls, want 30 (capabilities + connect)", len(rec))
 	}
-	// Probe keys carry their honest bit: DPAD_CENTER (23) is not in the
-	// probe and must never appear; every H[] key is TRUE here.
+	// Probe keys carry their bit: DPAD_CENTER (23) is not in the probe and must
+	// never appear; every H[] key is TRUE here.
 	seenKey := map[int]int{}
 	for _, e := range rec {
 		if e.kind != gamepadRecSetKey {
@@ -271,7 +269,7 @@ func TestGamepadCapabilitySequence(t *testing.T) {
 	if _, ok := seenKey[23]; ok {
 		t.Fatal("DPAD_CENTER (23) must never be advertised: absent from the engine probe")
 	}
-	// Motion seeds use third arg -1; GAS/BRAKE are honestly FALSE.
+	// Motion seeds use third arg -1; GAS/BRAKE are FALSE.
 	seedArg := map[int]int{}
 	seedSup := map[int]int{}
 	hatExtra := map[int]int{}
@@ -344,10 +342,9 @@ func TestGamepadCapabilityAbsentKeyHonest(t *testing.T) {
 	}
 }
 
-// xboxFrame builds one synthetic Xbox Android frame: BUTTON_A + DPAD_LEFT
-// held, left stick half-right, right stick up (Z/RZ), full left trigger,
-// hat-right at full deflection. The RX/RY mirror value must never reach
-// the direct feed (engine never reads it).
+// xboxFrame builds one synthetic Xbox Android frame: BUTTON_A + DPAD_LEFT held,
+// left stick half-right, right stick up (Z/RZ), full left trigger, hat-right at
+// full deflection. The RX/RY mirror value must never reach the direct feed.
 func xboxFrame() gamepad.AndroidFrame {
 	return gamepad.AndroidFrame{
 		DeviceID: 1,
@@ -369,9 +366,9 @@ func connectXboxForTest(t *testing.T) {
 }
 
 // TestHandleGamepadFrameXboxGolden pins the frame feed: buttons/DPAD as
-// ButtonEvent edges, hats/triggers as (0,0,v) singles, sticks as the DEX
-// pair packing (x,-y,0) / (z,-rz,0) on both axis ids of the pair, RX/RY
-// mirror suppressed, and rest frames refiring nothing.
+// ButtonEvent edges, hats/triggers as (0,0,v) singles, sticks as the pair
+// packing (x,-y,0) / (z,-rz,0) on both axis ids of the pair, RX/RY mirror
+// suppressed, and rest frames refiring nothing.
 func TestHandleGamepadFrameXboxGolden(t *testing.T) {
 	selectGamepadPath(t, "direct")
 	wireRecordingDirectGamepadTarget(t, 0x1234, 0x5678)
@@ -565,8 +562,8 @@ func TestGamepadFocusLossQuiet(t *testing.T) {
 	if st.Dropped == before.Dropped {
 		t.Fatal("unfocused frame was not counted as dropped")
 	}
-	// Focus gain resumes: the same physical state re-announces as fresh
-	// DOWN edges (no stuck-button, no missed press).
+	// Focus gain resumes: the same physical state re-announces as fresh DOWN
+	// edges (no stuck-button, no missed press).
 	handleX11InputEvent(x11.InputEvent{Kind: x11.InputFocus, FocusGained: true})
 	n := testDirectGamepadRecCount()
 	handleGamepadFrame(xboxFrame())
@@ -584,9 +581,9 @@ func TestGamepadFocusLossQuiet(t *testing.T) {
 	}
 }
 
-// TestGamepadDisconnectSynthesis proves unplug withdraws the pad: UP for
-// held buttons, zeroed axes, then the disconnect event; a second
-// disconnect for the same id is honestly ignored.
+// TestGamepadDisconnectSynthesis proves unplug withdraws the pad: UP for held
+// buttons, zeroed axes, then the disconnect event; a second disconnect for the
+// same id is ignored.
 func TestGamepadDisconnectSynthesis(t *testing.T) {
 	selectGamepadPath(t, "direct")
 	wireRecordingDirectGamepadTarget(t, 0x1234, 0x5678)
@@ -688,9 +685,8 @@ func TestGamepadConnectParkedWithoutTarget(t *testing.T) {
 	}
 }
 
-// TestGamepadLegacyPathStillDelivers pins the honest behavior change:
-// legacy gameactivity/both values are ignored (one warn in production) and
-// pads still feed direct — never silently dropped.
+// TestGamepadLegacyPathStillDelivers pins that legacy gameactivity/both values
+// are ignored and pads still feed direct — never silently dropped.
 func TestGamepadLegacyPathStillDelivers(t *testing.T) {
 	for _, mode := range []string{"gameactivity", "both"} {
 		t.Run(mode, func(t *testing.T) {
@@ -729,8 +725,7 @@ func TestGamepadKillSwitchFeed(t *testing.T) {
 }
 
 // selectGamepadCalibration sets the direct path plus one calibration
-// environment for Phase 3 tests. A nil env means defaults (no deadzone
-// floor, no inversion).
+// environment. A nil env means defaults (no deadzone floor, no inversion).
 func selectGamepadCalibration(t *testing.T, env map[string]string) {
 	t.Helper()
 	t.Setenv("TIPSY_GAMEPAD_PATH", "direct")
@@ -744,10 +739,9 @@ func selectGamepadCalibration(t *testing.T, env map[string]string) {
 	t.Cleanup(ResetGamepadInputPath)
 }
 
-// TestGamepadCalibrationEnvParsing pins the lean CLI/env parity surface:
-// one TIPSY_GAMEPAD_DEADZONE floor (clamped 0..0.5, invalid ignored),
-// defaulting to the device-flat baseline when unset. Removed v1 per-stick
-// and invert keys are ignored.
+// TestGamepadCalibrationEnvParsing pins the CLI/env parity surface: one
+// TIPSY_GAMEPAD_DEADZONE floor (clamped 0..0.5, invalid ignored), defaulting to
+// the device-flat baseline when unset. Per-stick and invert keys are ignored.
 func TestGamepadCalibrationEnvParsing(t *testing.T) {
 	selectGamepadCalibration(t, map[string]string{
 		"TIPSY_GAMEPAD_DEADZONE":       "0.2",
@@ -781,9 +775,9 @@ func TestGamepadCalibrationEnvInvalidIgnored(t *testing.T) {
 	}
 }
 
-// calibrationPumpFrame builds one normalized left-stick Frame the way the
-// evdev pump would: AbsX raw 3000 (≈0.09, above the device flat) and AbsY
-// half deflection (≈0.5).
+// calibrationPumpFrame builds one normalized left-stick Frame the way the evdev
+// pump would: AbsX raw 3000 (≈0.09, above the device flat) and AbsY half
+// deflection (≈0.5).
 func calibrationPumpFrame(t *testing.T) (*gamepad.Frame, gamepad.Mapping, map[uint16]gamepad.AbsInfo) {
 	t.Helper()
 	infos := map[uint16]gamepad.AbsInfo{
@@ -924,7 +918,7 @@ func TestGamepadDispatchAxisGetters(t *testing.T) {
 			t.Fatalf("getHistoricalAxisValue(%d) = %v, want %v", a, got, want)
 		}
 	}
-	// Unmapped axis (e.g. AXIS_VSCROLL 9) stays honestly 0.
+	// Unmapped axis (e.g. AXIS_VSCROLL 9) stays 0.
 	if got := axis(t, 9); got != 0 {
 		t.Fatalf("getAxisValue(9) = %v, want 0", got)
 	}
@@ -1008,9 +1002,8 @@ func TestGamepadDispatchKeyGetters(t *testing.T) {
 	}
 }
 
-// Lean single-pad contract (simplified 2026-09-12): the second-pad
-// coexistence/focus/stuck-button tests are deleted vs v1 — one pad is
-// served (see TestManagerSecondPadHonestlyIgnored for the ignore rule).
+// Lean single-pad contract: one pad is served (see
+// TestManagerSecondPadHonestlyIgnored for the ignore rule).
 
 func connectPadForTest(t *testing.T, dev, typ int32) {
 	t.Helper()
@@ -1020,11 +1013,11 @@ func connectPadForTest(t *testing.T, dev, typ int32) {
 	}
 }
 
-// TestGamepadInputDeviceGettersHonest pins the structured stub-dispatch
-// contract for InputDevice getters: none is claimed by the implemented
-// dispatch families, so every one falls through to the content-free
-// [jni] stub-dispatch diagnostic with an honest zero/empty failure — never
-// fake children (no phantom pads, no synthesized MotionRanges).
+// TestGamepadInputDeviceGettersHonest pins the structured stub-dispatch contract
+// for InputDevice getters: none is claimed by the implemented dispatch families,
+// so every one falls through to the content-free [jni] stub-dispatch diagnostic
+// with a zero/empty failure — never fake children (no phantom pads, no
+// synthesized MotionRanges).
 func TestGamepadInputDeviceGettersHonest(t *testing.T) {
 	vm, err := NewVM()
 	if err != nil {
@@ -1052,11 +1045,10 @@ func TestGamepadInputDeviceGettersHonest(t *testing.T) {
 			t.Fatalf("%s%s must stay on the honest stub path, never a fake child", name, sig)
 		}
 	}
-	// Enumeration / identity (ground truth §4: getDeviceIds never called by
-	// the engine; listener hotplug drives connect/disconnect instead).
-	// getName/getClass/toString stay on the generic class-identity core
-	// handlers (they answer the class identity, never a pad child), so only
-	// the pad-specific getters are pinned here.
+	// Enumeration / identity: listener hotplug drives connect/disconnect
+	// instead. getName/getClass/toString stay on the generic class-identity
+	// core handlers (they answer the class identity, never a pad child), so
+	// only the pad-specific getters are pinned here.
 	unhandled("getDeviceIds", "()[I")
 	unhandled("getDevice", "(I)Landroid/view/InputDevice;", 1)
 	unhandled("getSources", "()I")
@@ -1064,14 +1056,14 @@ func TestGamepadInputDeviceGettersHonest(t *testing.T) {
 	unhandled("getControllerNumber", "()I")
 	unhandled("getVendorId", "()I")
 	unhandled("getProductId", "()I")
-	// Capability queries (E() runs through the direct capability setters,
-	// never through these Java objects).
+	// Capability queries (capabilities run through the direct capability
+	// setters, never through these Java objects).
 	unhandled("supportsSource", "(I)Z", 0x401)
 	unhandled("hasKeys", "([I)Z")
 	unhandled("getMotionRange", "(I)Landroid/view/InputDevice$MotionRange;", 0)
 	unhandled("getMotionRange", "(II)Landroid/view/InputDevice$MotionRange;", 0, 1)
 	unhandled("getMotionRanges", "()Ljava/util/List;")
-	// Vibration (ground truth §4: no gamepad-rumble door in this client).
+	// Vibration (no gamepad-rumble door in this client).
 	unhandled("getVibrator", "()Landroid/os/Vibrator;")
 	unhandled("hasVibrator", "()Z")
 	// Listener registration (engine-side manager wiring, not a Tipsy object).

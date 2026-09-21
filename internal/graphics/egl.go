@@ -26,16 +26,11 @@ type EGL struct {
 	x11Display uintptr // Xlib Display* (bounded fallback probes only)
 	x11XID     uintptr // X11 Window
 	swap       uintptr // C tipsy_swap* background thread, or 0
-	// swapGuest identifies this sentinel's target-registration lifetime.
-	// swapGuestSurface is separately generationed for every Android EGLSurface
-	// lifetime, even when a driver reuses the same numeric handle.
-	// It is registered before the C thread can expose a sentinel and removed
-	// before that thread is joined and freed. The Android ABI bridge carries
-	// the surface generation back on every guest-swap signal, so a recycled
-	// XID or EGL handle cannot retire a later surface.
+	// swapGuest is this sentinel's target-registration lifetime; swapGuestSurface
+	// is generationed per Android EGLSurface lifetime, so a recycled numeric
+	// handle cannot retire a later surface.
 	swapGuest        *guestSwapRegistration
 	swapGuestSurface guestSwapDelivery
-	// Handoff wake plumbing (linux+cgo; see bind_linux.go, notify_linux.go).
 	// swapWake is the capacity-1 coalesced channel the C thread resolves via
 	// swapHandle; swapStop is closed after the C thread is joined; swapDone is
 	// closed by the watcher goroutine when it returns.
@@ -46,8 +41,7 @@ type EGL struct {
 }
 
 // swapHandoffSource says why the sentinel thread stopped. guest-swap is the
-// normal path. bounded-readback-fallback is retained only for a host where the
-// Android EGL compatibility boundary cannot provide the explicit signal.
+// normal path; bounded-readback-fallback is the fallback path.
 type swapHandoffSource uint8
 
 const (
@@ -70,9 +64,8 @@ func (s swapHandoffSource) String() string {
 	}
 }
 
-// swapHandoffStats is intentionally content-free. It provides the exact
-// event source and bounded fallback interval/count for diagnostics and tests;
-// it does not attempt to infer displayed FPS or frame time.
+// swapHandoffStats carries the handoff event source and bounded fallback
+// interval/count for diagnostics and tests.
 type swapHandoffStats struct {
 	Retired  bool
 	Finished bool

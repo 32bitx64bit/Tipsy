@@ -158,8 +158,7 @@ func nz(s, fallback string) string {
 
 // formatGamepadLines renders the honest pad enumeration for doctor output:
 // content-free pad topology, env/path state, and the EACCES hint. A zero
-// GamepadInfo (fixtures predating the probe) reports unknown instead of a
-// misleading disabled state.
+// GamepadInfo reports unknown instead of a misleading disabled state.
 func formatGamepadLines(g GamepadInfo) string {
 	var b strings.Builder
 	w := func(format string, args ...any) {

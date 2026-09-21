@@ -19,8 +19,7 @@ import (
 )
 
 // TestGridUnpacksPaintedVisual exercises tipsy_fcap_unpack against a real
-// X11 window: channel extraction must follow the visual's masks rather than
-// assuming 8-bit RGBX at fixed 16/8/0 shifts. White-in -> 255 RGB out.
+// X11 window: channel extraction must follow the visual's masks.
 func TestGridUnpacksPaintedVisual(t *testing.T) {
 	if os.Getenv("DISPLAY") == "" {
 		t.Skip("DISPLAY unset")
@@ -71,9 +70,9 @@ func TestGridUnpacksPaintedVisual(t *testing.T) {
 	}
 }
 
-// TestLiveLoginFlickerCapture measures whether the live Roblox window's
-// presented content alternates between distinct frames (flicker). It is
-// Roblox-window-only evidence (XGetImage on that window, never the desktop).
+// TestLiveLoginFlickerCapture checks whether the live Roblox window's
+// presented content alternates between distinct frames. Evidence is
+// Roblox-window-only (XGetImage on that window, never the desktop).
 // Gated behind TIPSY_FLICKER=1.
 func TestLiveLoginFlickerCapture(t *testing.T) {
 	if os.Getenv("TIPSY_FLICKER") != "1" {

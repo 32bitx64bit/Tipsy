@@ -14,7 +14,7 @@ import (
 	"github.com/tipsy-linux/tipsy/internal/logging"
 )
 
-// RuntimeDir is $XDG_DATA_HOME/tipsy/runtime (see config.Paths).
+// RuntimeDir is $XDG_DATA_HOME/tipsy/runtime.
 func RuntimeDir() string {
 	return filepath.Join(config.Paths().DataDir, "runtime")
 }
@@ -50,8 +50,8 @@ func Setup(ctx context.Context, apkPaths []string) (*apk.ExtractResult, error) {
 }
 
 // PrepareAppStorageForSetup preserves the version-independent Android FilesDir
-// before a staged runtime update is committed. Package installers should call
-// this only after the replacement package has passed validation.
+// before a staged runtime update commits. Call it only after the replacement
+// package passes validation.
 func PrepareAppStorageForSetup() error {
 	_, migration, err := prepareAppStorage(RuntimeDir())
 	if err != nil {
@@ -62,8 +62,7 @@ func PrepareAppStorageForSetup() error {
 }
 
 // ExtractSetup writes a complete runtime into dest without changing RuntimeDir.
-// It exists for staged installers; persistent account data is never placed in
-// dest.
+// Persistent account data is never placed in dest.
 func ExtractSetup(ctx context.Context, apkPaths []string, dest string) (*apk.ExtractResult, error) {
 	res, err := apk.Extract(ctx, apkPaths, dest)
 	if err != nil {

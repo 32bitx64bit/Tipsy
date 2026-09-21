@@ -17,9 +17,9 @@ func TestEGLSetupTraceRequiresExactOptIn(t *testing.T) {
 }
 
 func TestEGLImportsResolveToWrappersFromEarlierDTNeeded(t *testing.T) {
-	// Official libroblox.so DT_NEEDED lists these before libEGL.so. The loader
-	// binds the first successful Lookup. libc/libm would otherwise return host
-	// Mesa via RTLD_DEFAULT and skip the Android window-surface wrapper.
+	// egl* lookups must resolve to the Android wrapper no matter which
+	// earlier-listed library requests them; libc/libm would otherwise return
+	// host Mesa via RTLD_DEFAULT and skip the window-surface wrapper.
 	wrapped := []string{
 		"eglGetDisplay",
 		"eglInitialize",
@@ -87,9 +87,8 @@ func TestEGLSetupLookupsUseCompatibilityWrappers(t *testing.T) {
 			t.Fatalf("eglGetProcAddress(%q) did not return setup trace wrapper", name)
 		}
 	}
-	// EXT is optional. When the host advertises it, the guest must still receive
-	// the traced wrapper; when absent, the resolver must preserve NULL rather
-	// than fabricate extension support.
+	// EXT is optional: when the host advertises it the guest must still
+	// receive the traced wrapper; when absent the resolver must preserve NULL.
 	if ours, err := Provider().Lookup("libEGL.so", "eglGetPlatformDisplayEXT"); err == nil {
 		host := hostDlsym("eglGetPlatformDisplayEXT")
 		if ours == 0 || (host != 0 && ours == host) ||

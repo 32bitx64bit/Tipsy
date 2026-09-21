@@ -11,9 +11,9 @@ import (
 	"unsafe"
 )
 
-// A JNI array identity and a returned data address identify one outstanding
-// borrow group. Different acquisitions of the same array may return the same
-// address. The backing slice must stay pinned until the last such borrow ends.
+// A JNI array identity and returned data address identify one borrow group;
+// different acquisitions of the same array may share an address. The backing
+// slice must stay pinned until the last borrow ends.
 type criticalArrayKey struct {
 	array int64
 	data  unsafe.Pointer
@@ -49,8 +49,8 @@ func (r *criticalArrayRegistry) pin(o *Object) unsafe.Pointer {
 		return p
 	}
 	b := &criticalArrayBorrow{owner: o, refs: 1}
-	// Only the pointer-free backing allocation crosses into C. Pinning the
-	// Object itself neither pins its reachable data nor makes it C-compatible.
+	// Only the pointer-free backing allocation crosses into C; pinning the
+	// Object itself neither pins its data nor makes it C-compatible.
 	b.pinner.Pin(unsafe.SliceData(o.bytes))
 	r.borrows[key] = b
 	return p
@@ -68,9 +68,9 @@ func (r *criticalArrayRegistry) registerCopy(o *Object, p unsafe.Pointer) {
 	}
 }
 
-// release returns C memory that the caller must free, or nil. Never infer
-// malloc ownership from absence in the registry: that could free a Go pointer.
-// JNI's mode is ignored for a direct/pinned array. JNI_COMMIT retains copies.
+// release returns C memory the caller must free, or nil. Never infer malloc
+// ownership from absence in the registry: that could free a Go pointer. JNI's
+// mode is ignored for a pinned array; JNI_COMMIT retains copies.
 func (r *criticalArrayRegistry) release(array int64, p unsafe.Pointer, commit bool) unsafe.Pointer {
 	if p == nil {
 		return nil

@@ -66,7 +66,7 @@ func TestStartupMeasurementVerticalScrollTestDriverFailsClosed(t *testing.T) {
 	}
 
 	// The same real fact is necessary but never sufficient without focus and
-	// without an active Roblox pointer capture.
+	// capture.
 	testStartupMeasurementMap(101, 102)
 	w.focused = false
 	if got := w.NewStartupMeasurementVerticalScrollTestDriver(); got != nil {
@@ -93,9 +93,8 @@ func TestStartupMeasurementVerticalScrollTestDriverFailsClosed(t *testing.T) {
 }
 
 func TestStartupMeasurementVerticalScrollTestDriverDispatchesOneFixedOwnedScroll(t *testing.T) {
-	// Input injection is restricted to a private Xvfb server. This exercises
-	// the actual XSendEvent -> Tipsy event-pump -> InputScroll contract, not a
-	// callback or a test ring write.
+	// Input injection is restricted to a private Xvfb server; this exercises
+	// the real XSendEvent -> event-pump -> InputScroll contract.
 	startXvfb(t)
 	w := openInputWindow(t)
 	c := collectInput(t)
@@ -140,8 +139,8 @@ func TestStartupMeasurementVerticalScrollTestDriverDispatchesOneFixedOwnedScroll
 }
 
 func TestStartupMeasurementVerticalScrollDispatchImmediatelyPrecedesDrawableArm(t *testing.T) {
-	// This is an ordering check only. It does not claim that a wheel caused a
-	// visible redraw; a later XDamage observation remains a separate edge.
+	// This is an ordering check only; a later XDamage observation remains a
+	// separate edge.
 	startXvfb(t)
 	w := openInputWindow(t)
 	focusStartupMeasurementScrollWindow(t, w)
@@ -160,7 +159,7 @@ func TestStartupMeasurementVerticalScrollDispatchImmediatelyPrecedesDrawableArm(
 		t.Fatal("fixed startup scroll did not dispatch")
 	}
 	// No Pump or input callback is permitted between the completed send and
-	// this declaration. The Runtime owner performs this same immediate call.
+	// this declaration.
 	if !w.DeclareStartupMeasurementVerticalScrollDispatch() {
 		t.Fatal("immediate post-dispatch drawable arm failed")
 	}

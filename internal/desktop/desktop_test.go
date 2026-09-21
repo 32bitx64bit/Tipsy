@@ -31,9 +31,8 @@ func repoRoot(t *testing.T) string {
 	}
 }
 
-// The shared templates in share/applications are what deb, rpm, Flatpak and
-// the AppDir install verbatim. They must stay identical to what this package
-// renders for a stable system install, so there is one source of truth.
+// The shared templates in share/applications must stay identical to what this
+// package renders for a stable system install.
 func TestSystemRenderingMatchesSharedTemplates(t *testing.T) {
 	t.Parallel()
 	root := repoRoot(t)
@@ -148,8 +147,8 @@ func (r *recorder) run(_ context.Context, name string, args ...string) error {
 	return nil
 }
 
-// The situation that motivated this package: a Flatpak is installed, but a
-// user-scope entry an older AppImage wrote still wins by XDG precedence.
+// A Flatpak is installed, but a user-scope entry an older AppImage wrote
+// still wins by XDG precedence.
 func TestResolveUserScopeAppImageShadowsFlatpak(t *testing.T) {
 	t.Parallel()
 	f := newFixture(t)
@@ -180,7 +179,6 @@ func TestResolveUserScopeAppImageShadowsFlatpak(t *testing.T) {
 		t.Fatalf("other AppImage plan = %s, want adopt", got)
 	}
 
-	// The developer's fix: the Flatpak releases the shadow.
 	rec := &recorder{}
 	result, err := Release(context.Background(), f.env, Stable, rec.run)
 	if err != nil {
@@ -320,8 +318,7 @@ func TestAdoptWritesEntriesIconsHandlerAndCleansDuplicates(t *testing.T) {
 		t.Fatalf("plan for the adopting AppImage = %s, want none", got)
 	}
 
-	// Adopting again (every AppImage start) is a no-op: nothing rewritten,
-	// no helper processes.
+	// Adopting again is a no-op: nothing rewritten, no helper processes.
 	writeFile(t, filepath.Join(f.env.ConfigHome, "mimeapps.list"), "[Default Applications]\nx-scheme-handler/roblox=io.github.tipsy_linux.Tipsy.Play.desktop;\n")
 	rec.calls = nil
 	again, err := Adopt(context.Background(), f.env, AdoptOptions{Identity: Stable, Launcher: AppImageLauncher(image), IconSource: iconSource, Handler: true, Run: rec.run})

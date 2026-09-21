@@ -151,9 +151,8 @@ func (g *Generation) NativeDescriptorSet() (*NativeDescriptorSet, error) {
 	return set, nil
 }
 
-// NativeDescriptors is a compatibility shim for the Phase 3B runtime
-// interface. Official integration must consume NativeDescriptorSet so the
-// generation binding is not discarded.
+// NativeDescriptors is a compatibility shim. Official integration must
+// consume NativeDescriptorSet so the generation binding is not discarded.
 func (g *Generation) NativeDescriptors() ([]NativeDescriptor, error) {
 	set, err := g.NativeDescriptorSet()
 	if err != nil {

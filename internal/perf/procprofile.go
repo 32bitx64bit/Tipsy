@@ -15,15 +15,15 @@ import (
 )
 
 // processProfileSnapshotInterval writes heap/alloc/goroutine dumps while the
-// process is still running. Final SIGTERM often lets in-process native code
-// _exit during StopCPUProfile/GC, which previously left empty heap files.
+// process is still running. A final SIGTERM can let in-process native code
+// _exit during StopCPUProfile/GC and leave heap dumps empty.
 const processProfileSnapshotInterval = 15 * time.Second
 
 const (
 	// EnvProfileDir enables process-wide profiles on the real tipsy binary.
 	// The directory is created with mode 0700. Profiles contain function
-	// names and addresses only; they must not be treated as a log of user
-	// input, cookies, or account state.
+	// names and addresses only, never a log of user input, cookies, or
+	// account state.
 	EnvProfileDir = "TIPSY_PPROF_DIR"
 	// EnvProfileContention enables mutex and block profiles. Those rates
 	// add observer work and belong only on an instrumented capture arm.
@@ -60,7 +60,6 @@ func ProfileOptionsFromEnv() ProfileOptions {
 }
 
 // StartFromEnv starts process-wide profiling when TIPSY_PPROF_DIR is set.
-// A missing directory variable is a no-op so production runs stay uninstrumented.
 func StartFromEnv() (func(), error) {
 	dir := strings.TrimSpace(os.Getenv(EnvProfileDir))
 	if dir == "" {
@@ -182,9 +181,8 @@ func (p *processProfile) stop() {
 		_ = p.cpu.Close()
 		p.cpu = nil
 	}
-	// Dump before runtime.GC(). A process-group SIGTERM can make in-process
-	// native code _exit during GC on a multi-gigabyte RSS, which used to
-	// leave heap.pprof truncated to 0 bytes and skip alloc/goroutine dumps.
+	// Dump before runtime.GC(): a process-group SIGTERM can make in-process
+	// native code _exit during GC, leaving heap.pprof truncated to 0 bytes.
 	p.writeProfilesLocked()
 	runtime.GC()
 	if p.opt.Heap {

@@ -166,7 +166,7 @@ func TestOffscreenVisualProof(t *testing.T) {
 	}
 
 	// Popups and dialogs must share the live application palette, not only the
-	// central window stylesheet. Retain window-only synthetic visual evidence.
+	// central window stylesheet.
 	win.settingsRenderer.ShowPopup()
 	qt.QCoreApplication_ProcessEvents()
 	if path := os.Getenv("TIPSY_GUI_SCREENSHOT"); path != "" {
@@ -353,8 +353,8 @@ func TestOffscreenVisualProof(t *testing.T) {
 	}
 	close(service.launchReady)
 	waitForLaunchState(t, win.launch, guimodel.LaunchRunning)
-	// Started can arrive between GUI timer ticks. Native close must not quit
-	// the in-process host before refresh disables quit-on-last-window and hides.
+	// Started can arrive between GUI timer ticks; native close must not quit
+	// the in-process host before refresh hides it.
 	win.win.Close()
 	if !win.win.IsVisible() {
 		t.Fatal("close during acknowledged-start timer gap dismissed the host")

@@ -9,13 +9,13 @@ package x11
 // timestamps.
 //
 // MapNotify reports the first real MapNotify for this Window's owned X11
-// client. If that notification was observed during Open before registration,
-// registration delivers the same fact once; it does not substitute window
-// allocation, a refresh wake, a child overlay, or a mapping query.
+// client. If it was observed during Open before registration, registration
+// delivers the same fact once; it does not substitute window allocation, a
+// refresh wake, a child overlay, or a mapping query.
 //
 // PostScrollDrawableUpdate reports one XDamage notification for this owned
 // client after DeclareStartupMeasurementVerticalScrollDispatch armed it. It
-// is an X drawable-damage observation only: it does not establish scanout,
+// is a drawable-damage observation only: it does not establish scanout,
 // compositor presentation, frame time, FPS, visible Home, or that the
 // declared scroll caused the update.
 type StartupMeasurementEdges struct {
@@ -40,8 +40,7 @@ type startupMeasurementObserver struct {
 
 // OnStartupMeasurementEdges subscribes to named, content-free startup
 // measurement edges for this Window. It is composable: each call adds one
-// observer and its cancel function removes only that observer. Normal X11
-// launches have no subscription and never create an XDamage object.
+// observer and its cancel function removes only that observer.
 //
 // The returned availability is an explicit fail-closed signal. A caller that
 // needs the post-scroll boundary must check it before declaring an arm.
@@ -69,9 +68,9 @@ func (w *Window) OnStartupMeasurementEdges(edges StartupMeasurementEdges) (cance
 	}
 
 	registered := edges
-	// A subscription that was told XDamage is unavailable must remain
-	// unavailable. Do not let a later, independent successful subscription
-	// turn its requested callback into a guessed edge.
+	// A subscription told XDamage is unavailable must remain unavailable; a
+	// later successful subscription must not turn its callback into a guessed
+	// edge.
 	if edges.PostScrollDrawableUpdate != nil && !availability.PostScrollDrawableUpdate {
 		registered.PostScrollDrawableUpdate = nil
 	}
@@ -84,8 +83,6 @@ func (w *Window) OnStartupMeasurementEdges(edges StartupMeasurementEdges) (cance
 	w.mu.Unlock()
 
 	// Registration never invokes arbitrary callbacks under the Window lock.
-	// This also preserves the cancellation/teardown path for a callback that
-	// chooses to stop itself.
 	notifyStartupMeasurementEdges(immediate)
 
 	return func() {
@@ -157,12 +154,12 @@ func (w *Window) clearStartupMeasurementEdgesLocked() {
 
 // DeclareStartupMeasurementVerticalScrollDispatch arms exactly one later
 // XDamage observation. Call it only immediately after the measurement owner
-// has dispatched its fixed, non-text vertical scroll interaction. It neither
-// reads nor dispatches a wheel event, changes input routing, synthesizes
-// input, polls, captures the screen, or observes arbitrary ongoing damage.
+// has dispatched its fixed, non-text vertical scroll interaction; it neither
+// reads nor dispatches input, polls, captures the screen, or observes
+// arbitrary ongoing damage.
 //
-// False is fail-closed: no active drawable subscriber, no XDamage support,
-// a closed window, or an already-armed boundary. Callers must not replace a
+// False is fail-closed: no active drawable subscriber, no XDamage support, a
+// closed window, or an already-armed boundary. Callers must not replace a
 // false result with an inferred redraw signal.
 func (w *Window) DeclareStartupMeasurementVerticalScrollDispatch() bool {
 	if w == nil {
@@ -183,9 +180,7 @@ func (w *Window) DeclareStartupMeasurementVerticalScrollDispatch() bool {
 
 // collectStartupMeasurementEdgesLocked observes only the two named native
 // edges. It runs after the C event reader drained X events but before input
-// subscribers run. A drawable notification is produced by C only after a
-// successful Declare call; a same-turn input subscriber can therefore arm a
-// later pump without an earlier queued damage event being attributed to it.
+// subscribers run.
 func (w *Window) collectStartupMeasurementEdgesLocked() []func() {
 	if len(w.startupMeasurementObservers) == 0 {
 		return nil

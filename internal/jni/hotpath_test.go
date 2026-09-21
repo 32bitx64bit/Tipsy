@@ -160,9 +160,9 @@ func TestGetStringCharsUsesOnlyItsFinalUTF16Buffer(t *testing.T) {
 				want = utf16.Encode([]rune(tc.value))
 			}
 
-			// C.malloc owns the interned JNI pin and is intentionally outside
-			// Go's allocation count. A nonzero count here would mean the normal
-			// path rebuilt a transient UTF-16 slice instead of using that buffer.
+			// C.malloc owns the interned JNI pin and is outside Go's allocation
+			// count; a nonzero count would mean the path rebuilt a transient
+			// UTF-16 slice instead of reusing that buffer.
 			allocs := testing.AllocsPerRun(100, func() {
 				chars, isCopy := testGetStringChars(vm.envRaw, id)
 				if chars == nil {
@@ -322,8 +322,8 @@ func TestReleaseArrayElementsCommitDoesNotFree(t *testing.T) {
 	if got := vm.get(arr).bytes[0]; got != 9 {
 		t.Fatalf("JNI_COMMIT copy-back = %d, want 9", got)
 	}
-	// The caller still owns the buffer after COMMIT: further writes must not
-	// fault, and a later ABORT release (mode 2) frees without copying.
+	// The caller still owns the buffer after COMMIT; a later ABORT release
+	// (mode 2) frees without copying back.
 	sl[0] = 8
 	testReleaseArrayElements(vm.envRaw, arr, p, 2)
 	if got := vm.get(arr).bytes[0]; got != 9 {

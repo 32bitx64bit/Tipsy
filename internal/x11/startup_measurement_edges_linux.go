@@ -42,15 +42,13 @@ func startupMeasurementTakeDrawableObservation(w *Window) bool {
 }
 
 // startupMeasurementDispatchVerticalScroll is the native half of the sealed
-// test driver. It has no input parameters beyond Window's private owned
-// handle; the C path always sends its one fixed Button5 wheel press.
+// test driver; it takes no input parameters beyond Window's owned handle.
 func startupMeasurementDispatchVerticalScroll(w *Window) bool {
 	return C.tipsy_x11_startup_measurement_dispatch_vertical_scroll(C.uintptr_t(w.display), C.ulong(w.xid)) != 0
 }
 
-// The helpers below mirror existing C-side X11 test seams. They set only the
-// content-free private facts used by the public subscription logic and never
-// touch a display, render, or inject input.
+// The helpers below mirror C-side X11 test seams: they set only content-free
+// private facts and never touch a display, render, or inject input.
 func testStartupMeasurementClear() {
 	C.tipsy_x11_startup_measurement_test_clear()
 }

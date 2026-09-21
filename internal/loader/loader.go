@@ -291,8 +291,8 @@ func openFile(key, display string, f *os.File, authenticated bool, r Resolver, s
 		return fail(err)
 	}
 
-	// Relocs done: we can drop the elf.File parser (fd stays until Close
-	// only if still needed; mappings are MAP_PRIVATE so fd can close).
+	// Relocations are done; mappings are MAP_PRIVATE, so the file descriptor
+	// can close.
 	_ = ef.Close()
 	m.ef = nil
 	if !authenticated {

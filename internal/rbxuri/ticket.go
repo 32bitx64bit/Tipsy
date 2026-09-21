@@ -28,7 +28,7 @@ var (
 )
 
 // TicketClient is the HTTP surface used to redeem a website authentication
-// ticket. Tests substitute it; production uses a short-timeout client.
+// ticket.
 type TicketClient interface {
 	Do(*http.Request) (*http.Response, error)
 }

@@ -42,8 +42,8 @@ func writeTestAPK(t testing.TB, dir string, files map[string][]byte) string {
 	return path
 }
 
-// cAsset matches android_bridge.h AAsset (LP64). Tests inspect owned/buffer
-// without cgo; this package rejects cgo in _test.go.
+// cAsset mirrors the android_bridge.h AAsset layout (LP64) so tests can
+// inspect owned/buffer without cgo; this package rejects cgo in _test.go.
 type cAsset struct {
 	magic  uint64
 	buffer unsafe.Pointer
@@ -502,7 +502,7 @@ func TestAssetCacheBudgetEvictsInactiveBlobWhileUnrelatedColdLoadRuns(t *testing
 	})
 	t.Cleanup(restoreLowPolicy)
 
-	// Finishing this load invokes the selector while borrow.txt is still pinned.
+	// Finishing this load invokes the selector while borrow.txt is pinned.
 	if got, err := openAssetBytes("trigger.txt"); err != nil || string(got) != "t" {
 		t.Fatalf("trigger source: %q %v", got, err)
 	}
@@ -874,8 +874,7 @@ func TestAcquireAssetBorrowReleaseModelsConstructorAllocationFailure(t *testing.
 	}
 
 	// newBorrowedAsset calls this exact closure synchronously if C's AAsset
-	// allocation fails. Calling it here validates the cache side of that
-	// allocation-failure contract without changing the ABI specialist's C seam.
+	// allocation fails.
 	release()
 	release()
 	after := assetCacheSnapshotForTest()

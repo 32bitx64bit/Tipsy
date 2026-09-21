@@ -22,21 +22,11 @@ import (
 )
 
 // Official universalapp PermissionsProtocol, answered over the MessageBus.
-//
-// The engine never checks RECORD_AUDIO through Context.checkSelfPermission.
-// RBX::Voice::RobloxAudioDevice::CheckMicrophonePermissionAsync (and
-// Soundscape::AudioDeviceInput, RealtimeMedia, VideoCaptureClient) go through
-// RBX::PermissionsProtocolCore::hasPermissions/requestPermissions, which is a
-// MessageBus request the APK's Java PermissionsProtocol answers. Without an
-// answer the voice stack never initializes and the in-experience microphone UI
-// never appears. Tipsy plays that Java role using only the exported
-// Java_com_roblox_universalapp_messagebus_MessageBus_* natives (no hooks).
-//
-// Ground truth (client 2.738.1397): APK classes2.dex, obfuscated Java class
-// sm/k; every token below also appears verbatim in libroblox.so strings
-// (PermissionsProtocol, HasPermissions, PermissionsRequest, SupportsPermissions,
-// permissions, status, AUTHORIZED, DENIED, UNSUPPORTED, MICROPHONE_ACCESS,
-// CAMERA_ACCESS).
+// The engine never checks RECORD_AUDIO through Context.checkSelfPermission;
+// the voice stack goes through the MessageBus request the APK's Java
+// PermissionsProtocol answers, so without an answer the in-experience
+// microphone UI never appears. Tipsy plays that Java role using only the
+// exported Java_com_roblox_universalapp_messagebus_MessageBus_* natives.
 const (
 	messageBusClass           = "com/roblox/universalapp/messagebus/MessageBus"
 	messageBusConnectionClass = "com/roblox/universalapp/messagebus/Connection"
@@ -83,9 +73,9 @@ var permissionsProtocolMethods = []string{
 	permissionsMethodRationale,
 }
 
-// PermissionsProtocolExports are the official Java→native MessageBus entry
-// points (libroblox.so dynsym), resolved by name in the launch sequence.
-// Zero means the export is absent; each path degrades independently.
+// PermissionsProtocolExports are the Java→native MessageBus entry points,
+// resolved by name in the launch sequence. Zero means the export is absent;
+// each path degrades independently.
 type PermissionsProtocolExports struct {
 	// (JNIEnv*, jobject bus, jstring protocol, jstring method, jobject RequestHandlerRaw) -> void
 	SetRequestHandlerRaw uintptr
@@ -107,11 +97,10 @@ var (
 )
 
 // RegisterPermissionsProtocol plays the APK's Java PermissionsProtocol role:
-// Tipsy becomes the request handler and the legacy request-topic subscriber
-// for every official method, through the exported MessageBus natives only.
-// Java registers both arms as well (the handler arm behind a flag), so the
-// engine is answered whichever request path its build uses. Returns the number
-// of methods registered on at least one arm.
+// Tipsy becomes the request handler and the legacy request-topic subscriber for
+// every official method, through the exported MessageBus natives only. Java
+// registers both arms as well, so the engine is answered whichever request path
+// its build uses. Returns the number of methods registered on at least one arm.
 func (e *Env) RegisterPermissionsProtocol(x PermissionsProtocolExports) int {
 	if e == nil || e.vm == nil {
 		return 0
@@ -150,8 +139,8 @@ func (e *Env) RegisterPermissionsProtocol(x PermissionsProtocolExports) int {
 			e.PutField(cb, permissionsMethodField, method)
 			e.vm.pinObject(cb)
 			// sticky=false, as Java MessageBus.w(). The returned Connection is
-			// owned by the native shared_ptr; Java only finalizes it on GC,
-			// which Tipsy never does, so the subscription lives for the process.
+			// owned by the native shared_ptr, so the subscription lives for the
+			// process.
 			conn := loader.CallP8(x.DoSubscribeProtocolMethodRequestRaw, e.Raw(), bus, protocol, m, cb, 0, 0, 0)
 			if conn != 0 {
 				e.vm.pinObject(uintptr(conn))
@@ -171,9 +160,9 @@ func (e *Env) RegisterPermissionsProtocol(x PermissionsProtocolExports) int {
 }
 
 // pinObject keeps a Tipsy jobject alive for the process regardless of local
-// frame lifetime. Handlers and the bus object are referenced from native
-// global refs; pinning removes any dependence on how long the launch thread's
-// local frame survives.
+// frame lifetime. Handlers and the bus object are referenced from native global
+// refs, so pinning removes any dependence on how long the launch thread's local
+// frame survives.
 func (vm *VM) pinObject(obj uintptr) {
 	if vm == nil || obj == 0 {
 		return
@@ -199,11 +188,11 @@ func ResetPermissionsProtocolForTest() {
 	})
 }
 
-// protocolPermissionGranted is Tipsy's honest grant table. MICROPHONE_ACCESS follows
-// the microphone door (Settings toggle / TIPSY_MICROPHONE). LOCAL_NETWORK
-// needs no runtime permission on Android and none on the host. Everything
-// else (camera, contacts, notifications, media picker, media storage) has no
-// host bridge and is reported missing rather than faked.
+// protocolPermissionGranted is Tipsy's grant table. MICROPHONE_ACCESS follows
+// the microphone door (Settings toggle / TIPSY_MICROPHONE). LOCAL_NETWORK needs
+// no runtime permission. Everything else (camera, contacts, notifications,
+// media picker, media storage) has no host bridge and is reported missing
+// rather than faked.
 func protocolPermissionGranted(name string, micAllowed bool) bool {
 	switch name {
 	case permissionMicrophoneAccess:
@@ -214,8 +203,8 @@ func protocolPermissionGranted(name string, micAllowed bool) bool {
 	return false
 }
 
-// supportedPermissions is the honest SupportsPermissions answer: the
-// permissions Tipsy can actually evaluate.
+// supportedPermissions is the SupportsPermissions answer: the permissions Tipsy
+// can actually evaluate.
 var supportedPermissions = []string{permissionMicrophoneAccess, permissionLocalNetwork}
 
 type permissionsRequestParams struct {
@@ -236,8 +225,8 @@ type permissionsSupportsResponse struct {
 	Permissions []string `json:"permissions"`
 }
 
-// parsePermissionsRequest reads {"permissions":[...]} exactly as Java
-// sm/k.p() does (getJSONArray("permissions")). Unknown keys are ignored.
+// parsePermissionsRequest reads {"permissions":[...]} exactly as Java sm/k.p()
+// does (getJSONArray("permissions")). Unknown keys are ignored.
 func parsePermissionsRequest(request string) ([]string, bool) {
 	var p permissionsRequestParams
 	dec := json.NewDecoder(strings.NewReader(request))
@@ -255,17 +244,17 @@ func mustJSON(v any) string {
 	return string(b)
 }
 
-// permissionsProtocolResponse builds the response JSON for one official
-// method, mirroring the Java response shapes:
+// permissionsProtocolResponse builds the response JSON for one official method,
+// mirroring the Java response shapes:
 //
 //	HasPermissions / PermissionsRequest -> {"status":"AUTHORIZED"|"DENIED","missingPermissions":[...]}
 //	SupportsPermissions                 -> {"permissions":[...]}
 //	ShouldShowPermissionUpsell /
 //	ShouldShowRequestPermissionRationale -> {"upsellStatus":"SHOW"|"HIDE","hiddenUpsellPermissions":[...granted...]}
 //
-// PermissionsRequest has no OS prompt to show: the Tipsy Settings toggle is
-// the consent surface, so it answers like HasPermissions. Malformed requests
-// answer the denied shape with the Java JSON-error code 13.
+// PermissionsRequest has no OS prompt to show: the Tipsy Settings toggle is the
+// consent surface, so it answers like HasPermissions. Malformed requests answer
+// the denied shape with the Java JSON-error code 13.
 func permissionsProtocolResponse(method, request string, micAllowed bool) (string, int32) {
 	perms, ok := parsePermissionsRequest(request)
 	switch method {
@@ -350,9 +339,9 @@ func (vm *VM) answerPermissionsProtocol(arm, method, request string) (string, in
 }
 
 // publishPermissionsResponse answers a legacy request-topic delivery the way
-// Java MessageBus.m() does: publishProtocolMethodResponseRaw(protocol,
-// method, responseJSON, code, telemetryJSON). Called re-entrantly from inside
-// the RawCallback upcall, exactly as the Java callback does.
+// Java MessageBus.m() does: publishProtocolMethodResponseRaw(protocol, method,
+// responseJSON, code, telemetryJSON). Called re-entrantly from inside the
+// RawCallback upcall, exactly as the Java callback does.
 func (vm *VM) publishPermissionsResponse(method, response string, code int32) {
 	permissionsProtocol.mu.Lock()
 	fn := permissionsProtocol.exports.PublishProtocolMethodResponseRaw

@@ -14,9 +14,8 @@ import (
 )
 
 // mappedDirAsset is one PROT_READ file mapping used as a directory-asset blob.
-// Lifetime lives here rather than in assetCache maps so a retired generation
-// can drop aliases while a live AAsset still holds the pages, and so Munmap
-// runs exactly once.
+// Lifetime lives here rather than in assetCache maps, so a retired generation
+// can drop aliases while a live AAsset holds the pages; Munmap runs once.
 type mappedDirAsset struct {
 	mapping []byte
 	cached  bool
@@ -36,9 +35,9 @@ func mappedDirAssetKey(data []byte) uintptr {
 }
 
 // mapDirAssetFile returns a file-backed PROT_READ view of path. Empty files
-// are an empty slice with no mapping. Missing paths stay os.ErrNotExist.
-// Directory assets are not copied onto the Go heap; ZIP inflate is a separate
-// path and must not call this.
+// are an empty slice with no mapping; missing paths stay os.ErrNotExist.
+// Directory assets are not copied onto the Go heap; ZIP inflate must not
+// call this.
 func mapDirAssetFile(path string) ([]byte, error) {
 	f, err := os.Open(path)
 	if err != nil {

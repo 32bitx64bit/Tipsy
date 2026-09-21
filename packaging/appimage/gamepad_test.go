@@ -9,11 +9,10 @@ import (
 	"testing"
 )
 
-// Phase 5 (controller-plan §6): the AppImage needs no sandbox change for
-// gamepads — it runs unsandboxed on the host, so /dev/input/event* nodes
-// stay visible and only the host permission state (input group / logind
-// ACL) governs access. Pin that AppRun introduces no sandbox layer that
-// could hide host evdev nodes; see packaging/gamepad-input.md.
+// The AppImage runs unsandboxed on the host, so /dev/input/event* nodes stay
+// visible and only the host permission state (input group / logind ACL)
+// governs access. Pin that AppRun introduces no sandbox layer that could hide
+// host evdev nodes.
 func TestAppRunExposesHostInputDevices(t *testing.T) {
 	data, err := os.ReadFile("AppRun")
 	if err != nil {

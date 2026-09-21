@@ -11,15 +11,12 @@ import (
 )
 
 // rawUTF16 exists only for a String that contains an unpaired surrogate.
-// Keeping it behind one pointer avoids charging every Object a slice header.
 type rawUTF16 struct {
 	units []uint16
 }
 
-// newStringUTF16On preserves Java's UTF-16 code-unit model. Go strings cannot
-// retain an unpaired surrogate, so retain a raw unit copy only in that lossy
-// case. This is representation correctness, not a UTF-16 conversion cache for
-// ordinary strings.
+// newStringUTF16On preserves Java's UTF-16 code-unit model: Go strings cannot
+// retain an unpaired surrogate, so retain a raw unit copy only in that case.
 //
 // vm.mu must be held by the caller.
 func (vm *VM) newStringUTF16On(env unsafe.Pointer, units []uint16) *Object {
@@ -63,11 +60,9 @@ func objectUTF16Length(o *Object) int {
 	return utf16UnitCount(o.str)
 }
 
-// decodeModifiedUTF8 decodes JNI's Modified UTF-8 as UTF-16 code units. MUTF-8
-// represents NUL as C0 80 and supplementary characters as their two surrogate
-// units, each encoded independently. Four-byte UTF-8 and overlong encodings
-// are invalid MUTF-8. Callers reject malformed guest input with NULL instead
-// of silently applying Go's replacement-rune policy.
+// decodeModifiedUTF8 decodes JNI's Modified UTF-8 as UTF-16 code units. NUL is C0 80
+// and supplementary characters are two independently encoded surrogates; four-byte
+// UTF-8 and overlong forms are invalid, rejected with NULL not a replacement rune.
 func decodeModifiedUTF8(in []byte) ([]uint16, bool) {
 	capacity := len(in)
 	if capacity > maxGuestStringUnits {
@@ -106,8 +101,7 @@ func decodeModifiedUTF8(in []byte) ([]uint16, bool) {
 			if i+2 >= len(in) || in[i+1]&0xc0 != 0x80 || in[i+2]&0xc0 != 0x80 {
 				return nil, false
 			}
-			// E0 80..9F is an overlong encoding. ED surrogate ranges are
-			// deliberately accepted: MUTF-8 operates on UTF-16 units.
+			// ED surrogate ranges are deliberately accepted: MUTF-8 operates on UTF-16 units.
 			if b0 == 0xe0 && in[i+1] < 0xa0 {
 				return nil, false
 			}

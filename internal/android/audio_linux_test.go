@@ -64,10 +64,9 @@ func TestOpenSLQueueOwnershipPool(t *testing.T) {
 	if result.Capacity != 2 || result.Callbacks != 4 || result.Queued != 0 || result.Inflight != 0 {
 		t.Fatalf("queue state=%+v, want capacity=2 callbacks=4 queued/inflight=0", result)
 	}
-	// The pre-pool baseline made seven node/payload allocations and copies
-	// (including the full-queue rejection). The two resident slots below prove
-	// that capacity is checked before allocation/copy, callbacks can re-enter,
-	// and Clear returns both nodes to the stream-local pool.
+	// The two resident slots prove capacity is checked before
+	// allocation/copy, callbacks can re-enter, and Clear returns both nodes
+	// to the stream-local pool.
 	if result.NodeAllocations != 2 || result.PayloadAllocations != 2 ||
 		result.PayloadBytesAllocated != 2*1920 || result.CopyOperations != 6 ||
 		result.CopyBytes != 6*1920 || result.CapacityRejections != 1 ||
@@ -179,10 +178,8 @@ func TestOpenSLMutedCaptureInterrupts(t *testing.T) {
 	}
 }
 
-// BenchmarkOpenSLMutedCaptureCadence is deliberately serial: the fake host
-// and process-wide mute gate model one recorder. It provides internal/perf a
-// direct-test-binary workload for Go allocation and resource metadata. The
-// cadence result itself is not an end-to-end microphone latency measurement.
+// BenchmarkOpenSLMutedCaptureCadence is serial: the fake host and
+// process-wide mute gate model one recorder.
 func BenchmarkOpenSLMutedCaptureCadence(b *testing.B) {
 	if MicrophoneDisabled() {
 		b.Skip("microphone kill-switch changes the recorder contract")
@@ -242,12 +239,9 @@ func TestOpenSLSymbolSurface(t *testing.T) {
 	}
 }
 
-// FMOD's OpenSL ES output plug-in loads the library at runtime:
-// dlopen("libOpenSLES.so") then dlsym of slCreateEngine and the SL_IID_*
-// tables (libroblox.so binds none of them at relocation time). The handle
-// must resolve exactly what the in-process provider serves, a symbol the
-// provider lacks must stay NULL, and a library Tipsy does not provide
-// (libaaudio.so: SDK 26, no AAudio) must still fail to open.
+// The handle must resolve exactly what the in-process provider serves, a
+// symbol the provider lacks must stay NULL, and a library Tipsy does not
+// provide must still fail to open.
 func TestOpenSLDlopenHandle(t *testing.T) {
 	h := openRegistered("libOpenSLES.so")
 	if h == nil {

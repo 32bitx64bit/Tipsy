@@ -43,8 +43,7 @@ type AdoptOptions struct {
 	// an icon even when no package installed one. Optional.
 	IconSource string
 	// IfUnowned makes Adopt a no-op (ErrOwnedElsewhere) when a package or
-	// Flatpak install already provides the identity. AppRun uses this on
-	// every start so an AppImage never silently takes over a real install.
+	// Flatpak install already provides the identity.
 	IfUnowned bool
 	// Handler registers the Play entry as the default roblox:// handler.
 	Handler bool
@@ -60,9 +59,8 @@ type AdoptResult struct {
 }
 
 // Adopt writes user-scope Play and Settings entries for the identity so the
-// desktop resolves it to this install, cleans up duplicate launchers other
-// tools created for the same origin, refreshes the desktop database, and
-// optionally claims the roblox:// handler.
+// desktop resolves it to this install, removes duplicate launchers other tools
+// created, refreshes the desktop database, and optionally claims the handler.
 func Adopt(ctx context.Context, env Env, opts AdoptOptions) (AdoptResult, error) {
 	result := AdoptResult{Before: Resolve(env, opts.Identity)}
 	if opts.IfUnowned && result.Before.OwnedElsewhere() {
@@ -88,8 +86,6 @@ func Adopt(ctx context.Context, env Env, opts AdoptOptions) (AdoptResult, error)
 		}
 		iconRef = ref
 	}
-	// AppRun adopts on every start; only touch the desktop when something
-	// actually differs so a launch is not a menu-cache rebuild.
 	changed := false
 	for _, entry := range Render(RenderOptions{Identity: opts.Identity, Launcher: opts.Launcher, Icon: iconRef}) {
 		path := filepath.Join(appsDir, entry.Name)
@@ -171,8 +167,8 @@ func Release(ctx context.Context, env Env, id Identity, run Runner) (ReleaseResu
 	return result, nil
 }
 
-// writtenByTipsy recognizes entries Adopt wrote (markers) and the entries the
-// pre-marker AppRun wrote (Exec pointing at an AppImage).
+// writtenByTipsy recognizes entries Adopt wrote (markers) and legacy entries
+// whose Exec points at an AppImage.
 func writtenByTipsy(parsed *desktopFile) bool {
 	if _, ok := parsed.main[markerMedium]; ok {
 		return true
@@ -183,8 +179,7 @@ func writtenByTipsy(parsed *desktopFile) bool {
 var iconSizes = []string{"256x256", "512x512"}
 
 // installIcons copies the PNG into the user hicolor theme under the
-// identity's icon name and returns the absolute path entries should
-// reference (menus refresh unreliably on theme-name lookups for new icons).
+// identity's icon name and returns the absolute path entries reference.
 func installIcons(env Env, id Identity, source string) (string, error) {
 	data, err := os.ReadFile(source)
 	if err != nil {
@@ -208,8 +203,7 @@ func installIcons(env Env, id Identity, source string) (string, error) {
 }
 
 // removeForeignLaunchers deletes other user-scope entries that start the
-// same origin (AppImage managers write a second "Play" row for the same file
-// and can leave an older appimage_tipsy_*.desktop behind after an update).
+// same origin.
 func removeForeignLaunchers(env Env, id Identity, origin string) []string {
 	appsDir := env.ApplicationsDir()
 	matches, err := filepath.Glob(filepath.Join(appsDir, "*.desktop"))
@@ -238,8 +232,6 @@ func removeForeignLaunchers(env Env, id Identity, origin string) []string {
 	return removed
 }
 
-// removeManagerIcons drops the appimage_tipsy_* theme icons AppImage
-// managers install alongside their own entries.
 func removeManagerIcons(env Env, icon string) {
 	if !strings.HasPrefix(icon, "appimage_tipsy_") || strings.ContainsAny(icon, "/\\") {
 		return

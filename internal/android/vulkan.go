@@ -50,15 +50,9 @@ func lookupVulkan(sym string) (uintptr, error) {
 	return 0, nil
 }
 
-// BindVulkanWSI records the X11 Display* and Window used to translate any
-// client vkCreateAndroidSurfaceKHR call onto the host XCB/Xlib WSI. display
-// and xid must be the same connection and window the client will present to.
-//
-// This is a window lifetime binding, not a renderer-selection decision: an
-// EGL-selected client can still issue the Android Vulkan-surface request while
-// it is starting. Presentation statistics remain controlled by the selected
-// presenter, so merely making the WSI route available cannot enable Vulkan
-// per-present work on an EGL launch.
+// BindVulkanWSI records the X11 Display* and Window used to translate client
+// vkCreateAndroidSurfaceKHR calls onto the host XCB/Xlib WSI. display and xid
+// must be the connection and window the client will present to.
 func BindVulkanWSI(display, xid uintptr) error {
 	if C.tipsy_vk_bind_wsi(C.uintptr_t(display), C.uintptr_t(xid)) != 0 {
 		return fmt.Errorf("graphics: vulkan WSI bind requires a live X11 display and window")
@@ -75,9 +69,8 @@ func UnbindVulkanWSI() {
 }
 
 // ConfigureVulkanPresentStatsForSelectedPresenter sets the default-off
-// per-present observer only after Runtime selected the Vulkan presenter. WSI
-// binding alone is intentionally insufficient because an EGL-selected client
-// can still request an Android Vulkan surface during startup.
+// per-present observer only after Runtime selected the Vulkan presenter; WSI
+// binding alone is insufficient.
 func ConfigureVulkanPresentStatsForSelectedPresenter() {
 	SetVulkanPresentStats(presentStatsLoggerEnabled())
 	seedPresentRateWindow()
@@ -99,10 +92,9 @@ func vulkanPresentModeName(mode int) string {
 }
 
 // SetVulkanVSync controls the modes advertised by the Android Vulkan adapter.
-// VSync off advertises IMMEDIATE alone when the host lists it (MAILBOX is the
-// fallback if IMMEDIATE is absent), matching GLES eglSwapInterval(0). A
-// verified MAILBOX create is rewritten to IMMEDIATE in that case; incomplete
-// or malformed probes still never rewrite.
+// VSync off advertises IMMEDIATE alone when the host lists it (MAILBOX
+// otherwise), matching GLES eglSwapInterval(0); only a verified MAILBOX create
+// is rewritten to IMMEDIATE.
 func SetVulkanVSync(enabled bool) {
 	value := C.int(0)
 	if enabled {
@@ -144,10 +136,9 @@ func resetVulkanPresentStats() {
 }
 
 // presentStatsLoggerEnabled reports whether the present-stats consumer will
-// actually run. launch.go's logPresentStats is called only under TIPSY_DIAG=1
-// and the record is dropped unless the graphics Info logger emits, so both
-// gates must hold before either backend pays per-present bookkeeping. EGL's
-// VSync setup and Vulkan's selected-presenter setup share this gate.
+// actually run: TIPSY_DIAG=1 must be set and the graphics Info logger must
+// emit. EGL's VSync setup and Vulkan's selected-presenter setup share this
+// gate.
 func presentStatsLoggerEnabled() bool {
 	if os.Getenv("TIPSY_DIAG") != "1" {
 		return false
@@ -156,10 +147,8 @@ func presentStatsLoggerEnabled() bool {
 }
 
 // SetVulkanPresentStats enables or disables vkQueuePresentKHR success
-// counters. Both EGL and Vulkan default off: a successful present is a host
-// call plus one relaxed enable load. The selected presenter turns the matching
-// backend on only when the real TIPSY_DIAG=1 present-stats consumer and the
-// graphics Info logger are both active.
+// counters. Both EGL and Vulkan default off; the selected presenter turns the
+// matching backend on only under the shared present-stats gate.
 func SetVulkanPresentStats(enabled bool) {
 	v := C.int(0)
 	if enabled {
@@ -175,9 +164,8 @@ func VulkanPresentStatsEnabled() bool {
 }
 
 // SetEGLPresentStats enables or disables eglSwapBuffers clock+counter
-// bookkeeping. Default off; SetEGLVSync enables it only when the real
-// TIPSY_DIAG=1 present-stats consumer and the graphics Info logger are both
-// active. When off, swap is a host call plus one relaxed enable load.
+// bookkeeping. Default off; SetEGLVSync enables it only under the shared
+// present-stats gate. When off, swap is a host call plus one relaxed load.
 func SetEGLPresentStats(enabled bool) {
 	v := C.int(0)
 	if enabled {
@@ -193,9 +181,8 @@ func EGLPresentStatsEnabled() bool {
 }
 
 // VulkanPresentStats returns a process-atomic observation of successful
-// vkQueuePresentKHR calls made through the Android Vulkan adapter.
-// Injected test timestamps (first/last ns) take precedence; otherwise rate is
-// computed from counter deltas versus wall time between calls (the 2s ticker).
+// vkQueuePresentKHR calls made through the Android Vulkan adapter. Rate is
+// computed from counter deltas versus wall time between calls.
 func VulkanPresentStats() VulkanPresentStatistics {
 	var presents, firstNS, lastNS C.uint64_t
 	C.tipsy_vk_present_stats(&presents, &firstNS, &lastNS)
@@ -227,35 +214,29 @@ func VulkanPresentStats() VulkanPresentStatistics {
 	return stats
 }
 
-// VulkanPresentTimingCapacity is the fixed diagnostic history length. At
-// 240 presents/s this retains about 17 seconds between snapshot reads.
+// VulkanPresentTimingCapacity is the fixed diagnostic history length.
 const VulkanPresentTimingCapacity = 4096
 
-// VulkanPresentTimingSample is one VK_SUCCESS return from the existing
-// platform vkQueuePresentKHR adapter. MonotonicNS is host CLOCK_MONOTONIC;
-// it measures the wrapper's return boundary, not physical display scanout.
-// Sequence is append order. Concurrent queues may append out of timestamp
-// order, so readers must handle a non-increasing adjacent timestamp honestly.
+// VulkanPresentTimingSample is one VK_SUCCESS return from the platform
+// vkQueuePresentKHR adapter. MonotonicNS is host CLOCK_MONOTONIC at the
+// wrapper's return boundary; concurrent queues may append out of order.
 type VulkanPresentTimingSample struct {
 	Sequence    uint64
 	MonotonicNS uint64
 }
 
 // VulkanPresentTimingBatch contains retained samples newer than a cursor.
-// Overwritten explicitly counts samples lost before the oldest retained one;
-// consumers should not calculate an interval across that gap. Cursor is the
-// last returned sequence, or the supplied cursor if no newer sample exists.
+// Overwritten counts samples lost before the oldest retained one; no interval
+// may span that gap. Cursor is the last returned sequence.
 type VulkanPresentTimingBatch struct {
 	Cursor      uint64
 	Overwritten uint64
 	Samples     []VulkanPresentTimingSample
 }
 
-// SetVulkanPresentTiming enables opt-in monotonic present timestamps. It
-// returns the current cursor for starting a diagnostic capture. Enabling,
-// disabling, swapchain creation, and stats resets never rewind the cursor.
-// Disabled presents perform only a relaxed timing-enable load: no diagnostic
-// clock, mutex, allocation, or ring write. Existing counters are independent.
+// SetVulkanPresentTiming enables opt-in monotonic present timestamps and
+// returns the current cursor for a diagnostic capture; the cursor never
+// rewinds. Disabled presents perform only a relaxed timing-enable load.
 func SetVulkanPresentTiming(enabled bool) uint64 {
 	v := C.int(0)
 	if enabled {
@@ -265,9 +246,8 @@ func SetVulkanPresentTiming(enabled bool) uint64 {
 }
 
 // VulkanPresentTimingSnapshot copies the bounded retained history after the
-// supplied lifetime cursor. It is safe while native presenters record, and
-// the returned Go slice owns its data. Use the returned Cursor for the next
-// call. Supplying a future cursor returns an empty batch without rewinding it.
+// supplied lifetime cursor. Safe while native presenters record; the returned
+// Go slice owns its data. A future cursor yields an empty batch.
 func VulkanPresentTimingSnapshot(after uint64) VulkanPresentTimingBatch {
 	var raw [VulkanPresentTimingCapacity]C.uint64_t
 	var cursor, overwritten C.uint64_t
@@ -289,8 +269,7 @@ func VulkanPresentTimingSnapshot(after uint64) VulkanPresentTimingBatch {
 
 // VulkanPresentCallDurationStatistics summarizes retained host-call duration
 // samples. P50NS/P99NS are nearest-rank over the samples returned by one
-// snapshot call; MaxNS is their maximum. Nothing is recorded unless the
-// TIPSY_PRESENT_TIMING epoch is enabled.
+// snapshot call; MaxNS is their maximum.
 type VulkanPresentCallDurationStatistics struct {
 	Count       uint64
 	Overwritten uint64
@@ -300,11 +279,8 @@ type VulkanPresentCallDurationStatistics struct {
 }
 
 // VulkanPresentCallDurations copies retained vkQueuePresentKHR host-call
-// duration samples newer than the supplied cursor and returns nearest-rank
-// p50/p99/max plus the next cursor. Samples exist only while the
-// TIPSY_PRESENT_TIMING epoch is enabled; the default path never clocks,
-// locks, or writes here. Overwritten counts samples lost before the oldest
-// retained one.
+// duration samples newer than the supplied cursor, returning nearest-rank
+// p50/p99/max plus the next cursor; Overwritten counts lost samples.
 func VulkanPresentCallDurations(after uint64) (VulkanPresentCallDurationStatistics, uint64) {
 	var raw [VulkanPresentTimingCapacity]C.uint64_t
 	var cursor, overwritten C.uint64_t
@@ -339,10 +315,9 @@ func durationPercentile(sorted []uint64, p int) uint64 {
 	return sorted[index]
 }
 
-// GoAndroid_LogVulkanDevice is the one-time E1 observation bridge. names/n
-// describe the client's enabled device extensions at the first
-// vkCreateDevice; host booleans come from one read-only host device extension
-// enumeration. content-free: only API names and booleans.
+// GoAndroid_LogVulkanDevice is the one-time device observation bridge. names/n
+// describe the client's enabled device extensions at the first vkCreateDevice;
+// host booleans come from one read-only host device extension enumeration.
 //
 //export GoAndroid_LogVulkanDevice
 func GoAndroid_LogVulkanDevice(names **C.char, n C.uint32_t, hostPresentWait, hostPresentWait2, hostPresentID, hostPresentID2, hostPresentTiming, hostSupportProbed C.int) {
@@ -373,9 +348,9 @@ func GoAndroid_LogVulkanDevice(names **C.char, n C.uint32_t, hostPresentWait, ho
 		"host_support_probed", hostSupportProbed != 0)
 }
 
-// GoAndroid_LogVulkanPacingQueries is the one-time E1 counter report, emitted
-// the first time any vkGetDeviceProcAddr query for a pacing entry point is
-// observed. Counts are content-free.
+// GoAndroid_LogVulkanPacingQueries is the one-time counter report, emitted the
+// first time any vkGetDeviceProcAddr query for a pacing entry point is
+// observed.
 //
 //export GoAndroid_LogVulkanPacingQueries
 func GoAndroid_LogVulkanPacingQueries(waitForPresent, waitForPresent2, setPresentTimingQueueSize, getPastPresentationTiming C.uint64_t) {

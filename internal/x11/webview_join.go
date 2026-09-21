@@ -30,8 +30,7 @@ var webViewUserClosed struct {
 }
 
 // SetWebViewStartGame registers the in-session StartGame door used when the
-// in-window overlay intercepts an official join URI. fn runs through the
-// existing nativeAppBridgeV2StartGameWithParam path. A nil fn parks joins.
+// in-window overlay intercepts an official join URI. A nil fn parks joins.
 func SetWebViewStartGame(fn func(rbxuri.Request)) {
 	webViewStartGame.Lock()
 	webViewStartGame.fn = fn
@@ -61,7 +60,7 @@ func handoffWebViewJoin(req rbxuri.Request, leaveBrowser func(), start func(rbxu
 
 func dismissWebViewOverlay() {
 	// Consume visibility before publication because the MessageBus callback
-	// can re-enter the host close path. One presentation emits one close.
+	// can re-enter the host close path.
 	if hideWebViewOverlay() {
 		notifyWebViewUserClosed()
 	}
@@ -158,9 +157,8 @@ func SoupCookieDomain(domain string, hostOnly bool) string {
 	return "." + d
 }
 
-// WebViewWebsiteTheme maps NativeUser getTheme onto the website cookie
-// value. Empty (Android omitted after login) follows the in-client dark
-// chrome so the overlay is not a white www.roblox.com default.
+// WebViewWebsiteTheme maps NativeUser getTheme onto the website cookie value.
+// Empty (Android omitted after login) follows the in-client dark chrome.
 func WebViewWebsiteTheme(theme string) string {
 	switch strings.ToLower(strings.TrimSpace(theme)) {
 	case "light":
@@ -170,9 +168,9 @@ func WebViewWebsiteTheme(theme string) string {
 	}
 }
 
-// EnsureWebViewThemeCookie mirrors Android SystemThemeProtocol.A/n:
-// RBXThemeOverride=dark|light; Path=/. This override is host theme state,
-// refreshed on each open; RBXTheme is not the Android WebView contract.
+// EnsureWebViewThemeCookie sets the RBXThemeOverride host theme cookie
+// (dark|light; Path=/). It is refreshed on each open; RBXTheme is not the
+// Android WebView contract.
 func EnsureWebViewThemeCookie(cookies []WebViewCookie, theme string) []WebViewCookie {
 	out := make([]WebViewCookie, 0, len(cookies)+1)
 	for _, c := range cookies {
@@ -299,7 +297,6 @@ func HandleWebViewPolicyURI(raw string) bool {
 	}
 	// Android's ordinary WebView URL callback closes the fragment and
 	// publishes handleWindowClose before forwarding the URL to Linking.
-	// Hiding alone leaves GenericWebPage over the originating details route.
 	logging.Logger(logging.CatX11).Info("WebView join handoff", "route", "uri", "browser", "dismiss")
 	handoffWebViewJoin(req, dismissWebViewOverlay, dispatchWebViewStartGame)
 	return true
@@ -322,9 +319,9 @@ type hybridLaunchRequest struct {
 	GameInstanceID string          `json:"gameInstanceId"`
 }
 
-// HandleHybridExecuteRoblox plays Java __globalRobloxAndroidBridge__.executeRoblox.
-// Game.launchGame starts the selected place through the existing StartGame
-// door. Overlay.close hides the child. The command string is never logged.
+// HandleHybridExecuteRoblox plays the in-client Hybrid bridge: Game.launchGame
+// starts the selected place through the existing StartGame door and
+// Overlay.close hides the child. The command string is never logged.
 func HandleHybridExecuteRoblox(raw string) bool {
 	var cmd hybridExecute
 	if json.Unmarshal([]byte(raw), &cmd) != nil || cmd.ModuleID == "" {
@@ -338,8 +335,8 @@ func HandleHybridExecuteRoblox(raw string) bool {
 	case strings.EqualFold(cmd.ModuleID, "Game") && strings.EqualFold(cmd.FunctionName, "launchGame"):
 		req, ok := parseHybridLaunchGame(cmd.Params)
 		if ok {
-			// Hybrid posts RequestGame through Android's experience manager;
-			// its inspected path does not publish WebView.handleWindowClose.
+			// Hybrid posts RequestGame through Android's experience manager,
+			// which does not publish WebView.handleWindowClose.
 			logging.Logger(logging.CatX11).Info("WebView join handoff", "route", "hybrid", "browser", "hide")
 			handoffWebViewJoin(req, HideWebViewOverlay, dispatchWebViewStartGame)
 		}

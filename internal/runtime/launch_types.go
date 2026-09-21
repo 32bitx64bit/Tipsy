@@ -16,9 +16,9 @@ import (
 
 type LaunchOptions struct {
 	Probe bool
-	// StartFullscreen asks the host X11 window manager for standard EWMH
-	// fullscreen immediately after the window maps. It is a Tipsy-owned launch
-	// policy, not a guessed Roblox Android preference.
+	// StartFullscreen asks the host X11 window manager for EWMH fullscreen
+	// right after the window maps. It is a Tipsy-owned launch policy, not a
+	// Roblox preference.
 	StartFullscreen      bool
 	Width                int
 	Height               int
@@ -27,9 +27,9 @@ type LaunchOptions struct {
 	AuthorizedGeneration AuthorizedGeneration
 }
 
-// AuthorizedRuntimeFiles is the same-generation, already authenticated file
-// view used by Android assets and launch metadata. Paths are usable only while
-// the AuthorizedGeneration owner remains open.
+// AuthorizedRuntimeFiles is the same-generation, authenticated file view for
+// Android assets and launch metadata. Paths are usable only while the
+// AuthorizedGeneration owner remains open.
 type AuthorizedRuntimeFiles struct {
 	GenerationID string
 	RootDir      string
@@ -39,9 +39,8 @@ type AuthorizedRuntimeFiles struct {
 }
 
 // AuthorizedGeneration is the narrow launch-side view implemented by
-// setupsvc.AuthorizedGeneration. Keeping the interface here avoids a package
-// cycle: setupsvc owns installation and currently depends on runtime setup
-// helpers. Official callers must keep the generation open until Launch returns.
+// setupsvc.AuthorizedGeneration. Official callers must keep the generation open
+// until Launch returns.
 type AuthorizedGeneration interface {
 	NativeDescriptorSet(context.Context) (*integrity.NativeDescriptorSet, error)
 	AuthorizedRuntimeFiles(context.Context) (AuthorizedRuntimeFiles, error)
@@ -49,9 +48,8 @@ type AuthorizedGeneration interface {
 
 var ErrAuthorizedGenerationRequired = errors.New("runtime: authenticated runtime generation is required")
 
-// robloxBaseURL is the official production site origin shared by the cookie,
-// NativeSettings, and protocol-launch surface. Path-specific endpoints append
-// to this origin.
+// robloxBaseURL is the official site origin shared by the cookie, NativeSettings,
+// and protocol-launch surface; path-specific endpoints append to it.
 const robloxBaseURL = "https://www.roblox.com/"
 
 func authorizedNativeDescriptorSet(ctx context.Context, generation AuthorizedGeneration) (*integrity.NativeDescriptorSet, error) {

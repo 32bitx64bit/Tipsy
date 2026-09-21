@@ -20,22 +20,17 @@ import (
 	"unsafe"
 )
 
-// Asset loading has three deliberately separate phases: an immutable source
-// selection, cache lookup/publication under assetCache.mu, and filesystem/ZIP
-// I/O without that mutex. A source is retired by replacing it with a new
-// generation; active loads retain the old source until they finish, so its APK
-// reader cannot be closed beneath zip.File.Open.
+// A retired source generation stays alive until its in-flight loads finish, so
+// its APK reader is never closed beneath zip.File.Open.
 const (
 	maxConcurrentAssetInflations = 2
 
-	// assetCacheByteBudget is deliberately conservative: it bounds only
-	// unborrowed, fully inactive cache blobs. A live native AAsset is never
-	// evicted or unpinned to meet this target.
+	// assetCacheByteBudget bounds only inactive, unborrowed blobs; a live
+	// native AAsset is never evicted or unpinned to meet it.
 	assetCacheByteBudget = 64 << 20
 
-	// Negative entries are cheap but attacker-controlled by requested names, so
-	// use a fixed capacity and lifetime rather than per-entry timers or an
-	// unbounded miss map.
+	// Negative entries are bounded by a fixed capacity and lifetime because
+	// requested names are attacker-controlled.
 	assetNegativeCacheLimit = 128
 	assetNegativeCacheTTL   = time.Minute
 )
@@ -58,22 +53,19 @@ type assetLoad struct {
 	data []byte
 	err  error
 
-	// blobKey is held out of the inactive LRU while this one loader may be
-	// publishing aliases. It replaces the former generation-wide eviction
-	// deferral: unrelated inactive blobs remain eligible.
+	// blobKey is held out of the inactive LRU while this loader may be
+	// publishing aliases.
 	blobKey uintptr
 }
 
 // assetBlob is one unique backing slice retained by an asset source
 // generation. Name/path/ZIP maps may all reference it, but bytes are counted
-// once. It deliberately carries no asset identity beyond the private map key.
+// once.
 type assetBlob struct {
 	bytes int64
 
-	// aliases make eviction proportional to this one blob rather than every
-	// cache map. lru is non-nil only when no native lease or in-flight load
-	// protects the blob, so closing the final native lease can select the LRU
-	// front without a full-cache scan.
+	// lru is non-nil only when no native lease or in-flight load protects the
+	// blob, so eviction can select the LRU front without a full-cache scan.
 	aliases       map[assetBlobAlias]struct{}
 	inFlight      uint32
 	nativeHandles uint32
@@ -122,13 +114,12 @@ type assetCache struct {
 	nextNegative  uint64
 	negativeNames map[string]struct{}
 	// nextNegativeExpiry skips negative-index maintenance until an entry could
-	// expire. A stale earlier value is safe; it can only trigger an early scan
-	// of the bounded negative index, never leave an expired result reusable.
+	// expire; a stale earlier value only triggers an early scan, never reuses
+	// an expired result.
 	nextNegativeExpiry time.Time
 
-	// All eviction/accounting fields below are maintained with each map or
-	// lease transition. The normal final AAsset_close path therefore does not
-	// walk the cache just to rediscover its byte total or oldest candidate.
+	// Eviction/accounting fields are maintained with each map or lease
+	// transition, so the final AAsset_close path never walks the cache.
 	inactiveBlobs      list.List // uintptr keys, least-recently-used first
 	positiveEntries    int
 	negativeEntries    int
@@ -141,7 +132,7 @@ type assetCache struct {
 	apkOpening *archiveOpen
 
 	// An active load owns a source reference, including while it waits for an
-	// inflation permit. Retiring a source closes its archive only at zero.
+	// inflation permit; a source's archive closes only at zero active loads.
 	activeLoads int
 	inflating   int
 	retired     bool
@@ -159,9 +150,8 @@ type assetPin struct {
 	tracksCache   bool
 }
 
-// assetCacheSnapshot is intentionally content-free. It is package-private so
-// deterministic tests can prove cache/lifetime states without exposing asset
-// names, paths, data, or pointers to runtime diagnostics.
+// assetCacheSnapshot is content-free and package-private, so tests can assert
+// cache state without exposing asset names, paths, or data.
 type assetCacheSnapshot struct {
 	Generation          uint64
 	NameEntries         int
@@ -257,9 +247,8 @@ func normalizeAssetCachePolicy(policy assetCachePolicy) assetCachePolicy {
 	return policy
 }
 
-// setAssetCachePolicyForTest changes only the private cache policy. It is a
-// deterministic seam for ownership tests; production keeps the constants
-// above and has no configuration surface for it.
+// setAssetCachePolicyForTest overrides the private cache policy for
+// ownership tests.
 func setAssetCachePolicyForTest(policy assetCachePolicy) (restore func()) {
 	assetCachePolicyState.Lock()
 	previous := assetCachePolicyState.policy
@@ -282,9 +271,8 @@ func assetCacheNow() time.Time {
 	return time.Now()
 }
 
-// setAssetCacheNowForTest supplies a deterministic clock for the bounded
-// negative-cache policy. It is deliberately a single shared seam, not a
-// timer per miss or a background cleanup goroutine.
+// setAssetCacheNowForTest supplies a deterministic clock for the negative
+// cache.
 func setAssetCacheNowForTest(now func() time.Time) (restore func()) {
 	assetTestHook.Lock()
 	previous := assetTestHook.now
@@ -297,10 +285,8 @@ func setAssetCacheNowForTest(now func() time.Time) (restore func()) {
 	}
 }
 
-// setAssetsLocked preserves its established caller-facing name. It publishes a
-// fresh immutable source generation before retiring the old one. It never
-// waits for a stalled cold read, and the retired generation owns its archive
-// until every in-flight load releases its source reference.
+// setAssetsLocked publishes a fresh source generation before retiring the
+// old; the retired generation owns its archive until in-flight loads finish.
 func setAssetsLocked(dir, apk string) {
 	assetsMu.Lock()
 	previous := currentAssets.Load()
@@ -326,11 +312,8 @@ func (c *assetCache) retire() {
 	c.closeArchive(archive)
 }
 
-// dropRetiredCachesLocked returns an archive that is safe to close. The caller
-// must hold c.mu. Native pins retain heap slices or directory mappings
-// independently, while this source generation remains alive only until its
-// in-flight reads finish; an AAsset close cannot extend an APK reader's
-// source lifetime.
+// The caller must hold c.mu. Native pins retain their slices independently;
+// an AAsset close cannot extend an APK reader's source lifetime.
 func (c *assetCache) dropRetiredCachesLocked() *zip.ReadCloser {
 	if !c.retired || c.activeLoads != 0 {
 		return nil
@@ -372,8 +355,7 @@ func (c *assetCache) closeArchive(archive *zip.ReadCloser) {
 func dirCandidates(dir, name string) []string {
 	rel := filepath.FromSlash(name)
 	candidates := []string{filepath.Join(dir, rel)}
-	// rbxasset://configs/... is under content/; AAsset may open either
-	// "configs/..." or "content/..." depending on AssetReader root.
+	// rbxasset://configs/... is under content/; try both roots.
 	if name != "" && name != "content" && !strings.HasPrefix(name, "content/") {
 		candidates = append(candidates, filepath.Join(dir, "content", rel))
 	}
@@ -431,9 +413,9 @@ func (c *assetCache) cachedNameLocked(name string, now time.Time) (nameEntry, bo
 	return entry, true
 }
 
-// beginLoad either returns a cached value, joins the one loader for name, or
-// establishes the source reference for a new loader. The retry result means a
-// caller raced a source-generation change and must select the current source.
+// beginLoad joins or creates the single loader for name. A retry result
+// means the caller raced a source-generation change and must reselect the
+// current source.
 func (c *assetCache) beginLoad(name string) (entry nameEntry, cached bool, load *assetLoad, leader bool, retry bool) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -513,8 +495,8 @@ func (c *assetCache) pruneExpiredNegativeLocked(now time.Time) {
 	for name := range c.negativeNames {
 		entry, found := c.nameCache[name]
 		if !found || !errors.Is(entry.err, os.ErrNotExist) {
-			// The normal mutation helpers prevent this. Repair defensively so a
-			// malformed private cache cannot keep maintenance permanently armed.
+			// Repair defensively so a malformed private cache cannot keep
+			// maintenance permanently armed.
 			delete(c.negativeNames, name)
 			continue
 		}
@@ -589,8 +571,8 @@ func (c *assetCache) oldestInactiveBlobLocked() (uintptr, bool) {
 }
 
 // removeBlobAliasesLocked removes exactly this blob's tracked aliases while
-// holding c.mu. It never unpins the slice: native AAsset ownership belongs
-// solely to the close-token release path.
+// holding c.mu. It never unpins: native AAsset ownership belongs solely to
+// the close-token release path.
 func (c *assetCache) removeBlobAliasesLocked(key uintptr) {
 	blob, found := c.blobs[key]
 	if !found {
@@ -704,7 +686,7 @@ func (c *assetCache) removeBlobLocked(key uintptr, blob assetBlob) {
 	}
 	delete(c.blobs, key)
 	// Native AAsset pins keep the mapping alive even after this generation
-	// drops aliases. LRU eviction of an inactive mmap blob Munmaps here.
+	// drops aliases.
 	releaseMappedDirAssetFromCache(key)
 }
 
@@ -850,9 +832,8 @@ func (c *assetCache) readDirAsset(name string, load *assetLoad) ([]byte, bool, e
 			return data, true, nil
 		}
 
-		// Directory I/O is intentionally outside every cache mutex. Map the
-		// file instead of os.ReadFile so the measured Go inuse_space retain
-		// is not a heap copy. ZIP inflate remains a separate heap path.
+		// Directory I/O stays outside every cache mutex; map the file instead
+		// of copying it onto the Go heap. ZIP inflate remains a heap path.
 		data, err := mapDirAssetFile(path)
 		if err != nil {
 			if !errors.Is(err, os.ErrNotExist) {
@@ -888,8 +869,8 @@ func (c *assetCache) inflateZip(f *zip.File, load *assetLoad) ([]byte, error) {
 		return data, nil
 	}
 
-	// Bound concurrent decompression, but wait without a cache lock. A stalled
-	// cold key therefore cannot delay unrelated warmed hits.
+	// Bound concurrent decompression, but wait without the cache lock; a
+	// stalled cold key cannot delay unrelated warmed hits.
 	c.inflateSlots <- struct{}{}
 	c.mu.Lock()
 	c.inflating++
@@ -931,9 +912,9 @@ func (c *assetCache) inflateZip(f *zip.File, load *assetLoad) ([]byte, error) {
 	return data, nil
 }
 
-// recordBlobLocked records an exact unique backing allocation for this source
-// generation. Empty data has no retained bytes and does not participate in a
-// byte budget, so it has no blob record. The caller holds c.mu.
+// recordBlobLocked records the unique backing allocation for this source
+// generation. Empty data has no retained bytes, so it has no blob record.
+// The caller holds c.mu.
 func (c *assetCache) recordBlobLocked(data []byte) uintptr {
 	key := assetBlobKey(data)
 	if key == 0 {
@@ -1037,9 +1018,8 @@ func openAssetBytes(name string) ([]byte, error) {
 }
 
 // acquireAssetBorrow pins one blob and records one native AAsset handle before
-// constructing that AAsset. Its release closure is consumed either by the real
-// C close callback or synchronously by newBorrowedAsset when C allocation
-// fails. No source cache lifecycle is allowed to infer that a handle closed.
+// constructing that AAsset. Its release closure is consumed by the real C
+// close callback, or synchronously when C allocation fails.
 func acquireAssetBorrow(data []byte) (unsafe.Pointer, int64, func()) {
 	var pointer unsafe.Pointer
 	if len(data) == 0 {
@@ -1055,8 +1035,8 @@ func acquireAssetBorrow(data []byte) (unsafe.Pointer, int64, func()) {
 	if !exists {
 		pin.bytes = int64(len(data))
 		if len(data) != 0 {
-			// mmap pages are not Go objects; runtime.Pinner.Pin panics on
-			// them. A live AAsset still holds mappedDirAsset.pins so eviction
+			// mmap pages are not Go objects, so runtime.Pinner.Pin would
+			// panic; a live AAsset holds mappedDirAsset.pins, so eviction
 			// cannot Munmap to meet the byte budget.
 			if !retainMappedDirAssetPin(key) {
 				pin.pinner = new(runtime.Pinner)
@@ -1071,9 +1051,9 @@ func acquireAssetBorrow(data []byte) (unsafe.Pointer, int64, func()) {
 	assetPins[key] = pin
 	assetPinsMu.Unlock()
 
-	// Exactly one shared pin may protect one current-cache blob. Do this after
-	// publishing the pin record so duplicate handles cannot each claim the
-	// cache entry; no C close token exists until this function returns.
+	// Exactly one shared pin may protect one current-cache blob. Claim the
+	// cache entry after publishing the pin record, so duplicate handles cannot
+	// each claim it.
 	if first {
 		cache := assetsForOpen()
 		if cache.beginNativeBorrow(key) {
@@ -1116,9 +1096,8 @@ func releaseAssetBorrowedPin(key uintptr) {
 	if pinner != nil {
 		pinner.Unpin()
 	}
-	// C has completed descriptor teardown and this was the final borrower. The
-	// tracked cache entry returns directly to its inactive LRU; enforcement is
-	// O(number evicted), not a scan over names, blobs, or global pins.
+	// The tracked cache entry returns directly to its inactive LRU once the
+	// final borrower's C teardown completes.
 	if pin.tracksCache && pin.cache != nil {
 		pin.cache.endNativeBorrow(pin.cacheKey)
 	}
@@ -1167,9 +1146,8 @@ func (c *assetCache) endNativeBorrow(key uintptr) {
 
 func assetFromBytes(data []byte) unsafe.Pointer {
 	buffer, length, release := acquireAssetBorrow(data)
-	// owned=0: C neither frees the Go blob nor learns its identity. It consumes
-	// only an opaque release token after invalidating the descriptor and
-	// finishing C-side teardown, which makes zero-handle unpin safe.
+	// owned=0: C neither frees the Go blob nor learns its identity; it
+	// consumes only an opaque release token.
 	return newBorrowedAsset(buffer, length, -1, release)
 }
 
@@ -1212,8 +1190,7 @@ func assetCacheSnapshotForTest() assetCacheSnapshot {
 }
 
 // setAssetTestBeforeZipRead installs a test-only cold-reader/decompression
-// seam. Production callers leave it nil, so it neither observes content nor
-// changes the loader's control flow.
+// seam.
 func setAssetTestBeforeZipRead(fn func(string) error) (restore func()) {
 	assetTestHook.Lock()
 	previous := assetTestHook.beforeZipRead

@@ -1,15 +1,13 @@
 // Copyright 2026 The Tipsy Authors
 // SPDX-License-Identifier: GPL-3.0-or-later
 
-// Package desktop owns Tipsy's freedesktop launcher integration: the
-// .desktop entries every packaging medium ships, and the rules for which
-// installed copy of Tipsy (AppImage, Flatpak, distro package, source build)
-// provides the launcher and the roblox:// URI handler on a given machine.
+// Package desktop owns Tipsy's freedesktop launcher integration: the .desktop
+// entries every packaging medium ships, and which installed copy of Tipsy
+// provides the launcher and the roblox:// URI handler.
 //
 // One desktop-file ID is one identity. Stable builds share
-// io.github.tipsy_linux.Tipsy; development builds use a separate
-// io.github.tipsy_linux.Tipsy.Dev identity so a developer's daily install is
-// never shadowed by a work-in-progress AppImage.
+// io.github.tipsy_linux.Tipsy; development builds use a separate .Dev identity
+// so a developer's daily install is never shadowed by a work-in-progress build.
 package desktop
 
 import "github.com/tipsy-linux/tipsy/internal/version"

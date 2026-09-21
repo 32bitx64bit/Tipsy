@@ -233,9 +233,9 @@ func (g *AuthorizedGeneration) NativeDescriptorSet(ctx context.Context) (*integr
 	return set, nil
 }
 
-// NativeDescriptors temporarily satisfies the Phase 3B runtime interface.
-// The higher-level integration must switch to NativeDescriptorSet so identity
-// cannot be discarded before Loader validation.
+// NativeDescriptors is a compatibility shim. Callers must consume
+// NativeDescriptorSet so identity cannot be discarded before Loader
+// validation.
 func (g *AuthorizedGeneration) NativeDescriptors(ctx context.Context) ([]integrity.NativeDescriptor, error) {
 	set, err := g.NativeDescriptorSet(ctx)
 	if err != nil {

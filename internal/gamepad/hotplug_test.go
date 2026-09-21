@@ -38,7 +38,6 @@ func TestManagerNoPadRescanIsEmpty(t *testing.T) {
 
 func TestManagerDisconnectSynthesis(t *testing.T) {
 	m := NewManager(t.TempDir(), nil)
-	// Inject live-equivalent state without hardware (same package).
 	abs := stickAbs()
 	r := NewReader(abs)
 	r.Feed(InputEvent{Type: EvKey, Code: BtnSouth, Value: 1})
@@ -134,7 +133,6 @@ func TestManagerSecondPadHonestlyIgnored(t *testing.T) {
 	for _, line := range logs[nLogs:] {
 		t.Fatalf("ignore line must log once per streak, got %q", line)
 	}
-	// Unplug the first pad: the second promotes to player 1.
 	delete(present, "/dev/input/event1")
 	var disconnected []int
 	m.OnDisconnect = func(devID int) { disconnected = append(disconnected, devID) }
@@ -172,8 +170,6 @@ func TestManagerCloseIsSafeEmpty(t *testing.T) {
 }
 
 func TestManagerWatchFiresOnVirtualNodes(t *testing.T) {
-	// Recorded inotify on a virtual dir: creating and deleting event*
-	// files triggers rescans without hardware.
 	dir := t.TempDir()
 	var calls atomic.Uint64
 	m := NewManager(dir, nil)

@@ -22,9 +22,8 @@ const (
 )
 
 // VersionCompatibilityReason identifies why an authenticated versioned import
-// could not be proven compatible. It is deliberately machine-readable so a
-// staged install check can report a compatibility verdict without treating it
-// as an authenticity failure.
+// could not be proven compatible. It is machine-readable so a staged install
+// check can report a compatibility verdict, not an authenticity failure.
 type VersionCompatibilityReason string
 
 const (

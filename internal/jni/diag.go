@@ -11,7 +11,7 @@ import (
 )
 
 // diagnosticsOn caches TIPSY_DIAG=1 once at process start so hot dispatch
-// paths (findClass and the stub fallback) never call os.Getenv.
+// paths never call os.Getenv.
 var diagnosticsOn atomic.Bool
 
 func init() {

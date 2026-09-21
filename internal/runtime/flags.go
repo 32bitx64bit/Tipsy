@@ -34,8 +34,8 @@ const (
 	flagDisableVulkan11 = "FFlagDebugGraphicsDisableVulkan11"
 )
 
-// applicationSettingsFromResponse extracts the flag map as a JSON object.
-// Does not log flag names or values.
+// applicationSettingsFromResponse extracts the flag map as a JSON object
+// without logging flag names or values.
 func applicationSettingsFromResponse(body []byte) (string, int, error) {
 	return applicationSettingsFromResponseWithOverrides(body, nil)
 }
@@ -62,8 +62,7 @@ func applicationSettingsFromResponseWithOverrides(body []byte, overrides map[str
 	} else {
 		m = cloneFlagMap(m)
 	}
-	// Explicit renderer choices own this narrow conflict set. Auto emits
-	// PreferVulkan only when the Vulkan WSI path is the resolved platform.
+	// Explicit renderer choices own this conflict set.
 	if _, ok := overrides[flagPreferOpenGL]; ok {
 		delete(m, flagPreferVulkan)
 		delete(m, flagDisableOpenGL)
@@ -75,24 +74,14 @@ func applicationSettingsFromResponseWithOverrides(body []byte, overrides map[str
 	}
 	for k, v := range overrides {
 		if v == nil {
-			// A nil override removes a shipped key (used for the
-			// `_PlaceFilter` companions of raised FastLog groups).
+			// A nil override removes a shipped key.
 			delete(m, k)
 			continue
 		}
 		m[k] = v
 	}
-	// 7a14858 / ShadowFValuesEnabled defaults false and is absent from CDN.
-	// Commit 0x2e77680 runs apply (store+0x10 list → shadow maps) and sets
-	// 7a148d8 only when that C++ byte is already 1. JSON overlay does not
-	// set the byte in time; launch pokes it. JNI nativeGetFFlag still reads
-	// a different map (store+0x1a8).
 	m["ShadowFValuesEnabled"] = "True"
-	// Dual-key envelope is required: ClientAppSettings-only JSON sets ingest
-	// 73db040=1, skips extract, and nativeInitClientSettings returns 1 with an
-	// empty apply (launch-init.md). Both keys serialize the same map, so the
-	// live JNI string is about twice the inner object. That backing is interned
-	// on the NewString local and released after native init / post-init.
+	// Dual-key envelope is required: both keys must carry the same map.
 	raw, err := json.Marshal(map[string]any{
 		"applicationSettings": m,
 		"ClientAppSettings":   m,
@@ -104,9 +93,8 @@ func applicationSettingsFromResponseWithOverrides(body []byte, overrides map[str
 }
 
 // settingsJSONString aliases json.Marshal's buffer as a string. The []byte is
-// never mutated after Marshal returns. JNI NewString stores the same Go string
-// on o.str for the native-init local lifetime, so the backing stays reachable
-// without a second copy of the envelope.
+// never mutated after Marshal returns, and the backing stays reachable for the
+// native-init local lifetime without a second copy.
 func settingsJSONString(raw []byte) string {
 	if len(raw) == 0 {
 		return ""
@@ -122,29 +110,24 @@ func cloneFlagMap(m map[string]any) map[string]any {
 	return out
 }
 
-// flogOverridesEnv is a diagnostics-only knob: a space- or `;`-separated
-// list of official FastLog groups and levels, e.g.
-// `VoiceChatLogs=Verbose,7 SoundTrace=Verbose`. Each entry raises the
-// `FLog<Group>` and `DFLog<Group>` levels in the client settings handed to
-// Roblox. It can only change how much the official client logs; it never
-// sets an FFlag/FInt/FString and never alters engine behavior.
+// flogOverridesEnv is a diagnostics-only knob: a space- or `;`-separated list
+// of FastLog groups and levels (e.g. `VoiceChatLogs=Verbose,7`) that raises the
+// matching FLog/DFLog levels. It only changes how much the client logs; it never
+// sets an FFlag/FInt/FString or alters engine behavior.
 const flogOverridesEnv = "TIPSY_FLOG_OVERRIDES"
 
-// flogLevelNames are the named FastLog severities the official settings use
-// (`FLogAudio = Info`, `FLogX = Verbose,6`, `..._PlaceFilter = Verbose;<placeId>`).
-// A value is `<number>`, `<Severity>`, or `<Severity>,<number>`.
+// flogLevelNames are the named FastLog severities the official settings use.
+// A level value is `<number>`, `<Severity>`, or `<Severity>,<number>`.
 var flogLevelNames = map[string]bool{"error": true, "warning": true, "info": true, "debug": true, "verbose": true, "trace": true}
 
-// flogFilterSuffixes are the per-place / per-datacenter companions Roblox
-// ships next to a group (`FLogVoiceChatLogs_PlaceFilter = Verbose;1111…`).
-// Raising a group must drop them, or the filter pins the group back to its
-// shipped value in every other place. A nil override value means delete.
+// flogFilterSuffixes are the per-place / per-datacenter companions Roblox ships
+// next to a group. Raising a group must drop them, or the filter pins the group
+// to its shipped value elsewhere. A nil override value means delete.
 var flogFilterSuffixes = []string{"_PlaceFilter", "_DataCenterFilter"}
 
-// flogOverrides parses a flogOverridesEnv value. Malformed entries are
-// skipped: the group must be an identifier and the level a small integer or
-// one of flogLevelNames. The returned map counts one group as len/2 keys
-// with non-nil values.
+// flogOverrides parses a flogOverridesEnv value, skipping malformed entries
+// (the group must be an identifier; the level a small integer or a known name).
+// Each group yields FLog and DFLog keys, both with non-nil values.
 func flogOverrides(spec string) map[string]any {
 	out := map[string]any{}
 	items := strings.FieldsFunc(spec, func(r rune) bool { return r == ';' || unicode.IsSpace(r) })
@@ -163,7 +146,6 @@ func flogOverrides(spec string) map[string]any {
 	return out
 }
 
-// flogGroupCount counts the groups in a flogOverrides result.
 func flogGroupCount(m map[string]any) int {
 	n := 0
 	for k, v := range m {
@@ -209,11 +191,9 @@ func isFlogNumber(s string) bool {
 	return true
 }
 
-// luaLogEnv is the companion diagnostics knob for Roblox's own Lua Logger:
-// `level` or `level:pattern`, e.g. `debug:Voice`. It sets only the two
-// logging fast strings the official CoreScripts Logger reads
-// (`FStringDebugLuaLogLevel`, `FStringDebugLuaLogPattern`) so Lua-side
-// decisions print into the Player log as `[Name (level)] - message`.
+// luaLogEnv is a diagnostics-only knob for Roblox's Lua Logger: `level` or
+// `level:pattern` (e.g. `debug:Voice`). It sets only the two logging fast
+// strings, so Lua-side decisions print into the Player log.
 const luaLogEnv = "TIPSY_LUA_LOG"
 
 const (
@@ -244,9 +224,9 @@ func luaLogOverrides(spec string) map[string]any {
 	return out
 }
 
-// withFlogOverrides merges the flogOverridesEnv groups and the luaLogEnv
-// logger settings into overrides. It returns the number of FastLog groups
-// raised and whether the Lua logger was configured.
+// withFlogOverrides merges the flogOverridesEnv groups and luaLogEnv logger
+// settings into overrides, returning the count of FastLog groups raised and
+// whether the Lua logger was configured.
 func withFlogOverrides(overrides map[string]any, spec, luaSpec string) (map[string]any, int, bool) {
 	extra := flogOverrides(spec)
 	lua := luaLogOverrides(luaSpec)
@@ -264,10 +244,8 @@ func withFlogOverrides(overrides map[string]any, spec, luaSpec string) (map[stri
 }
 
 // splitRendererStartupOverrides removes an explicit OpenGL request from the
-// ordinary AndroidApp settings merge and serializes it for the APK's external
-// override path. MainGameActivity consumes that one payload at both of its
-// official boundaries: pre-super preload and nativeInitClientSettings.
-// Auto and explicit Vulkan retain the existing settings-envelope behavior.
+// ordinary settings merge and serializes it for the APK's external override
+// path. Auto and explicit Vulkan keep the settings-envelope behavior.
 func splitRendererStartupOverrides(overrides map[string]any, testOpenGL bool) (map[string]any, string, error) {
 	if testOpenGL {
 		overrides = cloneFlagMap(overrides)
@@ -322,14 +300,13 @@ func loadAndroidAppOverrides(ctx context.Context, cachePath string, testOpenGL b
 	}
 	overrides, overrideErr := clientsettings.New().LoadOverrides(ctx, caps)
 	if overrideErr != nil {
-		// A settings-permission/symlink failure must not prevent use of the
-		// official client settings; the rejected override is simply not applied.
+		// A settings-permission/symlink failure must not block the official client
+		// settings; the rejected override is simply not applied.
 		overrides = nil
 	}
-	// The named AppConfiguration override is a terminal whole-policy response,
-	// not a field merge. The OS-specific loader therefore returns a complete
-	// cached policy or nothing; any malformed, ambiguous, or touch-mode input
-	// fails closed and leaves Roblox's ordinary policy path intact.
+	// The AppConfiguration override is a terminal whole-policy response, not a
+	// field merge; malformed, ambiguous, or touch-mode input fails closed and
+	// leaves Roblox's ordinary policy path intact.
 	var policyApplied bool
 	overrides, policyApplied, overrideErr = withDesktopAppPolicyOverride(cachePath, overrides)
 	if overrideErr != nil {

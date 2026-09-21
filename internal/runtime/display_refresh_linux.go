@@ -59,11 +59,10 @@ func callDisplayRefreshRateExports(env *jni.Env, class, currentFn, supportedFn u
 	return nil
 }
 
-// displayRefreshExports caches the named-export lookups and class handle
-// resolved on the first publication. The Roblox exports and this VM's class
-// handles are stable for the launch session, so a monitor-change republish
-// must not repeat dlsym/FindClass work. Caching is keyed by module because a
-// different authenticated module gets fresh handles.
+// displayRefreshExports caches the export lookups and class handle from the
+// first publication. These are stable for the launch session, so a republish
+// must not repeat dlsym/FindClass. The cache is keyed by module: a different
+// authenticated module gets fresh handles.
 type displayRefreshExports struct {
 	mod         *loader.Module
 	class       uintptr

@@ -16,7 +16,6 @@ const (
 )
 
 // ownerNotifyingService preserves the service boundary used by the GUI models.
-// LaunchModel owns launch-state notifications, after each transition commits.
 type ownerNotifyingService struct {
 	guimodel.Service
 }
@@ -255,9 +254,9 @@ func (w *mainWindow) showLaunchFailure(message string) {
 	w.status.ShowMessage2("Roblox could not be launched.", 6000)
 }
 
-// External starts paint before package verification or settings loading. Models
-// are built privately by the worker and transferred to the GUI thread once,
-// avoiding concurrent access to SettingsModel's presentation state.
+// External starts paint before package verification or settings loading.
+// Models are built on the worker and transferred to the GUI thread once, so
+// SettingsModel's presentation state is never touched concurrently.
 type launchInitialization struct {
 	setup                 *guimodel.SetupModel
 	settings              *guimodel.SettingsModel

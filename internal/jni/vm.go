@@ -28,7 +28,7 @@ type VM struct {
 	nextID  int64
 
 	// threadStates owns the JNI locals and pending exception for each attached
-	// environment. g_native is shared, but no JNIEnv object or local state is.
+	// environment; no JNIEnv object or local state is shared.
 	threadStates map[uintptr]*jniThreadState
 
 	filesDir   string
@@ -44,8 +44,8 @@ type VM struct {
 	natives  map[string]uintptr // class + "." + name + sig → fnPtr
 	monitors map[int64]*jniMonitor
 
-	// Immortal JNI objects reused across calls for stable Android paths and
-	// identity strings. Cleared when SetDirs changes the matching path.
+	// Immortal JNI objects reused across calls. Cleared when SetDirs changes
+	// the matching path.
 	immortalPackageName *Object
 	immortalAppVersion  *Object
 	immortalLocale      *Object
@@ -101,9 +101,8 @@ func NewVM() (*VM, error) {
 	vm.ensureThreadStateLocked(vm.envRaw)
 	vm.mu.Unlock()
 
-	// Deliver real X11 window input through the engine-registered
-	// GameActivity input natives once an input target is wired; until
-	// then events are counted as dropped, never synthesized.
+	// Deliver X11 input through the engine-registered GameActivity input
+	// natives; undelivered events are dropped, never synthesized.
 	bindX11InputBridge()
 
 	return vm, nil
@@ -125,8 +124,8 @@ func (vm *VM) JavaVM() uintptr {
 	return uintptr(vm.javaVM)
 }
 
-// NativeInterface returns the original JNINativeInterface* (not JNIEnv*).
-// Roblox wraps env->functions; callers must snapshot this before GetEnv.
+// NativeInterface returns the original JNINativeInterface* (not JNIEnv*);
+// callers must snapshot it before GetEnv.
 func (vm *VM) NativeInterface() uintptr {
 	if vm == nil {
 		return 0
@@ -139,8 +138,8 @@ func (vm *VM) Handle() uintptr {
 	return vm.JavaVM()
 }
 
-// SetAppVersion sets the extracted APK versionName used by getAppVersion
-// and DeviceStaticParams.appVersion. Launch reads it from runtime/meta.json.
+// SetAppVersion sets the APK versionName used by getAppVersion and
+// DeviceStaticParams.appVersion.
 func (vm *VM) SetAppVersion(version string) {
 	if vm == nil {
 		return
@@ -211,9 +210,8 @@ func (vm *VM) SetDisplayPhysicalSizeMM(w, h int) {
 	}
 }
 
-// screenPhysicalSizeMM returns the physical screen size in millimeters:
-// the X-server-reported size when the launcher wired one, otherwise the
-// standard 96-DPI derivation from the pixel size.
+// screenPhysicalSizeMM returns the physical screen size in millimeters: the
+// X-server-reported size when wired, otherwise the 96-DPI pixel derivation.
 func (vm *VM) screenPhysicalSizeMM() (int32, int32) {
 	vm.mu.RLock()
 	w, h := vm.dispMmW, vm.dispMmH

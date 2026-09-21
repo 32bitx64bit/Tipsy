@@ -10,10 +10,9 @@ var bionicAliases = map[string]string{
 	"__errno": "__errno_location",
 }
 
-// libcSymbols is a table of names from the official libroblox.so libc import
-// set (baseline 2.734.917) plus common NDK/bionic companions. Lookup still
-// tries dlsym(RTLD_DEFAULT) for any requested name; this list documents the
-// expected surface and is used by tests.
+// libcSymbols documents the expected libc import surface plus common NDK and
+// bionic companions. Lookup still tries dlsym(RTLD_DEFAULT) for any requested
+// name; this list is used by tests.
 var libcSymbols = []string{
 	// memory / strings
 	"memcpy", "memmove", "memset", "memcmp", "memchr", "memrchr",

@@ -14,9 +14,8 @@ import (
 )
 
 // TestNativeGLGameDidLeaveExactSynchronousFanout drives the production
-// dispatch-or-stub path used by the engine's static CallVoidMethod. It pins
-// exact identity, synchronous registration order, listener coexistence, and
-// the absence of a fallback stub.
+// dispatch-or-stub path. It pins exact identity, synchronous registration
+// order, listener coexistence, and the absence of a fallback stub.
 func TestNativeGLGameDidLeaveExactSynchronousFanout(t *testing.T) {
 	vm, err := NewVM()
 	if err != nil {
@@ -75,10 +74,9 @@ func TestNativeGLGameDidLeaveExactSynchronousFanout(t *testing.T) {
 	}
 }
 
-// TestNativeGLGameDidLeaveCoexistsWithNativeHelperLifecycle proves the exact
-// NativeGL callback and the existing NativeHelper lifecycle stream remain
-// independent. Adding the missing callback must not consume, reorder, or
-// duplicate NativeHelper events used by the GameActivity route gate.
+// TestNativeGLGameDidLeaveCoexistsWithNativeHelperLifecycle proves the NativeGL
+// callback and the NativeHelper lifecycle stream stay independent: adding the
+// callback must not consume, reorder, or duplicate NativeHelper events.
 func TestNativeGLGameDidLeaveCoexistsWithNativeHelperLifecycle(t *testing.T) {
 	vm, err := NewVM()
 	if err != nil {
@@ -140,10 +138,9 @@ func TestNativeGLGameDidLeaveCancellationLifetime(t *testing.T) {
 	}
 }
 
-// TestNativeGLGameDidLeaveConcurrentSubscribeCancel exercises the registry
-// under the same concurrent subscribe/dispatch/cancel shape a session teardown
-// can produce. The race build supplies the data-race assertion; the count only
-// proves callbacks were not globally lost.
+// TestNativeGLGameDidLeaveConcurrentSubscribeCancel exercises the registry under
+// concurrent subscribe/dispatch/cancel; the race build supplies the data-race
+// assertion.
 func TestNativeGLGameDidLeaveConcurrentSubscribeCancel(t *testing.T) {
 	const workers = 24
 	var calls atomic.Int64

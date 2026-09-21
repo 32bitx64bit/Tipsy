@@ -13,15 +13,14 @@ import (
 	"github.com/tipsy-linux/tipsy/internal/x11"
 )
 
-// startupMeasurementArm owns the two composable JNI subscriptions for one
-// diagnostic launch arm. It deliberately receives only the fixed enum from
-// JNI and takes its own receipt clock; no Java payload, place ID, route, or
-// arbitrary AppReady string reaches Runtime.
+// startupMeasurementArm owns the two JNI subscriptions for one diagnostic
+// launch. It receives only the fixed enum from JNI and takes its own receipt
+// clock; no Java payload, place ID, route, or AppReady string reaches Runtime.
 //
-// teardown first closes the arm, then cancels both subscriptions, then emits
-// its single aggregate. Closing before cancellation makes an already-snapshotted
-// JNI callback harmless, while the arm lock ensures a callback that entered
-// before teardown has finished recording before the aggregate is formed.
+// teardown closes the arm, then cancels both subscriptions, then emits its
+// single aggregate. Closing before cancellation makes an already-snapshotted
+// callback harmless, and the lock ensures a callback that entered before
+// teardown has finished recording first.
 type startupMeasurementArm struct {
 	mu sync.Mutex
 
@@ -34,10 +33,9 @@ type startupMeasurementArm struct {
 	cancelReady func()
 	cancelX11   func()
 
-	// testScroll is a sealed, separately double-opted-in visual-test driver.
-	// It is not an input subscriber and it has no normal-launch allocation or
-	// behavior. Its sole source event is this arm's existing exact HomeReady
-	// subscription.
+	// testScroll is a sealed, separately opted-in visual-test driver. It is not an
+	// input subscriber and has no normal-launch allocation or behavior; its sole
+	// source event is the HomeReady subscription.
 	testScroll *startupMeasurementTestScrollDriver
 }
 
@@ -47,36 +45,32 @@ type startupHomeSubscribe func(jni.StartupHomeListener) func()
 
 const startupMeasurementTestScrollEnvironment = "TIPSY_STARTUP_MEASUREMENT_TEST_SCROLL"
 
-// startupMeasurementTestScrollRequested is deliberately stricter than the
-// aggregate recorder's opt-in. It gates the one controlled visual-test
-// interaction behind two exact values, so neither diagnostics nor an ordinary
-// aggregate arm can change client input.
+// startupMeasurementTestScrollRequested is stricter than the recorder's opt-in:
+// it gates the one controlled visual-test interaction behind two exact values,
+// so neither diagnostics nor an ordinary aggregate can change client input.
 func startupMeasurementTestScrollRequested(getenv func(string) string) bool {
 	return startupMeasurementRequested(getenv) && getenv(startupMeasurementTestScrollEnvironment) == "1"
 }
 
 // startupMeasurementTestScrollCapability is the sealed X11 interaction
-// capability. Its owner accepts no caller-controlled event details: Dispatch
-// can send one fixed detent or fail closed, and Close only invalidates an
-// unused capability.
+// capability. It accepts no caller-controlled details: Dispatch sends one fixed
+// detent or fails closed, and Close only invalidates an unused capability.
 type startupMeasurementTestScrollCapability interface {
 	Dispatch() bool
 	Close()
 }
 
-// startupMeasurementTestScrollDeclaration is the existing Runtime/X11
-// declaration surface, kept separate from the dispatch capability so tests
-// can prove dispatch-to-declaration order without exposing an arbitrary input
-// operation.
+// startupMeasurementTestScrollDeclaration is the Runtime/X11 declaration
+// surface, kept separate from the dispatch capability so no arbitrary input
+// operation is exposed.
 type startupMeasurementTestScrollDeclaration interface {
 	DeclareStartupMeasurementVerticalScrollDispatch() bool
 }
 
 // startupMeasurementTestScrollDriver is a sealed one-shot visual-test
-// interaction. It never observes a navigator, map query, timer, process
-// state, UI string, or input event. The existing fixed JNI HomeReady callback
-// is its only trigger; the paired X11 MapNotify callback merely proves the
-// same attached owned window observed its authoritative map edge.
+// interaction. It never observes a navigator, map query, timer, process state,
+// UI string, or input event; the fixed JNI HomeReady callback is its only
+// trigger, and MapNotify only proves the owned window mapped.
 type startupMeasurementTestScrollDriver struct {
 	mu sync.Mutex
 
@@ -118,13 +112,11 @@ func (d *startupMeasurementTestScrollDriver) noteX11Map() {
 	}
 }
 
-// noteHomeReady is called only from the arm's existing no-payload exact
-// HomeReady subscriber. The first readiness event consumes this driver's one
-// chance for the session. If the matching owned X11 MapNotify or attached
-// window is absent, it fails closed rather than retrying from a map, timer, or
-// arbitrary UI state. X11 rejects an unfocused/closed/captured window before
-// it can complete its fixed dispatch. A declaration follows synchronously and
-// only after that dispatch reports success.
+// noteHomeReady is called only from the no-payload HomeReady subscriber. The
+// first readiness event consumes this driver's one chance. If the owned X11
+// MapNotify or attached window is absent, it fails closed rather than retrying
+// from a map, timer, or UI state. A declaration follows synchronously and only
+// after a successful dispatch.
 func (d *startupMeasurementTestScrollDriver) noteHomeReady() {
 	if d == nil {
 		return
@@ -154,9 +146,8 @@ func (d *startupMeasurementTestScrollDriver) noteHomeReady() {
 	d.activeCapability = capability
 	d.mu.Unlock()
 	if capability.Dispatch() {
-		// Keep the declaration in this same call path, with no yield, pump,
-		// timer, or secondary observer between the successful dispatch and
-		// the existing Runtime/X11 declaration.
+		// Keep the declaration in this same call path: no yield, pump, timer, or
+		// secondary observer between the dispatch and the declaration.
 		declare()
 	}
 }
@@ -177,17 +168,16 @@ func (d *startupMeasurementTestScrollDriver) close() {
 	}
 }
 
-// newStartupMeasurementArm starts an exact diagnostic arm. The default-off
-// path returns nil before it reads a clock or subscribes, leaving normal
-// launch behavior and JNI dispatch unchanged.
+// newStartupMeasurementArm starts an exact diagnostic recorder. The default-off
+// path returns nil before reading a clock or subscribing, leaving normal launch
+// behavior and JNI dispatch unchanged.
 func newStartupMeasurementArm(getenv func(string) string, now func() time.Time, log func(msg string, args ...any)) *startupMeasurementArm {
 	return newStartupMeasurementArmWithSubscriptions(getenv, now, log,
 		jni.SubscribeStartupHomeDataModel, jni.SubscribeStartupHomeReady)
 }
 
-// newStartupMeasurementArmWithSubscriptions keeps subscription lifetime
-// independently testable. Production always supplies the two fixed JNI
-// subscriptions above; tests may provide content-free callback sources only.
+// newStartupMeasurementArmWithSubscriptions takes the two JNI subscriptions as
+// parameters.
 func newStartupMeasurementArmWithSubscriptions(getenv func(string) string, now func() time.Time, log func(msg string, args ...any), subscribeModel, subscribeReady startupHomeSubscribe) *startupMeasurementArm {
 	if !startupMeasurementRequested(getenv) {
 		return nil
@@ -251,10 +241,9 @@ func (a *startupMeasurementArm) installReady(subscribe startupHomeSubscribe) boo
 	return true
 }
 
-// attachX11 subscribes only to X11's owned MapNotify and explicit post-scroll
-// XDamage edge. The boolean is consumed as a fail-closed availability fact;
-// Runtime never replaces a missing drawable observation with an Expose,
-// renderer return, or input-pump wake.
+// attachX11 subscribes only to X11's owned MapNotify and post-scroll XDamage
+// edge. The boolean is a fail-closed availability fact; Runtime never replaces
+// a missing drawable observation with an Expose, renderer return, or pump wake.
 func (a *startupMeasurementArm) attachX11(window *x11.Window) bool {
 	if a == nil || window == nil {
 		return false
@@ -266,8 +255,8 @@ func (a *startupMeasurementArm) attachX11(window *x11.Window) bool {
 		})
 		return cancel, availability.PostScrollDrawableUpdate
 	})
-	// attachX11 is the single production binding for the test driver. The
-	// driver remains inert unless the two exact environment gates created it.
+	// attachX11 is the single production binding for the test driver, which stays
+	// inert unless the two exact environment gates created it.
 	a.attachTestScrollWindow(window)
 	return available
 }
@@ -292,10 +281,9 @@ func (a *startupMeasurementArm) attachX11WithSubscription(subscribe startupMeasu
 	return drawableAvailable
 }
 
-// declarePredeclaredScrollDispatch records only an already-dispatched,
-// fixed, non-text vertical scroll. The caller must use the X11 owner's exact
-// declaration at that dispatch boundary; ordinary input observers and normal
-// client behavior never call this method.
+// declarePredeclaredScrollDispatch records only an already-dispatched, fixed,
+// non-text vertical scroll. The caller must use the X11 owner's exact
+// declaration at that boundary; ordinary input observers never call this.
 func (a *startupMeasurementArm) declarePredeclaredScrollDispatch(window startupMeasurementTestScrollDeclaration) bool {
 	if a == nil || window == nil {
 		return false
@@ -386,8 +374,7 @@ func (a *startupMeasurementArm) attachTestScrollWindow(window *x11.Window) {
 }
 
 // attachTestScrollDriver separates the sealed X11 capability factory from the
-// Runtime lifecycle so its one-shot and cancellation rules can be exercised
-// without a display. Production reaches it only through attachTestScrollWindow.
+// Runtime lifecycle. Production reaches it only through attachTestScrollWindow.
 func (a *startupMeasurementArm) attachTestScrollDriver(newCapability func() startupMeasurementTestScrollCapability, declare func() bool) {
 	if a == nil || newCapability == nil || declare == nil {
 		return
@@ -402,9 +389,9 @@ func (a *startupMeasurementArm) attachTestScrollDriver(newCapability func() star
 }
 
 // teardown is idempotent and safe from a subscription callback. It emits the
-// bounded, content-free aggregate once, after the arm no longer accepts
-// events. The ordinary Launch defer calls it on every normal and early-return
-// lifecycle path before Runtime's surrounding resources are released.
+// bounded, content-free aggregate once after the arm no longer accepts events.
+// The Launch defer calls it on every lifecycle path before Runtime releases its
+// surrounding resources.
 func (a *startupMeasurementArm) teardown() {
 	if a == nil {
 		return

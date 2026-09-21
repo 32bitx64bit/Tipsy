@@ -17,13 +17,11 @@ import (
 	"unsafe"
 )
 
-// Test-only helpers (callAResult/callA/wrapHandlerHits) live in this
-// production file because Go test files cannot import "C": the underlying
-// JNI entry points carry cgo types in their signatures.
+// Test-only helpers live in this production file because Go test files cannot
+// import "C": the JNI entry points carry cgo types in their signatures.
 
 // familyFn is one dispatch family. Method expressions bind the receiver, so
-// each concrete dispatcher can be listed directly; only dispatchInsets needs
-// an adapter because its signature has no receiver object.
+// dispatchers are listed directly; dispatchInsets needs an adapter (no receiver).
 type familyFn func(vm *VM, o *Object, class, name, sig string, args *C.jvalue) (C.jobject, bool)
 
 var dispatchFamilies = []familyFn{
@@ -73,10 +71,8 @@ func wrapFamily(fn familyFn, class, name, sig string) callHandler {
 }
 
 // messageBusSharedRun is RequestHandlerRaw.run(String)String and
-// RawCallback.run(String)V. PermissionsProtocol and WebViewProtocol share
-// those Java classes; interning the first family that handled a call would
-// stub later receivers (live Servers click: Permissions intern then
-// untagged WebView RawCallback → stub-dispatch, no overlay).
+// RawCallback.run(String)V. PermissionsProtocol and WebViewProtocol share those
+// classes; interning the first handler would stub later receivers.
 func messageBusSharedRun(name, sig string) bool {
 	if name != "run" {
 		return false
@@ -141,8 +137,7 @@ func oClassName(o *Object) string {
 func (vm *VM) resolveDispatch(env unsafe.Pointer, obj C.jobject, class, name, sig string, args *C.jvalue) (C.jobject, bool, callHandler) {
 	if name == "<init>" {
 		// WebRtcAudioManager.<init>(J)V must call back the registered
-		// nativeCacheAudioParameters. Every other constructor still uses
-		// the generic no-arg handler.
+		// nativeCacheAudioParameters; other constructors use the no-arg handler.
 		o := vm.get(jobjectToID(uintptr(obj)))
 		if class == webRtcAudioManagerClass || oClassName(o) == webRtcAudioManagerClass {
 			if v, ok := vm.dispatchWebRtcAudioManager(o, webRtcAudioManagerClass, name, sig, args); ok {
@@ -211,9 +206,8 @@ func packCallResult(out *C.jvalue, retKind C.jint, v C.jobject) {
 	}
 }
 
-// callAResult and callA are test-facing wrappers: Go test files in this
-// package cannot import "C", so the C-typed CallA entry point is invoked
-// through this small production shim.
+// callAResult and callA are test-facing wrappers: Go test files in this package
+// cannot import "C", so the C-typed CallA entry point runs through this shim.
 
 type callAResult struct {
 	l int64

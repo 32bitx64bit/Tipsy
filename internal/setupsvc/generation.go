@@ -19,25 +19,23 @@ import (
 	"github.com/tipsy-linux/tipsy/internal/integrity"
 )
 
-// GenerationStoreDir is deliberately outside the compatibility runtime path
-// and the app-data tree. The Loader integration phase will consume active
-// generations directly; account/auth/config data is never an input here.
+// GenerationStoreDir is outside the compatibility runtime path and the
+// app-data tree; account/auth/config data is never an input.
 func GenerationStoreDir(runtimeDir string) string { return runtimeDir + "-generations" }
 
 // AuthenticatedExternalArtifact is supplied only by the authenticated policy
 // owner for a separately downloaded official target. PolicyOrigin is the
 // opaque canonical target identifier; it must not contain a URL or account
-// data. An MD5 value cannot populate SHA256 and therefore cannot authorize an
-// artifact.
+// data. Only SHA256 can authorize an artifact.
 type AuthenticatedExternalArtifact struct {
 	SHA256       string
 	Size         int64
 	PolicyOrigin string
 }
 
-// PrepareGeneration builds a source-path-free canonical inventory, stages the
-// exact extracted runtime as an immutable-by-convention generation, and
-// returns its content identity without changing the active launch path.
+// PrepareGeneration builds a canonical inventory, stages the extracted
+// runtime as an immutable generation, and returns its content identity
+// without changing the active launch path.
 func PrepareGeneration(ctx context.Context, sourceRuntimeDir, storeRoot string, rep *apk.Report, trust TrustPolicy) (string, error) {
 	return PrepareGenerationWithExternal(ctx, sourceRuntimeDir, storeRoot, rep, trust, nil)
 }
@@ -58,10 +56,10 @@ func BuildGenerationInventory(ctx context.Context, runtimeDir string, rep *apk.R
 	return BuildGenerationInventoryWithExternal(ctx, runtimeDir, rep, authorization, nil)
 }
 
-// BuildGenerationInventoryWithExternal classifies every file by truthful
-// provenance. APK assets are verified against the retained signed base APK;
-// non-APK assets require an exact authenticated SHA-256, size, and policy
-// target supplied out-of-band by the policy owner.
+// BuildGenerationInventoryWithExternal classifies every file by provenance.
+// APK assets are verified against the retained signed base APK; non-APK
+// assets require an authenticated SHA-256, size, and policy target supplied
+// out-of-band by the policy owner.
 func BuildGenerationInventoryWithExternal(ctx context.Context, runtimeDir string, rep *apk.Report, authorization Authorization, external map[string]AuthenticatedExternalArtifact) (integrity.Inventory, error) {
 	if ctx == nil {
 		ctx = context.Background()

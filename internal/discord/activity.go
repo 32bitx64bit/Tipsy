@@ -62,9 +62,9 @@ func BuildActivity(place Place, join bool, started time.Time) *activityPayload {
 		act.Timestamps = &timestamps{Start: started.UnixMilli()}
 	}
 	if place.ID > 0 {
-		// Large image is the experience's public square icon (the display art).
-		// Small image is the Tipsy corner badge. Missing icons fall back to
-		// tipsy_large without dropping the corner badge.
+		// Large image is the experience's public square icon; small image is
+		// the Tipsy corner badge. Missing icons fall back to tipsy_large
+		// without dropping the corner badge.
 		large := publicHTTPS(place.IconURL)
 		if large == "" {
 			large = assetTipsyLarge
@@ -90,11 +90,10 @@ func BuildActivity(place Place, join bool, started time.Time) *activityPayload {
 	return act
 }
 
-// publicJoinURL is Roblox's documented HTTPS web-to-app deep link. Unlike the
-// public /games/{placeId} listing used previously, /games/start asks the web
-// flow to launch the registered Roblox protocol handler and join the place.
-// It intentionally contains only the public place id: no job id, access code,
-// join secret, ticket, or account identity crosses Discord.
+// publicJoinURL is Roblox's documented HTTPS web-to-app deep link: /games/start
+// asks the web flow to launch the registered Roblox protocol handler and join
+// the place. It intentionally contains only the public place id: no job id,
+// access code, join secret, ticket, or account identity crosses Discord.
 func publicJoinURL(placeID int64) string {
 	if placeID <= 0 {
 		return ""

@@ -11,29 +11,18 @@ import (
 	"strings"
 )
 
-// Lean stick calibration (simplified 2026-09-12): one global deadzone floor
-// over the honest device ranges. The evdev flat from EVIOCGABS is the
-// baseline (reader.go), capped at DefaultDeadzone when the device reports a
-// larger stick flat (GuliKit gyro-to-stick); the global floor only ever
-// RAISES the stick floor above that baseline, never lowers it and never
-// touches triggers or hats. It never edits GlobalBasicSettings_13.xml or
-// any engine state: it shapes the normalized Frame before android.go
-// translates it.
-//
-// Downgrades vs controller v1 (honest list, see
-// gamepad-simplify-2026-09-12.md): per-stick deadzoneLeft/deadzoneRight and
-// invertY/invertYLeft/invertYRight are gone (one floor for both sticks, Y
-// never inverted); the rumble preference is gone (no vibration door was
-// ever observed); unknown section keys (including those removed keys) are
-// parsed-but-ignored so old files still load their enabled/deadzone.
+// Lean stick calibration: one global deadzone floor over the device
+// ranges. The evdev flat from EVIOCGABS is the baseline, capped at
+// DefaultDeadzone when the device reports a larger stick flat; the global
+// floor only ever RAISES the stick floor above that baseline, never lowers
+// it and never touches triggers or hats. It shapes the normalized Frame
+// before android.go translates it.
 const (
 	// MaxUserDeadzone caps the global stick floor (TIPSY_GAMEPAD_DEADZONE
 	// range is 0.0-0.5 in normalized axis units).
 	MaxUserDeadzone = 0.5
 	// GamepadConfigSectionKey is the reserved key for this struct under
-	// the existing settings file. Wiring it into config.json belongs to
-	// the config owner; this package only defines the section shape,
-	// defaults, and merge rules. Missing key/file = defaults.
+	// the settings file. Missing key/file = defaults.
 	GamepadConfigSectionKey = "gamepad"
 )
 
@@ -49,8 +38,7 @@ const (
 )
 
 // NormalizeFaceButtonLayout rejects unknown persisted values by falling back
-// to the compatible Xbox layout. That includes an omitted field from older
-// config files.
+// to the compatible Xbox layout.
 func NormalizeFaceButtonLayout(layout FaceButtonLayout) FaceButtonLayout {
 	if layout == FaceButtonLayoutSwitch {
 		return FaceButtonLayoutSwitch
@@ -60,9 +48,7 @@ func NormalizeFaceButtonLayout(layout FaceButtonLayout) FaceButtonLayout {
 
 // GamepadConfig is the persisted gamepad section: enable switch, one global
 // stick floor, and the labelled face-button arrangement. Defaults (missing
-// JSON = these): enabled, zero user floor (the small 0.08 reader fallback
-// still applies when a device reports flat=0, so the default effective feel
-// is unchanged from v1), and Xbox face-button positions.
+// JSON = these): enabled, zero user floor, and Xbox face-button positions.
 type GamepadConfig struct {
 	Enabled          bool             `json:"enabled"`
 	Deadzone         float64          `json:"deadzone"`
@@ -109,9 +95,9 @@ func (c GamepadConfig) EffectiveDeadzone() float64 { return clampDeadzone(c.Dead
 // ParseGamepadSection merges one settings-file body over the defaults: the
 // "gamepad" key, when present, overlays only its stated fields. Empty or
 // whitespace-only input, or a body without the key, yields defaults with no
-// error. Unknown keys (including removed v1 per-stick/invert/rumble keys)
-// are ignored so old files keep their enabled/deadzone. Malformed JSON or a
-// mistyped section is an honest error, never silent defaults.
+// error. Unknown keys are ignored so old files keep their enabled/deadzone.
+// Malformed JSON or a mistyped section is an honest error, never silent
+// defaults.
 func ParseGamepadSection(fileJSON []byte) (GamepadConfig, error) {
 	cfg := DefaultGamepadConfig()
 	if len(strings.TrimSpace(string(fileJSON))) == 0 {
@@ -192,9 +178,6 @@ func ParseDeadzoneEnv(s string) (float64, bool) {
 
 // WithEnv overlays TIPSY_GAMEPAD_DEADZONE over c and returns the result.
 // Env wins over file/defaults; unset or invalid env leaves it untouched.
-// (Removed v1 keys TIPSY_GAMEPAD_DEADZONE_LEFT/RIGHT, TIPSY_GAMEPAD_INVERT_*
-// and TIPSY_GAMEPAD_RUMBLE are parsed nowhere: setting them is ignored.
-// The TIPSY_GAMEPAD kill-switch keeps living in the JNI feed-in.)
 func (c GamepadConfig) WithEnv(lookup func(string) (string, bool)) GamepadConfig {
 	if lookup == nil {
 		return c
@@ -208,15 +191,12 @@ func (c GamepadConfig) WithEnv(lookup func(string) (string, bool)) GamepadConfig
 }
 
 // ApplyCalibration shapes a normalized reader Frame in place with the single
-// user stick floor: |v| <= floor → 0, else passthrough unrescaled (matching
-// the engine's own |v|<=flat gate). It also stamps the configured face-button
-// layout for the following MapFrame translation. Only the four stick codes
-// move: ABS_X/Y (left) and m.RightX/m.RightY (right, skipped when NoAxis);
-// both sticks share the floor (uniform, no per-stick override, Y never
-// inverted). Trigger-shaped axes and hats are untouched (honest device flat
-// only). Codes absent from f.Axes stay absent (never zero-filled). A nil
-// frame is a no-op. Callers apply this between Reader.Feed and MapFrame;
-// MapFrame itself stays pure translation so golden tests pin each layer once.
+// user stick floor: |v| <= floor → 0, else passthrough unrescaled. It also
+// stamps the configured face-button layout for the following MapFrame
+// translation. Only the four stick codes move: ABS_X/Y (left) and
+// m.RightX/m.RightY (right, skipped when NoAxis); both sticks share the
+// floor. Trigger-shaped axes and hats are untouched. Codes absent from
+// f.Axes stay absent (never zero-filled). A nil frame is a no-op.
 func ApplyCalibration(f *Frame, m Mapping, cfg GamepadConfig) {
 	if f == nil {
 		return

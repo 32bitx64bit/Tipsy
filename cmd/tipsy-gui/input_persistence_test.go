@@ -18,8 +18,7 @@ import (
 
 // TestInputSettingsConcurrentCanonicalSavesReloadBoth covers two independent
 // Settings windows saving each section at once. Both values must survive the
-// shared config.json write and hydrate a fresh UI load; an unmodeled key is
-// included to prove the narrow writers do not discard future settings.
+// shared config.json write and hydrate a fresh UI load.
 func TestInputSettingsConcurrentCanonicalSavesReloadBoth(t *testing.T) {
 	root := t.TempDir()
 	t.Setenv("XDG_CONFIG_HOME", filepath.Join(root, "config"))

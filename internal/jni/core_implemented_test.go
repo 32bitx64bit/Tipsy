@@ -10,10 +10,9 @@ import (
 	"testing"
 )
 
-// TestImplementedMethodsCoverCoreHandlers keeps the hand-maintained
-// implementedMethods list honest: every registerCore identity must be
-// reported implemented so GetMethodID never logs a missing method for a
-// method the dispatcher answers.
+// TestImplementedMethodsCoverCoreHandlers keeps the implementedMethods list
+// honest: every registerCore identity must be reported implemented so GetMethodID
+// never logs a missing method for one the dispatcher answers.
 func TestImplementedMethodsCoverCoreHandlers(t *testing.T) {
 	for key := range coreHandlers {
 		i := strings.IndexByte(key, '(')

@@ -5,8 +5,7 @@
 
 package x11
 
-// SetInputDrainDiagnostics is a no-op on builds without the native X11
-// backend. It still resets the Go-side gate so tests keep the same API.
+// SetInputDrainDiagnostics is a no-op without the native X11 backend.
 func SetInputDrainDiagnostics(enabled bool) { inputDrainDiagnosticsOn.Store(enabled) }
 
 func InputDrainDiagnosticsEnabled() bool { return inputDrainDiagnosticsEnabled() }

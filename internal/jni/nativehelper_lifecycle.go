@@ -8,8 +8,7 @@ package jni
 import "sync"
 
 // NativeHelperLifecycleKind identifies an engine-to-Java callback declared by
-// the APK's NativeHelper. Values are not inferred from window state, timers,
-// or UI actions.
+// the APK's NativeHelper.
 type NativeHelperLifecycleKind uint8
 
 const (
@@ -20,9 +19,9 @@ const (
 )
 
 // NativeHelperLifecycleEvent is one exact NativeHelper callback. Duration is
-// set only for gameActivity_onExperienceStop(D)V; PlaceID is set only for
-// gameActivity_onGameLoaded(J)V. A zero value in either field is still the
-// engine's own value, not a sentinel fabricated by Tipsy.
+// set only for gameActivity_onExperienceStop(D)V; PlaceID only for
+// gameActivity_onGameLoaded(J)V. A zero value in either field is the engine's
+// own value, not a Tipsy sentinel.
 type NativeHelperLifecycleEvent struct {
 	Kind            NativeHelperLifecycleKind
 	DurationSeconds float64
@@ -30,9 +29,8 @@ type NativeHelperLifecycleEvent struct {
 }
 
 // NativeHelperLifecycleListener observes engine-declared application
-// lifecycle callbacks. It is intentionally separate from GameLoadedListener:
-// Discord's existing place-presence observer retains its single owner while
-// GameActivity and future platform consumers can compose lifecycle observers.
+// lifecycle callbacks. It is separate from GameLoadedListener so multiple
+// observers can compose.
 type NativeHelperLifecycleListener func(NativeHelperLifecycleEvent)
 
 var nativeHelperLifecycleListeners struct {
@@ -42,9 +40,9 @@ var nativeHelperLifecycleListeners struct {
 }
 
 // SubscribeNativeHelperLifecycle registers an independent lifecycle observer.
-// Its return function is idempotent and may be called from an observer. The
+// The returned function is idempotent and may be called from an observer. The
 // dispatcher snapshots listeners before invoking them, so no callback runs
-// while the registry lock is held.
+// while the lock is held.
 func SubscribeNativeHelperLifecycle(fn NativeHelperLifecycleListener) func() {
 	if fn == nil {
 		return func() {}
@@ -69,9 +67,7 @@ func SubscribeNativeHelperLifecycle(fn NativeHelperLifecycleListener) func() {
 }
 
 // noteNativeHelperLifecycle fans out an exact callback to independent
-// observers. It deliberately has no route or state-machine policy: the
-// GameActivity owner decides whether a particular sequence can request a
-// named APK route.
+// observers. It has no route or state-machine policy.
 func noteNativeHelperLifecycle(event NativeHelperLifecycleEvent) {
 	nativeHelperLifecycleListeners.mu.Lock()
 	listeners := make([]NativeHelperLifecycleListener, 0, len(nativeHelperLifecycleListeners.set))

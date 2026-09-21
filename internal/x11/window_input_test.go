@@ -77,8 +77,8 @@ func (c *inputCollector) next(t *testing.T, w *Window) InputEvent {
 			return ev
 		default:
 		}
-		// Synthetic events cross the server asynchronously; keep the
-		// pump running (as the runtime ticker does) until one lands.
+		// Synthetic events cross the server asynchronously; keep the pump
+		// running until one lands.
 		_ = w.Pump()
 		time.Sleep(10 * time.Millisecond)
 	}
@@ -141,8 +141,7 @@ func requireProbe(t *testing.T) {
 func requirePointerGrabAvailable(t *testing.T, w *Window) {
 	t.Helper()
 	// A freshly opened window may not be viewable for the first few
-	// milliseconds, which XGrabPointer reports exactly like a competing
-	// grab. Retry briefly before concluding the desktop holds one.
+	// milliseconds, which XGrabPointer reports like a competing grab.
 	var err error
 	for attempt := 0; attempt < 40; attempt++ {
 		if err = x11probe.GrabPointer(w.XID()); err == nil {
@@ -160,8 +159,8 @@ func TestFocusEventsDelivered(t *testing.T) {
 	c := collectInput(t)
 	requireProbe(t)
 
-	// Drain any focus state from Open's own XSetInputFocus, settle
-	// in-flight events, then start from a clean slate.
+	// Drain Open's own focus state and settle in-flight events before
+	// asserting.
 	drainPump(w, t)
 	c.clearAndSettle(t, w)
 
@@ -236,9 +235,8 @@ func TestPrintableKeyDeliveredAsPhysicalKey(t *testing.T) {
 	}
 	drainPump(w, t)
 
-	// X11's letter A preserves the real physical edge for Roblox's direct
-	// key path, then separately reports the input method's committed UTF-8.
-	// This separation keeps layout/compose handling out of keycode mapping.
+	// X11's letter A preserves the real physical edge, then separately reports
+	// the input method's committed UTF-8.
 	ev := c.next(t, w)
 	if ev.Kind != InputKey || !ev.KeyPressed || ev.KeyCode != 29 || ev.ScanCode <= 8 {
 		t.Fatalf("event = %+v, want physical A (Android 29, raw X11 code > 8)", ev)
@@ -294,9 +292,7 @@ func TestPointerButtonAndContinuousMotion(t *testing.T) {
 	requireProbe(t)
 	c.clearAndSettle(t, w)
 
-	// PointerMotionMask must deliver ordinary unpressed motion. The direct
-	// Roblox mouse listener consumes this stream to keep its cursor position
-	// current before any button is pressed.
+	// PointerMotionMask must deliver ordinary unpressed motion.
 	if err := x11probe.Motion(w.XID(), 8, 9, 0); err != nil {
 		t.Fatalf("probe hover: %v", err)
 	}
@@ -344,9 +340,9 @@ func TestPointerMotionCoalescesToLatestPosition(t *testing.T) {
 	requireProbe(t)
 	c.clearAndSettle(t, w)
 
-	// A slow engine consumer may have several raw moves pending. The X11
-	// ring retains the newest real position rather than adding stale cursor
-	// lag or growing without bound.
+	// A slow consumer may have several raw moves pending; the ring retains
+	// the newest real position rather than adding stale cursor lag or growing
+	// without bound.
 	if err := x11probe.Motion(w.XID(), 4, 5, 0); err != nil {
 		t.Fatalf("first probe motion: %v", err)
 	}
@@ -431,10 +427,9 @@ func TestResizePrecedesFollowingPointerDelivery(t *testing.T) {
 }
 
 // TestResizeStormPreservesEveryConfigureBeforeFollowingPointer reproduces the
-// event order from a manual title-bar drag through multiple sub-720p client
-// rectangles. X11 must retain the real ConfigureNotify stream and must not
-// let a later pointer coordinate overtake it; runtime is responsible for
-// coalescing only the expensive Android/V2 lifecycle work at the settled size.
+// event order from a title-bar drag through multiple sub-720p client
+// rectangles: X11 must retain the real ConfigureNotify stream and must not
+// let a later pointer coordinate overtake it.
 func TestResizeStormPreservesEveryConfigureBeforeFollowingPointer(t *testing.T) {
 	w := openInputWindow(t)
 	c := collectInput(t)
@@ -722,9 +717,8 @@ func TestPointerLockPreservesEachQueuedRelativeSample(t *testing.T) {
 		t.Fatalf("capture event = %+v", ev)
 	}
 
-	// Queue three genuine relative source samples before Tipsy's X reader runs.
-	// The old core path collapsed this burst to one final-coordinate delta;
-	// XI2's float-valuator path must retain three ordered camera moves.
+	// Queue three genuine relative source samples before the X reader runs;
+	// the path must retain three ordered camera moves.
 	for i := 0; i < 3; i++ {
 		if err := x11probe.RelativeMotion(1, 0); err != nil {
 			t.Fatalf("relative motion %d: %v", i, err)
@@ -857,10 +851,8 @@ func TestPointerLockFallsBackToCoreMotionWhenRawStreamIsQuiet(t *testing.T) {
 		t.Fatalf("capture event = %+v", ev)
 	}
 
-	// XSendEvent creates only the core stream. RawMotion remains selected for
-	// a real hardware source, but a server that accepts that selection and then
-	// supplies no raw master events must still move the camera through the
-	// proven relative/recenter fallback.
+	// XSendEvent creates only the core stream, so the camera must still move
+	// through the relative/recenter fallback when no raw master events arrive.
 	if err := x11probe.Motion(w.XID(), centerX+60, centerY, 0); err != nil {
 		t.Fatalf("quiet-raw core motion: %v", err)
 	}
@@ -894,8 +886,6 @@ func TestPointerLockQueuedRecenterDoesNotCancelDelta(t *testing.T) {
 	}
 
 	// Physical look and a queued recenter must not coalesce to a zero delta.
-	// Production used the warp's anchor coordinate as the latest sample, so
-	// nativePassMouseMove never saw camera travel.
 	if err := x11probe.WarpPointer(w.XID(), 319, 179); err != nil {
 		t.Fatalf("queued physical look: %v", err)
 	}
@@ -1172,8 +1162,8 @@ func TestPointerLockAtCenterConfinesAtCenterWithoutStickyTabBack(t *testing.T) {
 	}
 	waitPointerPosition(t, w, centerX, centerY)
 
-	// Focus loss drops the grab; focus return must NOT re-grab by itself
-	// (that is the engine LockCenter sticky contract, not the zoom lock's).
+	// Focus loss drops the grab; focus return must not re-grab by itself
+	// (that is the sticky contract, not the zoom lock's).
 	if err := x11probe.Focus(w.XID(), false); err != nil {
 		t.Fatal(err)
 	}
@@ -1307,8 +1297,8 @@ func TestPointerLockGrabFailureKeepsButtonEdges(t *testing.T) {
 
 // TestSetCursorVisibleSwapsHiddenPolicy pins the desktop capture cursor
 // toggle: Open hides the host cursor, SetCursorVisible(true) restores the
-// inherited cursor while the operator release is active, and hiding again
-// redefines transparency. No pointer grab is involved.
+// inherited cursor, and hiding again redefines transparency. No pointer grab
+// is involved.
 func TestSetCursorVisibleSwapsHiddenPolicy(t *testing.T) {
 	w := openInputWindow(t)
 	if !w.CursorHidden() {

@@ -24,51 +24,28 @@ import (
 	"github.com/tipsy-linux/tipsy/internal/logging"
 )
 
-// nativeGLClass is the engine's Java callback surface
-// (com/roblox/engine/jni/NativeGLJavaInterface) for the keyboard half of
-// the text-input contract. The engine GetMethodIDs showKeyboard/hideKeyboard
-// here at startup and calls them when a Lua text box gains focus; when the
-// NativeGL call does not settle the request it falls back to NativeHelper's
-// gameActivity_showKeyboard/gameActivity_hideKeyboard pair (both directions
-// observed live in the same focus storm).
+// nativeGLClass is the engine's Java callback surface for the keyboard half
+// of the text-input contract.
 const nativeGLClass = "com/roblox/engine/jni/NativeGLJavaInterface"
 
-// showKeyboardSig/hideKeyboardSig are the exact descriptors the engine
-// requests via GetMethodID (live launch logs, 2.734.917): the J slot carries
-// the engine's native handle, Z is the engine's boolean flag, [B is the
-// initial-bytes payload, and L…NativeTextBoxInfo is the text-box object.
-// DEX ground truth (classes2.dex, read-only method-table audit, no
-// disassembly): NativeGLJavaInterface.showKeyboard(J,Z,[B,LNativeTextBoxInfo;)V
-// and the NativeHelper gameActivity_showKeyboard twin carry the identical
-// parameter list; hideKeyboard is ()V on both classes.
+// showKeyboardSig/hideKeyboardSig are the descriptors the engine requests
+// via GetMethodID: the J slot carries the engine's native handle, Z is the
+// engine's boolean flag, [B is the initial-bytes payload, and the trailing
+// object slot is the text box.
 const (
 	showKeyboardSig = "(JZ[BLcom/roblox/engine/jni/model/NativeTextBoxInfo;)V"
 	hideKeyboardSig = "()V"
 )
 
-// GameTextInput connection identities (DEX ground truth, classes2.dex
-// method-table audit, 2.734.917 — descriptors only, no code copied):
+// GameTextInput connection identities. Direction is engine→Java: the engine
+// resolves these methods at startup and calls them on the InputConnection
+// object. The Java→native routes it registers for a real connection have no
+// Tipsy-side caller.
 //
-//	com/google/androidgamesdk/gametextinput/InputConnection.setState(Lcom/google/androidgamesdk/gametextinput/State;)V
-//	com/google/androidgamesdk/gametextinput/InputConnection.setSoftKeyboardActive(ZI)V
-//	com/google/androidgamesdk/gametextinput/InputConnection.restartInput()V
-//
-// Direction is engine→Java: the engine GetMethodIDs these at startup and
-// Calls them on the InputConnection object. The Java→native commit route
-// the engine registers for a real connection to call into is:
-//
-//	com/google/androidgamesdk/GameActivity.setInputConnectionNative(JLcom/google/androidgamesdk/gametextinput/InputConnection;)V
-//	com/google/androidgamesdk/GameActivity.onTextInputEventNative(JLcom/google/androidgamesdk/gametextinput/State;)V
-//	com/google/androidgamesdk/GameActivity.onEditorActionNative(JI)V
-//	com/google/androidgamesdk/GameActivity.onSoftwareKeyboardVisibilityChangedNative(JZ)V
-//	com/roblox/engine/jni/NativeGLInterface.nativePassText(JLjava/lang/String;ZI)V
-//	  (named dynsym Java_com_roblox_engine_jni_NativeGLInterface_nativePassText)
-//
-// Tipsy implements the engine→Java GameTextInput half below and hands its
-// InputConnection object to the engine. That State-based route still has no
-// commit source because State content is intentionally opaque. Separately,
-// the APK-proven RbxKeyboard editor below receives genuine X11 XIM commits
-// and calls the named syncTextboxTextAndCursorPosition2/nativePassText route.
+// Tipsy implements the engine→Java half below and hands its InputConnection
+// object to the engine. That State-based route has no commit source because
+// State content is intentionally opaque; the RbxKeyboard editor below instead
+// receives genuine X11 XIM commits and calls the named text route.
 const (
 	gameTextInputConnectionClass = "com/google/androidgamesdk/gametextinput/InputConnection"
 	gameTextInputStateClass      = "com/google/androidgamesdk/gametextinput/State"
@@ -80,16 +57,12 @@ const (
 	nativeTextBoxInfoCopySig     = "(Lcom/roblox/engine/jni/model/NativeTextBoxInfo;)V"
 )
 
-// keyboardState records the engine's keyboard announcements verbatim: how
-// many show/hide requests arrived and the safe aggregates of the most recent
-// show (handle, flag, initial-text length, information presence, and raw
-// non-content ARGB/alpha). The [B bytes can carry user text, so their content
-// is never logged. NativeTextBoxInfo's layout/style fields are retained only
-// for the focused Android-view equivalent below. The Z flag's exact meaning
-// is recorded as an opaque boolean. Nothing here fabricates visibility or
-// focus. The same genuine show announcement starts the private RbxKeyboard
-// editor session below; it is the only gate through which X11 committed text
-// can reach the named engine callbacks.
+// keyboardState records the engine's keyboard announcements: show/hide
+// counts plus the safe aggregates of the most recent show. The [B bytes can
+// carry user text, so their content is never logged. The Z flag is recorded
+// as an opaque boolean. The same show announcement starts the private
+// RbxKeyboard editor session below; it is the only gate through which X11
+// committed text can reach the named engine callbacks.
 var keyboardState struct {
 	mu         sync.Mutex
 	showCount  uint64
@@ -102,8 +75,7 @@ var keyboardState struct {
 }
 
 // rbxTextBoxConfig is the non-content portion of NativeTextBoxInfo that
-// affects desktop editing behavior. The APK's RbxKeyboard reads these fields
-// when showKeyboard's boolean is true. They never contain user text.
+// affects desktop editing behavior. It never contains user text.
 type rbxTextBoxConfig struct {
 	configured         bool
 	density            float32
@@ -130,12 +102,9 @@ type rbxTextBoxConfig struct {
 // RbxKeyboard EditText would paint above Roblox while its textbox owns focus.
 // Text can contain sensitive user input: consumers must draw it immediately
 // and must never log, persist, inspect, or retain it. Inactive snapshots never
-// expose text. Geometry is already converted to final Android View pixels by
-// multiplying NativeTextBoxInfo values by DisplayMetrics.density and applying
-// DEX float-to-int truncation; consumers must not scale it again. FontSize is
-// still the raw float because RbxKeyboard separately applies density and its
-// APK font ratio. Selection is currently collapsed and expressed in Java
-// UTF-16 code units, matching EditText.
+// expose text. Geometry is already in final Android View pixels; consumers
+// must not scale it again. Selection is collapsed and expressed in Java
+// UTF-16 code units.
 type RbxTextOverlaySnapshot struct {
 	Version                           uint64
 	Active, Configured                bool
@@ -158,17 +127,14 @@ type RbxTextOverlaySnapshot struct {
 }
 
 // RobloxTextNativeCaller runs one named JNI export with eight integer/pointer
-// ABI slots. Runtime supplies loader.CallP8 so Roblox code always executes on
-// the repository's dedicated native Main pthread. Tests may leave it nil and
-// use the typed C ABI witnesses below.
+// ABI slots. Tests may leave it nil and use the typed C ABI witnesses below.
 type RobloxTextNativeCaller func(fn, a0, a1, a2, a3, a4, a5, a6, a7 uintptr) int64
 
 // rbxTextEditor is Tipsy's platform-side equivalent of the APK's hidden
 // RbxKeyboard EditText. The engine owns focus and supplies the textbox handle
-// plus UTF-8 initial text through showKeyboard. X11 supplies genuine committed
-// UTF-8. The adapter retains content only for the lifetime of that focused
-// textbox and exposes it only through the transient overlay snapshot; it is
-// never logged or retained after hide/teardown.
+// plus UTF-8 initial text through showKeyboard; X11 supplies genuine
+// committed UTF-8. Content is retained only for the lifetime of that focused
+// textbox and is never logged or retained after hide/teardown.
 var rbxTextEditor struct {
 	mu                     sync.Mutex
 	active                 bool
@@ -184,9 +150,9 @@ var rbxTextEditor struct {
 
 var rbxTextOverlayVersion uint64
 
-// rbxTextTarget is the exact named JNI surface called by the APK's
-// RbxKeyboard. Runtime wires it after JNI_OnLoad; until then editor input is
-// rejected honestly. No engine pointer or callback identity is invented.
+// rbxTextTarget is the named JNI surface called by the APK's RbxKeyboard.
+// Runtime wires it after JNI_OnLoad; until then editor input is rejected.
+// No engine pointer or callback identity is invented.
 var rbxTextTarget struct {
 	mu        sync.RWMutex
 	env       *Env
@@ -206,8 +172,7 @@ var rbxTextDelivered struct {
 }
 
 // RbxTextInfoRefreshDiagnostics is content-free evidence for the APK's
-// propertyChanged -> nativeGetTextBoxInfo boundary. Requests are coalesced;
-// none of these counters reveal editor text or field identity.
+// propertyChanged -> nativeGetTextBoxInfo boundary. Requests are coalesced.
 type RbxTextInfoRefreshDiagnostics struct {
 	Requested, Attempted, Applied uint64
 	MissingTarget, NullResult     uint64
@@ -220,10 +185,9 @@ var rbxTextInfoRefresh struct {
 	staleSession                  uint64
 }
 
-// SetRobloxTextInputTarget wires the APK-proven RbxKeyboard exports.
-// nativePassText is required for a ready typing target; editor action,
-// selection, and the property-refresh info getter are optional and fail
-// honestly if an APK omits them.
+// SetRobloxTextInputTarget wires the RbxKeyboard exports. nativePassText is
+// required for a ready typing target; editor action, selection, and the
+// property-refresh info getter are optional and fail closed if an APK omits them.
 func SetRobloxTextInputTarget(env *Env, class, passFn, returnFn, syncFn, getInfoFn uintptr, call RobloxTextNativeCaller) bool {
 	rbxTextTarget.mu.Lock()
 	rbxTextTarget.env = env
@@ -256,8 +220,7 @@ func ClearRobloxTextInputTarget() {
 }
 
 // dispatchTextInput serves the engine→Java keyboard contract on both
-// classes that actually call it. Only the four live-observed identities are
-// handled; everything else falls through to the honest stub path.
+// classes that call it; everything else falls through to the stub path.
 // showKeyboard activates the Tipsy-owned InputConnection and starts the
 // private RbxKeyboard editor from the engine-provided initial value;
 // hideKeyboard deactivates and wipes it. No text is fabricated or logged.
@@ -315,12 +278,11 @@ func (vm *VM) dispatchTextInput(o *Object, class, name, sig string, args *C.jval
 	return jnull(), true
 }
 
-// keyboardPayload decodes exactly what the APK's RbxKeyboard does: slot 2 is
-// a UTF-8 byte[] used as the EditText's initial value and slot 3 is one
-// NativeTextBoxInfo object (not an array). Content is copied into the private
-// focused editor and exposed only through its transient render snapshot; it is
-// never logged. Invalid UTF-8 follows Java's String(byte[], UTF_8) behavior by
-// replacing malformed input.
+// keyboardPayload decodes the showKeyboard payload: slot 2 is a UTF-8 byte[]
+// used as the EditText's initial value and slot 3 is one NativeTextBoxInfo
+// object (not an array). Content is copied into the private focused editor
+// and never logged. Invalid UTF-8 follows Java's String(byte[], UTF_8)
+// behavior by replacing malformed input.
 func keyboardPayload(vm *VM, args *C.jvalue) (initial string, infoPresent int, config rbxTextBoxConfig) {
 	if vm == nil || args == nil {
 		return "", 0, config
@@ -347,9 +309,8 @@ func nativeTextBoxConfigLocked(vm *VM, o *Object) rbxTextBoxConfig {
 	if vm == nil || o == nil || o.class == nil || o.class.name != nativeTextBoxInfoClass {
 		return config
 	}
-	// fi/a.g() is exactly DisplayMetrics.density. Tipsy publishes density 1
-	// through the same VM and PlatformParams contract; retain it here so the
-	// Android View transform remains explicit at the render boundary.
+	// DisplayMetrics.density; Tipsy publishes density 1 through the same VM
+	// contract, so the Android View transform stays explicit here.
 	config.density = 1
 	config.viewportWidthPx = vm.dispW
 	config.viewportHeightPx = vm.dispH
@@ -375,9 +336,8 @@ func nativeTextBoxConfigLocked(vm *VM, o *Object) rbxTextBoxConfig {
 
 // TextInputKeyboardState reports the keyboard announcements received from
 // the engine: show/hide counts plus the safe aggregates of the most recent
-// show (handle, opaque flag, initial-bytes length, text-box count, calling
-// class). Zero counts mean the engine has not requested the keyboard —
-// never a fabricated value. No text content is exposed here by construction.
+// show. Zero counts mean the engine has not requested the keyboard, never a
+// fabricated value. No text content is exposed here.
 func TextInputKeyboardState() (show, hide uint64, handle int64, flag bool, initLen, boxes int, class string) {
 	keyboardState.mu.Lock()
 	defer keyboardState.mu.Unlock()
@@ -455,9 +415,8 @@ func CurrentRbxTextOverlay() RbxTextOverlaySnapshot {
 		TextColor: c.textColor, Font: c.font, TextInputType: c.textInputType,
 		XAlignment: c.xAlignment, YAlignment: c.yAlignment,
 		ReturnKeyType: c.returnKeyType, Editable: c.editable,
-		// activity_game.xml gives RbxKeyboard a transparent ColorDrawable and
-		// no padding attributes. Android therefore contributes zero content
-		// insets; the parent Roblox field remains responsible for decoration.
+		// activity_game.xml gives RbxKeyboard no padding attributes, so Android
+		// contributes zero content insets.
 		PaddingLeftPx: 0, PaddingTopPx: 0, PaddingRightPx: 0, PaddingBottomPx: 0,
 		CursorVisible: c.editable,
 		// android.widget.TextView defaults includeFontPadding to true, and
@@ -471,14 +430,13 @@ func CurrentRbxTextOverlay() RbxTextOverlaySnapshot {
 // RefreshRbxTextOverlayInfo performs the delayed half of the APK's
 // onLuaTextBoxPropertyChanged UI-thread work. The callback itself only marks a
 // coalesced request; Runtime invokes this function after that callback has
-// returned, so the named nativeGetTextBoxInfo export runs on the existing
-// dedicated native Main thread without re-entering its engine caller.
+// returned, so the nativeGetTextBoxInfo export runs on the dedicated native
+// Main thread without re-entering its engine caller.
 //
-// A returned local NativeTextBoxInfo reference is copied into non-content
-// platform state and released immediately. A hide/refocus while the call is in
-// flight rejects the stale result by both session generation and handle. Null
-// and missing-target results consume one request and fail closed: there is no
-// retry loop and no fabricated/default geometry.
+// A returned local reference is copied into non-content platform state and
+// released immediately. A hide/refocus while the call is in flight rejects the
+// stale result by both session generation and handle. Null and missing-target
+// results consume one request and fail closed: no retry, no fabricated geometry.
 func RefreshRbxTextOverlayInfo() bool {
 	rbxTextEditor.mu.Lock()
 	if !rbxTextEditor.active || rbxTextEditor.handle == 0 || !rbxTextEditor.propertyRefreshPending {
@@ -560,11 +518,9 @@ func RbxTextInfoRefreshStats() RbxTextInfoRefreshDiagnostics {
 	}
 }
 
-// androidViewPixel mirrors DEX float-to-int after multiplying a
-// NativeTextBoxInfo coordinate by DisplayMetrics.density. Java truncates
-// finite values toward zero and saturates overflows; it maps NaN to zero.
-// The float return preserves the existing renderer interface while making
-// every geometry value an integer pixel before it crosses packages.
+// androidViewPixel mirrors Java float-to-int after multiplying a
+// NativeTextBoxInfo coordinate by DisplayMetrics.density: finite values
+// truncate toward zero, overflows saturate, and NaN maps to zero.
 func androidViewPixel(value, density float32) float32 {
 	v := value * density
 	if math.IsNaN(float64(v)) {
@@ -580,9 +536,8 @@ func androidViewPixel(value, density float32) float32 {
 }
 
 // SetRbxTextOverlayViewport tracks the current Android surface dimensions.
-// The APK does not proportionally rescale NativeTextBoxInfo geometry on a
-// window resize; this metadata instead lets the renderer clip against the
-// exact current viewport while waiting for a genuine property update.
+// The APK does not rescale NativeTextBoxInfo geometry on a window resize; this
+// metadata lets the renderer clip against the current viewport instead.
 func SetRbxTextOverlayViewport(width, height int, density float32) {
 	if width <= 0 || height <= 0 || math.IsNaN(float64(density)) || math.IsInf(float64(density), 0) || density <= 0 {
 		return
@@ -636,9 +591,8 @@ func utf16Cursor(text []rune, cursor int) int {
 	if cursor > len(text) {
 		cursor = len(text)
 	}
-	// Allocation-free equivalent of len(utf16.Encode(text[:cursor])):
-	// astral runes count two units, surrogate/invalid runes encode as one
-	// U+FFFD unit. Keeps the per-edit cursor measurement off the allocator.
+	// Allocation-free equivalent of len(utf16.Encode(text[:cursor])): astral
+	// runes count two units, surrogate/invalid runes encode as one U+FFFD unit.
 	n := 0
 	for _, r := range text[:cursor] {
 		if l := utf16.RuneLen(r); l > 0 {
@@ -851,8 +805,7 @@ func DispatchRobloxTextKey(keyCode int32, pressed bool) bool {
 // releaseRbxTextJstring drops the local reference created by Env.NewString
 // for one editor snapshot. The reference was registered on the same Env that
 // performed the synchronous engine calls, so it is released there too; the
-// engine treats the argument as borrowed and may take its own global
-// reference if it needs to retain the String.
+// engine treats the argument as borrowed.
 func releaseRbxTextJstring(env *Env, str uintptr) {
 	if env == nil || env.vm == nil || str == 0 {
 		return
@@ -861,15 +814,13 @@ func releaseRbxTextJstring(env *Env, str uintptr) {
 }
 
 func sendRbxText(handle int64, text string, submit bool, cursor int) bool {
-	// RbxKeyboard's TextWatcher and editor-action listener both call k()
-	// immediately before nativePassText. k() invokes this exact selection
-	// sync with the complete EditText snapshot; preserve that APK order.
+	// RbxKeyboard's TextWatcher and editor-action listener both sync the
+	// selection immediately before nativePassText; preserve that order.
 	//
-	// One Java String local reference serves the selection sync and
-	// nativePassText (a Java String is immutable, so sharing is exact), and
-	// it is released before returning. The target snapshot is taken under
-	// RLock and the engine calls run after the lock is dropped, so teardown
-	// can take the write lock without deadlocking against a live call.
+	// One Java String local reference serves both calls (a Java String is
+	// immutable, so sharing is exact) and is released before returning. The
+	// target snapshot is taken under RLock and the engine calls run after the
+	// lock is dropped, so teardown cannot deadlock against a live call.
 	rbxTextTarget.mu.RLock()
 	env := rbxTextTarget.env
 	class := rbxTextTarget.class
@@ -979,16 +930,14 @@ func RbxTextDeliveryStats() (pass, returns, sync, dropped uint64) {
 }
 
 // textConnection is the Tipsy-owned GameActivity InputConnection contract:
-// one real InputConnection Java object (VM object id, opaque 64-bit, never
-// an engine pointer) whose active flag follows the engine's own
+// one real InputConnection Java object (VM object id, opaque 64-bit, never an
+// engine pointer) whose active flag follows the engine's own
 // showKeyboard/hideKeyboard focus announcements, plus receive-and-record
-// counts for the engine→Java State contract (setState,
-// setSoftKeyboardActive, restartInput). The State argument object is
-// recorded as an opaque reference id only: its fields/strings/bytes can
-// carry user text and are never read, stored, or logged. committedCount is
-// incremented only by edits from the separate, showKeyboard-owned
-// RbxKeyboard editor. Physical nativePassKeyEvent delivery is untouched
-// when no text editor owns focus.
+// counts for the engine→Java State contract. The State argument object is
+// recorded as an opaque reference id only: its fields/strings/bytes can carry
+// user text and are never read, stored, or logged. committedCount is
+// incremented only by edits from the separate, showKeyboard-owned RbxKeyboard
+// editor. Physical key delivery is untouched when no text editor owns focus.
 var textConnection struct {
 	mu                sync.Mutex
 	connID            int64
@@ -1007,10 +956,9 @@ var textConnection struct {
 // EnsureTextInputConnection returns the Tipsy-owned InputConnection object
 // id, creating the real object on first use. The id is a Tipsy VM object
 // handle (opaque 64-bit), never an engine pointer and never fabricated
-// engine memory. A nil VM degrades to 0, never a fabricated value. The
-// GameActivity/Runtime owner passes this id (with the engine's own J
-// handle) to the registered setInputConnectionNative(J,InputConnection)V
-// once that wiring lands; this function itself calls nothing engine-side.
+// engine memory. A nil VM degrades to 0. The GameActivity/Runtime owner
+// passes this id to the registered setInputConnectionNative wiring; this
+// function itself calls nothing engine-side.
 func (vm *VM) EnsureTextInputConnection() int64 {
 	if vm == nil {
 		return 0
@@ -1045,10 +993,9 @@ func (vm *VM) EnsureTextInputConnection() int64 {
 }
 
 // noteTextFocus drives connection activation from the engine's own
-// showKeyboard/hideKeyboard focus signals and nothing else: show ensures
-// the real object exists and marks it active; hide marks it inactive and
-// keeps the stable object. No text action is taken. Safe on a nil VM
-// (records the flag; object creation degrades to a no-op).
+// showKeyboard/hideKeyboard focus signals and nothing else: show ensures the
+// real object exists and marks it active; hide marks it inactive and keeps
+// the stable object. No text action is taken. Safe on a nil VM.
 func (vm *VM) noteTextFocus(active bool) {
 	if active && vm != nil {
 		vm.EnsureTextInputConnection()
@@ -1059,11 +1006,10 @@ func (vm *VM) noteTextFocus(active bool) {
 }
 
 // dispatchTextConnection serves the engine→Java GameTextInput contract on
-// the InputConnection class: setState(State)V, setSoftKeyboardActive(ZI)V,
-// restartInput()V. Each call is received and recorded (counts plus opaque
-// aggregates only) with a trigger-gated log line; State content is never
-// read, stored, or logged. Everything else falls through to the honest
-// stub path. Void semantics mirror dispatchTextInput/dispatchNativeHelper.
+// the InputConnection class. Each call is received and recorded (counts plus
+// opaque aggregates only) with a trigger-gated log line; State content is
+// never read, stored, or logged. Everything else falls through to the stub
+// path. Void semantics mirror dispatchTextInput/dispatchNativeHelper.
 func (vm *VM) dispatchTextConnection(o *Object, class, name, sig string, args *C.jvalue) (C.jobject, bool) {
 	if class != gameTextInputConnectionClass {
 		return jnull(), false

@@ -32,7 +32,7 @@ func makeRelInfo(sym uint32, typ uint32) uint64 {
 }
 
 // walkAPS2 decodes Android packed relocations and visits each record without
-// retaining the full []Reloc. Grouping/addend semantics match AOSP
+// retaining the full []Reloc; grouping/addend semantics match AOSP
 // for_all_packed_relocs (linker_reloc_iterators.h).
 func walkAPS2(data []byte, visit func(Reloc) error) error {
 	if len(data) < 4 || string(data[:4]) != "APS2" {
@@ -156,7 +156,6 @@ func walkAPS2(data []byte, visit func(Reloc) error) error {
 }
 
 // decodeAPS2 is a collecting walker for APS2 unit tests that inspect the slice.
-// Production relocate/applyPackedSections use walkAPS2 and do not keep the list.
 func decodeAPS2(data []byte) ([]Reloc, error) {
 	var out []Reloc
 	err := walkAPS2(data, func(r Reloc) error {

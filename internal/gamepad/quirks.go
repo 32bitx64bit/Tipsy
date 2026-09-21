@@ -33,9 +33,8 @@ type Mapping struct {
 	// L2/R2 exist only as BTN_TL2/TR2 edges.
 	TriggersDigitalOnly bool
 	// HIDLinearButtons is true when EV_KEY is hid-input's unskipped
-	// Button 1–10 → BTN_SOUTH..TR2 (C and Z occupied, no BTN_START/
-	// SELECT/THUMB). hid-microsoft Xbox Bluetooth (GuliKit XW) looks
-	// like this: X/L1/R1/Select/Start/L3/R3 sit on C/WEST/Z/TL/TR/TL2/TR2.
+	// Button 1–10 → BTN_SOUTH..TR2, with C and Z occupied and no
+	// BTN_START/SELECT/THUMB.
 	HIDLinearButtons bool
 }
 
@@ -49,17 +48,10 @@ type Quirk struct {
 	Note    string
 }
 
-// QuirkTable is the lean per-family table (simplified 2026-09-12): Xbox
-// xpad and PlayStation sony (incl. the DS4-USB golden pin) plus
+// QuirkTable is the per-family table: Xbox xpad and PlayStation sony plus
 // capability-driven generic rules in ResolveMapping (RX/RY vs symmetric Z/RZ
 // sticks, Z/RZ vs HAT2X vs digital-only triggers, BTN vs HAT0 D-pad). Axes
 // always come from device capabilities, never this table.
-//
-// Deleted vs v1 (see gamepad-simplify-2026-09-12.md): Sony BT stamps,
-// DualSense/DS3 rows, Switch/Joy-Con rows, 8BitDo DInput/Switch/BT rows,
-// XInput-clone, Logitech/clone/Stadia/Valve rows, flight-stick rows. Those
-// pads resolve via the generic rules under spec-default/generic-* labels;
-// Bluetooth is paired in the OS, Tipsy rescans the same evdev node.
 var QuirkTable = []Quirk{
 	{Vendor: 0x045e, Label: "xpad", Note: "Xbox: RX/RY right stick, Z/RZ analog triggers, HAT0 D-pad"},
 	{Vendor: 0x054c, Label: "sony", Note: "PlayStation: RX/RY right stick, Z/RZ analog triggers, HAT0 D-pad"},
@@ -112,7 +104,6 @@ func ResolveMapping(name string, id DeviceID, hasAbs map[uint16]bool, infos map[
 	switch {
 	case rxOK:
 		m.RightX, m.RightY = AbsRX, AbsRY
-		// Triggers default to asymmetric Z/RZ behind an RX/RY stick.
 		if zrzOK && !zrzSymmetric {
 			m.TriggerL, m.TriggerR = AbsZ, AbsRZ
 		} else if hasAbs[AbsHat2X] {
@@ -128,7 +119,6 @@ func ResolveMapping(name string, id DeviceID, hasAbs map[uint16]bool, infos map[
 			m.TriggerL, m.TriggerR = AbsHat2X, AbsHat2Y
 		}
 	default:
-		// No right stick axes at all; triggers may still exist.
 		if zrzOK && !zrzSymmetric {
 			m.TriggerL, m.TriggerR = AbsZ, AbsRZ
 		} else if hasAbs[AbsHat2X] {
@@ -137,9 +127,7 @@ func ResolveMapping(name string, id DeviceID, hasAbs map[uint16]bool, infos map[
 	}
 
 	// D-pad note: BTN_DPAD_* presence is checked by the caller via HasKey,
-	// not HasAbs. ResolveMapping only sees ABS here, so DpadButtons above
-	// covers ABS-mapped DPAD codes (rare). The HasKey half is merged by
-	// ResolveMappingForDevice below.
+	// not HasAbs; ResolveMappingForDevice merges that half.
 	if m.TriggerL == NoAxis {
 		m.TriggersDigitalOnly = true
 	}
@@ -171,7 +159,7 @@ func ResolveMappingForDevice(info DeviceInfo) (Mapping, string) {
 // hidLinearButtons reports hid-input's unskipped 10-button gamepad map:
 // Button1..10 land on SOUTH,EAST,C,NORTH,WEST,Z,TL,TR,TL2,TR2 and the
 // xpad codes (START/SELECT/THUMB) are absent. xpad USB nodes have the
-// skipped layout (WEST=X, THUMB present) and must not match.
+// skipped layout and must not match.
 func hidLinearButtons(hasKey map[uint16]bool) bool {
 	if hasKey == nil {
 		return false

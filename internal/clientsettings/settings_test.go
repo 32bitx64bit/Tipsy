@@ -640,9 +640,9 @@ func TestMalformedFilesRecoveredWithoutPayloadLeak(t *testing.T) {
 }
 
 // TestTruncatedXMLDoesNotBlockLaunch pins the unclean-shutdown contract: a
-// zero-byte settings document must not abort a launch. The bytes are
-// preserved under a new name and replaced with a working UserGameSettings
-// document that already carries the owned frame-rate.
+// zero-byte settings document must not abort a launch. The bytes are preserved
+// under a new name and replaced with a working UserGameSettings document that
+// already carries the owned frame-rate.
 func TestTruncatedXMLDoesNotBlockLaunch(t *testing.T) {
 	s := testService(t)
 	if err := os.MkdirAll(filepath.Dir(s.Path), 0o700); err != nil {
@@ -1016,12 +1016,6 @@ func assertLowTextureOverrides(t *testing.T, got map[string]any) {
 	assertNoForbiddenTextureOverrides(t, got)
 }
 
-// assertNoForbiddenTextureOverrides keeps keys out of both texture mappings
-// that were measured to be harmful or inert on the official Android client:
-// the compositor low-res factor (Tipsy's 1 failed to fix the blur and spun
-// the compositor; the CDN owns it at 4), the unconsumed avatar texture memory
-// name, incorrect compositor-budget aliases, and the temporary compositor
-// diagnostic channel. The client's measured cap is the DFIntDebugTc1 key.
 func assertNoForbiddenTextureOverrides(t *testing.T, got map[string]any) {
 	t.Helper()
 	for _, key := range []string{

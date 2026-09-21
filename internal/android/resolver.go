@@ -36,8 +36,7 @@ var _ loader.VersionedResolver = (*provider)(nil)
 type LookupFunc func(sym string) (uintptr, error)
 
 // EGLSwapStatistics observes successful client calls through the Android EGL
-// compatibility export. It does not alter eglSwapBuffers behavior or inspect
-// engine state. RateFPS is zero until at least two swaps have completed.
+// compatibility export. RateFPS is zero until at least two swaps.
 type EGLSwapStatistics struct {
 	SuccessfulSwaps uint64
 	Elapsed         time.Duration
@@ -133,10 +132,9 @@ func init() {
 	C.tipsy_bionic_compat_init()
 }
 
-// SetEGLVSync controls the independent Android libEGL presentation policy.
-// Off requests interval zero and on requests interval one regardless of the
-// client's request. A rejected policy interval falls back to the exact client
-// interval so unsupported host behavior remains honest and recoverable.
+// SetEGLVSync controls the independent Android libEGL presentation policy:
+// off requests interval zero, on requests interval one, regardless of the
+// client's request. A rejected policy interval falls back to the client's.
 func SetEGLVSync(enabled bool) {
 	value := C.int(0)
 	if enabled {
@@ -451,9 +449,8 @@ func missingSymbol(name string) error {
 
 // Lookup implements Resolver. lib is a DT_NEEDED soname or "".
 //
-// Results are cached per provider. A cgo round trip plus up to ten fallback
-// probes dominated relocation-time lookups; the cache is dropped whenever the
-// registry or diagnostics toggle changes what Lookup can return.
+// Results are cached per provider; the cache is dropped whenever the registry
+// or diagnostics toggle changes what Lookup can return.
 func (p *provider) Lookup(lib, sym string) (uintptr, error) {
 	if p == nil {
 		p = defaultProvider
@@ -497,10 +494,9 @@ func lookupEGL(sym string) (uintptr, error) {
 }
 
 func (p *provider) lookupUncached(lib, sym string) (uintptr, error) {
-	// libroblox.so imports unversioned egl* and lists libm.so before libEGL.so.
-	// libc/libm lookup uses RTLD_DEFAULT, which already contains host Mesa from
-	// Tipsy's linked EGL. Binding those host pointers skips the Android
-	// ANativeWindow wrappers, so every egl* reloc must take the EGL surface.
+	// egl* relocations must resolve through the Android EGL surface: host
+	// RTLD_DEFAULT lookups would bind host Mesa pointers and skip the
+	// ANativeWindow wrappers.
 	if strings.HasPrefix(sym, "egl") {
 		return lookupEGL(sym)
 	}

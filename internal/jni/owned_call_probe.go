@@ -12,8 +12,8 @@ package jni
 #include "call.h"
 #include <stdlib.h>
 
-// Observation record written by the fake guest on whichever thread runs it.
-// Plain C storage: never a pointer into Go memory.
+// Observation record written by the fake guest. Plain C storage: never a
+// pointer into Go memory.
 struct owned_probe {
 	JNIEnv *env_arg;
 	JNIEnv *seen_current;

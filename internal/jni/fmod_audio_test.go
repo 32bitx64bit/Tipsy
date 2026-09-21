@@ -142,8 +142,8 @@ func TestFmodAudioCapabilityPredicates(t *testing.T) {
 	}
 }
 
-// org.fmod.FMOD.init(Context) is the APK's own startup step (NativeHelper);
-// Tipsy plays it with the real activity object, and only with a live one.
+// org.fmod.FMOD.init(Context) is the APK's own startup step; Tipsy plays it with
+// the real activity object, and only with a live one.
 func TestFmodInitBacksCheckInit(t *testing.T) {
 	vm, err := NewVM()
 	if err != nil {
@@ -169,12 +169,12 @@ func TestFmodInitBacksCheckInit(t *testing.T) {
 	}
 }
 
-// FMOD's Android autodetect: AAudio when the SDK allows (not here, SDK 26),
-// else its OpenSL ES output when the Java supportsLowLatency() helper is
-// true, else AudioTrack, which FMOD documents as having no recording. Tipsy
-// answers the helper the way FMOD's Java does — FEATURE_AUDIO_LOW_LATENCY
-// from PackageManager plus a block size in (0, 1024] — so the two surfaces
-// agree, and TIPSY_FMOD_OUTPUT=audiotrack turns both off together.
+// FMOD's Android autodetect: AAudio when the SDK allows (not here, SDK 26), else
+// its OpenSL ES output when the Java supportsLowLatency() helper is true, else
+// AudioTrack, which FMOD documents as having no recording. Tipsy answers the
+// helper the way FMOD's Java does — FEATURE_AUDIO_LOW_LATENCY from PackageManager
+// plus a block size in (0, 1024] — so the two surfaces agree, and
+// TIPSY_FMOD_OUTPUT=audiotrack turns both off together.
 func TestFmodAudioLowLatencyFollowsHostAnswer(t *testing.T) {
 	vm, err := NewVM()
 	if err != nil {
@@ -205,10 +205,10 @@ func TestFmodAudioLowLatencyFollowsHostAnswer(t *testing.T) {
 	}
 }
 
-// FMOD's OpenSL/AAudio outputs size their device stream from the two
-// AudioManager property helpers; Java answers 0 when the property is
-// unknown, which makes FMOD guess. Tipsy answers PipeWire's defaults and the
-// methods are on the implemented list so GetMethodID does not flag them.
+// FMOD's OpenSL/AAudio outputs size their device stream from the two AudioManager
+// property helpers; Java answers 0 when the property is unknown, which makes FMOD
+// guess. Tipsy answers PipeWire's defaults and the methods are on the implemented
+// list so GetMethodID does not flag them.
 func TestFmodAudioOutputProperties(t *testing.T) {
 	vm, err := NewVM()
 	if err != nil {
@@ -231,8 +231,8 @@ func TestFmodAudioOutputProperties(t *testing.T) {
 	}
 }
 
-// This explicitly selected integration test exercises the actual JNI
-// AudioDevice dispatch against a real output. It never opens capture.
+// An explicitly selected integration test exercising the actual JNI AudioDevice
+// dispatch against a real output. It never opens capture.
 func TestFmodAudioHostPlayback(t *testing.T) {
 	if os.Getenv("TIPSY_AUDIO_HOST_TEST") != "1" {
 		t.Skip("set TIPSY_AUDIO_HOST_TEST=1 for host playback")

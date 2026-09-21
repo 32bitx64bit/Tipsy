@@ -61,8 +61,8 @@ func loadDynsym(ef *elf.File, d *dynInfo) ([]dynSym, []byte, error) {
 	if err != nil {
 		return nil, nil, err
 	}
-	// ELF64 dynsym entries are exactly 24 bytes. Anything else (notably 0,
-	// which previously defaulted) makes the range arithmetic below ambiguous.
+	// ELF64 dynsym entries are exactly 24 bytes; anything else makes the range
+	// arithmetic below ambiguous.
 	if d.syment != 24 {
 		return nil, nil, fmt.Errorf("loader: unsupported DT_SYMENT %d (ELF64 requires 24)", d.syment)
 	}
@@ -237,10 +237,8 @@ func (m *Module) symbolValue(idx uint32) (uint64, error) {
 	return m.resolveUndefIndexed(idx, s)
 }
 
-// resolveUndefIndexed memoizes resolveUndef per undefined dynsym index, so a
-// symbol referenced by many relocations resolves once. Resolution is a pure
-// function of already-loaded modules; the lock is never held across resolver
-// callbacks to avoid re-entrant deadlock.
+// resolveUndefIndexed memoizes resolveUndef per undefined dynsym index. The
+// lock is never held across resolver callbacks to avoid re-entrant deadlock.
 func (m *Module) resolveUndefIndexed(idx uint32, s dynSym) (uint64, error) {
 	m.undefMu.Lock()
 	if r, ok := m.resolved[idx]; ok {

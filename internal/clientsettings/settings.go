@@ -2,8 +2,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 // Package clientsettings owns the validated Roblox settings surface exposed by
-// Tipsy, including user-owned custom Fast Flags that are supplied to the
-// official Android client-settings initialization on its next launch.
+// Tipsy, including user-owned custom Fast Flags.
 package clientsettings
 
 import (
@@ -38,20 +37,15 @@ const (
 	flagDisableOpenGL   = "FFlagDebugGraphicsDisableOpenGL"
 	flagDisableVulkan   = "FFlagDebugGraphicsDisableVulkan"
 	flagDisableVulkan11 = "FFlagDebugGraphicsDisableVulkan11"
-	// The 2.734.917 client resolves GameBasicSettingsFramerateCap through its
-	// versioned flag lookup with version 5. Fast-variable ingestion supplies
-	// the FFlag type prefix used here.
+	// The client resolves GameBasicSettingsFramerateCap through its versioned
+	// flag lookup, which supplies the version suffix used in this name.
 	flagGameBasicSettingsFramerateCap = "FFlagGameBasicSettingsFramerateCap5"
 	flagTaskSchedulerLimitFPS240      = "FFlagTaskSchedulerLimitTargetFpsTo2402"
 	intTaskSchedulerTargetFPS         = "DFIntTaskSchedulerTargetFps"
-	// Texture quality uses the named LowTextureMode mapping. The current
-	// Android client's TM2 repeatedly completes finer-mip requests with the
-	// same coarse image, even with the high quality and memory settings active.
-	// High uses the official TM1 path, verified with close-up avatar textures.
-	// Both manager gates are required: NewRenderUseTextureManager2 otherwise
-	// reenables the version-24 RenderUseTextureManager2 gate during startup.
-	// Low restores both gates so the previous high launch cannot linger in
-	// the engine flag cache. The 3/1 quality override pair remains high/low.
+	// Texture quality uses the named LowTextureMode mapping. High uses the
+	// official TM1 path; Low restores both TM2 manager gates so the previous
+	// high launch cannot linger in the engine flag cache. The 3/1 override
+	// pair is high/low.
 	flagTextureQualityOverrideEnabled = "DFFlagTextureQualityOverrideEnabled"
 	intTextureQualityOverride         = "DFIntTextureQualityOverride"
 	flagUITextureCompressionDesktop   = "FFlagUITextureCompressionDesktop"
@@ -59,13 +53,10 @@ const (
 	intRenderTextureTotalBudgetMB     = "FIntRenderTextureTotalBudgetMB"
 	intRenderTextureMipBias           = "FIntRenderTextureMipBias"
 	intRenderForceVideoMemorySize     = "FIntRenderForceVideoMemorySize"
-	// Clothing composites (TextureCompositor) live under their own byte
-	// budget: min(max(videoMemorySize/3, 8 MiB), this DFInt). The client
-	// default cap is 48 MiB, which a 45-player server can exceed, and over
-	// budget the compositor re-bakes clothing at 1/LowResFactor width
-	// (measured 229 of 916). High raises the cap so the measured populated
-	// server keeps full-width composites; low restores the default cap
-	// explicitly.
+	// Clothing composites live under their own byte budget:
+	// min(max(videoMemorySize/3, 8 MiB), this DFInt). The client default cap
+	// is 48 MiB; High raises it so populated servers keep full-width
+	// composites, Low restores the default explicitly.
 	intDebugTc1MaxAllowedMemoryBudget     = "DFIntDebugTc1MaxAllowedMemoryBudget"
 	flagTM2RuntimeTextureDisableStreaming = "FFlagTM2RuntimeTextureDisableStreaming"
 	flagTM2SkipMipsForUnstreamable2       = "FFlagTM2SkipMipsForUnstreamable2"
@@ -93,8 +84,7 @@ const (
 	maxFastFlagBytes    = 32 << 10
 	unlimitedFPSValue   = "9999"
 	// engineDefaultFramerateCap is Roblox's stored "no Tipsy override"
-	// value (Auto / client-owned). Used when Tipsy must write a working
-	// UserGameSettings document without having observed a prior cap.
+	// value (Auto / client-owned).
 	engineDefaultFramerateCap = "-1"
 )
 
@@ -149,18 +139,16 @@ type Settings struct {
 	VSync     bool      `json:"vsync"`
 	// LowTextureMode requests the memory-saving texture mapping (override 1,
 	// 64 MiB video-memory cap, 48 MiB clothing-compositor cap, TM2 skip-mips,
-	// no desktop DXT). That pair yields about 21.3 MiB of effective compositor
-	// budget. The zero value / missing JSON field is false, so existing configs
-	// and Default() emit the high-quality mapping (override 3, 1 GiB
-	// video-memory cap, 256 MiB effective compositor budget, desktop DXT,
-	// official TM1).
+	// no desktop DXT). The zero value / missing JSON field is false, so existing
+	// configs and Default() emit the high-quality mapping (override 3, 1 GiB
+	// video-memory cap, 256 MiB compositor budget, desktop DXT, TM1).
 	LowTextureMode bool `json:"lowTextureMode"`
 	// Display selects where Tipsy maps the launcher and Roblox windows.
 	// "primary" (default) pins them to the current main monitor, "pointer"
 	// restores window-manager mouse placement, and any other value is an
 	// XRandR/Qt output name. A missing output falls back to primary at spawn.
 	Display string `json:"display,omitempty"`
-	// StartFullscreen is a Tipsy-owned window preference. When enabled, Tipsy
+	// StartFullscreen is a Tipsy-owned window preference: when enabled, Tipsy
 	// asks the desktop window manager to fullscreen a newly created Roblox
 	// window. It does not read, change, or mirror Roblox's in-app fullscreen
 	// setting. The missing JSON field keeps existing installations windowed.
@@ -173,9 +161,9 @@ type Settings struct {
 }
 
 // FastFlag is one user-owned Roblox Fast Flag override. Name identifies a
-// supported Fast Flag type and Value is its serialized client-settings value.
-// Values are intentionally strings because that is the representation used by
-// Roblox's applicationSettings JSON surface.
+// supported Fast Flag type and Value is its serialized client-settings value;
+// values are strings because that is Roblox's applicationSettings JSON
+// representation.
 type FastFlag struct {
 	Name  string `json:"name"`
 	Value string `json:"value"`
@@ -215,11 +203,10 @@ var fastFlagControlLabels = map[string]string{
 	flagNewRenderUseTextureManager2:       "Texture quality",
 }
 
-// ValidateFastFlags checks the bounded, typed custom-Fast-Flag surface.
-// It permits the flag classes accepted by the Android client-settings JSON:
-// boolean FFlag/DFFlag, signed 32-bit FInt/DFInt, and printable FString/
-// DFString values. Duplicate names are rejected so the persisted list always
-// has one unambiguous final value for each flag.
+// ValidateFastFlags checks the bounded, typed custom-Fast-Flag surface: boolean
+// FFlag/DFFlag, signed 32-bit FInt/DFInt, and printable FString/DFString
+// values. Duplicate names are rejected so the persisted list always has one
+// unambiguous final value for each flag.
 func ValidateFastFlags(flags []FastFlag) error {
 	if len(flags) > maxFastFlags {
 		return fmt.Errorf("at most %d custom Fast Flags are allowed", maxFastFlags)
@@ -523,12 +510,10 @@ func (s *Service) applyLocked(ctx context.Context, wanted Settings) (ApplyResult
 	if xmlExists {
 		_, _, err := updateFramerateCap(diskXML, "")
 		if err != nil {
-			// Roblox's settings document is user data, never a launch gate.
-			// An unclean shutdown can truncate it to zero bytes or cut it
-			// mid-tag. Preserve those bytes, then write a working
-			// UserGameSettings document so this launch (and older Tipsy
-			// builds that still parse the file strictly) have a real XML
-			// instead of an empty path.
+			// Roblox's settings document is user data, never a launch gate: an
+			// unclean shutdown can truncate it to zero bytes or cut it mid-tag.
+			// Preserve those bytes, then write a working UserGameSettings
+			// document so this launch has real XML instead of an empty path.
 			s.backupMalformedXML(diskXML)
 			var parseErr xmlParseError
 			if errors.As(err, &parseErr) {
@@ -649,14 +634,8 @@ func (s *Service) Reset(ctx context.Context) (Settings, error) {
 }
 
 // Overrides converts renderer, FPS, and texture-quality choices into Roblox
-// ClientAppSettings strings. The feature gate exposes the current client's
-// official GameBasicSettings frame-rate surface. Limited mode sets the current
-// client's legacy scheduler target; Unlimited opts out of the current 240
-// limiter and keeps its high finite target in GlobalBasicSettings_13.xml.
-// Automatic mode deliberately leaves both FPS controls under
-// downloaded-policy/client ownership. High texture quality selects the
-// official TM1 path because TM2 does not retain finer completed mips on the
-// current Android client. Low restores TM2 and the memory-saving mapping.
+// ClientAppSettings strings. Automatic mode leaves both FPS controls under
+// client ownership; High texture quality selects the official TM1 path.
 func Overrides(s Settings) (map[string]any, error) {
 	return overridesFor(s, graphics.ProbeRendererCapabilities())
 }
@@ -678,12 +657,9 @@ func overridesFor(s Settings, caps graphics.RendererCapabilities) (map[string]an
 	switch s.Renderer {
 	case RendererOpenGL:
 		out[flagPreferOpenGL] = "True"
-		// PreferOpenGL only changes the ordering of the client's candidates.
-		// The current Android client can still initialize and choose its Vulkan
-		// candidate first. These are the client's registered, named gates read
-		// by nativeAppBridgeV2StartAppWithParams; setting both generations keeps
-		// an explicit OpenGL selection exclusive without hiding libvulkan or
-		// changing any engine code.
+		// PreferOpenGL only changes the ordering of the client's candidates;
+		// the client can still choose its Vulkan candidate first. Setting both
+		// generations keeps an explicit OpenGL selection exclusive.
 		out[flagDisableVulkan] = "True"
 		out[flagDisableVulkan11] = "True"
 	case RendererVulkan:
@@ -701,13 +677,11 @@ func overridesFor(s Settings, caps graphics.RendererCapabilities) (map[string]an
 	case FrameRateLimited:
 		out[intTaskSchedulerTargetFPS] = strconv.Itoa(s.FrameRate.Limit)
 	case FrameRateUnlimited:
-		// The current downloaded Android policy enables this exact 240-FPS
-		// limiter. Unlimited alone opts out; its high finite 9999 request is
-		// owned by GlobalBasicSettings_13.xml. Do not also feed 9999 through the
-		// legacy TaskSchedulerTargetFps registry: this client unconditionally
-		// clamps that integer to 240 during post-settings initialization. Limited
-		// stays within 30..240, and Auto leaves both settings under
-		// downloaded-policy/client ownership.
+		// Unlimited alone opts out; its high finite 9999 request is owned by
+		// GlobalBasicSettings_13.xml. Do not also feed 9999 through the legacy
+		// TaskSchedulerTargetFps registry: the client clamps that integer to
+		// 240 during post-settings initialization. Limited stays within
+		// 30..240, and Auto leaves both settings under client ownership.
 		out[flagTaskSchedulerLimitFPS240] = "False"
 	}
 	return out, nil
@@ -715,8 +689,8 @@ func overridesFor(s Settings, caps graphics.RendererCapabilities) (map[string]an
 
 // OverridesWithFastFlags returns the official ClientAppSettings overrides for
 // normal Tipsy Settings plus validated user Fast Flags. User entries are added
-// last by design, so an explicitly confirmed custom value wins over a normal
-// Settings control for the next Roblox launch.
+// last, so an explicitly confirmed custom value wins over a normal Settings
+// control for the next Roblox launch.
 func OverridesWithFastFlags(s Settings, flags []FastFlag) (map[string]any, error) {
 	return overridesWithFastFlagsFor(s, flags, graphics.ProbeRendererCapabilities())
 }
@@ -739,16 +713,6 @@ func overridesWithFastFlagsFor(s Settings, flags []FastFlag, caps graphics.Rende
 // Desktop compression, legacy-decal, video-memory, and compositor-budget keys
 // are explicit so a previous high launch cannot linger in the engine flag
 // cache when Low texture mode is on.
-//
-// FIntTextureCompositorLowResFactor is deliberately not emitted. Roblox ships
-// 4 on every platform's CDN table (desktop included); Tipsy's former 1 did not
-// produce full-resolution output and triggered pathological rebake/upsample
-// loops (one NDS job reached ~1300 requests/s; one Blacksite Zeta job queued
-// ~4000 in 90 seconds).
-// FIntAvatarTextureMemoryMax is not emitted either: changing the attempted key
-// did not move the measured compositor budget, and bounded registration
-// inspection found only the same name as a memory-tracker label, not a
-// consumed FastInt control.
 func applyTextureQualityOverrides(out map[string]any, low bool) {
 	out[flagTextureQualityOverrideEnabled] = "True"
 	if low {
@@ -858,8 +822,7 @@ func xmlFramerateCap(f FrameRate) string {
 // workingUserGameSettingsXML is a minimal official-shaped rbx settings
 // document: version-4 roblox wrapper, the stock External sentinels, and one
 // UserGameSettings FramerateCap. Missing properties stay absent so Roblox
-// fills class defaults on load instead of Tipsy inventing graphics, camera,
-// or volume values. cap must be a decimal integer.
+// fills class defaults on load. cap must be a decimal integer.
 func workingUserGameSettingsXML(cap string) []byte {
 	if _, err := strconv.Atoi(cap); err != nil {
 		cap = engineDefaultFramerateCap

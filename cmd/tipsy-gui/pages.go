@@ -98,8 +98,8 @@ func (w *mainWindow) buildHomePage() *qt.QWidget {
 		*item.label = value
 		cardLayout.AddWidget(row.QWidget)
 	}
-	// Retain the descriptive profile for accessibility and existing state adapters;
-	// the visible summary below is deliberately based on Saved, never Draft.
+	// Retain the profile for accessibility and state adapters; the visible
+	// summary uses Saved, never Draft.
 	w.settingsProfile = qt.NewQLabel(content)
 	w.settingsProfile.Hide()
 	w.refreshSettingsProfile()

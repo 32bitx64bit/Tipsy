@@ -13,9 +13,8 @@ import "C"
 
 import "unsafe"
 
-// C jvalue is a union; every member lives at offset 0. These helpers write
-// that overlay from Go so CallA / field / argument packing do not cross
-// cgo for a store or load.
+// C jvalue is a union; every member lives at offset 0. These helpers write that
+// overlay from Go so packing does not cross cgo for each store or load.
 
 func jvalueZero(v *C.jvalue) {
 	if v != nil {

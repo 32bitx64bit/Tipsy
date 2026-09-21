@@ -23,8 +23,8 @@ func init() {
 	}
 }
 
-// SetGetterTrace enables or disables MotionEvent/KeyEvent getter consumption
-// tracing. Default is off (no alloc, mutex, or Info log on the input path).
+// SetGetterTrace enables or disables MotionEvent/KeyEvent getter tracing.
+// Default is off.
 func SetGetterTrace(enabled bool) {
 	getterTraceEnabled.Store(enabled)
 }
@@ -33,35 +33,25 @@ func getterTraceOn() bool {
 	return getterTraceEnabled.Load()
 }
 
-// Observation-only MotionEvent/KeyEvent getter-consumption trace.
-//
-// Every getter the engine's native code resolves through the JNI dispatch
-// is counted here under its known method identity (name+sig) — never any
-// event payload: no coordinates, no times, no keycodes beyond the
-// delivered identity names, no strings. Attribution is exact per event
-// object: each delivered event is a fresh object, so the identities
-// recorded against its id are precisely what the engine's native consumed
-// while handling that one event. This proves which getters the engine
-// actually reads during a real gesture without touching any return value
-// or dispatch decision.
+// Observation-only getter-consumption trace. Records known method
+// identities (name+sig) only, never event payload.
 
-const getterTraceCap = 64 // bounded ring of per-event traces
+const getterTraceCap = 64
 
 type getterTraceEntry struct {
-	order []string          // identities in first-call order
-	count map[string]uint64 // identity → calls for this event
+	order []string
+	count map[string]uint64
 }
 
 var getterTraceState struct {
 	mu     sync.Mutex
 	events map[int64]*getterTraceEntry
-	ring   []int64 // insertion order, for eviction and drain
+	ring   []int64
 	totals map[string]uint64
 }
 
-// noteGetterCall records one getter call the engine's native made on an
-// event object. Called only from the handled MotionEvent/KeyEvent getter
-// paths in dispatchInput.
+// noteGetterCall records one getter call on an event object, from
+// dispatchInput's handled getter paths only.
 func noteGetterCall(objID int64, name, sig string) {
 	if objID == 0 || !getterTraceOn() {
 		return
@@ -91,10 +81,9 @@ func noteGetterCall(objID int64, name, sig string) {
 	getterTraceState.totals[identity]++
 }
 
-// drainEventGetterTrace returns the getter identities the engine's native
-// consumed for this event object as "identity:count" strings in
-// first-call order, and releases the entry. An empty result means native
-// consumed no getters for the event — equally valid evidence.
+// drainEventGetterTrace returns the getter identities consumed for this
+// event object as "identity:count" strings in first-call order, and
+// releases the entry.
 func drainEventGetterTrace(objID int64) []string {
 	if !getterTraceOn() {
 		return nil
@@ -119,8 +108,8 @@ func drainEventGetterTrace(objID int64) []string {
 	return out
 }
 
-// GetterConsumptionTotals snapshots cumulative per-identity getter
-// consumption counts (known method identities only, never event data).
+// GetterConsumptionTotals snapshots cumulative per-identity getter counts
+// (method identities only, never event data).
 func GetterConsumptionTotals() map[string]uint64 {
 	if !getterTraceOn() {
 		return map[string]uint64{}
@@ -144,7 +133,7 @@ func resetGetterTrace() {
 }
 
 // motionActionName renders a MotionEvent/KeyEvent action constant as a
-// safe enum name (never a coordinate or payload).
+// safe enum name, never a coordinate or payload.
 func motionActionName(action int32) string {
 	switch action {
 	case motionActionDown:
@@ -164,10 +153,8 @@ func motionActionName(action int32) string {
 	}
 }
 
-// traceEventGetterLine logs one observation line per delivered input
-// event: which known getter identities the engine's native consumed while
-// reading it. Identities and counts only — never coordinates, times, or
-// text.
+// traceEventGetterLine logs one line per delivered input event: the known
+// getter identities consumed reading it, never coordinates, times, or text.
 func traceEventGetterLine(kind string, action int32, objID int64) {
 	if !getterTraceOn() {
 		return

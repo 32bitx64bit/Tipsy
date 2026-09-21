@@ -119,7 +119,7 @@ func classify(parsed *desktopFile, scope Scope) Provider {
 		program == "flatpak" || strings.HasSuffix(program, "/flatpak"):
 		provider.Medium = MediumFlatpak
 	case strings.HasSuffix(strings.ToLower(program), ".appimage"):
-		// Entries written by AppRun before ownership markers existed.
+		// Legacy AppImage entry without markers.
 		provider.Medium = MediumAppImage
 		provider.Origin = program
 	case scope == ScopeSystem:
@@ -128,8 +128,7 @@ func classify(parsed *desktopFile, scope Scope) Provider {
 		provider.Medium = MediumSource
 		provider.Origin = program
 	default:
-		// A prefix install copied into ~/.local/share/applications
-		// (scripts/install-desktop.sh) or a hand-written entry.
+		// A prefix install or a hand-written entry.
 		provider.Medium = MediumSystem
 	}
 	return provider
@@ -217,11 +216,9 @@ func sameOrigin(a, b string) bool {
 // package or Flatpak install already provides the identity.
 var ErrOwnedElsewhere = errors.New("desktop launcher is provided by another installation")
 
-// CurrentMedium detects the packaging form of the running process.
-//
-// APPIMAGE is inherited by every child of any AppImage (a terminal started
-// from an AppImage editor carries the editor's path), so it only counts when
-// the running executable really lives inside that AppImage's mount (APPDIR).
+// CurrentMedium detects the packaging form of the running process. APPIMAGE
+// is inherited by child processes, so it only counts when the running
+// executable really lives inside that AppImage's mount (APPDIR).
 func CurrentMedium() (Medium, string) {
 	if InFlatpak() {
 		return MediumFlatpak, ""
@@ -248,9 +245,8 @@ func CurrentMedium() (Medium, string) {
 }
 
 // IconSource finds the PNG an AppImage should install for its user-scope
-// entries: the tipsy.png at the payload root (APPDIR, exported by the
-// AppImage runtime and AppRun). Other media rely on the theme icon their
-// package installed, so this returns "" for them.
+// entries: the tipsy.png at the payload root (APPDIR). Other media rely on
+// their package's theme icon, so this returns "" for them.
 func IconSource(medium Medium) string {
 	if medium != MediumAppImage {
 		return ""

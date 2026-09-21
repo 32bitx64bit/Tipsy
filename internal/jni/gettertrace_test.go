@@ -10,11 +10,9 @@ import (
 	"testing"
 )
 
-// TestGetterTracePerEventAttribution proves the observation-only getter
-// trace: identities are attributed exactly to the event object native
-// read them on, in first-call order, with counts; the drain releases the
-// entry; and totals accumulate across events. Only known method
-// identities and counts are recorded — no event payload.
+// TestGetterTracePerEventAttribution proves per-event getter attribution:
+// identities attach to the event object in first-call order with counts, the
+// drain releases the entry, and totals accumulate across events.
 func TestGetterTracePerEventAttribution(t *testing.T) {
 	SetGetterTrace(true)
 	t.Cleanup(func() {
@@ -32,7 +30,6 @@ func TestGetterTracePerEventAttribution(t *testing.T) {
 	objID := o.id
 	vm.mu.Unlock()
 
-	// Native-driven getter consumption through the production dispatch.
 	if _, handled := testEventGetter(vm, objID, motionEventClass, "getAction", "()I", -1); !handled {
 		t.Fatal("getAction not handled")
 	}
@@ -75,9 +72,8 @@ func TestGetterTracePerEventAttribution(t *testing.T) {
 	resetGetterTrace()
 }
 
-// TestGetterTraceKeyDispatchLine proves the per-delivery observation line
-// for a key event carries the consumed getter identities and never event
-// data such as keycodes or coordinates.
+// TestGetterTraceKeyDispatchLine proves the per-delivery line for a key event
+// carries the consumed getter identities and never event data.
 func TestGetterTraceKeyDispatchLine(t *testing.T) {
 	SetGetterTrace(true)
 	t.Cleanup(func() {
@@ -99,9 +95,8 @@ func TestGetterTraceKeyDispatchLine(t *testing.T) {
 	if !strings.Contains(out, "[jni] input getters") || !strings.Contains(out, "kind=key") || !strings.Contains(out, "action=down") {
 		t.Fatalf("missing input-getters observation line: %s", out)
 	}
-	// The recording fake native consumes no getters; the line must say so
-	// honestly rather than inventing consumption (identity recording is
-	// proven by TestGetterTracePerEventAttribution).
+	// The recording fake native consumes no getters; the line must report that
+	// honestly rather than inventing consumption.
 	if !strings.Contains(out, "getters=none") {
 		t.Fatalf("fake native consumption invented: %s", out)
 	}

@@ -43,10 +43,9 @@ type authCookieStore struct {
 	now     func() time.Time
 }
 
-// This is the CookieManager adapter for the official Roblox origin. Persisted
-// values stay opaque. Only cookie routing metadata is interpreted, and only
-// cookies scoped to the official site's registrable domain are accepted; a
-// parent/public-suffix cookie can never reach the native restore boundary.
+// openAuthCookieStore is the CookieManager adapter for the Roblox origin.
+// Persisted values stay opaque; only routing metadata is interpreted, and only
+// cookies scoped to the registrable domain reach the native restore boundary.
 func openAuthCookieStore(path, baseURL string) (*authCookieStore, error) {
 	base, err := url.Parse(baseURL)
 	if err != nil || base.Scheme != "https" || base.Hostname() == "" {
@@ -159,10 +158,10 @@ func (s *authCookieStore) header() string {
 func (s *authCookieStore) set(rawURL string, headers []string) error {
 	u, err := url.Parse(rawURL)
 	if err != nil || u.Scheme != "https" {
-		return nil // This adapter only bridges the official HTTPS origin.
+		return nil // Only the HTTPS origin is bridged.
 	}
 	host := strings.ToLower(u.Hostname())
-	// Other origins are outside this single official client cookie bridge.
+	// Other origins are outside this cookie bridge.
 	if !domainMatches(host, s.domain) {
 		return nil
 	}

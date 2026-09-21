@@ -22,17 +22,16 @@ import (
 const (
 	desktopAppPolicyRelativePath = "appData/LocalStorage/appStorage.json"
 	maxDesktopAppPolicyCacheSize = 1 << 20
-	// The official 2.734.917 defaults contain at least 210 fields and the
-	// current complete cached response contains 235. Refusing smaller objects
-	// prevents a partial response from becoming a terminal whole-policy value.
+	// Refusing smaller objects prevents a partial response from becoming a
+	// terminal whole-policy value.
 	minCompleteAppPolicyFields = 200
 )
 
 var errDesktopAppPolicyUnavailable = errors.New("complete unambiguous app policy unavailable")
 
-// desktopAppPolicyOverride derives presentation from Tipsy's existing Android
-// PC form factor. It never changes the cache and touch diagnostic mode keeps
-// the official policy unchanged.
+// desktopAppPolicyOverride derives presentation from the existing Android PC
+// form factor. It never mutates the cache, and touch diagnostic mode keeps the
+// official policy unchanged.
 func desktopAppPolicyOverride(filesDir string) (string, error) {
 	if filesDir == "." || filesDir == "" || jni.PointerDeviceIsTouch() {
 		return "", nil
@@ -86,9 +85,8 @@ func readDesktopAppPolicyCache(filesDir string) ([]byte, error) {
 	return raw, nil
 }
 
-// openDesktopAppPolicyCache walks every component below FilesDir with
-// O_NOFOLLOW. prepareAppStorage already hardens this tree in production; the
-// descriptor-relative walk also closes symlink traversal races at read time.
+// openDesktopAppPolicyCache walks each component below FilesDir with O_NOFOLLOW
+// to close symlink traversal races at read time.
 func openDesktopAppPolicyCache(filesDir string) (*os.File, error) {
 	rootFD, err := syscall.Open(filesDir, syscall.O_RDONLY|syscall.O_CLOEXEC|syscall.O_DIRECTORY|syscall.O_NOFOLLOW, 0)
 	if err != nil {

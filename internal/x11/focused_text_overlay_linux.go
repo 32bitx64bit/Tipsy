@@ -52,7 +52,7 @@ func NewFocusedTextOverlay(w *Window) (*FocusedTextOverlay, error) {
 
 // Update replaces s's dirty text-only premultiplied-alpha foreground. Text
 // crosses into one zeroed C allocation for this call and is never logged or
-// retained; graphics consumes the leased foreground before its next update.
+// retained.
 func (o *FocusedTextOverlay) Update(s FocusedTextSnapshot) error {
 	if o == nil {
 		return ErrUnavailable
@@ -220,7 +220,7 @@ func (o *FocusedTextOverlay) foregroundAlphaForTest(x, y int) (uint64, bool) {
 }
 
 // focusedTextForegroundLeaseForTest exercises the exact C lease consumed by
-// the host compositor without exposing pixels, text, or a general renderer.
+// the host compositor without exposing pixels or text.
 type focusedTextForegroundLeaseForTest struct {
 	x, y, width, height, stride int
 	generation                  uint64

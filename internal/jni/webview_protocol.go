@@ -21,19 +21,7 @@ import (
 	"github.com/tipsy-linux/tipsy/internal/x11"
 )
 
-// Official universalapp WebView protocol, answered over the MessageBus.
-//
-// Lua listing clicks (Servers, similar web dialogs) go through
-// BrowserService.OpenBrowserWindow / WebViewProtocolCore::OpenWindow, which
-// is a MessageBus request the APK's Java WebViewProtocol answers. Tipsy
-// plays that Java role using only the exported MessageBus natives (no
-// hooks) and shows the page in an X11 child WebKit overlay.
-//
-// Ground truth (classes2.dex WebViewProtocol.<init> + JNI getters in
-// libroblox.so): protocol name getProtocolName → "WebView"; methods
-// isAvailable (MessageBus.p → setRequestHandlerRaw), openWindow /
-// mutateWindow / closeWindow (MessageBus.t → doSubscribeRaw). JSON keys
-// from getUrlKey / getWindowTypeKey / getHideHeaderKey / getAvailableKey.
+// WebView protocol answered over the MessageBus, shown in an X11 WebKit overlay.
 const (
 	webViewProtocolClass = "com/roblox/protocols/webview/WebViewProtocol"
 
@@ -58,8 +46,8 @@ const (
 	webViewResponseBadJSON int32 = 13
 )
 
-// webViewProtocolMethods is Java WebViewProtocol.<init> registration order
-// plus handleWindowClose (getter exists; Java does not subscribe it there).
+// webViewProtocolMethods lists the WebViewProtocol methods in registration
+// order, plus handleWindowClose.
 var webViewProtocolMethods = []string{
 	webViewMethodIsAvailable,
 	webViewMethodOpenWindow,
@@ -68,8 +56,8 @@ var webViewProtocolMethods = []string{
 	webViewMethodHandleWindowClose,
 }
 
-// WebViewProtocolExports are official Java→native entry points resolved by
-// name. Zero means the export is absent; each path degrades independently.
+// WebViewProtocolExports are Java→native entry points resolved by name. Zero
+// means absent; each path degrades independently.
 type WebViewProtocolExports struct {
 	SetRequestHandlerRaw             uintptr
 	PublishProtocolMethodResponseRaw uintptr
@@ -92,7 +80,7 @@ var (
 	webViewProtocolLogged sync.Map
 )
 
-// RegisterWebViewProtocol plays the APK's Java WebViewProtocol role.
+// RegisterWebViewProtocol plays the Java WebViewProtocol role.
 func (e *Env) RegisterWebViewProtocol(x WebViewProtocolExports) int {
 	if e == nil || e.vm == nil {
 		return 0
@@ -123,7 +111,7 @@ func (e *Env) RegisterWebViewProtocol(x WebViewProtocolExports) int {
 	for _, method := range webViewProtocolMethods {
 		m := e.NewStringUTF(method)
 		ok := false
-		// Java setRequestHandlerRaw only for isAvailable (MessageBus.p).
+		// setRequestHandlerRaw is used only for isAvailable.
 		if method == webViewMethodIsAvailable && x.SetRequestHandlerRaw != 0 {
 			h := e.AllocObject(handlerCls)
 			e.PutField(h, webViewMethodField, method)
@@ -131,11 +119,8 @@ func (e *Env) RegisterWebViewProtocol(x WebViewProtocolExports) int {
 			loader.CallP8(x.SetRequestHandlerRaw, e.Raw(), bus, protocol, m, h, 0, 0, 0)
 			ok = true
 		}
-		// Java MessageBus.t → doSubscribeRaw(getMessageId(protocol, method), cb, sticky=false).
-		// DEX getMessageId(Ljava/lang/String;Ljava/lang/String;)Ljava/lang/String;
-		// formats "%s.%s" (WebView.openWindow). Native NewStringUTF must be read
-		// through GetStringUTFChars; o.str alone is empty on some jstrings.
-		// CallP8 doSubscribeRaw: env, this=bus, messageId, callback, sticky=false.
+		// Subscribe topic is "protocol.method"; read jstrings via GetStringUTFChars,
+		// since o.str alone can be empty on some jstrings.
 		if webViewTopicMethod(method) && x.DoSubscribeRaw != 0 {
 			cb := e.AllocObject(callbackCls)
 			e.PutField(cb, webViewMethodField, method)
@@ -173,7 +158,7 @@ func webViewTopicMethod(method string) bool {
 	return false
 }
 
-// webViewJavaTopic is the official MessageBus getMessageId format ("%s.%s").
+// webViewJavaTopic is the MessageBus topic format for a WebView method.
 func webViewJavaTopic(method string) string {
 	return webViewProtocolName + "." + method
 }

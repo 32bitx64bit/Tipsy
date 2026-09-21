@@ -103,11 +103,9 @@ func TestEffectiveConfigPrecedence(t *testing.T) {
 	if got.Deadzone != 0.2 {
 		t.Fatalf("env must win over file: %+v", got)
 	}
-	// Removed v1 file keys are ignored, not honored.
 	if got.EffectiveDeadzone() != 0.2 {
 		t.Fatalf("effective floor must be the single global: %+v", got)
 	}
-	// Invalid env never clobbers the file value.
 	again, err := EffectiveConfig(file, lookup(map[string]string{"TIPSY_GAMEPAD_DEADZONE": "huge"}))
 	if err != nil {
 		t.Fatal(err)
@@ -115,7 +113,6 @@ func TestEffectiveConfigPrecedence(t *testing.T) {
 	if again.Deadzone != 0.1 {
 		t.Fatalf("invalid env must be ignored: %+v", again)
 	}
-	// Missing file bytes = defaults, env still applies.
 	def, err := EffectiveConfig(nil, lookup(map[string]string{"TIPSY_GAMEPAD_DEADZONE": "0.25"}))
 	if err != nil {
 		t.Fatal(err)
@@ -123,14 +120,13 @@ func TestEffectiveConfigPrecedence(t *testing.T) {
 	if want := DefaultGamepadConfig().WithEnv(lookup(map[string]string{"TIPSY_GAMEPAD_DEADZONE": "0.25"})); def != want {
 		t.Fatalf("missing file must equal defaults+env: %+v", def)
 	}
-	// A corrupt section is an honest error alongside usable defaults.
 	if _, err := EffectiveConfig([]byte(`{"gamepad":{"deadzone":"huge"}}`), lookup(nil)); err == nil {
 		t.Fatal("corrupt section must error honestly")
 	}
 }
 
-// TestEffectiveConfigFileRoundTrip proves the headless pump's exact read:
-// LoadGamepadConfigFile over a real config.json, then env.
+// TestEffectiveConfigFileRoundTrip proves LoadGamepadConfigFile over a real
+// config.json, then env.
 func TestEffectiveConfigFileRoundTrip(t *testing.T) {
 	t.Parallel()
 	path := filepath.Join(t.TempDir(), "config.json")

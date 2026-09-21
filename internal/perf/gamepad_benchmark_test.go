@@ -7,9 +7,8 @@ import (
 )
 
 // BenchmarkGamepadTranslation is a deterministic public xpad-shaped fixture.
-// It deliberately measures the current reader snapshot plus Android-frame
-// translation allocation shape, not evdev readiness, device discovery, or
-// gameplay input latency.
+// It measures the reader snapshot plus Android-frame translation allocation
+// shape, not evdev readiness, device discovery, or gameplay input latency.
 func BenchmarkGamepadTranslation(b *testing.B) {
 	abs := map[uint16]gamepad.AbsInfo{
 		gamepad.AbsX:     {Minimum: -32768, Maximum: 32767, Flat: 512},

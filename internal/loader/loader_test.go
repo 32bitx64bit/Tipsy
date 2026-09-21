@@ -405,7 +405,6 @@ func buildSynthELF(opt synthOpts) []byte {
 		versionDefNameOff[i] = addStr(def.version)
 	}
 
-	// Dynsym at vaDynsym
 	symRaw := make([]byte, 24*len(syms))
 	nameOff := func(name string) uint32 {
 		if name == "" {
@@ -497,7 +496,6 @@ func buildSynthELF(opt synthOpts) []byte {
 	binary.LittleEndian.PutUint32(buf[vaHash:], 1)                   // nbucket
 	binary.LittleEndian.PutUint32(buf[vaHash+4:], uint32(len(syms))) // nchain
 	binary.LittleEndian.PutUint32(buf[vaHash+8:], 0)                 // bucket[0]
-	// chains already zero
 
 	relInfo := func(sym uint32, typ elf.R_X86_64) uint64 {
 		return makeRelInfo(sym, uint32(typ))
@@ -533,9 +531,8 @@ func buildSynthELF(opt synthOpts) []byte {
 			Info:   relInfo(0, elf.R_X86_64_RELATIVE),
 			Addend: 0x100,
 		}}
-		// The init_array entry itself is relocated by the packed stream
-		// (as in Android-packed libs like libroblox.so): the ctor pointer
-		// exists only after APS2 application, before the Init walk.
+		// The init_array entry itself is relocated by the packed stream: the
+		// ctor pointer exists only after APS2 application, before Init walks.
 		aps2Relocs = append(aps2Relocs, Reloc{
 			Off:    vaInitArr,
 			Info:   relInfo(0, elf.R_X86_64_RELATIVE),
@@ -545,7 +542,6 @@ func buildSynthELF(opt synthOpts) []byte {
 		copy(buf[vaAPS2:], aps2)
 	}
 
-	// Dynamic
 	w := vaDyn
 	put := func(tag elf.DynTag, val uint64) {
 		binary.LittleEndian.PutUint64(buf[w:], uint64(tag))
@@ -587,7 +583,6 @@ func buildSynthELF(opt synthOpts) []byte {
 	put(elf.DT_NULL, 0)
 	dynSize := w - vaDyn
 
-	// ELF header + 3 program headers
 	var hdr elf.Header64
 	hdr.Ident[0], hdr.Ident[1], hdr.Ident[2], hdr.Ident[3] = 0x7f, 'E', 'L', 'F'
 	hdr.Ident[elf.EI_CLASS] = byte(elf.ELFCLASS64)

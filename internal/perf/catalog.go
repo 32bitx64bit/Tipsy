@@ -1,8 +1,6 @@
-// Package perf defines Tipsy's reproducible project-performance matrix.
-//
-// It deliberately describes only host-owned work.  A record marked
-// unavailable is evidence that a workload needs a controlled fixture or
-// user-driven gameplay capture; it is not a zero-cost claim.
+// Package perf defines Tipsy's reproducible project-performance matrix. It
+// describes only host-owned work: a record marked unavailable means the
+// workload needs a controlled fixture or user-driven gameplay capture.
 package perf
 
 import "sort"

@@ -11,9 +11,7 @@ import (
 )
 
 // TestDLErrorConcurrentNoDoubleFree drives setDLError, the C dlerror shim, and
-// the exported Go entry point from several goroutines. Before the mutex and
-// thread-local ownership fix this raced on dlErr/dlerrorC and could free the
-// same string twice.
+// the exported Go entry point from several goroutines.
 func TestDLErrorConcurrentNoDoubleFree(t *testing.T) {
 	testDlErrorC() // drop any pending message
 	const workers = 8

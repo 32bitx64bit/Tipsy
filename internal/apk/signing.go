@@ -30,7 +30,6 @@ func parseSigning(ra io.ReaderAt, size int64, zr *zip.Reader) SigningInfo {
 
 	block, ids, blockErr := readAPKSigningBlock(ra, size)
 	if blockErr != nil {
-		// No signing block is normal for unsigned / v1-only APKs.
 		apkLog().Debug("apk signing block", "err", blockErr)
 	}
 	for _, id := range ids {
@@ -143,7 +142,6 @@ func certsFromPKCS7(der []byte) ([]*x509.Certificate, error) {
 		return nil, fmt.Errorf("pkcs7: %w", err)
 	}
 	if !ci.ContentType.Equal(oidSignedData) {
-		// Some producers store a raw certificate.
 		if c, err := x509.ParseCertificate(der); err == nil {
 			return []*x509.Certificate{c}, nil
 		}
@@ -357,7 +355,6 @@ func certsFromSignerBlock(value []byte) ([]*x509.Certificate, error) {
 		if err != nil {
 			continue
 		}
-		// signed data: digests then certificates (v2 and v3 share this prefix).
 		_, afterDigests, err := readU32Prefixed(signedData, 0)
 		if err != nil {
 			continue
@@ -412,7 +409,6 @@ func findCentralDirectoryOffset(ra io.ReaderAt, size int64) (int64, error) {
 	if _, err := ra.ReadAt(buf, off); err != nil && err != io.EOF {
 		return 0, err
 	}
-	// Search backwards for EOCD signature 0x06054b50.
 	for i := len(buf) - 22; i >= 0; i-- {
 		if binary.LittleEndian.Uint32(buf[i:]) != 0x06054b50 {
 			continue
@@ -479,11 +475,9 @@ func insertAPKSigningBlock(zipBytes []byte, pairs ...sigPair) ([]byte, error) {
 	out = append(out, block...)
 	out = append(out, zipBytes[cdOff:]...)
 
-	// Patch EOCD CD offset (and ZIP64 if present). Files from archive/zip are small.
+	// Patch EOCD CD offset (and ZIP64 if present).
 	newCD := uint64(cdOff) + uint64(len(block))
 	eocdOff := int64(len(out) - 22)
-	// Locate real EOCD in case of comment (none for archive/zip).
-	// Search from the end the same way as findCentralDirectoryOffset, then patch.
 	size := int64(len(out))
 	maxComment := int64(65535)
 	readLen := 22 + maxComment

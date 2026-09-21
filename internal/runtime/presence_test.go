@@ -52,11 +52,9 @@ func TestDiscordPresenceDoesNotStartPlayerLogPoller(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// The retired 250 ms file follower read the newest _Player_*.log after it
-	// grew, which raises IN_ACCESS on the file. Watching IN_ACCESS therefore
-	// turns "the poller is gone" into a behavioral assertion instead of a
-	// symbol check; the JNI and liblog place sources never read this file.
-	// Only IN_ACCESS is masked: the test's own append is IN_OPEN/IN_MODIFY.
+	// Watching IN_ACCESS turns "the poller is gone" into a behavioral assertion
+	// instead of a symbol check; the JNI and liblog place sources never read this
+	// file. Only IN_ACCESS is masked: the test's own append is IN_OPEN/IN_MODIFY.
 	fd, err := unix.InotifyInit1(unix.IN_CLOEXEC | unix.IN_NONBLOCK)
 	if err != nil {
 		t.Skipf("inotify unavailable: %v", err)

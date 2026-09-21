@@ -13,8 +13,8 @@ import (
 )
 
 // writeGamepadConfigFile plants one canonical settings file with a gamepad
-// section under an isolated XDG_CONFIG_HOME. Production resolves the same
-// path via internal/config; tests must never touch the real home.
+// section under an isolated XDG_CONFIG_HOME. Production resolves the same path
+// via internal/config; tests must never touch the real home.
 func writeGamepadConfigFile(t *testing.T, body string) {
 	t.Helper()
 	dir := filepath.Join(t.TempDir(), "tipsy")
@@ -42,9 +42,8 @@ func selectGamepadConfigFile(t *testing.T, body string, env map[string]string) {
 	t.Cleanup(ResetGamepadInputPath)
 }
 
-// TestGamepadEffectiveConfigFilePrecedence proves the live rule: persisted
-// file under env, unset env keeping the file value. Removed v1 file keys
-// are ignored, not honored.
+// TestGamepadEffectiveConfigFilePrecedence proves the live rule: persisted file
+// under env, unset env keeping the file value.
 func TestGamepadEffectiveConfigFilePrecedence(t *testing.T) {
 	selectGamepadConfigFile(t,
 		`{"gamepad":{"deadzone":0.1,"deadzoneRight":0.3,"invertYRight":true}}`,
@@ -69,8 +68,8 @@ func TestGamepadEffectiveConfigFileInvalidEnvIgnored(t *testing.T) {
 	}
 }
 
-// TestGamepadFileDisabledGate proves the persisted switch gates the frame
-// path exactly like the kill-switch: zero emissions, one honest drop.
+// TestGamepadFileDisabledGate proves the persisted switch gates the frame path
+// exactly like the kill-switch: zero emissions, one drop.
 func TestGamepadFileDisabledGate(t *testing.T) {
 	selectGamepadConfigFile(t, `{"gamepad":{"enabled":false}}`, nil)
 	wireRecordingDirectGamepadTarget(t, 0x1234, 0x5678)
@@ -97,9 +96,9 @@ func TestGamepadFileDisabledPumpRefusal(t *testing.T) {
 	}
 }
 
-// TestGamepadFileDeadzonePipeline proves the persisted floor reaches the
-// wire: with deadzone 0.2 in config.json the ≈0.09 X deflection floors to 0
-// while the ≈0.5 Y deflection passes through — the same application order
+// TestGamepadFileDeadzonePipeline proves the persisted floor reaches the wire:
+// with deadzone 0.2 in config.json the ≈0.09 X deflection floors to 0 while the
+// ≈0.5 Y deflection passes through — the same application order
 // (ApplyCalibration with the effective config, then MapFrame, then the
 // focus-gated handler) the pump runs.
 func TestGamepadFileDeadzonePipeline(t *testing.T) {

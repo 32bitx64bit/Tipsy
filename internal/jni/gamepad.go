@@ -25,20 +25,8 @@ import (
 	"github.com/tipsy-linux/tipsy/internal/logging"
 )
 
-// Direct-only single-pad feed-in (simplified 2026-09-12): an own evdev pump
-// goroutine feeds Android frames from internal/gamepad into
-// handleGamepadFrame, bypassing the X11 ring. No libroblox .text patches
-// (ADR 0010). Only the six DEX-proven dynsyms are resolved.
-//
-// Deleted vs controller v1 (honest list, see
-// gamepad-simplify-2026-09-12.md): the TIPSY_GAMEPAD_PATH
-// gameactivity/both branches (direct-only per Phase 0; the variable is
-// parsed-but-ignored with one honest warn), players 2..4, and per-stick
-// deadzone/invert calibration (one global floor, Y never inverted).
-
-// Gamepad axis constants (AMOTION_EVENT_AXIS_*) beyond the X/Y pair. The
-// engine pump reads exactly X/Y, Z/RZ, HAT_X/Y and L/RTRIGGER; RX/RY (12/13)
-// are served as a mirror in the frame but only Z/RZ go on the wire.
+// Gamepad axis constants (AMOTION_EVENT_AXIS_*) beyond the X/Y pair. Only
+// Z/RZ, HAT_X/Y and L/RTRIGGER reach the wire; RX/RY stay a frame mirror.
 const (
 	motionAxisZ        = int32(11)
 	motionAxisRX       = int32(12)
@@ -50,9 +38,8 @@ const (
 	motionAxisRTrigger = int32(18)
 )
 
-// Truthful input sources for gamepad events. Keys report SOURCE_GAMEPAD
-// (DPAD keys SOURCE_DPAD, never combined) and moves report SOURCE_JOYSTICK,
-// exactly as the DEX source gate accepts either bit.
+// Input sources for gamepad events: keys report SOURCE_GAMEPAD (DPAD keys
+// SOURCE_DPAD, never combined), moves report SOURCE_JOYSTICK.
 const (
 	sourceGamepad  = int32(0x401)
 	sourceDpad     = int32(0x201)
@@ -61,9 +48,9 @@ const (
 
 var gamepadPathOnce sync.Once
 
-// gamepadPathNote parses TIPSY_GAMEPAD_PATH once and honestly ignores it:
-// pads are direct-only, so any non-direct value logs one warn and delivery
-// still goes direct. Unset (or direct) is silent.
+// gamepadPathNote parses TIPSY_GAMEPAD_PATH once and ignores it: pads are
+// direct-only, so any non-direct value logs one warn and delivery still goes
+// direct. Unset (or direct) is silent.
 func gamepadPathNote() {
 	gamepadPathOnce.Do(func() {
 		raw := strings.TrimSpace(os.Getenv("TIPSY_GAMEPAD_PATH"))
@@ -99,8 +86,7 @@ var gamepadDebugOnce sync.Once
 var gamepadDebugValue bool
 
 // gamepadDebug gates per-event arg logging (TIPSY_GAMEPAD_DEBUG=1). Off by
-// default: button/axis values are input content and never hit the default
-// log.
+// default: button/axis values are input content and never hit the default log.
 func gamepadDebug() bool {
 	gamepadDebugOnce.Do(func() {
 		switch strings.ToLower(strings.TrimSpace(os.Getenv("TIPSY_GAMEPAD_DEBUG"))) {
@@ -111,9 +97,8 @@ func gamepadDebug() bool {
 	return gamepadDebugValue
 }
 
-// ResetGamepadInputPath makes the next path/enabled lookup re-read the
-// environment and clears the pad delivery state. Test seam; production
-// never changes paths within a process.
+// ResetGamepadInputPath re-reads the environment on the next lookup and
+// clears the pad delivery state. Test seam.
 func ResetGamepadInputPath() {
 	gamepadPathOnce = sync.Once{}
 	gamepadEnabledOnce = sync.Once{}
@@ -129,10 +114,10 @@ var gamepadCalOnce sync.Once
 var gamepadCalValue = gamepad.DefaultGamepadConfig()
 
 // gamepadCalibration returns the cached effective calibration: the persisted
-// "gamepad" section of the existing settings file (missing file/key =
-// defaults) overlaid once with TIPSY_GAMEPAD_DEADZONE (env wins). An
-// unreadable section falls back to defaults (logged once, content-free) so a
-// bad file can never block launch. ResetGamepadInputPath clears the cache.
+// "gamepad" section of the settings file (missing file/key = defaults) overlaid
+// once with TIPSY_GAMEPAD_DEADZONE (env wins). An unreadable section falls back
+// to defaults so a bad file can never block launch.
+// ResetGamepadInputPath clears the cache.
 func gamepadCalibration() gamepad.GamepadConfig {
 	gamepadCalOnce.Do(func() {
 		cfg, err := gamepad.LoadGamepadConfigFile(config.Paths().ConfigFile)
@@ -169,10 +154,9 @@ func GamepadTypeForName(name string) int {
 	}
 }
 
-// GamepadTypeForDevice is the connect-time ordinal: name first (engine
-// classifier), then Xbox USB/BT vendor 0x045e → 3 so GuliKit/X-Box nodes
-// that hid-microsoft names without the substring "XBOX" still get the
-// Xbox scheme the face-button layout uses.
+// GamepadTypeForDevice is the connect-time ordinal: name first, then Xbox
+// USB/BT vendor 0x045e → 3 so GuliKit/X-Box nodes without the substring
+// "XBOX" still get the Xbox scheme the face-button layout uses.
 func GamepadTypeForDevice(name string, vendor uint16) int {
 	if t := GamepadTypeForName(name); t != 0 {
 		return t
@@ -183,10 +167,9 @@ func GamepadTypeForDevice(name string, vendor uint16) int {
 	return 0
 }
 
-// The direct gamepad target is the exact JNI static-native identity from
-// the APK: (JNIEnv*, NativeInputInterface jclass, native function
-// pointers). It remains parked until the runtime resolves all six matching
-// named exports.
+// The direct gamepad target is the JNI static-native identity for the pad
+// feed: (JNIEnv*, NativeInputInterface jclass, six native function pointers).
+// It stays parked until all six are resolved.
 var directGamepadTarget struct {
 	mu           sync.RWMutex
 	env          uintptr
@@ -199,8 +182,8 @@ var directGamepadTarget struct {
 	setMotionFn  uintptr
 }
 
-// SetRobloxDirectGamepadTarget wires the six DEX-proven direct gamepad
-// methods (descriptors (IIFFF)V, (III)V, (II)V, (I)V, (IIZI)V, (IIIZI)V).
+// SetRobloxDirectGamepadTarget wires the six direct gamepad methods
+// (descriptors (IIFFF)V, (III)V, (II)V, (I)V, (IIZI)V, (IIIZI)V).
 func SetRobloxDirectGamepadTarget(env, class, axisFn, buttonFn, connectFn, disconnectFn, setKeyFn, setMotionFn uintptr) bool {
 	directGamepadTarget.mu.Lock()
 	directGamepadTarget.env = env
@@ -241,7 +224,6 @@ func ClearRobloxDirectGamepadTarget() {
 	StopRobloxDirectGamepadPump()
 }
 
-// directGamepadTargetLive reports whether the six gamepad natives are wired.
 func directGamepadTargetLive() bool {
 	directGamepadTarget.mu.RLock()
 	defer directGamepadTarget.mu.RUnlock()
@@ -251,8 +233,8 @@ func directGamepadTargetLive() bool {
 		directGamepadTarget.setKeyFn != 0 && directGamepadTarget.setMotionFn != 0
 }
 
-// GamepadStats counts direct-pad deliveries and honest drops. The direct
-// methods return void, so only deliveries and drops exist.
+// GamepadStats counts direct-pad deliveries and drops; the direct methods
+// return void, so nothing else exists.
 type GamepadStats struct {
 	ButtonDelivered     uint64
 	AxisDelivered       uint64
@@ -307,8 +289,8 @@ func DispatchRobloxDirectGamepadButton(deviceID, keyCode int32, pressed bool) bo
 }
 
 // DispatchRobloxDirectGamepadAxis delivers one stick/trigger/hat sample
-// through nativeGamepadAxisEvent(IIFFF)V. The three floats are a pass-through:
-// handleGamepadFrame packs them (stick pairs vs hat/trigger singles).
+// through nativeGamepadAxisEvent(IIFFF)V. The three floats are a pass-through
+// packed by handleGamepadFrame.
 func DispatchRobloxDirectGamepadAxis(deviceID, axisID int32, f1, f2, f3 float32) bool {
 	directGamepadTarget.mu.RLock()
 	env, class, fn := directGamepadTarget.env, directGamepadTarget.class, directGamepadTarget.axisFn
@@ -399,24 +381,21 @@ func DispatchRobloxDirectGamepadSetMotion(deviceID, axisID, arg int32, supported
 	return true
 }
 
-// engineProbeKeys is the exact H[] set the engine's E() probe passes to
-// hasKeys: A/B/X/Y, DPAD 19–22, R1/L1, THUMBL/R, SELECT/START. Absent from
-// the probe: C/Z/L2/R2/MODE/DPAD_CENTER.
+// engineProbeKeys is the connect-time probed key set: A/B/X/Y, DPAD 19–22,
+// R1/L1, THUMBL/R, SELECT/START. C/Z/L2/R2/MODE/DPAD_CENTER are never probed.
 var engineProbeKeys = []int{96, 97, 99, 100, 19, 20, 21, 22, 103, 102, 106, 107, 109, 108}
 
 // gamepadExtraKeys are advertised TRUE only when physically present:
 // digital L2/R2 edges alongside the analog trigger axes, plus MODE.
 var gamepadExtraKeys = []int{104, 105, 110}
 
-// engineProbeMotions seeds the E() motion map. GAS/BRAKE (22/23) are probed
-// as max() fallbacks for the triggers; a Tipsy pad reports them FALSE
-// honestly since its triggers ride 17/18.
+// engineProbeMotions seeds the motion map. GAS/BRAKE (22/23) are probed as
+// trigger fallbacks and reported FALSE since triggers ride 17/18.
 var engineProbeMotions = []int{0, 1, 11, 14, 15, 16, 17, 18, 22, 23}
 
-// AdvertiseGamepadCapabilities replays the engine's connect-time E()
-// sequence through the capability setters: every probed key and motion with
-// its honest supported bit, plus the extra (dev, 15|16, 1, sup, type) hat
-// calls. RX/RY are never advertised: the engine never probes them.
+// AdvertiseGamepadCapabilities replays the connect-time capability sequence:
+// every probed key and motion with its supported bit, plus the extra
+// (dev, 15|16, 1, sup, type) hat calls. RX/RY are never advertised.
 func AdvertiseGamepadCapabilities(deviceID, gamepadType int32, keys []int, motions []int) bool {
 	if !directGamepadTargetLive() {
 		gpDrop("capabilities: no direct gamepad target wired")
@@ -448,22 +427,20 @@ func AdvertiseGamepadCapabilities(deviceID, gamepadType int32, keys []int, motio
 	return ok
 }
 
-// gamepadEngineAxes is the DEX onGenericMotion emission order (packed-switch
-// i=0..7): HAT_Y, HAT_X, RTRIGGER, LTRIGGER, RZ, Z, Y, X. Stick pairs are
-// packed as (x, -y, 0) / (z, -rz, 0) on both axis ids of the pair; hats and
-// triggers stay singles (0, 0, v) with HAT_Y negated. See packGamepadAxis.
+// gamepadEngineAxes is the emission order: HAT_Y, HAT_X, RTRIGGER, LTRIGGER,
+// RZ, Z, Y, X. Stick pairs pack as (x, -y, 0) / (z, -rz, 0) on both axis ids
+// of the pair; hats and triggers stay singles (0, 0, v) with HAT_Y negated.
+// See packGamepadAxis.
 var gamepadEngineAxes = []int32{16, 15, 18, 17, 14, 11, 1, 0}
 
-// axisSample is one nativeGamepadAxisEvent f-slot triple.
 type axisSample struct{ f1, f2, f3 float32 }
 
 func (s axisSample) zero() bool { return s.f1 == 0 && s.f2 == 0 && s.f3 == 0 }
 
-// packGamepadAxis is the 2.738.1397 DEX packing for nativeGamepadAxisEvent
-// (tk/e$e.onGenericMotion packed-switch). Hats/triggers: (0, 0, v) with
-// HAT_Y negated. Left stick: (X, -Y, 0) on both AXIS_X and AXIS_Y. Right
-// stick: (Z, -RZ, 0) on both AXIS_Z and AXIS_RZ. Sending sticks as
-// (0, 0, v) is ignored by the engine (website nav + in-game move die).
+// packGamepadAxis is the engine packing for nativeGamepadAxisEvent.
+// Hats/triggers: (0, 0, v) with HAT_Y negated. Left stick: (X, -Y, 0) on both
+// AXIS_X and AXIS_Y. Right stick: (Z, -RZ, 0) on both AXIS_Z and AXIS_RZ.
+// Sticks sent as (0, 0, v) are ignored by the engine.
 func packGamepadAxis(axis int32, axes map[int]float32) (axisSample, bool) {
 	switch axis {
 	case motionAxisX, motionAxisY:
@@ -493,9 +470,9 @@ func packGamepadAxis(axis int32, axes map[int]float32) (axisSample, bool) {
 
 // Last-sent pad state for the single pad: the diff baseline for
 // change-driven AxisEvent emission and the source of UP synthesis + zeroed
-// axes on focus loss and unplug, so the engine never keeps a stuck button.
-// Lock order is always gamepadState.mu → directGamepadTarget.mu (via the
-// dispatchers); the dispatchers alone never take gamepadState.mu.
+// axes on focus loss and unplug. Lock order is always gamepadState.mu →
+// directGamepadTarget.mu (via the dispatchers); the dispatchers alone never
+// take gamepadState.mu.
 var gamepadState struct {
 	mu         sync.Mutex
 	focused    bool
@@ -524,10 +501,9 @@ func resetGamepadStateForTest() {
 }
 
 // gamepadNoteFocus records the X11 window focus transition for the pad gate.
-// The pad goes quiet while the window is unfocused, and focus loss
-// synthesizes UP for every held button plus zeroed axes in the same beat (no
-// stuck-button), keeping the pad announced so refocus sends DOWNs only for
-// still-held physical state (no ghost presses).
+// The pad goes quiet while unfocused; focus loss synthesizes UP for every held
+// button plus zeroed axes, keeping the pad announced so refocus sends DOWNs
+// only for still-held physical state.
 func gamepadNoteFocus(gained bool) {
 	gamepadState.mu.Lock()
 	defer gamepadState.mu.Unlock()
@@ -553,8 +529,8 @@ func clearGamepadStateLocked() {
 
 // synthesizeGamepadReleaseLocked emits UP for every held button and zero for
 // every nonzero axis in deterministic order. Caller holds mu. The pad stays
-// announced: the next frame for still-held physical state re-emits fresh
-// DOWN edges (no ghost presses, no stuck buttons).
+// announced: the next frame for still-held physical state re-emits fresh DOWN
+// edges.
 func synthesizeGamepadReleaseLocked() {
 	var keys []int
 	for k := range gamepadState.buttons {
@@ -580,12 +556,10 @@ func synthesizeGamepadReleaseLocked() {
 	}
 }
 
-// GamepadConnected runs the connect sequence for the single pad: the E()
+// GamepadConnected runs the connect sequence for the single pad: the
 // capability replay, then the connect event with the gamepad type. A
 // re-announce of the same device re-probes capabilities without a duplicate
-// connect. A second simultaneous device id is ignored honestly (the lean
-// build serves one pad). Zero host pads means this is never called: no fake
-// pad, and the engine keeps its honest empty enumeration.
+// connect. A second simultaneous device id is ignored (one pad is served).
 func GamepadConnected(deviceID, gamepadType int32, keys []int, motions []int) bool {
 	gamepadPathNote()
 	gamepadState.mu.Lock()
@@ -613,7 +587,7 @@ func GamepadConnected(deviceID, gamepadType int32, keys []int, motions []int) bo
 }
 
 // GamepadDisconnected withdraws the single pad: UP synthesis + zeroed axes,
-// then the disconnect event. Unknown or stale ids are ignored honestly.
+// then the disconnect event. Unknown or stale ids are ignored.
 func GamepadDisconnected(deviceID int32) bool {
 	gamepadState.mu.Lock()
 	defer gamepadState.mu.Unlock()
@@ -630,11 +604,11 @@ func GamepadDisconnected(deviceID int32) bool {
 	return true
 }
 
-// handleGamepadFrame is the X11-ring bypass for the pad: one normalized
-// Android frame becomes direct ButtonEvents (buttons/DPAD, L2/R2 key duality
-// included) and change-driven AxisEvents with the DEX stick-pair packing
-// (ACTION_MOVE). Same focus gating as keys: quiet while unfocused, UP
-// synthesis + zero axes on focus loss (via gamepadNoteFocus) and on unplug.
+// handleGamepadFrame turns one normalized Android frame into direct
+// ButtonEvents (buttons/DPAD, L2/R2 key duality included) and change-driven
+// AxisEvents with the stick-pair packing (ACTION_MOVE). Same focus gating as
+// keys: quiet while unfocused, UP synthesis + zero axes on focus loss (via
+// gamepadNoteFocus) and on unplug.
 func handleGamepadFrame(af gamepad.AndroidFrame) {
 	gamepadPathNote()
 	if !gamepadEnabled() {
@@ -665,8 +639,8 @@ func handleGamepadFrame(af gamepad.AndroidFrame) {
 		gpDrop("gamepad: frame for unannounced pad")
 		return
 	}
-	// Buttons first (edges), deterministic order over the union of held
-	// and pressed so releases are never missed.
+	// Buttons first (edges), deterministic order over the union of held and
+	// pressed so releases are never missed.
 	allKeys := collectGamepadKeys(gamepadState.keyScratch, gamepadState.buttons, af.Buttons)
 	gamepadState.keyScratch = allKeys
 	for _, k := range allKeys {
@@ -699,9 +673,9 @@ func handleGamepadFrame(af gamepad.AndroidFrame) {
 	}
 }
 
-// resetGamepadKeyEventLocked fills a gamepad KeyEvent object: truthful
-// per-pad device id and source (SOURCE_GAMEPAD, DPAD keys SOURCE_DPAD).
-// scanCode carries the evdev code's honest hardware value where known.
+// resetGamepadKeyEventLocked fills a gamepad KeyEvent object: per-pad device
+// id and source (SOURCE_GAMEPAD, DPAD keys SOURCE_DPAD). scanCode carries the
+// evdev code's hardware value where known.
 func (vm *VM) resetGamepadKeyEventLocked(o *Object, keyCode, deviceID, source int32, pressed bool, downTime, eventTime int64, scanCode int32) {
 	if pressed {
 		o.fields["action"] = keyEventActionDown
@@ -721,9 +695,9 @@ func (vm *VM) resetGamepadKeyEventLocked(o *Object, keyCode, deviceID, source in
 }
 
 // resetGamepadMotionEventLocked fills a gamepad MotionEvent object for one
-// ACTION_MOVE sample: stable device id, SOURCE_JOYSTICK, and the full axis
-// set (X/Y mirrored into the x/y fields; the rest ride the gamepadAxes map
-// served by the extended getAxisValue cases).
+// ACTION_MOVE sample: stable device id, SOURCE_JOYSTICK, and the full axis set
+// (X/Y mirrored into the x/y fields; the rest ride the gamepadAxes map served
+// by the extended getAxisValue cases).
 func (vm *VM) resetGamepadMotionEventLocked(o *Object, deviceID, source int32, axes map[int32]float32, downTime, eventTime int64) {
 	o.fields["action"] = motionActionMove
 	o.fields["deviceId"] = deviceID
@@ -748,8 +722,8 @@ func (vm *VM) resetGamepadMotionEventLocked(o *Object, deviceID, source int32, a
 }
 
 // gamepadAxisValue answers the extended getAxisValue cases (Z/RZ, RX/RY
-// mirror, hats, triggers) from the per-object gamepadAxes map. Objects
-// without the map — every pointer/key event — answer 0, exactly as before.
+// mirror, hats, triggers) from the per-object gamepadAxes map. Objects without
+// the map — every pointer/key event — answer 0.
 func (vm *VM) gamepadAxisValue(o *Object, axis int32) float32 {
 	vm.mu.RLock()
 	defer vm.mu.RUnlock()
@@ -760,11 +734,10 @@ func (vm *VM) gamepadAxisValue(o *Object, axis int32) float32 {
 	return m[axis]
 }
 
-// Evdev pump: single-pad owner. It bypasses the X11 ring: the gamepad
-// readiness pump waits on evdev, inotify, and shutdown then feeds normalized
-// frames into handleGamepadFrame. Deadzone comes from the evdev flat via the
-// gamepad package (flat==0 fallback logged once per device); the single global
-// TIPSY_GAMEPAD_DEADZONE floor is applied per Frame just before MapFrame.
+// Evdev pump: single-pad owner. It waits on evdev, inotify, and shutdown then
+// feeds normalized frames into handleGamepadFrame. Deadzone comes from the
+// evdev flat via the gamepad package; the single global TIPSY_GAMEPAD_DEADZONE
+// floor is applied per Frame just before MapFrame.
 var gamepadPump struct {
 	mu      sync.Mutex
 	running bool
@@ -779,8 +752,7 @@ func StartRobloxDirectGamepadPump() bool {
 	return StartRobloxDirectGamepadPumpDir(gamepad.InputNodeDir)
 }
 
-// StartRobloxDirectGamepadPumpDir starts the evdev pump over dir. The dir
-// seam lets the no-pad test prove zero devices stay silent.
+// StartRobloxDirectGamepadPumpDir starts the evdev pump over dir.
 func StartRobloxDirectGamepadPumpDir(dir string) bool {
 	gamepadPump.mu.Lock()
 	defer gamepadPump.mu.Unlock()
@@ -830,9 +802,9 @@ func StopRobloxDirectGamepadPump() {
 
 func gamepadPumpLoop(mgr *gamepad.Manager, stop <-chan struct{}, done chan<- struct{}) {
 	defer close(done)
-	// InputDeviceListener-equivalent wiring: hotplug connect runs the E()
-	// capability replay + typed connect; disconnect synthesizes UPs +
-	// zeroed axes in the same beat, then the disconnect event.
+	// Hotplug connect runs the capability replay plus the typed connect;
+	// disconnect synthesizes releases and zeroed axes, then the disconnect
+	// event.
 	mgr.OnConnect = func(info gamepad.DeviceInfo, devID int) {
 		pad, _, r, ok := mgr.Slot(devID)
 		if !ok {
@@ -852,20 +824,19 @@ func gamepadPumpLoop(mgr *gamepad.Manager, stop <-chan struct{}, done chan<- str
 	}
 	loggedDeny := false
 	pump := gamepad.NewReadyPump(mgr)
-	// Single-pad pump: one scratch AndroidFrame reused across SYN_REPORT.
-	// handleGamepadFrame copies edges into gamepadState and does not retain
-	// Buttons/Axes after return. DisconnectSnapshotFor still uses MapFrame.
+	// One scratch AndroidFrame is reused across SYN_REPORT; handleGamepadFrame
+	// copies edges into gamepadState and does not retain Buttons/Axes after it
+	// returns.
 	var mapped gamepad.AndroidFrame
 	pump.OnFrame = func(pad gamepad.Pad, frame *gamepad.Frame) {
-		// ReadyPump invokes this only at a real SYN_REPORT boundary and keeps
-		// source order. The frame is owned by this callback until it returns.
+		// Invoked only at a real SYN_REPORT boundary, in source order. The
+		// frame is owned by this callback until it returns.
 		gamepad.ApplyCalibration(frame, pad.Mapping, gamepadCalibration())
 		handleGamepadFrame(gamepad.MapFrameInto(&mapped, frame, pad.DevID, pad.Mapping, pad.Info.Abs))
 	}
 	pump.OnRescanError = func(err error) {
-		// EACCES carries the actionable input-group/Flatpak hint. Log once per
-		// denial streak at Info, then Debug; ReadyPump keeps recovery rescans
-		// only while an inotify watch is unavailable.
+		// EACCES carries the actionable input-group/Flatpak hint: log once per
+		// denial streak at Info, then Debug.
 		if !loggedDeny {
 			logging.Logger(logging.CatJNI).Info("gamepad rescan", "err", err)
 			loggedDeny = true
@@ -878,9 +849,8 @@ func gamepadPumpLoop(mgr *gamepad.Manager, stop <-chan struct{}, done chan<- str
 	}
 }
 
-// Test hooks for the gamepad recording natives (see direct_input.c). _test
-// files cannot import C, so the C-typed calls happen here. Kinds mirror
-// the TIPSY_GP_* enum.
+// Test hooks for the gamepad recording natives. Test files cannot import C,
+// so the C-typed calls happen here.
 const (
 	gamepadRecAxis       = 1
 	gamepadRecButton     = 2

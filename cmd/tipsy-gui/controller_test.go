@@ -94,8 +94,8 @@ func TestControllerSettingsPartialSectionKeepsDefaults(t *testing.T) {
 	}
 }
 
-// TestControllerSettingsIgnoresRemovedKeys pins the honest downgrade: v1
-// files with per-stick/invert/rumble/legacy keys load their lean subset.
+// TestControllerSettingsIgnoresRemovedKeys pins the downgrade: files with
+// per-stick/invert/rumble/legacy keys load their lean subset.
 func TestControllerSettingsIgnoresRemovedKeys(t *testing.T) {
 	t.Parallel()
 	path := controllerTestPath(t)
@@ -276,8 +276,7 @@ func TestControllerCardBuildsBindsAndPersistsOffscreen(t *testing.T) {
 	win := newMainWindow(visualService{}, brandIcon())
 	defer win.win.Delete()
 
-	// Lean card: enable + one global deadzone slider, no per-stick
-	// sliders, no invert toggles, no rumble box, no test readout.
+	// Lean card: enable + one global deadzone slider.
 	if win.controllerEnable == nil || win.controllerFaceLayout == nil || win.controllerDeadL == nil || win.controllerDeadLValue == nil {
 		t.Fatal("lean controller card widgets are incomplete")
 	}
@@ -297,7 +296,6 @@ func TestControllerCardBuildsBindsAndPersistsOffscreen(t *testing.T) {
 	if win.settingsFPS == nil || win.settingsApply == nil || win.settingsRenderer == nil {
 		t.Fatal("graphics card widgets are missing after the controller card landed")
 	}
-	// Opening Settings refreshes the honest no-pad enumeration.
 	win.selectPage(2)
 	qt.QCoreApplication_ProcessEvents()
 	if !strings.Contains(win.controllerPadNote.Text(), "No gamepad found") {
@@ -319,7 +317,6 @@ func TestControllerCardBuildsBindsAndPersistsOffscreen(t *testing.T) {
 	if saved.Enabled {
 		t.Fatalf("toggle did not persist: %+v", saved)
 	}
-	// Slider changes persist (every change, so keyboard adjustments save too).
 	win.controllerDeadL.SetValue(20)
 	qt.QCoreApplication_ProcessEvents()
 	saved, err = loadControllerSettings()

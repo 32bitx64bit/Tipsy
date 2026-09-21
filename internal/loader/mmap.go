@@ -256,10 +256,8 @@ func (m *Module) protectFinal() error {
 			return fmt.Errorf("loader: refusing writable executable final mapping in %s", m.Path)
 		}
 		if s.prot&syscall.PROT_EXEC != 0 {
-			// protectExecutableLoads() already moved executable segments to
-			// their final (non-writable) protection before relocation ran,
-			// and write64 rejects stores into execSpans, so no later write can
-			// land there. Re-mprotecting would repeat the same syscall.
+			// protectExecutableLoads() already applied final protection
+			// before relocation; write64 rejects stores into execSpans.
 			continue
 		}
 		addr := m.bias + uintptr(s.vaddr)

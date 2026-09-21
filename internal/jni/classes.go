@@ -102,8 +102,8 @@ func (vm *VM) seedClasses() {
 		"java/util/Iterator",
 		"org/fmod/AudioDevice",
 		"org/fmod/FMOD",
-		// Seed-only: live voice capture is FMOD OpenSL (§276), not this
-		// Java wrapper. FindClass must still succeed if the engine looks.
+		// Seed-only: live voice capture is FMOD OpenSL, not this Java wrapper.
+		// FindClass must still succeed if the engine looks.
 		"com/roblox/audio/AppRtcDeviceWrapper",
 		"com/roblox/audio/WebRtcLoader",
 		"org/webrtc/voiceengine/WebRtcAudioManager",
@@ -142,8 +142,8 @@ func (vm *VM) seedClasses() {
 		c.obj.fields["HARDWARE"] = "amd64"
 		c.obj.fields["FINGERPRINT"] = "tipsy/tipsy/tipsy:8.0.0/OPR1.170623.027/26:user/release-keys"
 	}
-	// androidx Insets.NONE: the official all-zero Insets singleton, readable
-	// as a static field and sharing the class's official int field semantics.
+	// androidx Insets.NONE: the official all-zero Insets singleton, readable as
+	// a static field and sharing the class's official int field semantics.
 	if c := vm.classes["androidx/core/graphics/Insets"]; c != nil && c.obj != nil {
 		none := vm.newObjectLocked(c)
 		none.markImmortal()
@@ -209,9 +209,8 @@ var implementedMethods = map[string]bool{
 	"onRequestPermissionsResult(I[Ljava/lang/String;[I)V":    true,
 	// WebRTC legacy Android ADM Java surface
 	// (org/webrtc/voiceengine/WebRtcAudioManager, webrtc_audio_manager.go):
-	// GetMethodID'd by AudioManager::JavaAudioManager (upstream
-	// audio_manager.cc) plus Roblox's setMicrophoneMute; live client
-	// 2.738.1397. <init>(J)V is class-interned, not listed here.
+	// GetMethodID'd by the native AudioManager plus Roblox's
+	// setMicrophoneMute. <init>(J)V is class-interned, not listed here.
 	"init()Z":                                true,
 	"dispose()V":                             true,
 	"isCommunicationModeEnabled()Z":          true,
@@ -282,9 +281,8 @@ var implementedMethods = map[string]bool{
 	"getVariant()Ljava/lang/String;":                                                        true,
 	"getNativeHelper()Lcom/roblox/client/startup/NativeHelper;":                             true,
 	"bootstrapTheApp()V":                                                                    true,
-	// MotionEvent/KeyEvent getters the engine's GameActivity glue
-	// GetMethodIDs during initializeNativeCode (observed missing-method
-	// list, last-honest.log:104-131). Answered by dispatchInput.
+	// MotionEvent/KeyEvent getters the engine's GameActivity glue GetMethodIDs
+	// during initializeNativeCode. Answered by dispatchInput.
 	"getDeviceId()I":                    true,
 	"getSource()I":                      true,
 	"getAction()I":                      true,
@@ -310,69 +308,51 @@ var implementedMethods = map[string]bool{
 	"gameActivity_onFlagsFailed()V":     true,
 	"gameActivity_onFlagsLoaded()V":     true,
 	// NativeGLJavaInterface.gameDidLeave()V is the engine-to-Java exit
-	// callback. The active APK forwards it synchronously to the currently
-	// installed ExperienceSession exit implementation, which finishes the
-	// experience session before marking it ended successfully. Tipsy exposes
-	// that exact signal to the GameActivity owner; JNI does not guess a route
-	// or perform host UI work itself.
+	// callback. Tipsy exposes that exact signal to the GameActivity owner; JNI
+	// does not guess a route or perform host UI work itself.
 	"gameDidLeave()V": true,
 	// NativeHelper.gameActivity_onAppReady(String): the engine's Java-side
-	// readiness announcement (GetMethodID'd every ~30 s in launch logs;
-	// official traces show step-name payloads like "Startup"/"Landing").
-	// Received and recorded in nativehelper.go — never fabricated.
+	// readiness announcement. Received and recorded in nativehelper.go —
+	// never fabricated.
 	"gameActivity_onAppReady(Ljava/lang/String;)V": true,
-	// NativeHelper.gameActivity_onScreenOrientationChanged(IZ)V: the
-	// engine's orientation request push (GetMethodID'd and CALLED at
-	// startup, launch logs; official classes2.dex forwards to
-	// Activity.setRequestedOrientation/requestOrientationAsDefault).
-	// X11 has no orientation surface (WM-owned, no rotation API), so the
-	// receiver records the announcement; the request is never faked as
-	// applied.
+	// NativeHelper.gameActivity_onScreenOrientationChanged(IZ)V: the engine's
+	// orientation request push. X11 has no orientation surface, so the receiver
+	// records the announcement; the request is never faked as applied.
 	"gameActivity_onScreenOrientationChanged(IZ)V": true,
 	// NativeHelper.gameActivity_onGameLoaded(J)V: the engine's game-loaded
-	// announcement, CALLED once per launch at startup in the
-	// experience-lifecycle batch (launch logs: same second as
-	// NativeGLJavaInterface.gameLoadedCallback(J)V with handle=0).
-	// Received and recorded in nativehelper.go — never fabricated. It also
-	// fans out to independent lifecycle subscribers so it does not displace
-	// Discord presence.
+	// announcement, in the experience-lifecycle batch. Received and recorded in
+	// nativehelper.go — never fabricated. It also fans out to independent
+	// lifecycle subscribers.
 	"gameActivity_onGameLoaded(J)V": true,
-	// NativeHelper's APK-declared paired experience callbacks. The DEX
-	// implementation posts Android UI-session work and restores default
-	// orientation; Tipsy receives and fans out the exact callbacks so the
-	// GameActivity owner can use a named route rather than a timer or click.
+	// NativeHelper's paired experience callbacks. Tipsy receives and fans out
+	// the exact callbacks so the GameActivity owner can use a named route
+	// rather than a timer or click.
 	"gameActivity_onExperienceStart()V": true,
 	"gameActivity_onExperienceStop(D)V": true,
 	"gameActivity_onLuaAppDidReturn()V": true,
-	// NativeHelper.gameActivity_onDidLogInReceived(String): official
-	// DID_LOG_IN JSON for NativeUserJavaInterface getters. Parsed in
-	// nativeuser.go — never logged (no names, ids, or raw JSON).
+	// NativeHelper.gameActivity_onDidLogInReceived(String): DID_LOG_IN JSON for
+	// NativeUserJavaInterface getters. Parsed in nativeuser.go — never logged
+	// (no names, ids, or raw JSON).
 	"gameActivity_onDidLogInReceived(Ljava/lang/String;)V": true,
-	// Keyboard text-input contract, engine→Java direction, CALLED when a Lua
-	// text box gains focus (live focus storm: NativeGLInterface first, then
-	// the NativeHelper fallback pair). Received and recorded in textinput.go
-	// (counts + handle/flag/payload lengths only — never text content, never
-	// acted on). The [B/TextBoxInfo payloads are length-observed, not read.
+	// Keyboard text-input contract, engine→Java direction, called when a Lua
+	// text box gains focus. Received and recorded in textinput.go (counts +
+	// handle/flag/payload lengths only — never text content, never acted on).
 	"showKeyboard(JZ[BLcom/roblox/engine/jni/model/NativeTextBoxInfo;)V": true,
 	"hideKeyboard()V": true,
 	"gameActivity_showKeyboard(JZ[BLcom/roblox/engine/jni/model/NativeTextBoxInfo;)V": true,
 	"gameActivity_hideKeyboard()V": true,
-	// GameTextInput InputConnection engine→Java contract (DEX-proven
-	// classes2.dex descriptors, GetMethodID'd at startup): the engine Calls
-	// these on the Tipsy-owned InputConnection object. Received and
-	// recorded in textinput.go (counts + opaque aggregates only — State
-	// content never read/stored/logged, nothing committed, physical
-	// nativePassKeyEvent untouched).
+	// GameTextInput InputConnection engine→Java contract: the engine calls
+	// these on the Tipsy-owned InputConnection object. Received and recorded in
+	// textinput.go (counts + opaque aggregates only — State content never
+	// read/stored/logged, nothing committed, physical nativePassKeyEvent
+	// untouched).
 	"setState(Lcom/google/androidgamesdk/gametextinput/State;)V": true,
 	"setSoftKeyboardActive(ZI)V":                                 true,
 	"restartInput()V":                                            true,
-	// Lua-textbox contract, engine→Java direction, CALLED during real
-	// Lua-textbox activity (live log: NativeGL pair GetMethodID'd at
-	// startup, NativeHelper pair lazily, all four stub-dispatched at
-	// 20:38:26 in tipsy-direct-retest.log). Received and recorded in
-	// luatextbox.go (counts + opaque handle/lengths/flags — the String
-	// twin's payload bytes are never read/stored/logged, nothing
-	// committed, physical nativePassKeyEvent untouched).
+	// Lua-textbox contract, engine→Java direction. Received and recorded in
+	// luatextbox.go (counts + opaque handle/lengths/flags — the String twin's
+	// payload bytes are never read/stored/logged, nothing committed, physical
+	// nativePassKeyEvent untouched).
 	"gameActivity_onLuaTextBoxChanged(Ljava/lang/String;)V":                  true,
 	"gameActivity_onLuaTextBoxPropertyChanged()V":                            true,
 	"onLuaTextBoxChangedCallback(Ljava/lang/String;)V":                       true,
@@ -380,10 +360,9 @@ var implementedMethods = map[string]bool{
 	"getIdentifier(Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;)I": true,
 	"loadLibrary(Ljava/lang/String;)V":                                       true,
 	"getProperty(Ljava/lang/String;)Ljava/lang/String;":                      true,
-	// java.lang.String.getBytes(String) is used inside Roblox's named
-	// syncTextboxTextAndCursorPosition2 JNI wrapper to turn the platform
-	// editor snapshot into UTF-8. The exact, privacy-safe implementation
-	// lives in export.go and supports the UTF-8 charset aliases only.
+	// java.lang.String.getBytes(String) turns the platform editor snapshot
+	// into UTF-8. The implementation lives in export.go and supports the UTF-8
+	// charset aliases only.
 	"getBytes(Ljava/lang/String;)[B":                           true,
 	"currentTimeMillis()J":                                     true,
 	"nanoTime()J":                                              true,
@@ -499,8 +478,8 @@ func isImplementedMethod(name, sig string) bool {
 	if implementedMethods[name+sig] {
 		return true
 	}
-	// Register-handled identities are the source of truth; consulting them
-	// here keeps this hand-maintained list from drifting when a new
-	// registerCore entry is added without a matching list entry.
+	// Register-handled identities are the source of truth; consulting them here
+	// keeps this hand-maintained list from drifting when a new registerCore
+	// entry is added without a matching list entry.
 	return lookupCoreHandler(name, sig) != nil
 }

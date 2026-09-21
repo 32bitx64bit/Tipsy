@@ -47,10 +47,9 @@ type authorizedFiles struct {
 // a pathname (including /proc/self/fd), and keeps its duplicates alive until
 // the returned root Module is closed.
 //
-// The caller must keep the AuthorizedGeneration that produced set alive through
-// Init. OpenFD duplicates and rechecks every input before parsing, then rechecks
-// the bound set plus both the original and duplicate after all mappings are
-// complete. Init performs the same gate immediately before any constructor.
+// The caller must keep the AuthorizedGeneration that produced set alive
+// through Init; descriptors are rechecked before mapping and before any
+// constructor runs.
 func OpenFD(ctx context.Context, rootSONAME string, set *integrity.NativeDescriptorSet, r Resolver) (*Module, error) {
 	if ctx == nil {
 		ctx = context.Background()

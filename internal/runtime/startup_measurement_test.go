@@ -24,10 +24,9 @@ type startupMeasurementTestSubscription struct {
 	active bool
 }
 
-// startupMeasurementTestSubscriptions is deliberately payload-free, matching
-// the public JNI observer contract. It lets Runtime pin registration,
-// cancellation, snapshot, and stale-callback behavior without reaching into
-// JNI's private registries.
+// startupMeasurementTestSubscriptions is payload-free, matching the public JNI
+// observer contract, so Runtime can pin registration, cancellation, snapshot,
+// and stale-callback behavior without reaching into JNI's private registries.
 type startupMeasurementTestSubscriptions struct {
 	mu sync.Mutex
 
@@ -110,8 +109,8 @@ func (s *startupMeasurementTestSubscriptions) staleReadyListener() jni.StartupHo
 }
 
 // startupMeasurementTestScrollWindowFake models only the narrow sealed X11
-// capability contract. completed is deliberately distinct from factoryCalls:
-// an unfocused window rejects driver creation before any input dispatch.
+// capability contract. completed is distinct from factoryCalls: an unfocused
+// window rejects driver creation before any input dispatch.
 type startupMeasurementTestScrollWindowFake struct {
 	mu sync.Mutex
 

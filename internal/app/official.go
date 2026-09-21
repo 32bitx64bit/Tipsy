@@ -18,8 +18,7 @@ import (
 )
 
 // releaseKind values the build scripts write into build-info.json. Every
-// local build of every medium is development-unrestricted; only GitHub
-// Actions passes the mode that produces the other kinds.
+// local build of every medium is development-unrestricted.
 const (
 	releaseKindDevelopment = "development-unrestricted"
 	// build-appdir.sh --mode official: release-candidate AppImage, no cosign.
@@ -49,9 +48,8 @@ func officialReleaseKind(kind string) error {
 // identifyOfficialRelease is the app-level release identity. The AppImage
 // branch keeps its AppRun contract; otherwise the executable must live in one
 // of the trusted install roots below next to an official build-info.json.
-// None of this authenticates the binary cryptographically (that stays in
-// release CI and in the package manager's signature check at install time);
-// it stops a local build from ever presenting itself as an official release.
+// None of this authenticates the binary cryptographically; it stops a local
+// build from ever presenting itself as an official release.
 func identifyOfficialRelease(ctx context.Context) error {
 	err := identifyOfficialAppImage(ctx)
 	if err == nil || !errors.Is(err, errOfficialReleaseUnavailable) {
@@ -79,7 +77,6 @@ var officialInstallRoots = []installRoot{
 	{medium: "package", binDir: "/usr/bin", buildInfo: "/usr/share/tipsy/build-info.json", rootOwned: true},
 }
 
-// Seams for tests; production uses the real process and filesystem.
 var (
 	flatpakInfoPath   = "/.flatpak-info"
 	currentExecutable = os.Executable
@@ -146,7 +143,7 @@ func (root installRoot) identify(exe string) error {
 	var parsed payloadBuildInfo
 	if err := json.Unmarshal(raw, &parsed); err != nil || parsed.Format != "tipsy.build-info.v1" {
 		// A marker exists but is not ours: fail closed rather than fall back
-		// to development consent, like a broken AppImage payload.
+		// to development consent.
 		return fmt.Errorf("%s build-info is not a tipsy.build-info.v1 document", root.medium)
 	}
 	return officialReleaseKind(parsed.ReleaseKind)

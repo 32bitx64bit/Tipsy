@@ -97,8 +97,8 @@ func (s BionicSyncStats) Aggregate(operation int) BionicSyncPathStats {
 }
 
 // SetBionicSyncDiagnostics must run before the Android client resolves libc.
-// Disabled leaves all candidate guest imports bound directly to glibc, so it
-// adds no wrapper, clock, classification, or atomic work to normal launches.
+// When disabled, guest imports bind directly to glibc with no wrapper, clock,
+// classification, or atomic work.
 func SetBionicSyncDiagnostics(enabled bool) {
 	v := C.int(0)
 	if enabled {
@@ -120,8 +120,8 @@ func bionicSyncPath(raw C.TipsyBionicSyncPathStats) BionicSyncPathStats {
 }
 
 // BionicSyncSnapshot reads aggregate counters. A reset exchanges each atomic
-// counter independently, so a live client can keep recording without losing
-// call increments between consecutive interval snapshots.
+// counter independently, so a live client keeps recording without losing
+// increments between snapshots.
 func BionicSyncSnapshot(reset bool) BionicSyncStats {
 	var raw C.TipsyBionicSyncStats
 	r := C.int(0)

@@ -8,9 +8,9 @@ package android
 import "testing"
 
 // TestEGLGuestHandoffUsesExactRetainedSurfaceIdentity exercises the Android
-// shim without loading graphics. Its direct host-EGL fixture covers failed
-// creation and swap, zero-XID windows, wrong display/surface calls, destroy,
-// numeric surface reuse, and externally re-entrant create/destroy callbacks.
+// shim without loading graphics, covering failed creation and swap, zero-XID
+// windows, wrong display/surface calls, destroy, surface reuse, and
+// re-entrant create/destroy callbacks.
 func TestEGLGuestHandoffUsesExactRetainedSurfaceIdentity(t *testing.T) {
 	got := testEGLGuestHandoffFixture()
 	if !got.passed {

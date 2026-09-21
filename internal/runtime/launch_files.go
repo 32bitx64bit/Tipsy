@@ -26,17 +26,17 @@ func absExistingDir(path string) string {
 	return abs
 }
 
-// prepareRuntimeFiles installs the CA bundle the official APK shipped under
-// Android FilesDir. It deliberately does not alter process-global CWD: normal
-// X11 startup depends on the caller's existing relative-resource context.
+// prepareRuntimeFiles installs the CA bundle the official APK ships. It must
+// not alter process-global CWD: X11 startup relies on the caller's relative
+// resource context.
 func prepareRuntimeFiles(filesDir, assetsDir string) error {
 	return ensureRobloxCABundle(filesDir, assetsDir)
 }
 
-// ensureRobloxCABundle prepares the exact relative path libroblox opens.
-// The official APK asset is authoritative; an absent or unusable asset is a
-// startup error.  Falling back to the host CA store could silently change the
-// client's trust configuration, so it is deliberately not supported here.
+// ensureRobloxCABundle installs the CA bundle at the relative path the engine
+// opens. The official APK asset is authoritative; a missing or unusable asset
+// is a startup error. It never falls back to the host CA store, which would
+// silently change the client's trust configuration.
 func ensureRobloxCABundle(filesDir, assetsDir string) error {
 	if strings.TrimSpace(filesDir) == "" {
 		return fmt.Errorf("files directory is empty")

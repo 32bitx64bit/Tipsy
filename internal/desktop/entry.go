@@ -71,9 +71,7 @@ func ExecutableLauncher(guiPath string, medium Medium) Launcher {
 
 // QuoteExecArgument quotes one argument for an Exec= line per the Desktop
 // Entry Specification: double quotes, with `"`, "`", "$" and "\" escaped by a
-// backslash. The general string escape rule is applied before the quoting
-// rule, so a literal backslash needs four characters. Paths without reserved
-// characters are still quoted so a space can never split the command.
+// backslash; paths are always quoted so a space can never split the command.
 func QuoteExecArgument(argument string) string {
 	var b strings.Builder
 	b.WriteByte('"')
@@ -196,7 +194,7 @@ const (
 
 func writeMarkers(b *strings.Builder, opts RenderOptions) {
 	if opts.Launcher.Medium == MediumUnknown || opts.Launcher.Medium == MediumSystem && opts.Launcher.Origin == "" {
-		// Shared templates carry no markers; packaging installs them as-is.
+		// Shared templates carry no markers.
 		return
 	}
 	fmt.Fprintf(b, "%s=%s\n", markerMedium, opts.Launcher.Medium)

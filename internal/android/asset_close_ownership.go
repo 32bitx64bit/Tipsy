@@ -15,10 +15,8 @@ import (
 	"unsafe"
 )
 
-// assetBorrowRelease is a per-AAsset ownership lease. The opaque token crosses
-// C, not a Go data pointer: a future filesystem owner may capture its own pin
-// accounting in release without exposing asset data, paths, byte counts, or
-// handles to the C ABI.
+// assetBorrowRelease is a per-AAsset ownership lease. The opaque token
+// crosses C instead of asset data, paths, byte counts, or handles.
 var assetBorrowReleases struct {
 	sync.Mutex
 	next    uintptr
@@ -36,7 +34,7 @@ func registerAssetBorrowRelease(release func()) uintptr {
 	}
 	for {
 		assetBorrowReleases.next++
-		// Zero deliberately means no Go lease in the C ABI.
+		// Zero means no Go lease in the C ABI.
 		if assetBorrowReleases.next == 0 {
 			continue
 		}
@@ -47,9 +45,9 @@ func registerAssetBorrowRelease(release func()) uintptr {
 	}
 }
 
-// releaseAssetBorrow is idempotent. It removes the lease before running the
-// owner callback, so a callback may cause unrelated asset operations without
-// retaining the registry lock or allowing duplicate pin release.
+// releaseAssetBorrow is idempotent: it removes the lease before running the
+// callback, so a callback may cause unrelated asset operations without
+// holding the registry lock.
 func releaseAssetBorrow(token uintptr) {
 	if token == 0 {
 		return
@@ -65,8 +63,7 @@ func releaseAssetBorrow(token uintptr) {
 
 // newBorrowedAsset constructs an owned=0 AAsset with an opaque Go release
 // lease. If C allocation fails, release runs immediately; otherwise exactly
-// one valid C AAsset_close consumes it. Filesystem should use this only after
-// it has pinned a blob and made its close callback able to release that pin.
+// one AAsset_close consumes it. Callers pin the blob before constructing.
 func newBorrowedAsset(buffer unsafe.Pointer, length int64, fd int, release func()) unsafe.Pointer {
 	token := registerAssetBorrowRelease(release)
 	asset := unsafe.Pointer(C.tipsy_AAsset_from_buffer_with_release(
@@ -77,9 +74,8 @@ func newBorrowedAsset(buffer unsafe.Pointer, length int64, fd int, release func(
 	return asset
 }
 
-// closeAssetForTest drives the real C AAsset_close path because Go test files
-// cannot import C directly. It is intentionally package-private and has no
-// production callers.
+// closeAssetForTest drives the real C AAsset_close path; Go test files
+// cannot import C directly.
 func closeAssetForTest(asset unsafe.Pointer) {
 	C.tipsy_AAsset_close((*C.AAsset)(asset))
 }

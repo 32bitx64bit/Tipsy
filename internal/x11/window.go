@@ -31,9 +31,9 @@ var (
 const RobloxWindowTitle = "Roblox - Tipsy"
 
 // RobloxMinimumWidth and RobloxMinimumHeight are the minimum logical X11
-// client pixels accepted for the official Android client. A real resize storm
-// below this floor re-enters its native presenter and can crash it; these are
-// X11 client pixels because the desktop Android contract uses density 1.
+// client pixels for the official Android client; a resize storm below this
+// floor can crash its native presenter. They are client pixels because the
+// desktop Android contract uses density 1.
 const (
 	RobloxMinimumWidth  = 1280
 	RobloxMinimumHeight = 720
@@ -61,11 +61,10 @@ type Window struct {
 	// 256-wide event array on every InputReady wake.
 	inputScratch any
 	// inputEvents is the reused Go drain target. Pump is the sole consumer
-	// for a window (the launch loop, or the single-window Open probe), so the
-	// backing array is overwritten only after notifyInput returns. Pump clears
-	// it afterwards so committed input text is not retained. Direct
-	// drainInputLocked callers must finish with the slice before draining
-	// again.
+	// for a window, so the backing array is overwritten only after
+	// notifyInput returns. Pump clears it afterwards so committed input text
+	// is not retained. Direct drainInputLocked callers must finish with the
+	// slice before draining again.
 	inputEvents []InputEvent
 	// startupMeasurementObservers are opt-in, per-window callbacks for the
 	// two fixed startup-measurement edges. They carry no X event payload,
@@ -75,9 +74,9 @@ type Window struct {
 	startupMeasurementMapEnabled      bool
 	startupMeasurementDrawableEnabled bool
 	startupMeasurementDrawableArmed   bool
-	// startupMeasurementScrollTestDriver is a single, test-only capability.
-	// It is deliberately distinct from ordinary input subscriptions: no normal
-	// launch creates it, and it permits one fixed wheel dispatch at most.
+	// startupMeasurementScrollTestDriver is a single, test-only capability
+	// distinct from ordinary input subscriptions; it permits one fixed wheel
+	// dispatch at most.
 	startupMeasurementScrollTestDriverGeneration uint64
 	startupMeasurementScrollTestDriverActive     bool
 	startupMeasurementScrollTestDriverDispatched bool
@@ -86,19 +85,15 @@ type Window struct {
 // InputKind classifies a captured window input event.
 type InputKind uint8
 
-// Captured input kinds.
 const (
 	// InputFocus is a real FocusIn/FocusOut on the window.
 	InputFocus InputKind = iota
 	// InputKey is a key press/release. Non-text keys carry an Android
-	// KeyCode; printable physical keys also carry their Android KeyCode for
-	// the direct Roblox key route. A printable KeyPress is followed by a
-	// separate InputText containing X11's actual committed UTF-8 text.
-	// KeyCode 0 is retained only for an unrecognized KeySym.
+	// KeyCode; a printable KeyPress is followed by a separate InputText with
+	// X11's committed UTF-8 text. KeyCode 0 means an unrecognized KeySym.
 	InputKey
 	// InputPointer is a button press/release or window-relative pointer
-	// motion. Both ordinary hover and button-held motion are delivered;
-	// the direct Roblox mouse path needs their continuous positions.
+	// motion. Both ordinary hover and button-held motion are delivered.
 	InputPointer
 	// InputScroll is one real core-X11 wheel detent. Vertical wheel buttons
 	// 4/5 carry ScrollY +1/-1; horizontal buttons 6/7 carry ScrollX -1/+1.
@@ -110,9 +105,8 @@ const (
 	// before a later pointer event uses the new window coordinates.
 	InputResize
 	// InputText is text genuinely committed by the X11 input method for one
-	// KeyPress. It is separate from InputKey because Android/Roblox likewise
-	// separates physical key edges from RbxKeyboard/EditText text changes.
-	// Consumers must never log Text: it may contain credentials.
+	// KeyPress, separate from InputKey. Consumers must never log Text: it may
+	// contain credentials.
 	InputText
 	// InputPointerCapture reports a host pointer-lock transition requested by
 	// Roblox's native lock getter. Capture failures carry CaptureStatus and do
@@ -195,11 +189,10 @@ func clearActiveWindow(w *Window) {
 }
 
 // SetPointerLock applies Roblox's current native mouse-lock request to the
-// sole client window. First-person / shift-lock grabs warp to the window
-// center so look has travel room in every direction. Release leaves the
-// desktop pointer at that same center rather than teleporting back to the
-// pre-lock coordinate. Acquisition is refused while the window is unfocused
-// so Alt-Tab cannot leave a background grab in place.
+// sole client window. First-person / shift-lock grabs warp to and confine at
+// the window center; release leaves the desktop pointer there. Acquisition is
+// refused while the window is unfocused so Alt-Tab cannot leave a background
+// grab in place.
 func SetPointerLock(locked bool) (bool, error) {
 	return setPointerLock(locked, anchorCenterSticky)
 }
@@ -212,17 +205,15 @@ func SetPointerLockAtCursor(locked bool) (bool, error) {
 }
 
 // SetPointerLockAtCenter is the desktop zoom-lock grab: it warps to and
-// confines at the window center like SetPointerLock, so release leaves the
-// desktop pointer at the center where the engine cursor reappears, but it is
-// not sticky — focus loss drops it and only the caller decides whether the
-// next motion re-acquires.
+// confines at the window center like SetPointerLock, but it is not sticky —
+// focus loss drops it and only the caller decides whether the next motion
+// re-acquires.
 func SetPointerLockAtCenter(locked bool) (bool, error) {
 	return setPointerLock(locked, anchorCenter)
 }
 
 // pointerAnchor selects where a grab confines the pointer and whether the
-// native side re-applies it by itself when focus returns. The values are the
-// wire encoding of tipsy_x11_set_pointer_lock's center argument.
+// native side re-applies it by itself when focus returns.
 type pointerAnchor int
 
 const (
@@ -248,10 +239,8 @@ func setPointerLock(locked bool, anchor pointerAnchor) (bool, error) {
 
 // SetCursorVisible swaps the sole client window's cursor between the
 // inherited host cursor (visible) and the transparent Roblox cursor
-// (hidden). The official Android client always hides the OS cursor over the
-// game surface; the desktop persistent-capture toggle shows it only while
-// the operator has explicitly released capture via LeftAlt. Visibility is
-// window-scoped: leaving the window restores the host cursor either way.
+// (hidden). Visibility is window-scoped: leaving the window restores the
+// host cursor either way.
 func SetCursorVisible(visible bool) {
 	activeWindow.Lock()
 	w := activeWindow.w
@@ -269,8 +258,8 @@ func SetCursorVisible(visible bool) {
 
 // OnInput subscribes fn to captured input events of every open window.
 // Tipsy owns a single Roblox window per process. fn runs on the caller of
-// Pump (the launch loop after InputReady) and must not block or re-enter
-// Pump. The returned cancel func removes the subscription.
+// Pump and must not block or re-enter Pump. The returned cancel func removes
+// the subscription.
 func OnInput(fn func(InputEvent)) (cancel func()) {
 	if fn == nil {
 		return func() {}
@@ -321,10 +310,9 @@ func (w *Window) Focused() bool {
 }
 
 // notifyInput delivers events to subscribers outside every package lock.
-// Event order is deliberately outermost: each subscriber sees a resize
-// before any pointer event that X11 delivered after that ConfigureNotify.
-// This prevents direct pointer coordinates from outrunning the Android
-// surface geometry after a user resizes the window.
+// Event order is outermost: each subscriber sees a resize before any pointer
+// event X11 delivered after that ConfigureNotify, so pointer coordinates
+// cannot outrun the Android surface geometry.
 func notifyInput(evs []InputEvent) {
 	if len(evs) == 0 {
 		return

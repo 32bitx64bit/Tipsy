@@ -10,9 +10,8 @@ import "errors"
 // InputNodeDir is the default evdev directory (Linux only).
 const InputNodeDir = "/dev/input"
 
-// MaxGamepads caps simultaneous pads (lean single-pad build). Mirrors
-// device.go: lowest-sorted path is player 1, a second pad is ignored
-// honestly, never faked.
+// MaxGamepads caps simultaneous pads: the lowest-sorted path is player 1,
+// and a second pad is ignored honestly, never faked.
 const MaxGamepads = 1
 
 var (
@@ -62,7 +61,7 @@ func OpenDevice(path string) (*Device, error) { return nil, ErrNoGamepad }
 func OpenFirstGamepad(dir string) (*Device, error) { return nil, ErrNoGamepad }
 
 // watchInputDir is unavailable off Linux: the caller keeps its periodic
-// rescan fallback. Mirrors device.go.
+// rescan fallback.
 func watchInputDir(dir string, stop <-chan struct{}, onEvent func()) error {
 	return errors.New("gamepad: inotify unavailable off Linux")
 }

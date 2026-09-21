@@ -7,7 +7,7 @@ const (
 	// DisplayPrimary pins new windows to the current main monitor.
 	DisplayPrimary = "primary"
 	// DisplayPointer leaves placement to the window manager (typically the
-	// pointer), matching Tipsy's previous unpositioned XCreateWindow path.
+	// pointer).
 	DisplayPointer = "pointer"
 )
 

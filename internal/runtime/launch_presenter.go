@@ -22,17 +22,16 @@ func stutterDiagnosticsRequested(getenv func(string) string) bool {
 	return getenv != nil && getenv("TIPSY_STUTTER_DIAG") == "1"
 }
 
-// Present timing can run without the synchronization wrappers so millions of
-// guest mutex calls cannot perturb a frame-timing control capture.
+// Present timing can run without the synchronization wrappers so guest mutex
+// calls cannot perturb the timing capture.
 func vulkanPresentTimingRequested(getenv func(string) string) bool {
 	return getenv != nil && (getenv("TIPSY_PRESENT_TIMING") == "1" || stutterDiagnosticsRequested(getenv))
 }
 
 // vulkanPresentGapStatistics is the privacy-minimized result of one bounded
-// vkQueuePresentKHR return-observer batch. It deliberately keeps no absolute
-// timestamp, sequence number, renderer content, or frame data. A gap ends at
-// the host wrapper's VK_SUCCESS return; it is not a scanout, displayed-frame,
-// or input-latency measurement.
+// vkQueuePresentKHR return-observer batch; it keeps no absolute timestamp,
+// sequence number, renderer content, or frame data. A gap ends at the host
+// wrapper's VK_SUCCESS return, not a scanout or input-latency measurement.
 type vulkanPresentGapStatistics struct {
 	Eligible             bool
 	Unavailable          vulkanPresentGapUnavailableReason
@@ -49,9 +48,9 @@ type vulkanPresentGapStatistics struct {
 	Overwritten          uint64
 }
 
-// vulkanPresentGapUnavailableReason is a fixed result label. It is not drawn
-// from client output and makes a short or overwritten batch explicitly
-// ineligible instead of allowing a partial interval to masquerade as an arm.
+// vulkanPresentGapUnavailableReason is a fixed result label, not drawn from
+// client output; a short or overwritten batch is explicitly ineligible rather
+// than a partial result.
 type vulkanPresentGapUnavailableReason uint8
 
 const (
@@ -78,8 +77,8 @@ func (r vulkanPresentGapUnavailableReason) String() string {
 
 // summarizeVulkanPresentGaps calculates nearest-rank gap percentiles only
 // between retained, increasing adjacent successful-return timestamps. An
-// overwritten or short batch is explicitly ineligible: callers must not
-// derive a partial result or bridge the missing interval.
+// overwritten or short batch is ineligible; callers must not derive a partial
+// result or bridge the missing interval.
 func summarizeVulkanPresentGaps(batch android.VulkanPresentTimingBatch) vulkanPresentGapStatistics {
 	stats := vulkanPresentGapStatistics{
 		Samples:     uint64(len(batch.Samples)),
@@ -154,9 +153,9 @@ func logVulkanPresentTiming(batch android.VulkanPresentTimingBatch) {
 		"overwritten", stats.Overwritten)
 }
 
-// logVulkanPresentCallDurations reports the opt-in E2b host-call histogram.
-// The caller runs it only inside the existing present-timing diagnostics
-// block, so the default path neither reads nor logs anything.
+// logVulkanPresentCallDurations reports the opt-in host-call histogram. The
+// caller runs it only inside the present-timing diagnostics block, so the
+// default path neither reads nor logs anything.
 func logVulkanPresentCallDurations(stats android.VulkanPresentCallDurationStatistics) {
 	if stats.Count == 0 && stats.Overwritten == 0 {
 		return
@@ -214,18 +213,15 @@ func logStutterDiagnostics(wait android.StutterWaitStats, calls jni.JNIStutterSt
 }
 
 // stutterInputDrainDiagnostics keeps the X11 input-drain observer on the same
-// explicitly opted-in lifecycle as the existing shared-wait diagnostics. The
-// function fields make its logger and counter source deterministic in runtime
-// tests; production supplies only aggregate-only X11 APIs.
+// explicitly opted-in lifecycle as the shared-wait diagnostics.
 type stutterInputDrainDiagnostics struct {
 	setEnabled func(bool)
 	snapshot   func(reset bool) x11.InputDrainStats
 	log        func(msg string, args ...any)
 }
 
-// begin clears counters before the first measured interval. A disabled
-// capture intentionally makes no source or logger call, preserving zero
-// additional work on ordinary launches.
+// begin clears counters before the first measured interval; a disabled capture
+// makes no source or logger call.
 func (d stutterInputDrainDiagnostics) begin(enabled bool) {
 	if !enabled || d.setEnabled == nil || d.snapshot == nil {
 		return
@@ -234,8 +230,8 @@ func (d stutterInputDrainDiagnostics) begin(enabled bool) {
 	_ = d.snapshot(true)
 }
 
-// logInterval emits only fixed-size, content-free aggregate counters. It is
-// called by the existing diagnostics ticker, never from the input pump.
+// logInterval emits only fixed-size, content-free aggregate counters, from the
+// diagnostics ticker and never the input pump.
 func (d stutterInputDrainDiagnostics) logInterval(enabled bool) {
 	if !enabled || d.snapshot == nil || d.log == nil {
 		return
@@ -273,8 +269,7 @@ func (d stutterInputDrainDiagnostics) logInterval(enabled bool) {
 		"goDrainBuckets", stats.GoDrain.Buckets)
 }
 
-// end reports the final partial interval before disabling the observer. This
-// matches the established Android/JNI stutter teardown sequence.
+// end reports the final partial interval before disabling the observer.
 func (d stutterInputDrainDiagnostics) end(enabled bool) {
 	if !enabled {
 		return
@@ -285,10 +280,9 @@ func (d stutterInputDrainDiagnostics) end(enabled bool) {
 	}
 }
 
-// jniStringPathDiagnosticFields is the fixed, content-free subset Runtime
-// emits for one JNI string boundary. Keeping the aggregate grouped by an
-// explicit vtable path avoids object, Java-class, handle, or payload identity
-// in a gameplay capture.
+// jniStringPathDiagnosticFields is the fixed, content-free subset Runtime emits
+// for one JNI string boundary, grouped by vtable path to avoid object, class,
+// handle, or payload identity in a capture.
 type jniStringPathDiagnosticFields struct {
 	Calls                uint64
 	Succeeded            uint64
@@ -321,9 +315,9 @@ func jniStringDiagnosticFields(stats jni.JNIStringPathStats) jniStringPathDiagno
 	}
 }
 
-// stutterJNIStringDiagnostics takes interval snapshots only inside the
-// existing exact opt-in diagnostic lifecycle. JNI owns enabling its observer
-// through SetStutterDiagnostics; Runtime only clears and logs aggregates.
+// stutterJNIStringDiagnostics takes interval snapshots only inside the opt-in
+// diagnostic lifecycle. JNI owns enabling the observer via SetStutterDiagnostics;
+// Runtime only clears and logs aggregates.
 type stutterJNIStringDiagnostics struct {
 	snapshot func(reset bool) jni.JNIStringDiagnostics
 	log      func(msg string, args ...any)
@@ -356,9 +350,9 @@ func (d stutterJNIStringDiagnostics) end(enabled bool) {
 	d.logInterval(enabled)
 }
 
-// configureEGLPresentationPolicy applies the independent VSync choice at the
-// Android EGL compatibility boundary. FPS mode and display refresh do not
-// participate: off always requests interval zero; on always requests one.
+// configureEGLPresentationPolicy applies the VSync choice at the Android EGL
+// boundary. FPS mode and display refresh do not participate: off requests
+// interval zero, on requests one.
 func configureEGLPresentationPolicy(settings clientsettings.Settings) bool {
 	unthrottled := settings.NeedsUnthrottledPresentation()
 	android.SetEGLVSync(settings.VSync)
@@ -373,10 +367,9 @@ func configureEGLPresentationPolicy(settings clientsettings.Settings) bool {
 	return unthrottled
 }
 
-// configureMesaVBlankMode must run before EGLDisplay/context creation. Mesa's
-// application-default mode (1) respects the interval-one VSync policy, while
-// mode 0 removes the driver-level vblank wait that can otherwise retain a
-// refresh-rate cap after EGL accepts interval zero.
+// configureMesaVBlankMode must run before EGLDisplay/context creation. Mode 0
+// removes the driver vblank wait that would otherwise retain a refresh-rate cap
+// after EGL accepts interval zero; mode 1 respects interval-one VSync.
 func configureMesaVBlankMode(vsync bool) error {
 	mode := "0"
 	if vsync {
@@ -402,15 +395,14 @@ func (p *clientPresenter) refreshRates() (float32, []float32) {
 	if p == nil {
 		return 0, nil
 	}
-	// WindowRefreshRates performs a fresh combined XRandR query and reports
-	// zero current / empty supported on failure, so the caller can keep the
-	// generation pending for retry instead of publishing stale rates.
+	// WindowRefreshRates does a fresh XRandR query and reports zero current / empty
+	// supported on failure, so the caller keeps the generation pending for retry.
 	current, supported := graphics.WindowRefreshRates(p.xdpy, p.xid)
 	return float32(current), supported
 }
 
 // displayRefreshPublication tracks the X11 generation whose complete rate pair
-// the client has accepted. An unchanged window must do no X server round trips.
+// the client has accepted; an unchanged window does no X server round trips.
 type displayRefreshPublication struct {
 	version   uint64
 	current   float32
@@ -423,8 +415,8 @@ func (p *displayRefreshPublication) update(version uint64, query func() (float32
 	}
 	current, supported := query()
 	if current <= 0 {
-		// Transient XRandR failure keeps this generation pending for the next
-		// bounded stats tick; it must not publish a guessed monitor rate.
+		// A transient XRandR failure keeps this generation pending; never publish a
+		// guessed monitor rate.
 		return nil
 	}
 	if displayRefreshRatesChanged(p.current, p.supported, current, supported) {
@@ -433,8 +425,8 @@ func (p *displayRefreshPublication) update(version uint64, query func() (float32
 		}
 		p.current, p.supported = current, supported
 	}
-	// The caller captured version before querying. Events arriving while the
-	// server replies or JNI publishes therefore remain pending.
+	// The caller captured version before querying, so events arriving during the
+	// query or publish remain pending.
 	p.version = version
 	return nil
 }
@@ -455,9 +447,8 @@ func (p *clientPresenter) close() {
 		_ = p.egl.Close()
 	}
 	if p.wsiBound {
-		// The binding refers to this X11 Display and Window. Clear it before
-		// the outer launch defer closes the X11 window, including EGL-selected
-		// sessions that made an early Android Vulkan-surface request.
+		// The binding refers to this X11 Display and Window; clear it before the
+		// outer launch defer closes the X11 window.
 		android.UnbindVulkanWSI()
 		p.wsiBound = false
 	}
@@ -499,10 +490,9 @@ func bindClientPresenter(win *x11.Window, settings clientsettings.Settings, caps
 	presenter := &clientPresenter{xdpy: win.Display(), xid: win.XID(), vulkan: resolved == graphics.RendererVulkan}
 	logging.Logger(logging.CatGraphics).Info("resolved client renderer",
 		"choice", settings.Renderer, "resolved", resolved)
-	// The APK can request VK_KHR_android_surface during startup even when this
-	// process has selected EGL for guest presentation. The mapped X11 window is
-	// already the authoritative host WSI target, so retain this binding for the
-	// complete presenter lifetime instead of tying it to the selected backend.
+	// The APK can request VK_KHR_android_surface during startup even under EGL;
+	// the mapped X11 window is the authoritative host WSI target, so keep this
+	// binding for the presenter's lifetime regardless of backend.
 	if err := android.BindVulkanWSI(win.Display(), win.XID()); err != nil {
 		return nil, err
 	}
@@ -523,20 +513,15 @@ func bindClientPresenter(win *x11.Window, settings clientsettings.Settings, caps
 	}
 	presenter.egl = eglSurf
 	configureEGLPresentationPolicy(settings)
-	// The C sentinel thread owns the first present: it makes the context
-	// current, clears the back buffer to opaque black, presents exactly one
-	// frame, then retires once the client presenter is observed
-	// (internal/graphics egl.c). Tipsy must not swap first here: an undefined
-	// pre-clear present would flash garbage and race the sentinel's single
-	// defined frame.
+	// The C sentinel thread owns the first present; Tipsy must not swap first here,
+	// or an undefined pre-clear present would flash garbage and race the sentinel.
 	if err := eglSurf.ReleaseCurrent(); err != nil {
 		presenter.close()
 		return nil, fmt.Errorf("egl release: %w", err)
 	}
 	if err := eglSurf.StartSwapThread(); err != nil {
-		// The sentinel thread is best-effort observation/paint only: the
-		// official client still owns its own presentation, so a failed start
-		// stays non-fatal but must not be silent.
+		// The sentinel thread is best-effort only; the official client owns its own
+		// presentation, so a failed start is non-fatal but must not be silent.
 		logging.Logger(logging.CatGraphics).Error("EGL sentinel present unavailable", "err", err)
 	}
 	return presenter, nil

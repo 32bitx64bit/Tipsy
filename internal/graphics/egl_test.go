@@ -61,9 +61,7 @@ func TestFirstFrame(t *testing.T) {
 	}
 	defer e.Close()
 
-	// Exercise the EGL-owning-thread Swap primitive. Production's sentinel
-	// path is StartSwapThread, which clears and presents its black frame
-	// inside C instead of exposing a glClear wrapper.
+	// Exercise the EGL-owning-thread Swap primitive.
 	if err := e.Swap(); err != nil {
 		t.Fatalf("Swap: %v", err)
 	}
@@ -108,9 +106,8 @@ func TestSwapThread(t *testing.T) {
 }
 
 // TestSwapThreadRetiresOnVerifiedGuestSwap proves the normal handoff does not
-// inspect pixels. The Android EGL bridge supplies the exact XID, host display,
-// host surface, and generation only after its real eglSwapBuffers succeeds.
-// The C sentinel waits on a condition and exits promptly on that one event.
+// inspect pixels: the Android EGL bridge supplies the exact XID, display,
+// surface, and generation only after its real swap succeeds.
 func TestSwapThreadRetiresOnVerifiedGuestSwap(t *testing.T) {
 	captured := captureGraphicsLogs(t)
 	ensureDisplay(t)
@@ -177,9 +174,7 @@ func TestSwapThreadRetiresOnVerifiedGuestSwap(t *testing.T) {
 }
 
 // TestSwapThreadFallbackIsStrictlyBounded records the compatibility-only
-// fallback without pretending it is a client rendering result. No guest
-// surface is registered, so exactly eight 125 ms readback opportunities are
-// permitted and the watcher is woken when the sentinel exits.
+// fallback without pretending it is a client rendering result.
 func TestSwapThreadFallbackIsStrictlyBounded(t *testing.T) {
 	ensureDisplay(t)
 	w, err := x11.Open("Tipsy bounded EGL fallback", 64, 64)
@@ -220,8 +215,7 @@ func TestSwapThreadFallbackIsStrictlyBounded(t *testing.T) {
 }
 
 // TestSwapThreadWatcherExitsOnStop covers the no-handoff lifetime: a lone
-// sentinel never wakes the watcher, so it must exit promptly when the thread
-// is stopped (no standing poll, no handoff log).
+// sentinel never wakes the watcher, so it must exit promptly when stopped.
 func TestSwapThreadWatcherExitsOnStop(t *testing.T) {
 	captured := captureGraphicsLogs(t)
 	ensureDisplay(t)
@@ -248,7 +242,7 @@ func TestSwapThreadWatcherExitsOnStop(t *testing.T) {
 		t.Fatalf("StartSwapThread: %v", err)
 	}
 	done := watcherDone(t, e)
-	// H6: the sentinel pthread must be externally attributable by name.
+	// The sentinel pthread must be externally attributable by name.
 	if runtime.GOOS == "linux" && !waitThreadName(t, "tip.eglswap") {
 		t.Fatal("EGL swap thread is not named tip.eglswap")
 	}
@@ -416,7 +410,6 @@ func watcherDone(t *testing.T, e *EGL) chan struct{} {
 	return e.swapDone
 }
 
-// waitThreadName polls /proc until a thread of this process carries name.
 func waitThreadName(t *testing.T, name string) bool {
 	t.Helper()
 	deadline := time.Now().Add(2 * time.Second)
@@ -436,8 +429,7 @@ func waitThreadName(t *testing.T, name string) bool {
 }
 
 // graphicsLogCapture collects slog messages while a test replaces the default
-// logger. logging.Logger re-resolves the current slog.Default, so records from
-// the handoff path reach this handler.
+// logger, which logging.Logger re-resolves.
 type graphicsLogCapture struct {
 	mu      sync.Mutex
 	records []string
@@ -498,8 +490,8 @@ func ensureDisplay(t *testing.T, extraArgs ...string) {
 		t.Skipf("Xvfb start failed: %v", err)
 	}
 	t.Cleanup(func() {
-		// Let Xvfb remove its socket/lock. SIGKILL alone leaves stale
-		// display locks and eventually turns repeated suites into skips.
+		// Let Xvfb remove its socket/lock; SIGKILL alone leaves stale display
+		// locks.
 		_ = cmd.Process.Signal(os.Interrupt)
 		done := make(chan struct{})
 		go func() {

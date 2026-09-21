@@ -551,8 +551,7 @@ func TestGetScreenPhysicalSizeInMillimeters(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	// Wired physical size — what launch.go sets from the X server's
-	// DisplayWidthMM/DisplayHeightMM on the already-open Display*.
+	// Wired physical size.
 	vm.SetDisplayPhysicalSizeMM(527, 296)
 	v, ok := vm.dispatch(jnull(), "java/lang/Class", "getScreenPhysicalSizeInMillimeters", "(Landroid/content/Context;)Landroid/graphics/Point;", nil)
 	if !ok {
@@ -579,8 +578,7 @@ func TestGetScreenPhysicalSizeFallback(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	// No X11 physical size wired: the standard 96-DPI derivation from
-	// the pixel size (px * 25.4 / 96, rounded): 1280x720 -> 339x191.
+	// No X11 physical size wired: the 96-DPI pixel derivation.
 	vm.SetDisplaySize(1280, 720)
 	w, h := vm.screenPhysicalSizeMM()
 	if w != 339 || h != 191 {

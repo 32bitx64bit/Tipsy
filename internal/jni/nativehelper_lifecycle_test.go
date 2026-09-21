@@ -12,11 +12,8 @@ import (
 	"testing"
 )
 
-// TestNativeHelperExperienceLifecycleFanout drives the production JNI
-// dispatcher through the APK-declared callbacks. It proves a real exit
-// sequence reaches composable lifecycle observers while preserving the
-// existing onGameLoaded observer used by Discord presence. No route is
-// executed here: event ordering is the GameActivity handoff boundary.
+// TestNativeHelperExperienceLifecycleFanout drives the APK-declared lifecycle
+// callbacks to composable observers while preserving the existing onGameLoaded observer.
 func TestNativeHelperExperienceLifecycleFanout(t *testing.T) {
 	vm, err := NewVM()
 	if err != nil {
@@ -95,8 +92,7 @@ func TestNativeHelperExperienceLifecycleFanout(t *testing.T) {
 		}
 	}
 
-	// Exact class and signature matching prevent unrelated Java calls from
-	// requesting a post-experience action.
+	// Exact class and signature matching prevent unrelated calls from being claimed.
 	if _, handled := vm.dispatch(idToJobject(receiver.id), "java/io/File", "gameActivity_onExperienceStop", "(D)V", packJdouble(1)); handled {
 		t.Fatal("lookalike class handled lifecycle callback")
 	}
@@ -105,9 +101,7 @@ func TestNativeHelperExperienceLifecycleFanout(t *testing.T) {
 	}
 }
 
-// TestNativeHelperLifecycleUnsubscribeMayRunFromListener verifies the
-// registry's re-entrant cleanup contract. This is needed for a GameActivity
-// session to release its observer without racing the engine callback thread.
+// TestNativeHelperLifecycleUnsubscribeMayRunFromListener verifies the registry's re-entrant cleanup contract.
 func TestNativeHelperLifecycleUnsubscribeMayRunFromListener(t *testing.T) {
 	var calls atomic.Int64
 	var cancel func()

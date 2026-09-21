@@ -178,10 +178,8 @@ func BenchmarkNotifyInput(b *testing.B) {
 }
 
 // BenchmarkDrainInputLockedBatch is a synthetic captured-motion load: N
-// non-coalescing pointer downs, then one drain. It is Tipsy ring+Go cost only
-// (no X server, warp, or JNI). 1 and 8 model 1 kHz / 8 kHz samples that
-// arrive in one coalesced wake; 64 and 128 are burst/backlog sizes under the
-// 255-slot usable ring.
+// non-coalescing pointer downs, then one drain. It measures Tipsy ring+Go
+// cost only.
 func BenchmarkDrainInputLockedBatch(b *testing.B) {
 	for _, n := range []int{1, 8, 64, 128} {
 		b.Run(fmt.Sprintf("n=%d", n), func(b *testing.B) {

@@ -1,8 +1,6 @@
-// Command tipsy-gui is the Qt 6 desktop application for Tipsy.
-//
-// It contains presentation and workflow code only. Package provenance,
-// extraction, client settings and launch behavior are delegated to the shared
-// backend used by the CLI.
+// Command tipsy-gui is the Qt 6 desktop application for Tipsy. It contains
+// presentation and workflow code only; package provenance, extraction, client
+// settings and launch behavior are delegated to the shared backend.
 package main
 
 import (

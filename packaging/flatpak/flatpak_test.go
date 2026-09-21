@@ -11,10 +11,8 @@ import (
 	"testing"
 )
 
-// The publish workflow once failed at build-flatpak.sh's own sanity check
-// after the manifest's go build line wrapped: the rewrite was fine, the
-// grep expected the old shape. Render through the script (no flatpak needed)
-// so the manifest and its checks are pinned together.
+// Render through build-flatpak.sh (no flatpak needed) so the manifest and its
+// own sanity checks are pinned together.
 func TestBuildFlatpakRendersManifestForBothModes(t *testing.T) {
 	if _, err := exec.LookPath("bash"); err != nil {
 		t.Skip("bash is unavailable")

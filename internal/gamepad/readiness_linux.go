@@ -22,10 +22,8 @@ import (
 // button value.
 //
 // ReadyToFrame* is the elapsed host work from observing an evdev-ready fd to
-// returning from OnFrame for a completed SYN_REPORT. It is not physical input
-// latency, kernel event timestamp latency, or engine-consumption latency:
-// evdev timestamps are intentionally discarded and the engine has no delivery
-// acknowledgement at this boundary.
+// returning from OnFrame for a completed SYN_REPORT. It is not physical
+// input latency.
 type ControllerReadinessSnapshot struct {
 	InitialRescans  uint64
 	HotplugRescans  uint64
@@ -42,8 +40,7 @@ type ControllerReadinessSnapshot struct {
 
 // ControllerReadinessDiagnostics enables the snapshot accounting above. A nil
 // pointer is the normal production path and adds neither timing reads nor
-// counter locking. It is for instrumented captures only; clean visual input
-// acceptance must run with Diagnostics nil.
+// counter locking. It is for instrumented captures only.
 type ControllerReadinessDiagnostics struct {
 	mu sync.Mutex
 	s  ControllerReadinessSnapshot
@@ -135,11 +132,9 @@ const (
 // readinessRecoveryDeadline arms a single poll timeout after a failed
 // reconciliation. Each consecutive failure backs off to a bounded delay; a
 // successful reconciliation disarms it immediately so an otherwise healthy
-// inotify watch returns to an infinite poll.
-//
-// This is deliberately separate from an unavailable-watch retry. A working
-// watch does not prove that a Scan/Open race has resolved, and a failed Scan
-// or Open must therefore retain its own recovery deadline.
+// inotify watch returns to an infinite poll. It is separate from the
+// unavailable-watch retry, which must retain its own deadline because a
+// working watch does not prove that a Scan/Open race has resolved.
 type readinessRecoveryDeadline struct {
 	enabled  bool
 	initial  time.Duration
@@ -217,13 +212,13 @@ func earlierPollTimeout(current, candidate int) int {
 // ReadyPump owns one Manager's device reads, close/reopen transitions, and
 // inotify/recovery reconciliations for the lifetime of Run. No other
 // goroutine may call that Manager's Rescan, Close, or read its current Device
-// while Run is active. This is what prevents a read racing a close after an
-// unplug or event-node reuse.
+// while Run is active; this prevents a read racing a close after an unplug or
+// event-node reuse.
 //
-// Run waits in poll(2) on the current evdev fd, the /dev/input inotify fd, and
-// an eventfd written on shutdown. It has no idle ticker. A one-shot timeout is
-// armed only while an inotify watch cannot be installed or a reconciliation
-// has failed; a successful reconciliation disarms it immediately.
+// Run waits in poll(2) on the current evdev fd, the /dev/input inotify fd,
+// and an eventfd written on shutdown. It has no idle ticker. A one-shot
+// timeout is armed only while an inotify watch cannot be installed or a
+// reconciliation has failed; a successful reconciliation disarms it.
 type ReadyPump struct {
 	Manager *Manager
 
@@ -292,9 +287,9 @@ func (p *ReadyPump) Run(stop <-chan struct{}) error {
 			_ = watch.Close()
 		}
 	}()
-	// A failed opening attempt gets one immediate retry below. Later attempts
-	// are paced by watchRetry; its zero value means the immediate retry is
-	// pending, not a poll timeout.
+	// A failed opening attempt gets one immediate retry below; later
+	// attempts are paced by watchRetry, whose zero value means the immediate
+	// retry is pending, not a poll timeout.
 	watchRetryPending := watch == nil
 	var watchRetry time.Time
 	rescan := func(kind readinessRescanKind) {
@@ -314,14 +309,10 @@ func (p *ReadyPump) Run(stop <-chan struct{}) error {
 				watch = next
 				watchRetryPending = false
 				watchRetry = time.Time{}
-				// The watch is installed before this scan, closing the recovery
-				// race without an always-running rescan.
 				rescan(readinessRecovery)
 			} else {
 				p.reportRescanError(err)
 				if retryingWatch {
-					// Keep the legacy unavailable-watch reconciliation alive,
-					// but only on its bounded retry deadline.
 					rescan(readinessRecovery)
 				}
 				if recoveryEnabled {
@@ -362,9 +353,9 @@ func (p *ReadyPump) Run(stop <-chan struct{}) error {
 		}
 		if n == 0 {
 			now = time.Now()
-			// Let the top of the loop recreate a due watch first so its
-			// reconciliation is protected from the watcher gap. If that is
-			// not due, this was a Scan/Open recovery deadline.
+			// Recreate a due watch first so its reconciliation is
+			// protected from the watcher gap; otherwise this was a
+			// Scan/Open recovery deadline.
 			if watch == nil && watchRetryPending && !watchRetry.After(now) {
 				continue
 			}
@@ -395,7 +386,7 @@ func (p *ReadyPump) Run(stop <-chan struct{}) error {
 			}
 		}
 		if deviceIndex >= 0 && pollFDs[deviceIndex].Revents != 0 {
-			// A hotplug rescan above may have closed/replaced this fd. Never
+			// A hotplug rescan above may have closed/replaced this fd; never
 			// read a stale descriptor.
 			if _, current, _, ok := p.Manager.Slot(singlePadID); ok && current == dev {
 				if rescanned, err := p.consumeReadyDevice(dev, pollFDs[deviceIndex].Revents); rescanned {
@@ -471,8 +462,8 @@ func (p *ReadyPump) consumeReadyDevice(dev *Device, revents int16) (rescanned bo
 		}
 	}
 	if err != nil || revents&(unix.POLLERR|unix.POLLHUP|unix.POLLNVAL) != 0 {
-		// The same readiness owner drops, closes, synthesizes disconnect, and
-		// rescans. No separate watch goroutine can race the read above.
+		// The same readiness owner drops, closes, synthesizes disconnect,
+		// and rescans. No separate watch goroutine can race the read above.
 		p.Manager.dropCurrent()
 		return true, p.rescan(readinessHotplug)
 	}
@@ -481,11 +472,9 @@ func (p *ReadyPump) consumeReadyDevice(dev *Device, revents int16) (rescanned bo
 
 // ControllerIdleReadinessFixture is a bounded, content-free owner seam for
 // internal/perf. It creates a private empty watched directory, runs a clean
-// readiness pump for duration, and returns only aggregate readiness counters.
-// The fixture never opens /dev/input, reads input data, or reports a physical
-// input latency. Process CPU/RSS/context-switch metadata must come from the
-// existing direct-test-binary perf runner, and its context switches must not
-// be relabeled as controller wakeups.
+// readiness pump for duration, and returns only aggregate readiness
+// counters. The fixture never opens /dev/input, reads input data, or
+// reports a physical input latency.
 func ControllerIdleReadinessFixture(duration time.Duration) (ControllerReadinessSnapshot, error) {
 	if duration <= 0 || duration > 5*time.Second {
 		return ControllerReadinessSnapshot{}, fmt.Errorf("gamepad: idle readiness duration must be in (0, 5s], got %s", duration)

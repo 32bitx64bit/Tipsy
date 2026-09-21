@@ -59,9 +59,7 @@ import "C"
 
 import "unsafe"
 
-// These helpers are test fixtures for the native JNIEnv vtable. They are not
-// called on launch paths; keeping the C call boundary here means the tests do
-// not accidentally exercise exported Go functions directly.
+// These helpers are test fixtures for the native JNIEnv vtable.
 func referenceVtableNewGlobal(envRaw unsafe.Pointer, id int64) int64 {
 	return jobjectToID(uintptr(C.tipsy_reference_new_global((*C.JNIEnv)(envRaw), idToJobject(id))))
 }

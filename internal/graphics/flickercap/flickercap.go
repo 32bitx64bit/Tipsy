@@ -1,10 +1,8 @@
 // Copyright 2026 The Tipsy Authors
 // SPDX-License-Identifier: GPL-3.0-or-later
 
-// Package flickercap is a diagnostics-only helper that captures frames of an
-// already-mapped window for flicker analysis. It reads pixels of the named
-// target window only (never the desktop) and is not linked into the launch
-// path.
+// Package flickercap captures frames of an already-mapped window for flicker
+// analysis.
 package flickercap
 
 /*
@@ -50,8 +48,7 @@ func Attach(xid uintptr) (*Target, error) {
 	return &Target{dpy: dpy, win: C.ulong(xid), Width: int(w), Height: int(h)}, nil
 }
 
-// PaintWhite fills the window white through the capture connection. Used by
-// tests to simulate a foreign presenter's frames.
+// PaintWhite fills the window white through the capture connection.
 func (t *Target) PaintWhite() error {
 	if t == nil || t.dpy == 0 {
 		return fmt.Errorf("flickercap: closed target")
