@@ -129,3 +129,48 @@ func TestPrivateServerShareUsesOfficialNavigationHandoff(t *testing.T) {
 		t.Fatalf("native handoff=%q want %q", got, want)
 	}
 }
+
+func TestStartGameFieldsTypePrivateServerJoins(t *testing.T) {
+	const fakeCode = "SYNTHETIC-ACCESS-CODE"
+	req, err := rbxuri.Parse("roblox-player:1+launchmode:play+gameinfo:SYNTHETIC-TICKET+placeid:1818+accesscode:" + fakeCode)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fields := startGameFields(req)
+	if got := fields["joinRequestType"]; got != rbxuri.JoinRequestPrivateServer {
+		t.Fatalf("joinRequestType=%v, want private server", got)
+	}
+	if fields["accessCode"] != fakeCode || fields["placeId"] != int64(1818) {
+		t.Fatalf("fields=%v", fields)
+	}
+	if fields["joinAttemptOrigin"] != "Website" {
+		t.Fatalf("origin=%v, want Website for a roblox-player launch", fields["joinAttemptOrigin"])
+	}
+}
+
+func TestStartGameShapeNeverIncludesValues(t *testing.T) {
+	const (
+		fakeJob  = "SYNTHETIC-JOB-ID"
+		fakeCode = "SYNTHETIC-ACCESS-CODE"
+		fakeData = "SYNTHETIC-LAUNCH-DATA"
+	)
+	shape := startGameShape(startGameFields(rbxuri.Request{
+		Scheme:         "roblox",
+		PlaceID:        1818,
+		GameInstanceID: fakeJob,
+		AccessCode:     fakeCode,
+		LaunchData:     fakeData,
+		ReferralPage:   "WebView",
+	}))
+	for _, leaked := range []string{fakeJob, fakeCode, fakeData, "1818", "WebView"} {
+		if strings.Contains(shape, leaked) {
+			t.Fatalf("shape leaked %q: %s", leaked, shape)
+		}
+	}
+	for _, want := range []string{"joinRequestType=2", "placeId=set", "gameId=16", "accessCode=21",
+		"launchData=21", "referralPage=7", "joinAttemptId=0", "joinAttemptOrigin=Deeplink", "userId=0"} {
+		if !strings.Contains(shape, want) {
+			t.Fatalf("shape missing %q: %s", want, shape)
+		}
+	}
+}

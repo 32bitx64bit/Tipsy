@@ -203,9 +203,40 @@ func TestParseFollowUserJoinPreservesUserIdentity(t *testing.T) {
 
 func TestJoinRequestTypeOrdinals(t *testing.T) {
 	t.Parallel()
-	if JoinRequestPlace != 0 || JoinRequestFollowUser != 1 || JoinRequestPrivateServer != 2 || JoinRequestGameInstance != 3 {
-		t.Fatalf("StartGameParams joinRequestType ordinals drifted: place=%d follow=%d private=%d instance=%d",
-			JoinRequestPlace, JoinRequestFollowUser, JoinRequestPrivateServer, JoinRequestGameInstance)
+	// Pinned to the official request builder (fi/i0.a in 2.738.1397): 0 place,
+	// 1 follow-user, 2 private server, 3 specific instance, 8 reserved server.
+	if JoinRequestPlace != 0 || JoinRequestFollowUser != 1 || JoinRequestPrivateServer != 2 ||
+		JoinRequestGameInstance != 3 || JoinRequestReservedServer != 8 {
+		t.Fatalf("StartGameParams joinRequestType ordinals drifted: place=%d follow=%d private=%d instance=%d reserved=%d",
+			JoinRequestPlace, JoinRequestFollowUser, JoinRequestPrivateServer, JoinRequestGameInstance, JoinRequestReservedServer)
+	}
+}
+
+// TestJoinRequestTypeFollowsOfficialDerivation pins the precedence of the
+// official Android request builder: user, then link/access code, then job id,
+// then reserved-server code, otherwise a place-only join. Inert sentinels only.
+func TestJoinRequestTypeFollowsOfficialDerivation(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name string
+		req  Request
+		want int32
+	}{
+		{"place only", Request{PlaceID: 1818}, JoinRequestPlace},
+		{"place with launch data only", Request{PlaceID: 1818, LaunchData: "SYNTHETIC"}, JoinRequestPlace},
+		{"follow user", Request{UserID: 123456}, JoinRequestFollowUser},
+		{"follow user beats instance", Request{PlaceID: 1818, UserID: 123456, GameInstanceID: "SYNTHETIC-JOB-ID"}, JoinRequestFollowUser},
+		{"link code is private server", Request{PlaceID: 1818, LinkCode: "SYNTHETIC-CODE"}, JoinRequestPrivateServer},
+		{"access code is private server", Request{PlaceID: 1818, AccessCode: "SYNTHETIC-CODE"}, JoinRequestPrivateServer},
+		{"private server beats instance", Request{PlaceID: 1818, AccessCode: "SYNTHETIC-CODE", GameInstanceID: "SYNTHETIC-JOB-ID"}, JoinRequestPrivateServer},
+		{"job id is specific instance", Request{PlaceID: 1818, GameInstanceID: "SYNTHETIC-JOB-ID"}, JoinRequestGameInstance},
+		{"reserved server code", Request{PlaceID: 1818, ReservedServerCode: "SYNTHETIC-CODE"}, JoinRequestReservedServer},
+		{"instance beats reserved server", Request{PlaceID: 1818, GameInstanceID: "SYNTHETIC-JOB-ID", ReservedServerCode: "SYNTHETIC-CODE"}, JoinRequestGameInstance},
+	}
+	for _, test := range cases {
+		if got := test.req.JoinRequestType(); got != test.want {
+			t.Errorf("%s: joinRequestType=%d, want %d", test.name, got, test.want)
+		}
 	}
 }
 
@@ -270,8 +301,13 @@ func TestParsePrivateServerLinksPreservesOpaqueJoinFields(t *testing.T) {
 				if !req.IsPrivateServerShare() || req.PlaceID != 0 || req.ShareCode != fakeCode {
 					t.Fatalf("share request=%+v", req)
 				}
-			} else if req.LinkCode != fakeCode || req.PlaceID != 1818 {
-				t.Fatalf("legacy request=%+v", req)
+			} else {
+				if req.LinkCode != fakeCode || req.PlaceID != 1818 {
+					t.Fatalf("legacy request=%+v", req)
+				}
+				if got := req.JoinRequestType(); got != JoinRequestPrivateServer {
+					t.Fatalf("joinRequestType=%d, want private server", got)
+				}
 			}
 		})
 	}

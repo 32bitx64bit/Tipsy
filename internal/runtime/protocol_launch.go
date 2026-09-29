@@ -8,7 +8,9 @@ package runtime
 import (
 	"context"
 	"fmt"
+	"sort"
 	"strconv"
+	"strings"
 
 	"github.com/tipsy-linux/tipsy/internal/jni"
 	"github.com/tipsy-linux/tipsy/internal/loader"
@@ -71,29 +73,73 @@ func startWebsiteGame(mod *loader.Module, env *jni.Env, gl, activity, platform, 
 		return
 	}
 	params := makeStartGameParams(env, activity, platform, device, surface, req)
-	logging.Logger(logging.CatRuntime).Info("starting website experience", "request", req.Summary(), "joinType", req.JoinRequestType())
+	logging.Logger(logging.CatRuntime).Info("starting website experience", "request", req.Summary(), "joinType", req.JoinRequestType(),
+		"params", startGameShape(startGameFields(req)))
 	callRobloxJNI(mod, env.Raw(), gl, startGameSym, params)
 }
 
-func makeStartGameParams(env *jni.Env, activity, platform, device, surface uintptr, req rbxuri.Request) uintptr {
-	p := env.AllocObject(env.FindClass("com/roblox/engine/jni/autovalue/StartGameParams"))
+// startGameFields are the StartGameParams values that come from the launch
+// request itself (everything except the JNI object handles). Fields the
+// request cannot supply stay empty; the official Hybrid handler leaves them
+// empty too.
+func startGameFields(req rbxuri.Request) map[string]any {
 	origin := "Deeplink"
 	if req.Scheme == "roblox-player" || req.Scheme == "https" {
 		origin = "Website"
 	}
-	for k, v := range map[string]any{
-		"surface": surface, "platformParams": platform, "deviceParams": device,
+	return map[string]any{
 		"placeId": req.PlaceID, "userId": req.UserID, "conversationId": int64(0),
 		"referredByPlayerId": req.ReferredByPlayerID, "isUnder13": false, "joinRequestType": req.JoinRequestType(),
 		"username": "", "accessCode": req.AccessCode, "callId": "", "eventId": "",
 		"gameId": req.GameInstanceID, "gameIdToExclude": "", "gameJoinContext": "",
 		"isoContext": "", "joinAttemptId": "", "joinAttemptOrigin": origin,
 		"launchData": req.LaunchData, "linkCode": req.LinkCode, "referralPage": req.ReferralPage,
-		"reservedServerAccessCode": req.ReservedServerCode, "vrContext": activity,
-	} {
+		"reservedServerAccessCode": req.ReservedServerCode,
+	}
+}
+
+func makeStartGameParams(env *jni.Env, activity, platform, device, surface uintptr, req rbxuri.Request) uintptr {
+	p := env.AllocObject(env.FindClass("com/roblox/engine/jni/autovalue/StartGameParams"))
+	fields := startGameFields(req)
+	fields["surface"], fields["platformParams"], fields["deviceParams"], fields["vrContext"] = surface, platform, device, activity
+	for k, v := range fields {
 		env.PutField(p, k, v)
 	}
 	return p
+}
+
+// startGameShape describes StartGameParams for the log without any value a
+// server, user, or account could be recovered from: string fields report only
+// their length (the fixed-vocabulary joinAttemptOrigin reports its value),
+// identities report set or 0, and joinRequestType reports its ordinal.
+func startGameShape(fields map[string]any) string {
+	names := make([]string, 0, len(fields))
+	for name := range fields {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	parts := make([]string, 0, len(names))
+	for _, name := range names {
+		switch v := fields[name].(type) {
+		case string:
+			if name == "joinAttemptOrigin" {
+				parts = append(parts, name+"="+v)
+			} else {
+				parts = append(parts, name+"="+strconv.Itoa(len(v)))
+			}
+		case int32:
+			parts = append(parts, name+"="+strconv.Itoa(int(v)))
+		case int64:
+			if v == 0 {
+				parts = append(parts, name+"=0")
+			} else {
+				parts = append(parts, name+"=set")
+			}
+		case bool:
+			parts = append(parts, name+"="+strconv.FormatBool(v))
+		}
+	}
+	return strings.Join(parts, " ")
 }
 
 func appStarterPlace(req rbxuri.Request) string {

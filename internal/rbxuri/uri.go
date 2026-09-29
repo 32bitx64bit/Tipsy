@@ -38,13 +38,17 @@ type Request struct {
 	hasWebsiteLaunch   bool
 }
 
-// StartGameParams.joinRequestType integers, in official Android JNI ordinal
-// order (place, follow-user, private server, specific instance).
+// StartGameParams.joinRequestType integers. They are the official Android
+// ints: the DEX request builder (fi/i0.a in 2.738.1397, ei/i0.a in 2.736.1408)
+// stores 0 place, 1 follow-user, 2 private server, 3 specific instance and 8
+// reserved server, and ExperienceSession forwards them unchanged to
+// StartGameParams.setJoinRequestType.
 const (
-	JoinRequestPlace         int32 = 0
-	JoinRequestFollowUser    int32 = 1
-	JoinRequestPrivateServer int32 = 2
-	JoinRequestGameInstance  int32 = 3
+	JoinRequestPlace          int32 = 0
+	JoinRequestFollowUser     int32 = 1
+	JoinRequestPrivateServer  int32 = 2
+	JoinRequestGameInstance   int32 = 3
+	JoinRequestReservedServer int32 = 8
 )
 
 var (
@@ -176,17 +180,26 @@ func (r Request) Summary() string {
 	return b.String()
 }
 
-// JoinRequestType is the StartGameParams.joinRequestType for this launch.
-// Specific-server jobs and profile follows must not fall through to a
-// place-only RequestGame, which matchmakes a random instance.
+// JoinRequestType is the StartGameParams.joinRequestType for this launch,
+// derived in the order the official Android request builder uses: a user id
+// is a follow (1); otherwise a link or access code is a private server (2), a
+// job id is a specific instance (3), a reserved-server access code is a
+// reserved server (8), and anything else is a place-only RequestGame (0).
+// Server-selecting identities must not fall through to a place-only join,
+// which matchmakes an arbitrary public instance.
 func (r Request) JoinRequestType() int32 {
-	if r.GameInstanceID != "" {
-		return JoinRequestGameInstance
-	}
-	if r.UserID != 0 {
+	switch {
+	case r.UserID != 0:
 		return JoinRequestFollowUser
+	case r.LinkCode != "" || r.AccessCode != "":
+		return JoinRequestPrivateServer
+	case r.GameInstanceID != "":
+		return JoinRequestGameInstance
+	case r.ReservedServerCode != "":
+		return JoinRequestReservedServer
+	default:
+		return JoinRequestPlace
 	}
-	return JoinRequestPlace
 }
 
 func isRobloxWebURL(u *url.URL) bool {

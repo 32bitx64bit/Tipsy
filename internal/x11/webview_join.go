@@ -6,6 +6,7 @@ package x11
 import (
 	"encoding/json"
 	"net/url"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -319,6 +320,10 @@ type hybridLaunchRequest struct {
 	GameInstanceID string          `json:"gameInstanceId"`
 }
 
+// hybridReferralPage is the referral the official Android Hybrid launchGame
+// handler (si/e$a.a in 2.738.1397) stores for every join it starts.
+const hybridReferralPage = "WebView"
+
 // HandleHybridExecuteRoblox plays the in-client Hybrid bridge: Game.launchGame
 // starts the selected place through the existing StartGame door and
 // Overlay.close hides the child. The command string is never logged.
@@ -334,6 +339,11 @@ func HandleHybridExecuteRoblox(raw string) bool {
 		return true
 	case strings.EqualFold(cmd.ModuleID, "Game") && strings.EqualFold(cmd.FunctionName, "launchGame"):
 		req, ok := parseHybridLaunchGame(cmd.Params)
+		attrs := []any{"request", hybridLaunchShape(cmd.Params), "accepted", ok}
+		if ok {
+			attrs = append(attrs, "joinType", req.JoinRequestType(), "summary", req.Summary())
+		}
+		logging.Logger(logging.CatX11).Info("WebView hybrid launchGame", attrs...)
 		if ok {
 			// Hybrid posts RequestGame through Android's experience manager,
 			// which does not publish WebView.handleWindowClose.
@@ -345,6 +355,14 @@ func HandleHybridExecuteRoblox(raw string) bool {
 	return true
 }
 
+// parseHybridLaunchGame maps a Hybrid launchGame request onto a StartGame
+// request. The official Android handler accepts only RequestGame and forwards
+// nothing but its placeId (server, user, and codes are all ignored, so the
+// backend matchmakes), with referralPage "WebView". Tipsy keeps that contract
+// for RequestGame, so a stale gameInstanceId or userId in an ordinary Play
+// payload cannot pin the join to one server or turn it into a follow. The
+// explicit RequestGameJob and RequestFollowUser types are Tipsy extensions the
+// official handler rejects; they keep their named identity.
 func parseHybridLaunchGame(params json.RawMessage) (rbxuri.Request, bool) {
 	var p hybridLaunchParams
 	if json.Unmarshal(params, &p) != nil {
@@ -355,20 +373,28 @@ func parseHybridLaunchGame(params json.RawMessage) (rbxuri.Request, bool) {
 		return rbxuri.Request{}, false
 	}
 	place := parseHybridPlaceID(p.Request.PlaceID)
-	user := parseHybridPlaceID(p.Request.UserID)
-	if strings.EqualFold(rt, "RequestFollowUser") {
+	req := rbxuri.Request{Scheme: "roblox", ReferralPage: hybridReferralPage}
+	switch strings.ToLower(rt) {
+	case "requestfollowuser":
+		user := parseHybridPlaceID(p.Request.UserID)
 		if user == 0 {
 			return rbxuri.Request{}, false
 		}
-	} else if place == 0 {
-		return rbxuri.Request{}, false
+		req.UserID = user
+		req.PlaceID = place
+	case "requestgamejob":
+		if place == 0 {
+			return rbxuri.Request{}, false
+		}
+		req.PlaceID = place
+		req.GameInstanceID = strings.TrimSpace(p.Request.GameInstanceID)
+	default:
+		if place == 0 {
+			return rbxuri.Request{}, false
+		}
+		req.PlaceID = place
 	}
-	return rbxuri.Request{
-		Scheme:         "roblox",
-		PlaceID:        place,
-		UserID:         user,
-		GameInstanceID: p.Request.GameInstanceID,
-	}, true
+	return req, true
 }
 
 func isHybridJoinRequestType(rt string) bool {
@@ -377,6 +403,106 @@ func isHybridJoinRequestType(rt string) bool {
 		return true
 	default:
 		return false
+	}
+}
+
+// hybridLaunchKeys are the request key names that may appear in a log. Any
+// other key is only counted, because its name is page-controlled.
+var hybridLaunchKeys = map[string]struct{}{
+	"requestType": {}, "placeId": {}, "userId": {}, "gameInstanceId": {},
+	"accessCode": {}, "linkCode": {}, "reservedServerAccessCode": {},
+	"launchData": {}, "referralPage": {}, "referredByPlayerId": {},
+	"conversationId": {}, "callId": {}, "eventId": {}, "joinAttemptId": {},
+	"joinAttemptOrigin": {}, "gameJoinContext": {}, "isoContext": {},
+	"gameIdToExclude": {},
+}
+
+// hybridLaunchShape describes a Hybrid launchGame request for the log:
+// allow-listed key names with value shapes (type and length), the bounded
+// requestType vocabulary, and a count of unlisted keys. It never includes a
+// value, so job ids, access codes, launch data, and identities stay out.
+func hybridLaunchShape(params json.RawMessage) string {
+	var outer map[string]json.RawMessage
+	if json.Unmarshal(params, &outer) != nil {
+		return "params=unparsed"
+	}
+	rawRequest, ok := outer["request"]
+	if !ok {
+		return "request=absent"
+	}
+	var request map[string]json.RawMessage
+	if json.Unmarshal(rawRequest, &request) != nil {
+		return "request=" + jsonShape(rawRequest)
+	}
+	names := make([]string, 0, len(request))
+	unknown := 0
+	for name := range request {
+		if _, listed := hybridLaunchKeys[name]; listed {
+			names = append(names, name)
+		} else {
+			unknown++
+		}
+	}
+	sort.Strings(names)
+	parts := make([]string, 0, len(names)+1)
+	for _, name := range names {
+		if name == "requestType" {
+			parts = append(parts, "requestType="+hybridRequestTypeToken(request[name]))
+			continue
+		}
+		parts = append(parts, name+"="+jsonShape(request[name]))
+	}
+	if unknown > 0 {
+		parts = append(parts, "unlistedKeys="+strconv.Itoa(unknown))
+	}
+	return strings.Join(parts, " ")
+}
+
+func hybridRequestTypeToken(raw json.RawMessage) string {
+	var rt string
+	if json.Unmarshal(raw, &rt) != nil {
+		return jsonShape(raw)
+	}
+	switch strings.ToLower(strings.TrimSpace(rt)) {
+	case "":
+		return "empty"
+	case "requestgame":
+		return "RequestGame"
+	case "requestgamejob":
+		return "RequestGameJob"
+	case "requestfollowuser":
+		return "RequestFollowUser"
+	case "requestprivategame":
+		return "RequestPrivateGame"
+	default:
+		return "other"
+	}
+}
+
+// jsonShape reports a JSON value's type and, for strings and numbers, its
+// length, never the value itself.
+func jsonShape(raw json.RawMessage) string {
+	s := strings.TrimSpace(string(raw))
+	if s == "" {
+		return "empty"
+	}
+	switch s[0] {
+	case '"':
+		var v string
+		if json.Unmarshal(raw, &v) != nil {
+			return "str"
+		}
+		return "str:" + strconv.Itoa(len(v))
+	case '{':
+		return "obj"
+	case '[':
+		return "arr"
+	case 't', 'f':
+		return "bool"
+	case 'n':
+		return "null"
+	default:
+		return "num:" + strconv.Itoa(len(s))
 	}
 }
 

@@ -4,6 +4,7 @@
 package x11
 
 import (
+	"encoding/json"
 	"strings"
 	"testing"
 
@@ -113,6 +114,9 @@ func TestHandoffWebViewJoinClosesBeforeStartGame(t *testing.T) {
 	}
 }
 
+// TestHandleHybridExecuteRobloxLaunchGame pins the official RequestGame
+// contract: only placeId is forwarded, so a stale server or user identity in
+// an ordinary Play payload must not pin the join or turn it into a follow.
 func TestHandleHybridExecuteRobloxLaunchGame(t *testing.T) {
 	const fakeJob = "SYNTHETIC-JOB-ID"
 	var got rbxuri.Request
@@ -123,21 +127,42 @@ func TestHandleHybridExecuteRobloxLaunchGame(t *testing.T) {
 		SetWebViewStartGame(nil)
 		SetWebViewJavascriptSignal(nil)
 	})
-	raw := `{"moduleID":"Game","functionName":"launchGame","params":{"request":{"requestType":"RequestGame","placeId":1818,"gameInstanceId":"` + fakeJob + `"}}}`
+	raw := `{"moduleID":"Game","functionName":"launchGame","params":{"request":{"requestType":"RequestGame","placeId":1818,"userId":4242,"gameInstanceId":"` + fakeJob + `"}}}`
 	if !HandleHybridExecuteRoblox(raw) {
 		t.Fatal("hybrid launchGame should be handled")
 	}
-	if got.PlaceID != 1818 || got.GameInstanceID != fakeJob {
-		t.Fatalf("started %+v", got)
+	if got.PlaceID != 1818 || got.GameInstanceID != "" || got.UserID != 0 {
+		t.Fatalf("started %+v, want a place-only join", got)
+	}
+	if got.ReferralPage != "WebView" {
+		t.Fatalf("referral=%q, want the official Hybrid referral", got.ReferralPage)
 	}
 	if signaled != raw {
 		t.Fatal("signalJavascriptCallback was not invoked with the command")
 	}
-	if strings.Contains(got.Summary(), fakeJob) {
-		t.Fatalf("summary leaked job: %s", got.Summary())
+	if got.JoinRequestType() != rbxuri.JoinRequestPlace {
+		t.Fatalf("joinType=%d, want place matchmaking", got.JoinRequestType())
 	}
-	if got.JoinRequestType() != rbxuri.JoinRequestGameInstance {
-		t.Fatalf("joinType=%d, want specific instance", got.JoinRequestType())
+}
+
+func TestParseHybridLaunchGameEmptyRequestTypeIsPlaceOnly(t *testing.T) {
+	req, ok := parseHybridLaunchGame(json.RawMessage(`{"request":{"placeId":"1818","gameInstanceId":"SYNTHETIC-JOB-ID"}}`))
+	if !ok || req.PlaceID != 1818 || req.GameInstanceID != "" || req.JoinRequestType() != rbxuri.JoinRequestPlace {
+		t.Fatalf("req=%+v ok=%v", req, ok)
+	}
+}
+
+func TestParseHybridLaunchGameRejectsUnsupportedAndIncomplete(t *testing.T) {
+	for name, params := range map[string]string{
+		"private game":          `{"request":{"requestType":"RequestPrivateGame","placeId":1818}}`,
+		"game without place":    `{"request":{"requestType":"RequestGame"}}`,
+		"job without place":     `{"request":{"requestType":"RequestGameJob","gameInstanceId":"SYNTHETIC-JOB-ID"}}`,
+		"follow without user":   `{"request":{"requestType":"RequestFollowUser","placeId":1818}}`,
+		"request not an object": `{"request":"RequestGame"}`,
+	} {
+		if req, ok := parseHybridLaunchGame(json.RawMessage(params)); ok {
+			t.Errorf("%s: accepted %+v", name, req)
+		}
 	}
 }
 
@@ -188,6 +213,34 @@ func TestHandleHybridExecuteRobloxRequestGameJob(t *testing.T) {
 	}
 	if got.JoinRequestType() != rbxuri.JoinRequestGameInstance {
 		t.Fatalf("joinType=%d, want specific instance", got.JoinRequestType())
+	}
+}
+
+func TestHybridLaunchShapeNeverIncludesValues(t *testing.T) {
+	const (
+		fakeJob    = "SYNTHETIC-JOB-ID"
+		fakeCode   = "SYNTHETIC-ACCESS-CODE"
+		fakeSecret = "SYNTHETIC-PAGE-CONTROLLED-KEY"
+	)
+	params := json.RawMessage(`{"request":{"requestType":"RequestGame","placeId":1818,"gameInstanceId":"` + fakeJob +
+		`","accessCode":"` + fakeCode + `","launchData":"","referralPage":"home","` + fakeSecret + `":"x"}}`)
+	got := hybridLaunchShape(params)
+	for _, leaked := range []string{fakeJob, fakeCode, fakeSecret, "1818", "home"} {
+		if strings.Contains(got, leaked) {
+			t.Fatalf("shape leaked %q: %s", leaked, got)
+		}
+	}
+	for _, want := range []string{"requestType=RequestGame", "placeId=num:4", "gameInstanceId=str:16",
+		"accessCode=str:21", "launchData=str:0", "referralPage=str:4", "unlistedKeys=1"} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("shape missing %q: %s", want, got)
+		}
+	}
+	if got := hybridLaunchShape(json.RawMessage(`{"request":{"requestType":"` + fakeSecret + `"}}`)); got != "requestType=other" {
+		t.Fatalf("unknown requestType shape=%q", got)
+	}
+	if got := hybridLaunchShape(json.RawMessage(`{}`)); got != "request=absent" {
+		t.Fatalf("missing request shape=%q", got)
 	}
 }
 
