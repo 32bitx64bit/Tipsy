@@ -254,6 +254,12 @@ is_host_library() {
 		ld-linux-*.so.*|libc.so.*|libdl.so.*|libm.so.*|libpthread.so.*|libresolv.so.*|librt.so.*|libutil.so.*|libanl.so.*|libnss_*.so.*|libsystemd.so.*|libEGL.so.*|libGL.so.*|libGLX.so.*|libGLdispatch.so.*|libOpenGL.so.*|libGLES*.so.*|libvulkan.so.*|libdrm.so.*|libgbm.so.*|libglapi.so.*)
 			return 0
 			;;
+		# The GCC runtime and expat come from the host. The Debian 12 release
+		# builder ships copies that need glibc 2.36; bundling them would raise
+		# the AppImage's floor above Ubuntu 22.04 (glibc 2.35).
+		libstdc++.so.*|libgcc_s.so.*|libexpat.so.*)
+			return 0
+			;;
 	esac
 	return 1
 }

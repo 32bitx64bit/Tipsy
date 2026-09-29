@@ -348,6 +348,207 @@ func TestReleaseGuardAcceptsCanonicalMinimalTree(t *testing.T) {
 	}
 }
 
+// versionNeeds renders the part of `readelf -V` the guard reads: one
+// version-needs entry per symbol version name.
+func versionNeeds(names ...string) string {
+	var out strings.Builder
+	fmt.Fprintf(&out, "Version needs section '.gnu.version_r' contains 1 entry:\n")
+	fmt.Fprintf(&out, " Addr: 0x0000000000000000  Offset: 0x000000  Link: 0 (.dynstr)\n")
+	fmt.Fprintf(&out, "  000000: Version: 1  File: libc.so.6  Cnt: %d\n", len(names))
+	for i, name := range names {
+		fmt.Fprintf(&out, "  0x%04x:   Name: %s  Flags: none  Version: %d\n", 0x10*(i+1), name, i+2)
+	}
+	return out.String()
+}
+
+// fakeReadelf returns a PATH directory whose readelf reports versionInfo for
+// `readelf -V` and defers to the real tool for everything else.
+func fakeReadelf(t *testing.T, versionInfo string) string {
+	t.Helper()
+	real, err := exec.LookPath("readelf")
+	if err != nil {
+		t.Skip("readelf is not installed")
+	}
+	tools := t.TempDir()
+	info := filepath.Join(tools, "version-info")
+	mustWrite(t, info, []byte(versionInfo), 0o644)
+	script := "#!/bin/sh\nif [ \"$1\" = -V ]; then cat '" + info + "'; exit 0; fi\nexec '" + real + "' \"$@\"\n"
+	mustWrite(t, filepath.Join(tools, "readelf"), []byte(script), 0o755)
+	return tools
+}
+
+// appDirWithELF is the minimal tree with a real x86-64 ELF as usr/bin/tipsy
+// that satisfies the RPATH and dependency rules.
+func appDirWithELF(t *testing.T) string {
+	t.Helper()
+	appdir := minimalAppDir(t)
+	data, err := os.ReadFile("/bin/true")
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(appdir, "usr/bin/tipsy")
+	mustWrite(t, path, data, 0o755)
+	if output, err := exec.Command("patchelf", "--set-rpath", `$ORIGIN/../lib`, path).CombinedOutput(); err != nil {
+		t.Fatalf("patchelf: %v: %s", err, output)
+	}
+	refreshManifest(t, appdir)
+	return appdir
+}
+
+func TestReleaseGuardEnforcesUbuntu2204SymbolCeilings(t *testing.T) {
+	guard := filepath.Join(repoRoot(t), "scripts", "check-release-tree.sh")
+	tests := []struct {
+		name  string
+		needs []string
+		want  string // empty: accepted
+	}{
+		{"glibc at the ceiling", []string{"GLIBC_2.2.5", "GLIBC_2.35"}, ""},
+		{"glibc 2.4 sorts below 2.35", []string{"GLIBC_2.4"}, ""},
+		{"private glibc symbols are not versions", []string{"GLIBC_PRIVATE"}, ""},
+		{"glibc newer than 2.35", []string{"GLIBC_2.34", "GLIBC_2.38"}, "GLIBC_2.38"},
+		{"glibc 2.36 from a Debian 12 copy", []string{"GLIBC_2.36"}, "GLIBC_2.36"},
+		{"libstdc++ newer than GCC 12", []string{"GLIBCXX_3.4.33"}, "GLIBCXX_3.4.33"},
+		{"libstdc++ at GCC 12", []string{"GLIBCXX_3.4.30"}, ""},
+		{"C++ ABI newer than GCC 12", []string{"CXXABI_1.3.15"}, "CXXABI_1.3.15"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			appdir := appDirWithELF(t)
+			command := exec.Command(guard, appdir)
+			command.Env = append(os.Environ(), "PATH="+fakeReadelf(t, versionNeeds(test.needs...))+":"+os.Getenv("PATH"))
+			output, err := command.CombinedOutput()
+			if test.want == "" {
+				if err != nil {
+					t.Fatalf("guard rejected an object within the ceiling: %v\n%s", err, output)
+				}
+				return
+			}
+			if err == nil || !strings.Contains(string(output), test.want) {
+				t.Fatalf("guard did not reject %s: %v\n%s", test.want, err, output)
+			}
+		})
+	}
+
+	t.Run("developer builds are not held to the release ceiling", func(t *testing.T) {
+		appdir := appDirWithELF(t)
+		mustWrite(t, filepath.Join(appdir, "usr/share/tipsy/build-info"), []byte("release_kind=development-unrestricted\n"), 0o644)
+		refreshManifest(t, appdir)
+		command := exec.Command(guard, appdir)
+		command.Env = append(os.Environ(), "PATH="+fakeReadelf(t, versionNeeds("GLIBC_2.43"))+":"+os.Getenv("PATH"))
+		if output, err := command.CombinedOutput(); err != nil {
+			t.Fatalf("developer build was held to the release ceiling: %v\n%s", err, output)
+		}
+	})
+}
+
+func TestReleaseGuardTreatsGCCRuntimeAndExpatAsHostLibraries(t *testing.T) {
+	// The Debian 12 release builder's copies need glibc 2.36, so they must not be
+	// bundled: the guard has to accept a tree that names them as NEEDED without
+	// shipping them, and reject one that still bundles an unlisted library.
+	guard := filepath.Join(repoRoot(t), "scripts", "check-release-tree.sh")
+	appdir := appDirWithELF(t)
+	needed := "Dynamic section at offset 0x0 contains 3 entries:\n" +
+		" 0x0000000000000001 (NEEDED)             Shared library: [libstdc++.so.6]\n" +
+		" 0x0000000000000001 (NEEDED)             Shared library: [libgcc_s.so.1]\n" +
+		" 0x0000000000000001 (NEEDED)             Shared library: [libexpat.so.1]\n" +
+		" 0x000000000000001d (RUNPATH)            Library runpath: [$ORIGIN/../lib]\n"
+	real, err := exec.LookPath("readelf")
+	if err != nil {
+		t.Skip("readelf is not installed")
+	}
+	tools := t.TempDir()
+	dynamic := filepath.Join(tools, "dynamic")
+	mustWrite(t, dynamic, []byte(needed), 0o644)
+	script := "#!/bin/sh\nif [ \"$1\" = -d ]; then cat '" + dynamic + "'; exit 0; fi\nexec '" + real + "' \"$@\"\n"
+	mustWrite(t, filepath.Join(tools, "readelf"), []byte(script), 0o755)
+	run := func() ([]byte, error) {
+		command := exec.Command(guard, appdir)
+		command.Env = append(os.Environ(), "PATH="+tools+":"+os.Getenv("PATH"))
+		return command.CombinedOutput()
+	}
+	if output, err := run(); err != nil {
+		t.Fatalf("guard rejected host-provided GCC runtime and expat: %v\n%s", err, output)
+	}
+	needed = strings.Replace(needed, "[libexpat.so.1]", "[libbundle-me.so.1]", 1)
+	mustWrite(t, dynamic, []byte(needed), 0o644)
+	output, err := run()
+	if err == nil || !strings.Contains(string(output), "libbundle-me.so.1") {
+		t.Fatalf("guard accepted an unbundled, unlisted dependency: %v\n%s", err, output)
+	}
+}
+
+func TestReleaseLockRequiresPinnedContainerBuilder(t *testing.T) {
+	repo := repoRoot(t)
+	script := filepath.Join(repo, "scripts", "release-lock.py")
+	raw, err := os.ReadFile(filepath.Join(repo, "scripts", "release-inputs.lock.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for name, test := range map[string]struct {
+		mutate func(builder map[string]any)
+		want   string
+	}{
+		"unpinned image digest": {func(b map[string]any) { b["sha256"] = nil }, "pinned builder image digest"},
+		"different builder":     {func(b map[string]any) { b["image"] = "github-hosted/ubuntu-24.04" }, "container builder"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			var lock map[string]any
+			if err := json.Unmarshal(raw, &lock); err != nil {
+				t.Fatal(err)
+			}
+			test.mutate(lock["builder"].(map[string]any))
+			mutated, err := json.Marshal(lock)
+			if err != nil {
+				t.Fatal(err)
+			}
+			path := filepath.Join(t.TempDir(), "release-inputs.lock.json")
+			mustWrite(t, path, append(mutated, '\n'), 0o644)
+			output, err := exec.Command(script, "--lock", path, "--mode", "github-signed").CombinedOutput()
+			if err == nil || !strings.Contains(string(output), test.want) {
+				t.Fatalf("GitHub-signed validation did not reject %s: %v\n%s", name, err, output)
+			}
+		})
+	}
+}
+
+func TestReleaseBuildRunsInTheLockedContainer(t *testing.T) {
+	repo := repoRoot(t)
+	workflow, err := os.ReadFile(filepath.Join(repo, ".github", "workflows", "release.yml"))
+	if os.IsNotExist(err) {
+		return
+	}
+	if err != nil {
+		t.Fatal(err)
+	}
+	var lock struct {
+		Builder struct {
+			Image  string `json:"image"`
+			SHA256 string `json:"sha256"`
+		} `json:"builder"`
+	}
+	raw, err := os.ReadFile(filepath.Join(repo, "scripts", "release-inputs.lock.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := json.Unmarshal(raw, &lock); err != nil {
+		t.Fatal(err)
+	}
+	if !regexp.MustCompile(`^[0-9a-f]{64}$`).MatchString(lock.Builder.SHA256) {
+		t.Fatalf("lock builder digest is not a SHA-256: %q", lock.Builder.SHA256)
+	}
+	text := string(workflow)
+	build, _, _ := strings.Cut(strings.SplitN(text, "\n  build:\n", 2)[1], "\n  publish:\n")
+	if want := "image: debian:bookworm-slim@sha256:" + lock.Builder.SHA256; strings.Count(build, want) != 1 {
+		t.Errorf("the build job is not pinned to the locked container image %q", want)
+	}
+	if strings.Contains(build, "sudo ") {
+		t.Error("the build job runs as root in its container and must not depend on sudo")
+	}
+	if !strings.Contains(build, "git config --system --add safe.directory") {
+		t.Error("the build job must trust its workspace at system scope so the empty-environment build can read it")
+	}
+}
+
 func TestReleaseGuardRejectsUnsafeFilesystemAndContent(t *testing.T) {
 	repo := repoRoot(t)
 	guard := filepath.Join(repo, "scripts", "check-release-tree.sh")
@@ -523,7 +724,7 @@ func TestReleaseInputLockSeparatesGitHubSignedAndOfficial(t *testing.T) {
 		t.Fatalf("GitHub-signed lock validation: %v\n%s", err, output)
 	}
 	output, err := exec.Command(script, "--lock", lock, "--mode", "official").CombinedOutput()
-	if err == nil || !strings.Contains(string(output), "pinned builder image digest") {
+	if err == nil || !strings.Contains(string(output), "package snapshot") {
 		t.Fatalf("GitHub-signed lock did not block the stricter official build: %v\n%s", err, output)
 	}
 	digest, err := exec.Command(script, "--lock", lock, "--mode", "developer", "--digest").Output()

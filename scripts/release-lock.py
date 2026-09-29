@@ -169,8 +169,10 @@ def validate(value: dict[str, Any], mode: str) -> None:
     if mode == "github-signed":
         if value["status"] != "reviewed":
             raise LockError("GitHub-signed release requires a reviewed release input lock")
-        if builder["image"] != "github-hosted/ubuntu-24.04" or builder["sha256"] is not None:
-            raise LockError("GitHub-signed release requires the declared GitHub-hosted builder")
+        if builder["image"] != "github-hosted/container/debian:bookworm-slim":
+            raise LockError("GitHub-signed release requires the declared GitHub-hosted container builder")
+        if not isinstance(builder["sha256"], str):
+            raise LockError("GitHub-signed release requires a pinned builder image digest")
         for name, material in downloads.items():
             if material["status"] != "pinned" or not isinstance(material["sha256"], str) or not HEX64.fullmatch(material["sha256"]):
                 raise LockError(f"GitHub-signed release requires a pinned digest for {name}")

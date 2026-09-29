@@ -63,8 +63,42 @@ is_allowed_host_library() {
 		ld-linux-*.so.*|libc.so.*|libdl.so.*|libm.so.*|libpthread.so.*|libresolv.so.*|librt.so.*|libutil.so.*|libanl.so.*|libnss_*.so.*|libsystemd.so.*|libEGL.so.*|libGL.so.*|libGLX.so.*|libGLdispatch.so.*|libOpenGL.so.*|libGLES*.so.*|libvulkan.so.*|libdrm.so.*|libgbm.so.*|libglapi.so.*)
 			return 0
 			;;
+		libstdc++.so.*|libgcc_s.so.*|libexpat.so.*)
+			return 0
+			;;
 	esac
 	return 1
+}
+
+# Release AppImages must run on Ubuntu 22.04, the oldest supported LTS (glibc
+# 2.35, libstdc++ from GCC 12). Bundled objects may not require newer symbol
+# versions than that, and libstdc++ is host-provided, so its ceiling matters
+# too. Local developer builds link against whatever the build host has.
+max_glibc=2.35
+max_glibcxx=3.4.30
+max_cxxabi=1.3.13
+enforce_symbol_ceilings=1
+if grep -qx 'release_kind=development-unrestricted' "$appdir/usr/share/tipsy/build-info" 2>/dev/null; then
+	enforce_symbol_ceilings=0
+fi
+
+# Highest <prefix>_x.y[.z] symbol version the ELF object requires from other
+# libraries (its version-needs section, not the versions it defines).
+highest_required_version() {
+	{
+		LC_ALL=C readelf -V "$1" 2>/dev/null |
+			awk '/^Version needs section/ {p = 1; next} /^Version (definition|symbols) section/ {p = 0} p' |
+			sed -n "s/.*Name: $2_\([0-9][0-9.]*\).*/\1/p" |
+			sort -V | tail -n 1
+	} || true
+}
+
+check_symbol_ceiling() {
+	local elf=$1 relative=$2 prefix=$3 ceiling=$4 highest
+	highest=$(highest_required_version "$elf" "$prefix")
+	if [[ -n "$highest" && "$(printf '%s\n%s\n' "$highest" "$ceiling" | sort -V | tail -n 1)" != "$ceiling" ]]; then
+		fail "$relative requires ${prefix}_${highest}, newer than ${prefix}_${ceiling} on Ubuntu 22.04"
+	fi
 }
 
 while IFS= read -r -d '' entry; do
@@ -165,6 +199,12 @@ while IFS= read -r -d '' elf; do
 		fi
 		fail "unresolved or unapproved dynamic dependency in $relative: $needed"
 	done < <(readelf -d "$elf" 2>/dev/null | sed -n 's/.*NEEDED.*\[\(.*\)\]/\1/p')
+
+	if (( enforce_symbol_ceilings )); then
+		check_symbol_ceiling "$elf" "$relative" GLIBC "$max_glibc"
+		check_symbol_ceiling "$elf" "$relative" GLIBCXX "$max_glibcxx"
+		check_symbol_ceiling "$elf" "$relative" CXXABI "$max_cxxabi"
+	fi
 done < <(find "$appdir" -type f -print0 | while IFS= read -r -d '' candidate; do
 	if file -Lb -- "$candidate" | grep -q '^ELF '; then
 		printf '%s\0' "$candidate"

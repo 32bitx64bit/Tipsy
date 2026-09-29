@@ -30,6 +30,15 @@ jobs:
       (github.event_name == 'push' && github.ref_type == 'tag' && startsWith(github.ref_name, 'v')) ||
       (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main')
     runs-on: ubuntu-24.04
+    # The AppImage bundles the build host's Qt, X11, and GTK libraries, so the
+    # build image sets the minimum glibc the release runs on. Ubuntu 22.04
+    # (glibc 2.35) is the oldest supported LTS but ships Qt 6.2, which MIQT
+    # cannot build against; Debian 12 has Qt 6.4.2. Its only glibc 2.36
+    # libraries (libstdc++, libgcc_s, libexpat) come from the host instead, and
+    # scripts/check-release-tree.sh enforces the 2.35 ceiling. The image is
+    # pinned by digest to scripts/release-inputs.lock.json.
+    container:
+      image: debian:bookworm-slim@sha256:3783cc01769c7b2b1b83a5c5ad96c815348e28ed7da68e2e3687004faa906251
     timeout-minutes: 60
     permissions:
       contents: read
@@ -40,6 +49,14 @@ jobs:
       version: ${{ steps.preflight.outputs.version }}
 
     steps:
+      - name: Install the container base tooling
+        shell: bash
+        run: |
+          set -euo pipefail
+          export DEBIAN_FRONTEND=noninteractive
+          apt-get update
+          apt-get install -y --no-install-recommends ca-certificates curl git file python3
+
       - name: Checkout the admitted release source without credentials
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2; scripts/release-inputs.lock.json
         with:
@@ -48,6 +65,15 @@ jobs:
           persist-credentials: false
           submodules: false
           show-progress: false
+
+      - name: Trust the workspace for git
+        shell: bash
+        run: |
+          set -euo pipefail
+          # The checkout is owned by the runner user, not the container's root.
+          # System scope so the credential-free build, which runs with an empty
+          # environment and no HOME, still reads it.
+          git config --system --add safe.directory "$GITHUB_WORKSPACE"
 
       - name: Fail closed unless the reviewed tag and keyless release policy agree
         id: preflight
@@ -83,6 +109,9 @@ jobs:
           go_version = lock["target"]["go"]
           if workflow.count(f'go-version: "{go_version}"') != 1:
               raise SystemExit("release workflow Go version is not tied to the reviewed lock")
+          builder_digest = lock["builder"]["sha256"]
+          if workflow.count(f"image: debian:bookworm-slim@sha256:{builder_digest}") != 1:
+              raise SystemExit("release workflow container image is not tied to the reviewed lock")
           PY
 
           event_commit=$(git rev-parse --verify "$GITHUB_SHA^{commit}")
@@ -142,13 +171,14 @@ jobs:
         run: |
           set -euo pipefail
           # Same native headers as CI (X11, XDamage, GTK/WebKit, Vulkan, Pulse,
-          # Qt 6). This ordinary package installation is the only sudo use; the
-          # build itself uses no sudo, Bubblewrap, unshare, or systemd-run.
+          # Qt 6). This ordinary package installation runs as root in the
+          # pinned container; the build itself uses no sudo, Bubblewrap,
+          # unshare, or systemd-run.
           scripts/ci-install-native.sh
           if [ -d /tmp/tipsy-ci-pkgconfig ]; then
             export PKG_CONFIG_PATH="/tmp/tipsy-ci-pkgconfig${PKG_CONFIG_PATH:+:$PKG_CONFIG_PATH}"
           fi
-          sudo apt-get install -y --no-install-recommends libcap2-bin patchelf
+          apt-get install -y --no-install-recommends libcap2-bin patchelf
           pkg-config --exists Qt6Widgets Qt6Gui Qt6Core x11 x11-xcb xext xrandr xtst xi xdamage pangocairo pangoft2 cairo-xlib egl glesv2 libpulse libpulse-simple gtk+-3.0 webkit2gtk-4.1 vulkan
           test -f /usr/include/X11/Xlib-xcb.h
           test -f /usr/include/X11/extensions/Xdamage.h

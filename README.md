@@ -114,7 +114,8 @@ chmod +x Tipsy-*-x86_64.AppImage
 Grab the file from
 [Releases](https://github.com/32bitx64bit/Tipsy/releases/latest). Official
 builds need a CPU with AVX2 (Intel Haswell 2013 or newer, AMD Excavator 2015 or
-newer). If the AppImage quits immediately, that is the usual reason.
+newer). If the AppImage quits immediately, that is the usual reason. It also
+needs glibc 2.35 or newer (Ubuntu 22.04, Debian 12, Fedora 36, and later).
 
 ### 2. Install the Roblox client
 
