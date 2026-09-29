@@ -264,7 +264,16 @@ package_owner() {
 	if command -v pacman >/dev/null 2>&1; then
 		owner=$(pacman -Qqo "$library" 2>/dev/null || true)
 	elif command -v dpkg-query >/dev/null 2>&1; then
-		owner=$(dpkg-query -S "$(readlink -f "$library")" 2>/dev/null | head -n 1 | cut -d: -f1 || true)
+		# dpkg indexes the path a package ships. On merged-/usr hosts that
+		# is still /lib/... for many libraries on Ubuntu 22.04 and Debian 12,
+		# while readlink -f canonicalizes it to /usr/lib/... (24.04 ships
+		# /usr/lib/... and needs the resolved spelling), so try each form.
+		local resolved candidate
+		resolved=$(readlink -f "$library")
+		for candidate in "$resolved" "$library" "${resolved#/usr}"; do
+			owner=$(dpkg-query -S "$candidate" 2>/dev/null | head -n 1 | cut -d: -f1 || true)
+			[[ -z "$owner" ]] || break
+		done
 	elif command -v rpm >/dev/null 2>&1; then
 		owner=$(rpm -qf --qf '%{NAME}' "$library" 2>/dev/null || true)
 	fi
