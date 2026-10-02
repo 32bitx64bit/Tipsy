@@ -66,21 +66,37 @@ func gamepadPathNote() {
 // is parsed-but-ignored (see gamepadPathNote).
 func GamepadInputPath() string { gamepadPathNote(); return "direct" }
 
-var gamepadEnabledOnce sync.Once
-var gamepadEnabledValue = true
+// gamepadLive serves the effective gamepad settings for the process: the
+// persisted "gamepad" section of the settings file overlaid with the
+// TIPSY_GAMEPAD / TIPSY_GAMEPAD_DEADZONE environment (env wins), re-checked on
+// the frame path at most every gamepad.DefaultLiveConfigInterval and forced
+// fresh on every launch and window-focus gain. It is deliberately NOT a
+// process-lifetime cache: the GUI launches Roblox in the same process that owns
+// the Settings page, so a once-only read never sees a later toggle.
+var gamepadLive = newGamepadLive()
 
-// gamepadEnabled is the TIPSY_GAMEPAD=0|off kill-switch (default on).
-func gamepadEnabled() bool {
-	gamepadEnabledOnce.Do(func() {
-		switch strings.ToLower(strings.TrimSpace(os.Getenv("TIPSY_GAMEPAD"))) {
-		case "0", "off", "false", "no":
-			gamepadEnabledValue = false
-		default:
-			gamepadEnabledValue = true
-		}
-	})
-	return gamepadEnabledValue
+func newGamepadLive() *gamepad.LiveConfig {
+	c := gamepad.NewLiveConfig(func() string { return config.Paths().ConfigFile }, os.LookupEnv)
+	c.OnError = func(err error) {
+		logging.Logger(logging.CatJNI).Info("[jni] gamepad config unreadable, keeping last good or defaults",
+			"err", logging.Redact(err.Error()))
+	}
+	return c
 }
+
+// gamepadEnabled is the TIPSY_GAMEPAD=0|off kill-switch alone (default on).
+// It does not include the persisted switch; see gamepadEffectiveEnabled.
+func gamepadEnabled() bool { return !gamepadLive.Get().KillSwitch }
+
+// gamepadFileEnabled reports the persisted gamepad.enabled switch alone. False
+// means the engine sees zero pads even when TIPSY_GAMEPAD is unset.
+func gamepadFileEnabled() bool { return gamepadLive.Get().Config.Enabled }
+
+// gamepadCalibration returns the effective calibration for this instant: the
+// persisted section (missing file/key = defaults) overlaid with
+// TIPSY_GAMEPAD_DEADZONE (env wins). An unreadable section keeps the last good
+// one (defaults on the first load) so a bad file can never block launch.
+func gamepadCalibration() gamepad.GamepadConfig { return gamepadLive.Get().Config }
 
 var gamepadDebugOnce sync.Once
 var gamepadDebugValue bool
@@ -97,44 +113,21 @@ func gamepadDebug() bool {
 	return gamepadDebugValue
 }
 
-// ResetGamepadInputPath re-reads the environment on the next lookup and
-// clears the pad delivery state. Test seam.
+// ResetGamepadInputPath re-reads the environment and settings file on the next
+// lookup and clears the pad delivery state. Test seam.
 func ResetGamepadInputPath() {
 	gamepadPathOnce = sync.Once{}
-	gamepadEnabledOnce = sync.Once{}
-	gamepadEnabledValue = true
 	gamepadDebugOnce = sync.Once{}
 	gamepadDebugValue = false
-	gamepadCalOnce = sync.Once{}
-	gamepadCalValue = gamepad.DefaultGamepadConfig()
+	gamepadLive.Reset()
+	gamepadLive.SetClock(nil)
+	gamepadLive.SetInterval(gamepad.DefaultLiveConfigInterval)
+	gamepadPump.mu.Lock()
+	gamepadPump.armed = false
+	gamepadPump.dir = ""
+	gamepadPump.mu.Unlock()
 	resetGamepadStateForTest()
 }
-
-var gamepadCalOnce sync.Once
-var gamepadCalValue = gamepad.DefaultGamepadConfig()
-
-// gamepadCalibration returns the cached effective calibration: the persisted
-// "gamepad" section of the settings file (missing file/key = defaults) overlaid
-// once with TIPSY_GAMEPAD_DEADZONE (env wins). An unreadable section falls back
-// to defaults so a bad file can never block launch.
-// ResetGamepadInputPath clears the cache.
-func gamepadCalibration() gamepad.GamepadConfig {
-	gamepadCalOnce.Do(func() {
-		cfg, err := gamepad.LoadGamepadConfigFile(config.Paths().ConfigFile)
-		if err != nil {
-			logging.Logger(logging.CatJNI).Info("[jni] gamepad config unreadable, using defaults",
-				"err", logging.Redact(err.Error()))
-			cfg = gamepad.DefaultGamepadConfig()
-		}
-		gamepadCalValue = cfg.WithEnv(os.LookupEnv)
-	})
-	return gamepadCalValue
-}
-
-// gamepadFileEnabled reports the persisted Enabled switch from the cached
-// effective config. False means the engine sees zero pads even when the
-// TIPSY_GAMEPAD kill-switch is unset.
-func gamepadFileEnabled() bool { return gamepadCalibration().Enabled }
 
 // GamepadTypeForName classifies the engine-consumed gamepadType ordinal
 // from the evdev device name (XBOX→3, DUALSENSE|PS5→2,
@@ -197,6 +190,11 @@ func SetRobloxDirectGamepadTarget(env, class, axisFn, buttonFn, connectFn, disco
 	ready := env != 0 && class != 0 && axisFn != 0 && buttonFn != 0 &&
 		connectFn != 0 && disconnectFn != 0 && setKeyFn != 0 && setMotionFn != 0
 	directGamepadTarget.mu.Unlock()
+
+	// A new target is a new engine instance: nothing it has not been told about
+	// may carry over from a previous launch in this process (a stale announced
+	// pad would swallow the new instance's connect event).
+	resetGamepadDeliveryState()
 
 	logging.Logger(logging.CatJNI).Info("[jni] gamepad delivery path",
 		"mode", GamepadInputPath(),
@@ -468,16 +466,41 @@ func packGamepadAxis(axis int32, axes map[int]float32) (axisSample, bool) {
 	}
 }
 
+// gamepadAnnounce is the connect payload for one pad: everything needed to
+// replay the capability sequence and the typed connect event to the engine.
+type gamepadAnnounce struct {
+	deviceID    int32
+	gamepadType int32
+	keys        []int
+	motions     []int
+}
+
+func newGamepadAnnounce(deviceID, gamepadType int32, keys, motions []int) gamepadAnnounce {
+	return gamepadAnnounce{
+		deviceID:    deviceID,
+		gamepadType: gamepadType,
+		keys:        append([]int(nil), keys...),
+		motions:     append([]int(nil), motions...),
+	}
+}
+
 // Last-sent pad state for the single pad: the diff baseline for
 // change-driven AxisEvent emission and the source of UP synthesis + zeroed
 // axes on focus loss and unplug. Lock order is always gamepadState.mu →
 // directGamepadTarget.mu (via the dispatchers); the dispatchers alone never
 // take gamepadState.mu.
+//
+// withheld is a pad that is physically present but hidden from the engine
+// because the controller switch is off (it was withdrawn from a running
+// session, or hot-plugged while off). Re-enabling re-announces it; it is
+// dropped when the pad unplugs or the pump stops, never replayed as a ghost.
 var gamepadState struct {
 	mu         sync.Mutex
 	focused    bool
 	announced  bool
 	deviceID   int32
+	padInfo    gamepadAnnounce  // payload of the announced pad (re-announce replay)
+	withheld   *gamepadAnnounce // pad present on the host but hidden by the switch
 	buttons    map[int]bool
 	axes       map[int32]axisSample
 	keyScratch []int // reusable per-frame union, protected by mu
@@ -489,28 +512,50 @@ func init() {
 	gamepadState.axes = make(map[int32]axisSample)
 }
 
-// resetGamepadStateForTest clears the pad delivery state. Test seam.
-func resetGamepadStateForTest() {
+// resetGamepadDeliveryState forgets everything the engine was told: a new
+// engine instance (SetRobloxDirectGamepadTarget) starts with no pad and no held
+// state. Focus is host state and survives.
+func resetGamepadDeliveryState() {
 	gamepadState.mu.Lock()
 	defer gamepadState.mu.Unlock()
-	gamepadState.focused = true
 	gamepadState.announced = false
 	gamepadState.deviceID = 0
+	gamepadState.padInfo = gamepadAnnounce{}
+	gamepadState.withheld = nil
 	gamepadState.buttons = make(map[int]bool)
 	gamepadState.axes = make(map[int32]axisSample)
+}
+
+// resetGamepadStateForTest clears the pad delivery state. Test seam.
+func resetGamepadStateForTest() {
+	resetGamepadDeliveryState()
+	gamepadState.mu.Lock()
+	gamepadState.focused = true
+	gamepadState.mu.Unlock()
 }
 
 // gamepadNoteFocus records the X11 window focus transition for the pad gate.
 // The pad goes quiet while unfocused; focus loss synthesizes UP for every held
 // button plus zeroed axes, keeping the pad announced so refocus sends DOWNs
 // only for still-held physical state.
+//
+// Focus gain is also the live-switch reconcile point: it force-reads the
+// persisted controller switch (no stat interval), withdraws the pad from the
+// engine at once when it is off even if the pad is idle, re-announces a
+// withheld pad when it is back on, and parks or (re)starts the evdev pump to
+// match. Window focus is a rare human-paced event, so this adds no polling.
 func gamepadNoteFocus(gained bool) {
-	gamepadState.mu.Lock()
-	defer gamepadState.mu.Unlock()
 	if gained {
+		snap := gamepadLive.Reload()
+		gamepadState.mu.Lock()
 		gamepadState.focused = true
+		reconcileGamepadSwitchLocked(snap)
+		gamepadState.mu.Unlock()
+		gamepadApplySwitchToPump(snap)
 		return
 	}
+	gamepadState.mu.Lock()
+	defer gamepadState.mu.Unlock()
 	gamepadState.focused = false
 	if !directGamepadTargetLive() {
 		clearGamepadStateLocked()
@@ -556,12 +601,78 @@ func synthesizeGamepadReleaseLocked() {
 	}
 }
 
+// announceGamepadLocked runs the connect sequence for a: the capability
+// replay, then the typed connect event. Caller holds mu and has checked the
+// switch. On success the pad is announced and no longer withheld.
+func announceGamepadLocked(a gamepadAnnounce) bool {
+	if !AdvertiseGamepadCapabilities(a.deviceID, a.gamepadType, a.keys, a.motions) {
+		return false
+	}
+	if !DispatchRobloxDirectGamepadConnect(a.deviceID, a.gamepadType) {
+		return false
+	}
+	gamepadState.announced = true
+	gamepadState.deviceID = a.deviceID
+	gamepadState.padInfo = a
+	gamepadState.withheld = nil
+	return true
+}
+
+// withdrawGamepadForSwitchLocked takes the announced pad away from the engine
+// because the controller switch went off: UP for every held button, zeroed
+// axes, then the disconnect event, exactly the unplug sequence. The pad is
+// remembered as withheld so turning the switch back on re-announces it
+// without a replug. Idempotent. Caller holds mu.
+func withdrawGamepadForSwitchLocked(snap gamepad.LiveSnapshot) {
+	if !gamepadState.announced {
+		return
+	}
+	dev := gamepadState.deviceID
+	if directGamepadTargetLive() {
+		synthesizeGamepadReleaseLocked()
+		DispatchRobloxDirectGamepadDisconnect(dev)
+	}
+	clearGamepadStateLocked()
+	held := gamepadState.padInfo
+	gamepadState.withheld = &held
+	gamepadState.announced = false
+	gamepadState.deviceID = 0
+	reason := "gamepad.enabled=false"
+	if snap.KillSwitch {
+		reason = "TIPSY_GAMEPAD"
+	}
+	logging.Logger(logging.CatJNI).Info("[jni] gamepad withdrawn (controller input off)",
+		"device", dev, "reason", reason)
+}
+
+// reconcileGamepadSwitchLocked brings the engine-visible pad in line with the
+// controller switch and reports whether frames may flow. Off: withdraw the
+// announced pad (idempotent). On: re-announce a withheld pad once the window
+// is focused and the target is wired. Caller holds mu.
+func reconcileGamepadSwitchLocked(snap gamepad.LiveSnapshot) bool {
+	if !snap.Enabled() {
+		withdrawGamepadForSwitchLocked(snap)
+		return false
+	}
+	if w := gamepadState.withheld; w != nil && !gamepadState.announced &&
+		gamepadState.focused && directGamepadTargetLive() {
+		if announceGamepadLocked(*w) {
+			logging.Logger(logging.CatJNI).Info("[jni] gamepad re-announced (controller input on)",
+				"device", gamepadState.deviceID)
+		}
+	}
+	return true
+}
+
 // GamepadConnected runs the connect sequence for the single pad: the
 // capability replay, then the connect event with the gamepad type. A
 // re-announce of the same device re-probes capabilities without a duplicate
 // connect. A second simultaneous device id is ignored (one pad is served).
+// While the controller switch is off the pad is remembered but never shown to
+// the engine; it is announced when the switch comes back on.
 func GamepadConnected(deviceID, gamepadType int32, keys []int, motions []int) bool {
 	gamepadPathNote()
+	snap := gamepadLive.Get()
 	gamepadState.mu.Lock()
 	defer gamepadState.mu.Unlock()
 	if gamepadState.announced {
@@ -569,17 +680,24 @@ func GamepadConnected(deviceID, gamepadType int32, keys []int, motions []int) bo
 			gpDrop("gamepad: second pad ignored (single-pad lean build)")
 			return false
 		}
+		if !snap.Enabled() {
+			withdrawGamepadForSwitchLocked(snap)
+			return false
+		}
+		a := newGamepadAnnounce(deviceID, gamepadType, keys, motions)
 		AdvertiseGamepadCapabilities(deviceID, gamepadType, keys, motions)
+		gamepadState.padInfo = a
 		return true
 	}
-	if !AdvertiseGamepadCapabilities(deviceID, gamepadType, keys, motions) {
+	a := newGamepadAnnounce(deviceID, gamepadType, keys, motions)
+	if !snap.Enabled() {
+		gamepadState.withheld = &a
+		gpDrop("gamepad: connect withheld (controller input off)")
 		return false
 	}
-	if !DispatchRobloxDirectGamepadConnect(deviceID, gamepadType) {
+	if !announceGamepadLocked(a) {
 		return false
 	}
-	gamepadState.announced = true
-	gamepadState.deviceID = deviceID
 	logging.Logger(logging.CatJNI).Info("[jni] gamepad connected",
 		"device", deviceID, "type", gamepadType,
 		"keys", len(keys), "motions", len(motions))
@@ -587,10 +705,14 @@ func GamepadConnected(deviceID, gamepadType int32, keys []int, motions []int) bo
 }
 
 // GamepadDisconnected withdraws the single pad: UP synthesis + zeroed axes,
-// then the disconnect event. Unknown or stale ids are ignored.
+// then the disconnect event. Unknown or stale ids are ignored. A pad withheld
+// by the controller switch is simply forgotten.
 func GamepadDisconnected(deviceID int32) bool {
 	gamepadState.mu.Lock()
 	defer gamepadState.mu.Unlock()
+	if w := gamepadState.withheld; w != nil && w.deviceID == deviceID {
+		gamepadState.withheld = nil
+	}
 	if !gamepadState.announced || gamepadState.deviceID != deviceID {
 		return false
 	}
@@ -600,6 +722,7 @@ func GamepadDisconnected(deviceID int32) bool {
 	}
 	gamepadState.announced = false
 	gamepadState.deviceID = 0
+	gamepadState.padInfo = gamepadAnnounce{}
 	logging.Logger(logging.CatJNI).Info("[jni] gamepad disconnected", "device", deviceID)
 	return true
 }
@@ -608,19 +731,27 @@ func GamepadDisconnected(deviceID int32) bool {
 // ButtonEvents (buttons/DPAD, L2/R2 key duality included) and change-driven
 // AxisEvents with the stick-pair packing (ACTION_MOVE). Same focus gating as
 // keys: quiet while unfocused, UP synthesis + zero axes on focus loss (via
-// gamepadNoteFocus) and on unplug.
+// gamepadNoteFocus) and on unplug. The controller switch is re-evaluated here
+// (rate-limited stat, see gamepadLive): turning it off withdraws the pad
+// mid-session and drops frames; turning it back on re-announces it.
 func handleGamepadFrame(af gamepad.AndroidFrame) {
 	gamepadPathNote()
-	if !gamepadEnabled() {
-		gpDrop("gamepad: disabled by TIPSY_GAMEPAD")
-		return
-	}
-	if !gamepadFileEnabled() {
-		gpDrop("gamepad: disabled by config file (gamepad.enabled=false)")
-		return
-	}
+	handleGamepadFrameSnap(gamepadLive.Get(), af)
+}
+
+func handleGamepadFrameSnap(snap gamepad.LiveSnapshot, af gamepad.AndroidFrame) {
 	gamepadState.mu.Lock()
 	defer gamepadState.mu.Unlock()
+	if !reconcileGamepadSwitchLocked(snap) {
+		if w := gamepadState.withheld; w != nil && af.Disconnect &&
+			(af.DeviceID == 0 || int32(af.DeviceID) == w.deviceID) {
+			gamepadState.withheld = nil
+		}
+		// Counter only: a pad that keeps moving while the switch is off must
+		// not spam the log.
+		atomic.AddUint64(&gamepadStats.Dropped, 1)
+		return
+	}
 	if !gamepadState.focused {
 		gpDrop("gamepad: unfocused, frame quiet")
 		return
@@ -738,38 +869,58 @@ func (vm *VM) gamepadAxisValue(o *Object, axis int32) float32 {
 // feeds normalized frames into handleGamepadFrame. Deadzone comes from the
 // evdev flat via the gamepad package; the single global TIPSY_GAMEPAD_DEADZONE
 // floor is applied per Frame just before MapFrame.
+//
+// armed marks a launch session that asked for the pump (Start was called and
+// no explicit Stop has torn it down). Only an armed session may have its pump
+// (re)started when the controller switch comes back on mid-game; a stopped or
+// never-started session never restarts one. dir is remembered for that
+// restart so it opens the same node directory the launch did.
 var gamepadPump struct {
 	mu      sync.Mutex
 	running bool
+	armed   bool
+	dir     string
 	stopCh  chan struct{}
 	doneCh  chan struct{}
 }
 
 // StartRobloxDirectGamepadPump starts the evdev pump over the default
 // /dev/input directory. It refuses to start under the TIPSY_GAMEPAD
-// kill-switch or when the persisted gamepad.enabled switch is off.
+// kill-switch or when the persisted gamepad.enabled switch is off; the switch
+// is read fresh from disk on every call, never from an earlier launch's cache.
+// A refused start still arms the session: if the switch is turned on while the
+// game runs, regaining window focus starts the pump then (and only then does
+// anything open /dev/input).
 func StartRobloxDirectGamepadPump() bool {
 	return StartRobloxDirectGamepadPumpDir(gamepad.InputNodeDir)
 }
 
 // StartRobloxDirectGamepadPumpDir starts the evdev pump over dir.
 func StartRobloxDirectGamepadPumpDir(dir string) bool {
+	if dir == "" {
+		dir = gamepad.InputNodeDir
+	}
 	gamepadPump.mu.Lock()
 	defer gamepadPump.mu.Unlock()
+	gamepadPump.armed = true
+	gamepadPump.dir = dir
 	if gamepadPump.running {
 		return true
 	}
 	gamepadPathNote()
-	if !gamepadEnabled() {
+	return startGamepadPumpLocked(dir, gamepadLive.Reload())
+}
+
+// startGamepadPumpLocked opens the manager and spawns the pump when snap
+// allows pads. Caller holds gamepadPump.mu and has verified !running.
+func startGamepadPumpLocked(dir string, snap gamepad.LiveSnapshot) bool {
+	if snap.KillSwitch {
 		logging.Logger(logging.CatJNI).Info("[jni] gamepad disabled", "TIPSY_GAMEPAD", "0|off")
 		return false
 	}
-	if !gamepadFileEnabled() {
+	if !snap.Config.Enabled {
 		logging.Logger(logging.CatJNI).Info("[jni] gamepad disabled", "gamepad.enabled", false)
 		return false
-	}
-	if dir == "" {
-		dir = gamepad.InputNodeDir
 	}
 	mgr := gamepad.NewManager(dir, func(msg string) {
 		logging.Logger(logging.CatJNI).Info(msg)
@@ -783,21 +934,70 @@ func StartRobloxDirectGamepadPumpDir(dir string) bool {
 	return true
 }
 
-// StopRobloxDirectGamepadPump stops the evdev pump. Idempotent; safe to
-// call with no pump running (teardown, tests).
+// StopRobloxDirectGamepadPump stops the evdev pump, disarms the session and
+// forgets what the engine was told: the pad feed ends with the session it fed,
+// so nothing (a focus event, a stale withheld pad) can later dispatch into an
+// engine that is being torn down. Idempotent; safe to call with no pump running
+// (teardown, tests).
 func StopRobloxDirectGamepadPump() {
+	stopGamepadPump(true)
+	resetGamepadDeliveryState()
+}
+
+// stopGamepadPump stops the pump and reports whether one was running;
+// disarm=false keeps the session armed so a later switch-on can start it
+// again. Concurrent callers all wait for the loop to exit; only the first
+// closes the stop channel.
+func stopGamepadPump(disarm bool) (wasRunning bool) {
 	gamepadPump.mu.Lock()
+	if disarm {
+		gamepadPump.armed = false
+	}
 	if !gamepadPump.running {
 		gamepadPump.mu.Unlock()
-		return
+		return false
 	}
 	stop, done := gamepadPump.stopCh, gamepadPump.doneCh
+	if stop != nil {
+		close(stop)
+		gamepadPump.stopCh = nil
+	}
 	gamepadPump.mu.Unlock()
-	close(stop)
 	<-done
 	gamepadPump.mu.Lock()
-	gamepadPump.running = false
+	if gamepadPump.doneCh == done {
+		gamepadPump.running = false
+		gamepadPump.doneCh = nil
+	}
 	gamepadPump.mu.Unlock()
+	return true
+}
+
+// gamepadApplySwitchToPump matches the evdev pump to the controller switch at
+// a window-focus gain. Off: close the pad node (nothing reads /dev/input
+// while the switch is off) and, if a pump was actually parked, forget the
+// withheld pad, which the next start rediscovers. On: start the pump if this
+// launch armed one that is not running (switch turned on mid-game) and its
+// engine target is still wired.
+// Never called with gamepadState.mu held: Stop waits on the pump goroutine,
+// which takes that lock.
+func gamepadApplySwitchToPump(snap gamepad.LiveSnapshot) {
+	if !snap.Enabled() {
+		if stopGamepadPump(false) {
+			gamepadState.mu.Lock()
+			gamepadState.withheld = nil
+			gamepadState.mu.Unlock()
+		}
+		return
+	}
+	gamepadPump.mu.Lock()
+	defer gamepadPump.mu.Unlock()
+	if !gamepadPump.armed || gamepadPump.running || !directGamepadTargetLive() {
+		return
+	}
+	if startGamepadPumpLocked(gamepadPump.dir, snap) {
+		logging.Logger(logging.CatJNI).Info("[jni] gamepad pump started (controller input on)")
+	}
 }
 
 func gamepadPumpLoop(mgr *gamepad.Manager, stop <-chan struct{}, done chan<- struct{}) {
@@ -831,8 +1031,12 @@ func gamepadPumpLoop(mgr *gamepad.Manager, stop <-chan struct{}, done chan<- str
 	pump.OnFrame = func(pad gamepad.Pad, frame *gamepad.Frame) {
 		// Invoked only at a real SYN_REPORT boundary, in source order. The
 		// frame is owned by this callback until it returns.
-		gamepad.ApplyCalibration(frame, pad.Mapping, gamepadCalibration())
-		handleGamepadFrame(gamepad.MapFrameInto(&mapped, frame, pad.DevID, pad.Mapping, pad.Info.Abs))
+		// One snapshot per frame: calibration and the controller switch come
+		// from the same rate-limited, file-aware read, so a toggle or a
+		// deadzone/layout change in Settings reaches a running game.
+		snap := gamepadLive.Get()
+		gamepad.ApplyCalibration(frame, pad.Mapping, snap.Config)
+		handleGamepadFrameSnap(snap, gamepad.MapFrameInto(&mapped, frame, pad.DevID, pad.Mapping, pad.Info.Abs))
 	}
 	pump.OnRescanError = func(err error) {
 		// EACCES carries the actionable input-group/Flatpak hint: log once per

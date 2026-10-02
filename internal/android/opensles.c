@@ -15,8 +15,10 @@
 #include <pulse/error.h>
 #include <pulse/simple.h>
 
+#include <ctype.h>
 #include <errno.h>
 #include <pthread.h>
+#include <stdatomic.h>
 #include <stddef.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -26,6 +28,12 @@
 #include <time.h>
 
 extern void GoAndroid_LogAudio(char *event, char *detail);
+/* Go owns the persisted half of the microphone door (config.json); see
+ * microphone_door.go. Refresh re-reads the file and pushes the result through
+ * tipsy_audio_set_microphone_file_door; RecorderCreated starts the live
+ * watcher. Neither is ever called per buffer. */
+extern void GoAndroid_MicrophoneDoorRefresh(void);
+extern void GoAndroid_MicrophoneRecorderCreated(void);
 
 typedef uint32_t SLresult;
 typedef uint32_t SLboolean;
@@ -373,6 +381,7 @@ typedef struct {
 	uint32_t fail_writes_remaining;
 	uint32_t fail_reads_remaining;
 	uint32_t opens;
+	uint32_t closes;
 	uint32_t writes;
 	uint32_t reads;
 	uint64_t written_bytes;
@@ -385,6 +394,10 @@ typedef struct {
 	 * a silent-buffer decision. It proves that the buffer cannot re-sample the
 	 * gate and dereference an unopened backend. */
 	int unmute_after_capture_decision;
+	/* Test-only: flips the persisted microphone switch closed (no sweep)
+	 * right after the next fake recorder read, to prove the worker withholds
+	 * a buffer whose read straddled the door closing. */
+	int close_door_after_read;
 } fake_backend_state;
 
 static fake_backend_state fake_backend = {
@@ -579,27 +592,122 @@ static const char *kind_name(object_kind kind)
 	return "object";
 }
 
-static int env_is_truthy(const char *v)
+/* True when the whitespace-trimmed, case-folded value equals one of words
+ * (NULL-terminated). Same tolerance as strings.TrimSpace + ToLower in
+ * mic.ParseMicrophoneEnv / ParseDisableMicrophoneEnv. */
+static int env_word_in(const char *v, const char *const *words)
 {
-	return v != NULL && (strcmp(v, "1") == 0 || strcasecmp(v, "true") == 0 || strcasecmp(v, "yes") == 0);
+	if (v == NULL)
+		return 0;
+	while (isspace((unsigned char)*v))
+		v++;
+	size_t n = strlen(v);
+	while (n > 0 && isspace((unsigned char)v[n - 1]))
+		n--;
+	for (; *words != NULL; words++) {
+		if (strlen(*words) == n && strncasecmp(v, *words, n) == 0)
+			return 1;
+	}
+	return 0;
 }
 
-static int env_is_falsey(const char *v)
+/* The microphone door has two inputs, resolved in one place for every
+ * consumer (this gate, the JNI RECORD_AUDIO / hasSystemFeature answers via
+ * tipsy_audio_microphone_disabled; diagnostics and the GUI via
+ * mic.MicrophoneConfig.WithEnv, pinned equal by a differential Go test):
+ *
+ *   1. env (read live, so a kill-switch needs no restart): same rules as
+ *      mic.MicrophoneConfig.WithEnv. TIPSY_DISABLE_MICROPHONE=1|true|yes
+ *      closes the door, then TIPSY_MICROPHONE=0|off|false|no closes it and
+ *      1|on|true|yes opens it (the newer name wins over the alias). Unset or
+ *      unrecognised values decide nothing.
+ *   2. the persisted Settings switch (config.json "microphone.enabled"), which
+ *      Go refreshes into microphone_file_allowed: at every recorder open, from
+ *      a watcher while a recorder exists, and on every JNI door query. The
+ *      audio threads only ever load that atomic; no file or Go work happens
+ *      per buffer. Default 1 (missing, unreadable, or malformed file = open,
+ *      logged by Go). */
+static atomic_int microphone_file_allowed = 1;
+
+/* -1: env decides nothing; 0: env closes the door; 1: env opens it. */
+static int microphone_env_decision(void)
 {
-	return v != NULL && (strcmp(v, "0") == 0 || strcasecmp(v, "off") == 0 ||
-	                      strcasecmp(v, "false") == 0 || strcasecmp(v, "no") == 0);
+	static const char *const disable_words[] = {"1", "true", "yes", NULL};
+	static const char *const off_words[] = {"0", "off", "false", "no", NULL};
+	static const char *const on_words[] = {"1", "on", "true", "yes", NULL};
+	int decision = -1;
+	if (env_word_in(getenv("TIPSY_DISABLE_MICROPHONE"), disable_words))
+		decision = 0;
+	const char *v = getenv("TIPSY_MICROPHONE");
+	if (env_word_in(v, off_words))
+		decision = 0;
+	else if (env_word_in(v, on_words))
+		decision = 1;
+	return decision;
 }
 
 static int microphone_disabled(void)
 {
-	if (env_is_truthy(getenv("TIPSY_DISABLE_MICROPHONE")))
-		return 1;
-	return env_is_falsey(getenv("TIPSY_MICROPHONE"));
+	int env = microphone_env_decision();
+	if (env >= 0)
+		return env == 0;
+	return atomic_load_explicit(&microphone_file_allowed, memory_order_acquire) == 0;
 }
 
 int tipsy_audio_microphone_disabled(void)
 {
 	return microphone_disabled();
+}
+
+int tipsy_audio_microphone_env_decision(void)
+{
+	return microphone_env_decision();
+}
+
+int tipsy_audio_microphone_file_door(void)
+{
+	return atomic_load_explicit(&microphone_file_allowed, memory_order_acquire);
+}
+
+/* A closing door must not wait for the client's next buffer: a recorder that
+ * is RECORDING with an empty queue would otherwise keep the host source open
+ * indefinitely. Ask every recorder worker to close its host stream (the same
+ * close_requested path Stop uses); a worker that is mid-buffer closes at its
+ * next gate check instead. Takes registry then stream mutexes, never Go. */
+static void capture_door_close_sweep(void)
+{
+	pthread_mutex_lock(&capture_recorders_mu);
+	for (tipsy_sl_object *o = capture_recorders; o != NULL; o = o->capture_next) {
+		pthread_mutex_lock(&o->mu);
+		o->close_requested = 1;
+		pthread_cond_broadcast(&o->cond);
+		pthread_mutex_unlock(&o->mu);
+	}
+	pthread_mutex_unlock(&capture_recorders_mu);
+}
+
+/* Go-side setter for the persisted switch. Returns 1 when the value changed.
+ * A transition to closed sweeps idle recorders; a transition to open needs no
+ * action because a denied worker retries every 100 ms. */
+int tipsy_audio_set_microphone_file_door(int allowed)
+{
+	int next = allowed ? 1 : 0;
+	int prev = atomic_exchange_explicit(&microphone_file_allowed, next, memory_order_acq_rel);
+	if (prev == next)
+		return 0;
+	if (!next)
+		capture_door_close_sweep();
+	return 1;
+}
+
+int tipsy_audio_capture_recorder_count(void)
+{
+	int n = 0;
+	pthread_mutex_lock(&capture_recorders_mu);
+	for (tipsy_sl_object *o = capture_recorders; o != NULL; o = o->capture_next)
+		n++;
+	pthread_mutex_unlock(&capture_recorders_mu);
+	return n;
 }
 
 void tipsy_audio_set_capture_muted(int muted)
@@ -675,11 +783,26 @@ static void capture_denied_reset_if_allowed(void)
 static int backend_open(tipsy_sl_object *o)
 {
 	char detail[192];
+	/* Re-read the persisted switch before every recorder open, so a toggle
+	 * made just before the client starts recording is honoured with no watcher
+	 * lag. This is the only Go call on the capture path and it happens once
+	 * per host-stream open, never per buffer. No stream or object lock is held
+	 * here. */
+	if (o->kind == OBJ_RECORDER)
+		GoAndroid_MicrophoneDoorRefresh();
 	if (o->kind == OBJ_RECORDER && microphone_disabled()) {
 		log_capture_denied_once();
 		return -1;
 	}
 	capture_denied_reset_if_allowed();
+	if (o->kind == OBJ_RECORDER) {
+		/* A door-close sweep (or Stop) that raced this open asked for a close
+		 * of a stream that is already gone; do not let it tear down the stream
+		 * opened below at the next idle point. */
+		pthread_mutex_lock(&o->mu);
+		o->close_requested = 0;
+		pthread_mutex_unlock(&o->mu);
+	}
 	if (o->backend_fake) {
 		pthread_mutex_lock(&fake_backend.mu);
 		fake_backend.opens++;
@@ -751,8 +874,13 @@ static void backend_close(tipsy_sl_object *o)
 {
 	if (o->stream == NULL)
 		return;
-	if (!o->backend_fake)
+	if (!o->backend_fake) {
 		pa_simple_free(o->stream);
+	} else {
+		pthread_mutex_lock(&fake_backend.mu);
+		fake_backend.closes++;
+		pthread_mutex_unlock(&fake_backend.mu);
+	}
 	o->stream = NULL;
 }
 
@@ -806,6 +934,10 @@ static int backend_transfer(tipsy_sl_object *o, void *buffer, size_t bytes)
 			} else {
 				memset(buffer, 0x5a, bytes);
 				fake_backend.read_bytes += bytes;
+				if (fake_backend.close_door_after_read) {
+					fake_backend.close_door_after_read = 0;
+					atomic_store_explicit(&microphone_file_allowed, 0, memory_order_release);
+				}
 			}
 		} else {
 			fake_backend.writes++;
@@ -1114,6 +1246,14 @@ static void *stream_worker(void *arg)
 					 * that PCM into another Tipsy buffer first; pa_simple_write
 					 * / pa_simple_read (or the fake host) is the remaining copy. */
 					rc = backend_transfer(o, n->io_buffer, n->size);
+				if (rc == 0 && o->kind == OBJ_RECORDER && microphone_disabled()) {
+					/* The door closed while this buffer was being read. Do
+					 * not hand that PCM to the client: wipe it and take the
+					 * denied path (close the host stream, then retry). */
+					memset(n->io_buffer, 0, n->size);
+					log_capture_denied_once();
+					rc = -1;
+				}
 			}
 		}
 		if (rc < 0)
@@ -1834,6 +1974,11 @@ static SLresult create_stream_object(object_kind kind, SLObjectItf *out, SLDataS
 	}
 	o->thread_started = 1;
 	*out = (SLObjectItf)&o->object_vt;
+	/* Recorder registered and its worker running: have Go refresh the persisted
+	 * switch and start the live watcher that closes/opens the door mid-session.
+	 * Not under any Tipsy lock. */
+	if (kind == OBJ_RECORDER)
+		GoAndroid_MicrophoneRecorderCreated();
 	return SL_RESULT_SUCCESS;
 }
 
@@ -2122,12 +2267,13 @@ static void fake_reset(int fail_first_write, int fail_first_read)
 	fake_backend.enabled = 1;
 	fake_backend.fail_writes_remaining = fail_first_write ? 1u : 0u;
 	fake_backend.fail_reads_remaining = fail_first_read ? 1u : 0u;
-	fake_backend.opens = fake_backend.writes = fake_backend.reads = 0;
+	fake_backend.opens = fake_backend.closes = fake_backend.writes = fake_backend.reads = 0;
 	fake_backend.written_bytes = fake_backend.read_bytes = 0;
 	fake_backend.expected_playback_count = 0;
 	fake_backend.expected_playback_index = 0;
 	fake_backend.playback_copy_mismatch = 0;
 	fake_backend.unmute_after_capture_decision = 0;
+	fake_backend.close_door_after_read = 0;
 	pthread_mutex_unlock(&fake_backend.mu);
 }
 
@@ -2937,6 +3083,135 @@ done:
 	free(second);
 	fake_disable();
 	return ok ? 0 : -1;
+}
+
+/* Live-door fixture. The client side mirrors WebRTC's recorder: RECORDING with
+ * a buffer enqueued, completion callback counts delivered buffers. Unlike the
+ * one-shot fixtures above, Go drives it step by step so the persisted switch
+ * can be flipped while the recorder is running. Only counts and a one-bit
+ * "was any sample non-zero" are kept; PCM is never copied out. */
+typedef struct {
+	int active;
+	SLObjectItf engine, stream;
+	SLRecordItf record;
+	SLBufferQueueItf queue;
+	uint8_t *buffer;
+	uint32_t bytes;
+	uint32_t pcm_callbacks;
+	test_callback_state state;
+} door_fixture;
+
+static door_fixture door_fx;
+
+static void door_fixture_callback(SLBufferQueueItf queue, void *context)
+{
+	(void)queue;
+	door_fixture *fx = context;
+	pthread_mutex_lock(&fx->state.mu);
+	fx->state.count++;
+	if (buffer_has_nonzero(fx->buffer, fx->bytes))
+		fx->pcm_callbacks++;
+	pthread_cond_signal(&fx->state.cond);
+	pthread_mutex_unlock(&fx->state.mu);
+}
+
+int tipsy_audio_test_door_start(uint32_t bytes)
+{
+	if (door_fx.active || bytes == 0)
+		return -1;
+	memset(&door_fx, 0, sizeof(door_fx));
+	pthread_mutex_init(&door_fx.state.mu, NULL);
+	pthread_cond_init(&door_fx.state.cond, NULL);
+	door_fx.bytes = bytes;
+	door_fx.buffer = calloc(1, bytes);
+	if (door_fx.buffer == NULL)
+		return -1;
+	fake_reset(0, 0);
+	SLEngineItf engine_itf = NULL;
+	TipsyPCMFormat pcm = {SL_DATAFORMAT_PCM, 1, 48000000u, 16, 16, 0, SL_BYTEORDER_LITTLEENDIAN, 0};
+	SLDataLocator_BufferQueue bq = {SL_DATALOCATOR_ANDROIDSIMPLEBUFFERQUEUE, 4};
+	SLuint32 input_locator[4] = {SL_DATALOCATOR_IODEVICE, 1, 0xffffffffu, 0};
+	SLDataSource source = {input_locator, NULL};
+	SLDataSink sink = {&bq, &pcm};
+	door_fx.active = 1;
+	if (tipsy_slCreateEngine(&door_fx.engine, 0, NULL, 0, NULL, NULL) != 0 || door_fx.engine == NULL) goto fail;
+	if ((*door_fx.engine)->Realize(door_fx.engine, 0) != 0 ||
+	    (*door_fx.engine)->GetInterface(door_fx.engine, SL_IID_ENGINE, &engine_itf) != 0) goto fail;
+	if ((*engine_itf)->CreateAudioRecorder(engine_itf, &door_fx.stream, &source, &sink, 0, NULL, NULL) != 0) goto fail;
+	if ((*door_fx.stream)->Realize(door_fx.stream, 0) != 0 ||
+	    (*door_fx.stream)->GetInterface(door_fx.stream, SL_IID_ANDROIDSIMPLEBUFFERQUEUE, &door_fx.queue) != 0) goto fail;
+	if ((*door_fx.queue)->RegisterCallback(door_fx.queue, door_fixture_callback, &door_fx) != 0) goto fail;
+	if ((*door_fx.stream)->GetInterface(door_fx.stream, SL_IID_RECORD, &door_fx.record) != 0 ||
+	    (*door_fx.record)->SetRecordState(door_fx.record, SL_RECORDSTATE_RECORDING) != 0) goto fail;
+	return 0;
+fail:
+	tipsy_audio_test_door_stop();
+	return -1;
+}
+
+int tipsy_audio_test_door_enqueue(void)
+{
+	if (!door_fx.active || door_fx.queue == NULL)
+		return -1;
+	memset(door_fx.buffer, 0, door_fx.bytes);
+	return (*door_fx.queue)->Enqueue(door_fx.queue, door_fx.buffer, door_fx.bytes) == 0 ? 0 : -1;
+}
+
+int tipsy_audio_test_door_set_recording(int recording)
+{
+	if (!door_fx.active || door_fx.record == NULL)
+		return -1;
+	return (*door_fx.record)->SetRecordState(door_fx.record,
+	           recording ? SL_RECORDSTATE_RECORDING : SL_RECORDSTATE_STOPPED) == 0 ? 0 : -1;
+}
+
+void tipsy_audio_test_door_stats(tipsy_audio_door_stats *out)
+{
+	if (out == NULL)
+		return;
+	memset(out, 0, sizeof(*out));
+	if (!door_fx.active)
+		return;
+	pthread_mutex_lock(&door_fx.state.mu);
+	out->callbacks = door_fx.state.count;
+	out->pcm_callbacks = door_fx.pcm_callbacks;
+	pthread_mutex_unlock(&door_fx.state.mu);
+	pthread_mutex_lock(&fake_backend.mu);
+	out->opens = fake_backend.opens;
+	out->closes = fake_backend.closes;
+	out->reads = fake_backend.reads;
+	pthread_mutex_unlock(&fake_backend.mu);
+	out->stream_open = out->opens > out->closes;
+	if (door_fx.stream != NULL) {
+		tipsy_sl_object *o = from_object(door_fx.stream);
+		pthread_mutex_lock(&o->mu);
+		out->queued = o->queue_count;
+		pthread_mutex_unlock(&o->mu);
+	}
+}
+
+void tipsy_audio_test_door_arm_close_after_read(void)
+{
+	pthread_mutex_lock(&fake_backend.mu);
+	fake_backend.close_door_after_read = 1;
+	pthread_mutex_unlock(&fake_backend.mu);
+}
+
+void tipsy_audio_test_door_stop(void)
+{
+	if (!door_fx.active)
+		return;
+	if (door_fx.queue != NULL)
+		(*door_fx.queue)->RegisterCallback(door_fx.queue, NULL, NULL);
+	if (door_fx.stream != NULL)
+		(*door_fx.stream)->Destroy(door_fx.stream);
+	if (door_fx.engine != NULL)
+		(*door_fx.engine)->Destroy(door_fx.engine);
+	pthread_cond_destroy(&door_fx.state.cond);
+	pthread_mutex_destroy(&door_fx.state.mu);
+	free(door_fx.buffer);
+	fake_disable();
+	memset(&door_fx, 0, sizeof(door_fx));
 }
 
 /* WebRTC legacy Android ADM shape, step for step from upstream

@@ -32,8 +32,8 @@ func (w *mainWindow) buildMicrophoneCard() *qt.QFrame {
 	w.microphoneEnable = qt.NewQCheckBox3(microphoneToggleText(false))
 	setObjectName(w.microphoneEnable.QObject, "inputToggle")
 	w.microphoneEnable.SetAccessibleName(microphoneConsentLabel)
-	w.microphoneEnable.SetAccessibleDescription("Microphone consent for Roblox. Default on. TIPSY_MICROPHONE=0 or off disables capture regardless of this setting.")
-	w.microphoneEnable.SetToolTip("Default on. TIPSY_MICROPHONE=0|off disables capture regardless of this setting.")
+	w.microphoneEnable.SetAccessibleDescription("Microphone consent for Roblox. Default on. Switching off stops host capture right away, even in a running game. TIPSY_MICROPHONE=0 or off disables capture regardless of this setting.")
+	w.microphoneEnable.SetToolTip("Default on. Takes effect live. TIPSY_MICROPHONE=0|off disables capture regardless of this setting.")
 	w.microphoneEnable.OnToggled(func(bool) { w.persistMicrophoneSettings() })
 	cardLayout.AddWidget(w.microphoneEnable.QWidget)
 
@@ -50,7 +50,7 @@ func (w *mainWindow) buildMicrophoneCard() *qt.QFrame {
 	setObjectName(w.microphoneStatusNote.QObject, "mutedText")
 	cardLayout.AddWidget(w.microphoneStatusNote.QWidget)
 
-	w.microphoneHint = qt.NewQLabel3("Enabling this toggle allows Roblox to use the host microphone. TIPSY_MICROPHONE=0 overrides this setting. Host mute is still pavucontrol or wpctl.")
+	w.microphoneHint = qt.NewQLabel3("Enabling this toggle allows Roblox to use the host microphone; switching it off stops capture right away, even in a running game. TIPSY_MICROPHONE=0 overrides this setting. Host mute is still pavucontrol or wpctl.")
 	w.microphoneHint.SetWordWrap(true)
 	setObjectName(w.microphoneHint.QObject, "noticeInfo")
 	cardLayout.AddWidget(w.microphoneHint.QWidget)
@@ -108,11 +108,15 @@ func (w *mainWindow) updateMicrophoneStateNote() {
 	if w.microphoneStateNote == nil || w.microphoneEnable == nil {
 		return
 	}
+	settings := w.readMicrophoneWidgets()
+	effective := microphoneEffectiveEnabled(settings)
 	switch {
-	case !w.microphoneEnable.IsChecked():
+	case !settings.Enabled && effective:
+		w.microphoneStateNote.SetText("Forced on by TIPSY_MICROPHONE=1|on — Roblox may use the host microphone even though this toggle is off.")
+	case !settings.Enabled:
 		w.microphoneStateNote.SetText("Microphone access is off — Roblox will not use the host microphone.")
-	case !microphoneEffectiveEnabled(w.readMicrophoneWidgets()):
-		w.microphoneStateNote.SetText("Disabled by TIPSY_MICROPHONE=0|off — capture stays closed regardless of this toggle.")
+	case !effective:
+		w.microphoneStateNote.SetText("Disabled by TIPSY_MICROPHONE=0|off or TIPSY_DISABLE_MICROPHONE=1 — capture stays closed regardless of this toggle.")
 	default:
 		w.microphoneStateNote.SetText("Microphone access is allowed. Roblox still needs an in-experience unmute to start capture.")
 	}

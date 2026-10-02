@@ -15,6 +15,10 @@ import (
 // synthesizes input content.
 func stubGamepadScan(t *testing.T, fn func(dir string) (gamepad.ScanResult, error)) {
 	t.Helper()
+	// The probe reads the persisted gamepad.enabled switch live; never let a
+	// developer's real settings file (or its toggle) leak into a test. Tests
+	// that need a particular file call isolateGamepadConfig afterwards.
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
 	old := gamepadScanFunc
 	gamepadScanFunc = fn
 	t.Cleanup(func() { gamepadScanFunc = old })

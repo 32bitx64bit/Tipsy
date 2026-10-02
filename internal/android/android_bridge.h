@@ -383,10 +383,27 @@ int tipsy_dl_iterate_count(void);
 
 /* Process-wide OpenSL recorder mute/disable. Mute completes buffers with
  * silence and still fires the queue callback. Disable refuses host open/read
- * at the next buffer boundary. Neither path logs PCM. */
+ * at the next buffer boundary. Neither path logs PCM.
+ *
+ * The disable gate has two inputs resolved in one place: the env kill-switches
+ * (read live in C, same rules as mic.MicrophoneConfig.WithEnv) and the
+ * persisted Settings switch, which Go refreshes through
+ * tipsy_audio_set_microphone_file_door. tipsy_audio_microphone_disabled() is
+ * the answer the JNI RECORD_AUDIO / hasSystemFeature queries and the capture
+ * gate both use. */
 void tipsy_audio_set_capture_muted(int muted);
 int tipsy_audio_capture_muted(void);
 int tipsy_audio_microphone_disabled(void);
+/* -1: env decides nothing; 0: env closes the door; 1: env opens it. */
+int tipsy_audio_microphone_env_decision(void);
+/* Persisted-switch half of the door: 1 allowed (default), 0 closed. The setter
+ * returns 1 when the value changed; a change to closed asks every recorder to
+ * close its host stream. */
+int tipsy_audio_microphone_file_door(void);
+int tipsy_audio_set_microphone_file_door(int allowed);
+/* Registered OpenSL recorders (Go uses this to run its door watcher only while
+ * a recorder exists). */
+int tipsy_audio_capture_recorder_count(void);
 
 /* OpenSL ES host bridge test probes. These exercise the same public interface
  * vtables used by the client while selecting a deterministic in-memory host. */
@@ -415,6 +432,24 @@ int tipsy_audio_test_capture_muted(uint64_t *read_bytes, uint32_t *callbacks, in
 int tipsy_audio_test_capture_unmute_race(void);
 int tipsy_audio_test_capture_refused(void);
 int tipsy_audio_test_capture_midstream_disable(uint32_t *callbacks, uint32_t *reads);
+/* Step-driven live-door fixture: one fake-host recorder that Go starts,
+ * feeds one buffer at a time, observes, and tears down while it flips the
+ * persisted switch. Counts only; never exposes PCM. */
+typedef struct {
+	uint32_t callbacks;
+	uint32_t pcm_callbacks; /* completions that delivered non-silent data */
+	uint32_t opens;
+	uint32_t closes;
+	uint32_t reads;
+	uint32_t queued;
+	int stream_open; /* opens > closes: the fake host stream is held */
+} tipsy_audio_door_stats;
+int tipsy_audio_test_door_start(uint32_t bytes);
+int tipsy_audio_test_door_enqueue(void);
+int tipsy_audio_test_door_set_recording(int recording);
+void tipsy_audio_test_door_stats(tipsy_audio_door_stats *out);
+void tipsy_audio_test_door_arm_close_after_read(void);
+void tipsy_audio_test_door_stop(void);
 /* Content-free ownership/reclamation result from a fake OpenSL player queue.
  * It has no PCM or device data. Allocation/copy fields describe this queue
  * bridge only, not process RSS, CPU, audio latency, or FPS. */

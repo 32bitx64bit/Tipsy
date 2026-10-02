@@ -10,6 +10,9 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/tipsy-linux/tipsy/internal/android"
+	"github.com/tipsy-linux/tipsy/internal/config"
 )
 
 // isolateMicrophoneConfigHome points config.Paths() at an empty XDG tree so
@@ -363,6 +366,9 @@ func TestAudioPermissionMicAllowedFileEnv(t *testing.T) {
 			if got := microphoneDoorOpen(); got != tt.wantOpen {
 				t.Fatalf("microphoneDoorOpen() = %v, want %v", got, tt.wantOpen)
 			}
+			if gate := !android.MicrophoneDisabled(); gate != tt.wantOpen {
+				t.Fatalf("OpenSL capture gate open=%v, engine-facing door=%v: they must never disagree", gate, tt.wantOpen)
+			}
 			if got := platformSystemFeature(androidHardwareMicrophone); got != tt.wantOpen {
 				t.Fatalf("hasSystemFeature(microphone) = %v, want %v", got, tt.wantOpen)
 			}
@@ -400,5 +406,120 @@ func TestAudioPermissionMicAllowedFileEnv(t *testing.T) {
 				t.Fatal("PCM appeared in permission logs")
 			}
 		})
+	}
+}
+
+// rewriteMicrophoneConfig replaces config.json in place under the current
+// (isolated) XDG_CONFIG_HOME, the way the Settings page does.
+func rewriteMicrophoneConfig(t *testing.T, body string) {
+	t.Helper()
+	if err := config.AtomicWriteFile(config.Paths().ConfigFile, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// The engine-facing answers (RECORD_AUDIO check, hasSystemFeature, the
+// PermissionsProtocol microphone arm) follow the Settings switch live, and each
+// answer is exactly what the OpenSL capture gate does: file false -> true ->
+// false with no restart.
+func TestMicrophoneSettingsToggleIsLiveAndMatchesCaptureGate(t *testing.T) {
+	isolateMicrophoneConfigHome(t)
+	t.Setenv("TIPSY_DISABLE_MICROPHONE", "")
+	t.Setenv("TIPSY_MICROPHONE", "")
+	t.Setenv("TIPSY_INPUT_DEVICE", "")
+	ResetPointerDeviceMode()
+	t.Cleanup(ResetPointerDeviceMode)
+	vm, err := NewVM()
+	if err != nil {
+		t.Fatal(err)
+	}
+	act := newPermissionReceiver(t, vm, "android/app/Activity")
+	vm.mu.Lock()
+	name := vm.newStringLocked(recordAudioPermissionName)
+	vm.mu.Unlock()
+
+	check := func(step string, wantOpen bool) {
+		t.Helper()
+		v, handled := vm.dispatch(idToJobject(act.id), "android/app/Activity",
+			"checkSelfPermission", checkSelfPermissionSig, testPermissionNameArgs(name.id))
+		if !handled {
+			t.Fatalf("%s: checkSelfPermission not handled", step)
+		}
+		want := uintptr(0)
+		if !wantOpen {
+			want = permissionDeniedJ()
+		}
+		if uintptr(v) != want {
+			t.Fatalf("%s: RECORD_AUDIO = %#x, want %#x", step, uintptr(v), want)
+		}
+		if got := platformSystemFeature(androidHardwareMicrophone); got != wantOpen {
+			t.Fatalf("%s: hasSystemFeature(microphone) = %v, want %v", step, got, wantOpen)
+		}
+		response, code := vm.answerPermissionsProtocol("test", permissionsMethodHas, `{"permissions":["MICROPHONE_ACCESS"]}`)
+		wantResponse := `{"status":"AUTHORIZED","missingPermissions":[]}`
+		if !wantOpen {
+			wantResponse = `{"status":"DENIED","missingPermissions":["MICROPHONE_ACCESS"]}`
+		}
+		if response != wantResponse || code != 0 {
+			t.Fatalf("%s: PermissionsProtocol = %q (%d), want %q", step, response, code, wantResponse)
+		}
+		if gate := !android.MicrophoneDisabled(); gate != wantOpen {
+			t.Fatalf("%s: OpenSL capture gate open=%v, engine-facing answers open=%v", step, gate, wantOpen)
+		}
+	}
+
+	check("no file", true)
+	rewriteMicrophoneConfig(t, `{"microphone":{"enabled":false}}`)
+	check("Settings toggle off", false)
+	rewriteMicrophoneConfig(t, `{"microphone":{"enabled":true}}`)
+	check("Settings toggle back on", true)
+	rewriteMicrophoneConfig(t, `{"microphone":{"enabled":false}}`)
+	check("Settings toggle off again", false)
+
+	// Env still decides over the file, in both directions, and live.
+	t.Setenv("TIPSY_MICROPHONE", "1")
+	check("env force-on over file off", true)
+	t.Setenv("TIPSY_MICROPHONE", "")
+	check("env cleared, file off", false)
+	rewriteMicrophoneConfig(t, `{"microphone":{"enabled":true}}`)
+	t.Setenv("TIPSY_DISABLE_MICROPHONE", "1")
+	check("kill-switch over file on", false)
+}
+
+// A missing, unreadable, or malformed config falls back to the defaults (door
+// open) through the same code the capture gate uses, and says so in the log
+// without printing the file.
+func TestMicrophoneDoorMalformedConfigDefaultsOpenAndLogs(t *testing.T) {
+	isolateMicrophoneConfigHome(t)
+	t.Setenv("TIPSY_DISABLE_MICROPHONE", "")
+	t.Setenv("TIPSY_MICROPHONE", "")
+	logs := captureLogs(t)
+	// A successful read re-arms the once-per-distinct-failure log.
+	if !microphoneDoorOpen() {
+		t.Fatal("missing config must default to open")
+	}
+
+	rewriteMicrophoneConfig(t, "{\"microphone\":{\"enabled\":false}\nSECRET-TOKEN-DO-NOT-LOG")
+	if !microphoneDoorOpen() {
+		t.Fatal("malformed config must default to open")
+	}
+	if gate := !android.MicrophoneDisabled(); !gate {
+		t.Fatal("capture gate closed on a malformed config; it must follow the same defaults")
+	}
+	out := logs.String()
+	if !strings.Contains(out, "microphone config unreadable") {
+		t.Fatalf("malformed config was not logged: %s", out)
+	}
+	if strings.Contains(out, "SECRET-TOKEN-DO-NOT-LOG") {
+		t.Fatalf("config contents leaked into the log: %s", out)
+	}
+
+	// The env kill-switch still closes the door while the file is unreadable.
+	t.Setenv("TIPSY_MICROPHONE", "0")
+	if microphoneDoorOpen() {
+		t.Fatal("env kill-switch ignored while the config is malformed")
+	}
+	if !android.MicrophoneDisabled() {
+		t.Fatal("capture gate open under TIPSY_MICROPHONE=0")
 	}
 }

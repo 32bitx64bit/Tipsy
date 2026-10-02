@@ -16,12 +16,14 @@ import (
 	"github.com/tipsy-linux/tipsy/internal/mic"
 )
 
-// The JNI hasSystemFeature(microphone) check follows the OpenSL env door,
-// not mic.Allowed() or the config file. Doctor must not treat that split as
-// a host failure.
-const microphoneFeatureNote = "JNI feature follows the env mic door (not yet mic.Allowed(); config file is CLI-canonical)"
+// The microphone door has one answer. The JNI RECORD_AUDIO / PermissionsProtocol
+// / hasSystemFeature(microphone) answers and the OpenSL capture gate both read
+// the persisted Settings switch (config file) under the env kill-switches
+// (file < env, same rules as mic.MicrophoneConfig.WithEnv) and follow a
+// Settings toggle live, so the door reported below is the one capture obeys.
+const microphoneFeatureNote = "JNI permission/feature answers and OpenSL capture share one live microphone door (config file < env)"
 
-const microphoneDisabledHint = "unset TIPSY_MICROPHONE / TIPSY_DISABLE_MICROPHONE, or enable the microphone section in the config file"
+const microphoneDisabledHint = "unset TIPSY_MICROPHONE / TIPSY_DISABLE_MICROPHONE, or turn the microphone on in Settings (config file microphone.enabled)"
 const noCaptureSourceHint = "no capture source found: unmute in pavucontrol/wpctl; Flatpak needs Pulse visible (see packaging/microphone-input.md)"
 
 // captureSourceProbe enumerates Pulse/PipeWire capture sources. It never opens

@@ -239,7 +239,7 @@ func TestDiagnoseAudioBridge(t *testing.T) {
 		"FMOD AudioTrack", "OpenSL ES", "PulseAudio",
 		"user-confirmed audible",
 		"Microphone: disabled (TIPSY_DISABLE_MICROPHONE)",
-		"JNI feature follows the env mic door",
+		"share one live microphone door",
 		"host-verified",
 		"does not play sound",
 		"never reports PCM",

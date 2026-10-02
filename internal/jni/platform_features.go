@@ -8,7 +8,7 @@ package jni
 const (
 	androidHardwareTypePC      = "android.hardware.type.pc"
 	androidHardwareTouchscreen = "android.hardware.touchscreen"
-	// android.hardware.microphone follows mic.Allowed() (file < env), the same
+	// android.hardware.microphone follows the live microphone door (file < env), the same
 	// door as the RECORD_AUDIO grant.
 	androidHardwareMicrophone = "android.hardware.microphone"
 	// android.hardware.audio.low_latency follows hostAudioLowLatency();
@@ -18,7 +18,7 @@ const (
 
 // platformSystemFeature is the truthful PackageManager feature surface. pc and
 // touchscreen mirror the input bridge's pointer profile; microphone follows
-// mic.Allowed(); all other features stay false until their bridge is verified.
+// live microphone door; all other features stay false until their bridge is verified.
 func platformSystemFeature(name string) bool {
 	touch := pointerDeviceIsTouch()
 	switch name {

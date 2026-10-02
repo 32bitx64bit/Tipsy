@@ -81,20 +81,15 @@ func mergeMicrophoneSettingsFromPath(path string, settings guimodel.MicrophoneSe
 	return mergeMicrophoneSettings(data, settings)
 }
 
-// microphoneEffectiveEnabled mirrors the mic-owned kill-switch:
-// TIPSY_MICROPHONE=0|off|false|no (and the DISABLE alias) closes the door
-// regardless of the file. Widget-off still wins; env never forces it on.
+// microphoneEffectiveEnabled is the door a launch resolves: this toggle (the
+// persisted file value) under the env overlay, through the very mic rules the
+// JNI RECORD_AUDIO answers and the OpenSL capture gate apply. TIPSY_MICROPHONE=
+// 0|off|false|no (and the TIPSY_DISABLE_MICROPHONE alias) closes the door
+// whatever the toggle says; TIPSY_MICROPHONE=1|on|true|yes opens it even when
+// the toggle is off.
 func microphoneEffectiveEnabled(settings guimodel.MicrophoneSettings) bool {
-	if !settings.Enabled {
-		return false
-	}
-	if enabled, set := mic.ParseMicrophoneEnv(os.Getenv("TIPSY_MICROPHONE")); set {
-		return enabled
-	}
-	if disabled, set := mic.ParseDisableMicrophoneEnv(os.Getenv("TIPSY_DISABLE_MICROPHONE")); set && disabled {
-		return false
-	}
-	return true
+	cfg := mic.MicrophoneConfig{Enabled: settings.Enabled}
+	return cfg.WithEnv(os.LookupEnv).Allowed()
 }
 
 func microphoneCaptureCountText(n *int) string {

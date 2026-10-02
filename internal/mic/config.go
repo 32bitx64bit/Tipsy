@@ -53,8 +53,10 @@ func (c *MicrophoneConfig) SetEnabled(v bool) { c.Enabled = v }
 func (c *MicrophoneConfig) SetSource(v string) { c.Source = strings.TrimSpace(v) }
 
 // Allowed reports whether capture is allowed after whatever overlay
-// produced c. True iff enabled. This is the canonical Go door; OpenSL C
-// getenv remains the native kill-switch.
+// produced c. True iff enabled. This is the canonical door: the OpenSL capture
+// gate and the JNI RECORD_AUDIO / hasSystemFeature answers apply the same
+// file-then-env rules (internal/android: C reads env live, Go publishes the
+// file switch; a differential test pins both to EffectiveConfig).
 func (c MicrophoneConfig) Allowed() bool { return c.Enabled }
 
 // SourcePinned reports whether a non-default source pin is set. Diagnose
@@ -160,7 +162,10 @@ func ParseDisableMicrophoneEnv(s string) (disabled bool, set bool) {
 
 // WithEnv overlays TIPSY_MICROPHONE / TIPSY_DISABLE_MICROPHONE /
 // TIPSY_MICROPHONE_SOURCE over c and returns the result. Env wins over
-// file/defaults; unset or invalid env leaves the field untouched.
+// file/defaults; unset or invalid env leaves the field untouched. The OpenSL
+// capture gate (opensles.c microphone_env_decision) mirrors these rules in C;
+// change them together (TestMicrophoneDoorMatchesMicEffectiveConfig fails if
+// they drift).
 // TIPSY_MICROPHONE (newer name) wins over the DISABLE alias when both are
 // valid. DISABLE remains a working kill-switch when MICROPHONE is unset.
 func (c MicrophoneConfig) WithEnv(lookup func(string) (string, bool)) MicrophoneConfig {

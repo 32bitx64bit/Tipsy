@@ -40,9 +40,13 @@ If `diagnose audio` reports no capture source, or `doctor` lists
    `--socket=pulseaudio`; Flatseal → Socket → PulseAudio).
 4. Never run Tipsy as root to work around a mute or missing source.
 
-`android.hardware.microphone` already follows the OpenSL env door (§269);
-this CLI slice does not re-probe JNI. Doctor does **not** fail for the
-file-vs-env leftover (`mic.Allowed()` is canonical; JNI should call it).
+`android.hardware.microphone`, the `RECORD_AUDIO` / PermissionsProtocol
+answers, and the OpenSL capture gate all read one door (config file under the
+env kill-switches), so a Settings toggle takes effect live: turning the
+microphone off closes an already-open host capture stream within a fraction of
+a second, and turning it back on lets capture resume without a restart. This
+CLI slice does not re-probe JNI; `tipsy diagnose audio` reports the same
+file-then-env door a launch would use.
 
 ## Per-format notes
 

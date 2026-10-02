@@ -231,6 +231,20 @@ func TestMicrophoneEffectiveEnabledHonorsFileAndKillSwitch(t *testing.T) {
 			t.Fatalf("DISABLE alias %q ignored", kill)
 		}
 	}
+	// Env force-on wins over the persisted toggle, exactly like the JNI door and
+	// the OpenSL capture gate (a toggle-off GUI must not claim "off" then).
+	t.Setenv("TIPSY_DISABLE_MICROPHONE", "")
+	for _, force := range []string{"1", "on", "true", "yes"} {
+		t.Setenv("TIPSY_MICROPHONE", force)
+		if !microphoneEffectiveEnabled(off) {
+			t.Fatalf("TIPSY_MICROPHONE=%q should force the door open over a disabled toggle", force)
+		}
+	}
+	t.Setenv("TIPSY_MICROPHONE", "")
+	t.Setenv("TIPSY_DISABLE_MICROPHONE", "0")
+	if microphoneEffectiveEnabled(off) {
+		t.Fatal("TIPSY_DISABLE_MICROPHONE=0 must never force the door on")
+	}
 }
 
 func TestMicrophoneStatusTextNeverListsSourceNames(t *testing.T) {

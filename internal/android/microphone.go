@@ -26,9 +26,13 @@ func CaptureMuted() bool {
 	return C.tipsy_audio_capture_muted() != 0
 }
 
-// MicrophoneDisabled reports the process-wide capture kill-switch:
-// TIPSY_DISABLE_MICROPHONE=1|true|yes, or TIPSY_MICROPHONE=0|off|false|no.
-// The deprecated DISABLE alias stays working.
+// MicrophoneDisabled reports the process-wide capture gate: the env
+// kill-switches (TIPSY_MICROPHONE=0|off|false|no closes, 1|on|true|yes opens,
+// TIPSY_DISABLE_MICROPHONE=1|true|yes closes; the newer name wins over the
+// alias) over the persisted Settings switch last published by the door
+// refresh. It is a pure read of that state (no file or Go work), the same value
+// the OpenSL recorder and MicrophoneDoorOpen use. Call MicrophoneDoorOpen to
+// refresh the persisted switch first.
 func MicrophoneDisabled() bool {
 	return C.tipsy_audio_microphone_disabled() != 0
 }

@@ -10,6 +10,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/tipsy-linux/tipsy/internal/config"
 	"github.com/tipsy-linux/tipsy/internal/gamepad"
 )
 
@@ -86,5 +87,85 @@ func TestDiagnoseGamepadEffectiveFactsReportFileOff(t *testing.T) {
 	text := FormatSubsystem(Diagnose(context.Background(), "gamepad"))
 	if !strings.Contains(text, "subsystem=off (config file)") {
 		t.Errorf("file-off gate missing from facts:\n%s", text)
+	}
+}
+
+// TestDiagnoseGamepadFileOffIsDisabledAndOpensNothing proves the persisted
+// switch is a first-class gate in the probe, like the kill-switch: status
+// disabled, the Settings toggle named as the cause, and no evdev node opened.
+func TestDiagnoseGamepadFileOffIsDisabledAndOpensNothing(t *testing.T) {
+	called := false
+	stubGamepadScan(t, func(dir string) (gamepad.ScanResult, error) {
+		called = true
+		return gamepad.ScanResult{}, nil
+	})
+	isolateGamepadConfig(t, `{"gamepad":{"enabled":false}}`)
+	t.Setenv("TIPSY_GAMEPAD", "1")
+	t.Setenv("TIPSY_GAMEPAD_PATH", "")
+	t.Setenv("TIPSY_GAMEPAD_DEADZONE", "")
+	r := Diagnose(context.Background(), "gamepad")
+	if r.Status != "disabled" {
+		t.Fatalf("file-off status = %q, want disabled", r.Status)
+	}
+	if called {
+		t.Fatal("file-disabled probe must not open evdev nodes")
+	}
+	text := FormatSubsystem(r)
+	for _, want := range []string{
+		"Settings > Controller",
+		"TIPSY_GAMEPAD=1 (enabled)", // the env line reports the kill-switch alone
+		"subsystem=off (config file)",
+	} {
+		if !strings.Contains(text, want) {
+			t.Errorf("file-off report missing %q:\n%s", want, text)
+		}
+	}
+	info := probeGamepad()
+	if info.Enabled || info.DisabledBy != "config" {
+		t.Fatalf("probe = enabled %v disabledBy %q, want disabled by config", info.Enabled, info.DisabledBy)
+	}
+}
+
+// TestDiagnoseGamepadFollowsToggleWithoutRestart proves the probe never caches
+// the switch: the same process sees each rewrite of the settings file on the
+// next call, in both directions, matching what the live JNI pump does.
+func TestDiagnoseGamepadFollowsToggleWithoutRestart(t *testing.T) {
+	stubGamepadScan(t, func(dir string) (gamepad.ScanResult, error) {
+		return gamepad.ScanResult{}, nil
+	})
+	isolateGamepadConfig(t, `{"gamepad":{"enabled":true}}`)
+	t.Setenv("TIPSY_GAMEPAD", "1")
+	if r := Diagnose(context.Background(), "gamepad"); r.Status != "active" {
+		t.Fatalf("enabled status = %q, want active", r.Status)
+	}
+	path := config.Paths().ConfigFile
+	if err := os.WriteFile(path, []byte(`{"gamepad":{"enabled":false}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if r := Diagnose(context.Background(), "gamepad"); r.Status != "disabled" {
+		t.Fatalf("after toggle off status = %q, want disabled", r.Status)
+	}
+	if err := os.WriteFile(path, []byte(`{"gamepad":{"enabled":true}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if r := Diagnose(context.Background(), "gamepad"); r.Status != "active" {
+		t.Fatalf("after toggle on status = %q, want active", r.Status)
+	}
+}
+
+// TestDiagnoseGamepadKillSwitchWinsOverFile pins the attribution when both
+// gates are off: the env kill-switch is the reported cause.
+func TestDiagnoseGamepadKillSwitchWinsOverFile(t *testing.T) {
+	stubGamepadScan(t, func(dir string) (gamepad.ScanResult, error) {
+		return gamepad.ScanResult{}, nil
+	})
+	isolateGamepadConfig(t, `{"gamepad":{"enabled":false}}`)
+	t.Setenv("TIPSY_GAMEPAD", "off")
+	info := probeGamepad()
+	if info.Enabled || info.DisabledBy != "kill-switch" {
+		t.Fatalf("probe = enabled %v disabledBy %q, want disabled by kill-switch", info.Enabled, info.DisabledBy)
+	}
+	if text := FormatSubsystem(Diagnose(context.Background(), "gamepad")); !strings.Contains(text, "kill-switch") {
+		t.Fatalf("report omits kill-switch:\n%s", text)
 	}
 }

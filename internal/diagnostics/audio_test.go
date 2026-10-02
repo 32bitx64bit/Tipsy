@@ -32,7 +32,7 @@ func TestDiagnoseAudioMicrophoneControlAndNoSourceName(t *testing.T) {
 		"Microphone: enabled (config file)",
 		"Source pin: pinned (name not reported)",
 		"Capture sources: 2 (pactl",
-		"JNI feature follows the env mic door",
+		"share one live microphone door",
 	} {
 		if !strings.Contains(text, want) {
 			t.Errorf("audio facts missing %q:\n%s", want, text)
@@ -82,8 +82,8 @@ func TestDoctorMicrophoneDisabledIssue(t *testing.T) {
 	if !strings.Contains(text, "Microphone: disabled (TIPSY_MICROPHONE)") {
 		t.Errorf("doctor text omits mic door:\n%s", text)
 	}
-	if !strings.Contains(text, "JNI feature follows the env mic door") {
-		t.Errorf("doctor text missing JNI leftover:\n%s", text)
+	if !strings.Contains(text, "share one live microphone door") {
+		t.Errorf("doctor text missing the shared-door note:\n%s", text)
 	}
 }
 

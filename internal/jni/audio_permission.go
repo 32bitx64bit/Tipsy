@@ -12,12 +12,10 @@ package jni
 import "C"
 
 import (
-	"os"
 	"sync"
 
-	"github.com/tipsy-linux/tipsy/internal/config"
+	"github.com/tipsy-linux/tipsy/internal/android"
 	"github.com/tipsy-linux/tipsy/internal/logging"
-	"github.com/tipsy-linux/tipsy/internal/mic"
 )
 
 // Android PackageManager permission results (SDK 26).
@@ -41,15 +39,14 @@ var (
 )
 
 // microphoneDoorOpen is the process-wide RECORD_AUDIO / hasSystemFeature
-// microphone door: mic.Allowed() after file then env (file < env), with an
-// unreadable config falling back to defaults. Capture still lazy-opens in
-// OpenSL, not here.
+// microphone door. It is not a second opinion: android.MicrophoneDoorOpen
+// re-reads the persisted Settings switch and returns the very gate the OpenSL
+// recorder uses (env kill-switches over config file, file < env; a missing or
+// unreadable config falls back to the defaults and is logged there). So the
+// answer the engine gets here and whether capture can actually open cannot
+// disagree, and a Settings toggle takes effect live.
 func microphoneDoorOpen() bool {
-	cfg, err := mic.LoadMicrophoneConfigFile(config.Paths().ConfigFile)
-	if err != nil {
-		cfg = mic.DefaultMicrophoneConfig()
-	}
-	return cfg.WithEnv(os.LookupEnv).Allowed()
+	return android.MicrophoneDoorOpen()
 }
 
 func evaluatePermission(name string) int32 {

@@ -69,12 +69,24 @@ func TestGamepadEffectiveConfigFileInvalidEnvIgnored(t *testing.T) {
 }
 
 // TestGamepadFileDisabledGate proves the persisted switch gates the frame path
-// exactly like the kill-switch: zero emissions, one drop.
+// exactly like the kill-switch: with gamepad.enabled=false from the start the
+// pad is never announced to the engine (the connect is withheld, not shown),
+// frames emit zero calls and count as dropped.
+//
+// Updated for the live switch: this test used to connect the pad under a
+// disabled config and expect it to stay announced, which encoded the old
+// behavior of a pad that stayed visible to the engine while the switch was
+// off. A pad connected while the switch is off is now withheld.
 func TestGamepadFileDisabledGate(t *testing.T) {
 	selectGamepadConfigFile(t, `{"gamepad":{"enabled":false}}`, nil)
 	wireRecordingDirectGamepadTarget(t, 0x1234, 0x5678)
-	connectPadForTest(t, 1, 3)
-	testDirectGamepadRecReset()
+	keys, motions := xboxPadCaps()
+	if GamepadConnected(1, 3, keys, motions) {
+		t.Fatal("connect while gamepad.enabled=false must be withheld, not announced")
+	}
+	if n := testDirectGamepadRecCount(); n != 0 {
+		t.Fatalf("withheld connect emitted %d engine calls, want 0", n)
+	}
 
 	before := RobloxDirectGamepadStats()
 	handleGamepadFrame(xboxFrame())

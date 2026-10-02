@@ -14,6 +14,14 @@ import (
 	guimodel "github.com/tipsy-linux/tipsy/internal/gui"
 )
 
+// controllerAppliesLiveText says when a saved controller change reaches a
+// running Roblox. It mirrors the JNI side: the settings file is re-checked
+// (rate-limited, no polling) whenever the pad produces input, and read fresh at
+// every launch and whenever the Roblox window regains focus. A pad that is
+// idle, or controllers that were off when Roblox started, are picked up at the
+// focus gain.
+const controllerAppliesLiveText = "on your next controller input or when its window regains focus"
+
 func controllerToggleText(enabled bool) string {
 	if enabled {
 		return "✓ Controller input enabled"
@@ -33,8 +41,8 @@ func (w *mainWindow) buildControllerCard() *qt.QFrame {
 	w.controllerEnable = qt.NewQCheckBox3(controllerToggleText(false))
 	setObjectName(w.controllerEnable.QObject, "inputToggle")
 	w.controllerEnable.SetAccessibleName("Enable controller input")
-	w.controllerEnable.SetAccessibleDescription("Default on. TIPSY_GAMEPAD=0 or off disables pads regardless of this setting.")
-	w.controllerEnable.SetToolTip("Default on. The TIPSY_GAMEPAD=0|off kill-switch disables pads regardless.")
+	w.controllerEnable.SetAccessibleDescription("Default on. Switching off disconnects the controller from a running Roblox " + controllerAppliesLiveText + ". TIPSY_GAMEPAD=0 or off disables pads regardless of this setting.")
+	w.controllerEnable.SetToolTip("Default on. Off disconnects the controller from a running Roblox " + controllerAppliesLiveText + ". The TIPSY_GAMEPAD=0|off kill-switch disables pads regardless.")
 	w.controllerEnable.OnToggled(func(bool) { w.persistControllerSettings() })
 	cardLayout.AddWidget(w.controllerEnable.QWidget)
 
@@ -86,7 +94,7 @@ func (w *mainWindow) buildControllerCard() *qt.QFrame {
 	form.AddRow3("", w.controllerDeadLValue.QWidget)
 	cardLayout.AddLayout(form.QLayout)
 
-	w.controllerHint = qt.NewQLabel3("Xbox is the default face-button layout. Choose Switch if A/B or X/Y feel reversed on a Switch-labelled controller. Deadzone applies to both sticks (0.00–0.50, default 0.00 = device flat). Changes save immediately and apply the next time Roblox starts; they never touch the graphics settings above.")
+	w.controllerHint = qt.NewQLabel3("Xbox is the default face-button layout. Choose Switch if A/B or X/Y feel reversed on a Switch-labelled controller. Deadzone applies to both sticks (0.00–0.50, default 0.00 = device flat). Changes save immediately and reach a running Roblox " + controllerAppliesLiveText + ", and every later launch; they never touch the graphics settings above.")
 	w.controllerHint.SetWordWrap(true)
 	setObjectName(w.controllerHint.QObject, "noticeInfo")
 	cardLayout.AddWidget(w.controllerHint.QWidget)
@@ -198,7 +206,7 @@ func (w *mainWindow) persistControllerSettings() {
 	w.controllerSettings = settings
 	w.controllerFaceButtonLayout = layout
 	w.controllerEnable.SetText(controllerToggleText(settings.Enabled))
-	w.controllerHint.SetText("Controller settings saved. Restart Roblox to apply controller changes.")
+	w.controllerHint.SetText("Controller settings saved. A running Roblox picks them up " + controllerAppliesLiveText + ".")
 	setObjectName(w.controllerHint.QObject, "noticeSuccess")
 	refreshStyle(w.controllerHint.QWidget)
 	w.updateControllerStateNote()
@@ -293,6 +301,10 @@ func (w *mainWindow) refreshControllerPadsWithPolicy(explicit bool) {
 	}
 	var lines []string
 	switch {
+	case !state.Enabled:
+		// Off means nothing opens /dev/input, so there is nothing honest to
+		// list; never tell the user to plug a pad in while the switch is off.
+		lines = append(lines, "Controller input is off, so no pads are listed and none are opened. Turn it on, then press Refresh.")
 	case len(state.Pads) == 0 && len(state.Denied) > 0:
 		lines = append(lines, fmt.Sprintf("No accessible gamepad: permission denied on %d node(s). %s. Zero pads is the honest state; no fake pad is shown.", len(state.Denied), state.PermissionHint))
 	case len(state.Pads) == 0:

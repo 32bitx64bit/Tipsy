@@ -4,6 +4,7 @@
 package main
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"strings"
@@ -14,6 +15,19 @@ import (
 	"github.com/tipsy-linux/tipsy/internal/gamepad"
 	guimodel "github.com/tipsy-linux/tipsy/internal/gui"
 )
+
+// controllerOffService reports the pad enumeration the way the diagnose probe
+// does while the controller switch is off: disabled, nothing listed, nothing
+// opened.
+type controllerOffService struct{ visualService }
+
+func (controllerOffService) ControllerPads(context.Context) (guimodel.ControllerState, error) {
+	return guimodel.ControllerState{
+		Enabled:      false,
+		PathSelector: "direct",
+		Note:         "disabled by Settings > Controller (gamepad.enabled=false); no pads are opened",
+	}, nil
+}
 
 func controllerTestPath(t *testing.T) string {
 	t.Helper()
@@ -307,8 +321,23 @@ func TestControllerCardBuildsBindsAndPersistsOffscreen(t *testing.T) {
 	if !strings.Contains(win.controllerHint.Text(), "saved") {
 		t.Fatalf("save hint=%q", win.controllerHint.Text())
 	}
+	// The hint must describe the live behavior: a running Roblox applies the
+	// change on the next controller input or window focus gain, so it must not
+	// tell the user to restart.
+	if hint := win.controllerHint.Text(); strings.Contains(hint, "Restart Roblox") ||
+		!strings.Contains(hint, controllerAppliesLiveText) {
+		t.Fatalf("save hint does not describe live apply: %q", hint)
+	}
 	if win.controllerEnable.Text() != controllerToggleText(false) {
 		t.Fatalf("controller off text=%q", win.controllerEnable.Text())
+	}
+	// With the switch off the pad list explains itself instead of telling the
+	// user to plug a pad in (nothing is opened while it is off).
+	win.service = controllerOffService{}
+	win.refreshControllerPads()
+	if note := win.controllerPadNote.Text(); !strings.Contains(note, "Controller input is off") ||
+		strings.Contains(note, "Plug in") {
+		t.Fatalf("pad note while off=%q", note)
 	}
 	saved, err := loadControllerSettings()
 	if err != nil {

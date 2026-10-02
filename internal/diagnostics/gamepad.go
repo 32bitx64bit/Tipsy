@@ -33,8 +33,12 @@ type GamepadPad struct {
 
 // GamepadInfo is the honest pad enumeration for diagnose/doctor.
 type GamepadInfo struct {
-	Enabled        bool              `json:"enabled"`
-	PathSelector   string            `json:"pathSelector"`
+	Enabled      bool   `json:"enabled"`
+	PathSelector string `json:"pathSelector"`
+	// DisabledBy names the gate that is off when Enabled is false:
+	// "kill-switch" (TIPSY_GAMEPAD=0|off) or "config" (the persisted
+	// gamepad.enabled switch). The kill-switch wins when both are off.
+	DisabledBy     string            `json:"disabledBy,omitempty"`
 	PadCount       int               `json:"padCount"`
 	Pads           []GamepadPad      `json:"pads,omitempty"`
 	Denied         []string          `json:"denied,omitempty"`
@@ -48,15 +52,30 @@ var gamepadScanFunc = gamepad.Scan
 
 func gamepadDir() string { return gamepad.InputNodeDir }
 
-// gamepadEnabledLive mirrors the JNI kill-switch without caching.
-func gamepadEnabledLive() (bool, string) {
-	raw := os.Getenv("TIPSY_GAMEPAD")
-	switch strings.ToLower(strings.TrimSpace(raw)) {
-	case "0", "off", "false", "no":
-		return false, raw
-	default:
-		return true, raw
+// The gates that can switch the engine's pads off. Mirrors the JNI side.
+const (
+	gamepadDisabledByKillSwitch = "kill-switch"
+	gamepadDisabledByConfig     = "config"
+)
+
+// gamepadEnabledLive reports whether pads may reach the engine right now: the
+// TIPSY_GAMEPAD kill-switch AND the persisted gamepad.enabled switch must both
+// allow it. Both are read fresh from the environment and the settings file on
+// every call (no cache) because the JNI pump re-evaluates the same two inputs
+// at every launch, at window-focus gain, and on its frame path; a cached answer
+// here would report a toggle the engine has already acted on (or the reverse).
+// It returns the raw TIPSY_GAMEPAD value and the gate that is off ("" when
+// enabled). An unreadable settings file reads as defaults (enabled), as on a
+// first launch; a running session keeps its last good value instead.
+func gamepadEnabledLive() (enabled bool, raw string, disabledBy string) {
+	raw = os.Getenv("TIPSY_GAMEPAD")
+	if gamepad.KillSwitchOff(os.LookupEnv) {
+		return false, raw, gamepadDisabledByKillSwitch
 	}
+	if !effectiveGamepadConfig().Enabled {
+		return false, raw, gamepadDisabledByConfig
+	}
+	return true, raw, ""
 }
 
 // gamepadPathLive reports the effective feed-in arm: pads are direct-only, so
@@ -94,15 +113,21 @@ func effectiveGamepadConfig() gamepad.GamepadConfig {
 
 // probeGamepad enumerates accessible pads without grabbing anything.
 func probeGamepad() GamepadInfo {
-	enabled, _ := gamepadEnabledLive()
+	enabled, _, disabledBy := gamepadEnabledLive()
 	pathSel, _ := gamepadPathLive()
 	info := GamepadInfo{
 		Enabled:      enabled,
+		DisabledBy:   disabledBy,
 		PathSelector: pathSel,
 		Env:          gamepadEnv(),
 	}
 	if !enabled {
-		info.Note = "disabled by TIPSY_GAMEPAD=0|off kill-switch; no pads are opened"
+		// Nothing opens /dev/input while pads are off, whichever gate is off.
+		if disabledBy == gamepadDisabledByConfig {
+			info.Note = "disabled by Settings > Controller (gamepad.enabled=false); no pads are opened"
+		} else {
+			info.Note = "disabled by TIPSY_GAMEPAD=0|off kill-switch; no pads are opened"
+		}
 		return info
 	}
 	res, err := gamepadScanFunc(gamepadDir())
@@ -168,6 +193,8 @@ func diagnoseGamepad() *SubsystemReport {
 	)
 	var msg string
 	switch {
+	case !info.Enabled && info.DisabledBy == gamepadDisabledByConfig:
+		msg = "Gamepad input is switched off in Settings > Controller (gamepad.enabled=false); no pads are opened and the engine sees zero pads. A running game picks the change up on the next controller input or when its window regains focus."
 	case !info.Enabled:
 		msg = "Gamepad input is disabled by the TIPSY_GAMEPAD=0|off kill-switch; no pads are opened and the engine sees zero pads."
 	case info.PadCount == 0 && len(info.Denied) > 0:
@@ -189,8 +216,11 @@ func diagnoseGamepad() *SubsystemReport {
 // the effective floor the pump enforces (persisted file overlaid with env:
 // file < env).
 func gamepadEnvFacts(info GamepadInfo) []string {
+	// The TIPSY_GAMEPAD line reports the kill-switch alone; the persisted
+	// switch is reported on the Effective line below.
+	killOff := info.DisabledBy == gamepadDisabledByKillSwitch || (!info.Enabled && info.DisabledBy == "")
 	enabledWord := "enabled"
-	if !info.Enabled {
+	if killOff {
 		enabledWord = "disabled"
 	}
 	rawEnable, ok := info.Env["TIPSY_GAMEPAD"]
@@ -210,7 +240,7 @@ func gamepadEnvFacts(info GamepadInfo) []string {
 	}
 	eff := effectiveGamepadConfig()
 	out = append(out, fmt.Sprintf("Effective: file < env → stick floor=%.2f; subsystem=%s (missing JSON = defaults)",
-		eff.EffectiveDeadzone(), effectiveEnabledWord(info.Enabled, eff.Enabled)))
+		eff.EffectiveDeadzone(), effectiveEnabledWord(!killOff, eff.Enabled)))
 	return out
 }
 
