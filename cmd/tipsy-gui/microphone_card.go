@@ -20,6 +20,16 @@ func microphoneToggleText(enabled bool) string {
 	return "Microphone access disabled"
 }
 
+// microphoneUnreadableToggleText labels the toggle while the settings file
+// cannot be read: the box shows the default, not a saved choice, so it must
+// not claim "allowed" or "disabled".
+const microphoneUnreadableToggleText = "Microphone access — settings file unreadable (default shown)"
+
+const microphoneUnreadableNote = "The settings file could not be read, so the toggle above shows the default and is locked. Fix or remove the file, then return to this page."
+
+// microphoneHintDefault is the card's resting hint.
+const microphoneHintDefault = "Enabling this toggle allows Roblox to use the host microphone; switching it off stops capture right away, even in a running game. TIPSY_MICROPHONE=0 overrides this setting. Host mute is still pavucontrol or wpctl."
+
 func (w *mainWindow) buildMicrophoneCard() *qt.QFrame {
 	card, cardLayout := newVerticalCard("card")
 	cardLayout.AddWidget(sectionLabel("Microphone").QWidget)
@@ -50,16 +60,14 @@ func (w *mainWindow) buildMicrophoneCard() *qt.QFrame {
 	setObjectName(w.microphoneStatusNote.QObject, "mutedText")
 	cardLayout.AddWidget(w.microphoneStatusNote.QWidget)
 
-	w.microphoneHint = qt.NewQLabel3("Enabling this toggle allows Roblox to use the host microphone; switching it off stops capture right away, even in a running game. TIPSY_MICROPHONE=0 overrides this setting. Host mute is still pavucontrol or wpctl.")
+	w.microphoneHint = qt.NewQLabel3(microphoneHintDefault)
 	w.microphoneHint.SetWordWrap(true)
 	setObjectName(w.microphoneHint.QObject, "noticeInfo")
 	cardLayout.AddWidget(w.microphoneHint.QWidget)
 
 	w.bindMicrophoneSettings(w.microphoneSettings)
 	if w.microphoneLoadErr != nil {
-		w.microphoneHint.SetText(w.microphoneLoadErr.Error())
-		setObjectName(w.microphoneHint.QObject, "noticeWarning")
-		refreshStyle(w.microphoneHint.QWidget)
+		setNotice(w.microphoneHint, "noticeWarning", w.microphoneLoadErr.Error())
 	}
 	return card
 }
@@ -68,8 +76,16 @@ func (w *mainWindow) bindMicrophoneSettings(settings guimodel.MicrophoneSettings
 	w.microphoneSyncing = true
 	defer func() { w.microphoneSyncing = false }()
 	if w.microphoneEnable != nil {
+		// While the settings file cannot be read the card shows a default it
+		// cannot save, so the toggle is locked rather than left to claim a choice.
+		usable := w.microphoneLoadErr == nil
 		w.microphoneEnable.SetChecked(settings.Enabled)
-		w.microphoneEnable.SetText(microphoneToggleText(settings.Enabled))
+		if usable {
+			w.microphoneEnable.SetText(microphoneToggleText(settings.Enabled))
+		} else {
+			w.microphoneEnable.SetText(microphoneUnreadableToggleText)
+		}
+		w.microphoneEnable.SetEnabled(usable)
 	}
 	w.updateMicrophoneStateNote()
 }
@@ -83,23 +99,24 @@ func (w *mainWindow) readMicrophoneWidgets() guimodel.MicrophoneSettings {
 }
 
 // persistMicrophoneSettings saves the current widget state to the canonical
-// microphone section. Graphics settings above are never touched.
+// microphone section. Graphics settings above are never touched. If the save
+// fails the toggle snaps back to the persisted state, so it never claims a
+// choice that is not saved.
 func (w *mainWindow) persistMicrophoneSettings() {
 	if w.microphoneSyncing || w.microphoneEnable == nil {
 		return
 	}
 	settings := w.readMicrophoneWidgets()
 	if err := saveMicrophoneSettings(settings); err != nil {
-		w.microphoneHint.SetText("Could not save microphone settings: " + err.Error())
-		setObjectName(w.microphoneHint.QObject, "noticeError")
-		refreshStyle(w.microphoneHint.QWidget)
+		w.reloadMicrophoneSettings()
+		message := "Could not save microphone settings: " + err.Error()
+		setNotice(w.microphoneHint, "noticeError", message)
+		w.showStatus(message)
 		return
 	}
 	w.microphoneSettings = settings
 	w.microphoneEnable.SetText(microphoneToggleText(settings.Enabled))
-	w.microphoneHint.SetText("Microphone settings saved.")
-	setObjectName(w.microphoneHint.QObject, "noticeSuccess")
-	refreshStyle(w.microphoneHint.QWidget)
+	setNotice(w.microphoneHint, "noticeSuccess", "Microphone settings saved.")
 	w.updateMicrophoneStateNote()
 	w.refreshMicrophoneStatus()
 }
@@ -111,6 +128,8 @@ func (w *mainWindow) updateMicrophoneStateNote() {
 	settings := w.readMicrophoneWidgets()
 	effective := microphoneEffectiveEnabled(settings)
 	switch {
+	case w.microphoneLoadErr != nil:
+		w.microphoneStateNote.SetText(microphoneUnreadableNote)
 	case !settings.Enabled && effective:
 		w.microphoneStateNote.SetText("Forced on by TIPSY_MICROPHONE=1|on — Roblox may use the host microphone even though this toggle is off.")
 	case !settings.Enabled:

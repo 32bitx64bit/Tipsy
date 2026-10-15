@@ -29,6 +29,16 @@ func controllerToggleText(enabled bool) string {
 	return "Controller input disabled"
 }
 
+// controllerUnreadableToggleText labels the toggle while the settings file
+// cannot be read: the box shows defaults, not a saved choice, so it must not
+// claim "enabled" or "disabled".
+const controllerUnreadableToggleText = "Controller input — settings file unreadable (defaults shown)"
+
+const controllerUnreadableNote = "The settings file could not be read, so the controls below show defaults and are locked. Fix or remove the file, then return to this page."
+
+// controllerHintDefault is the card's resting hint.
+const controllerHintDefault = "Xbox is the default face-button layout. Choose Switch if A/B or X/Y feel reversed on a Switch-labelled controller. Deadzone applies to both sticks (0.00–0.50, default 0.00 = device flat). Changes save immediately and reach a running Roblox " + controllerAppliesLiveText + ", and every later launch; they never touch the graphics settings above."
+
 func (w *mainWindow) buildControllerCard() *qt.QFrame {
 	card, cardLayout := newVerticalCard("card")
 	cardLayout.AddWidget(sectionLabel("Controller").QWidget)
@@ -94,25 +104,23 @@ func (w *mainWindow) buildControllerCard() *qt.QFrame {
 	form.AddRow3("", w.controllerDeadLValue.QWidget)
 	cardLayout.AddLayout(form.QLayout)
 
-	w.controllerHint = qt.NewQLabel3("Xbox is the default face-button layout. Choose Switch if A/B or X/Y feel reversed on a Switch-labelled controller. Deadzone applies to both sticks (0.00–0.50, default 0.00 = device flat). Changes save immediately and reach a running Roblox " + controllerAppliesLiveText + ", and every later launch; they never touch the graphics settings above.")
+	w.controllerHint = qt.NewQLabel3(controllerHintDefault)
 	w.controllerHint.SetWordWrap(true)
 	setObjectName(w.controllerHint.QObject, "noticeInfo")
 	cardLayout.AddWidget(w.controllerHint.QWidget)
 
 	resetRow := qt.NewQHBoxLayout2()
 	resetRow.AddStretch()
-	reset := qt.NewQPushButton3("Reset controller defaults")
-	setObjectName(reset.QObject, "secondaryButton")
-	reset.SetAccessibleName("Reset controller defaults")
-	reset.OnClicked(w.resetControllerSettings)
-	resetRow.AddWidget(reset.QWidget)
+	w.controllerReset = qt.NewQPushButton3("Reset controller defaults")
+	setObjectName(w.controllerReset.QObject, "secondaryButton")
+	w.controllerReset.SetAccessibleName("Reset controller defaults")
+	w.controllerReset.OnClicked(w.resetControllerSettings)
+	resetRow.AddWidget(w.controllerReset.QWidget)
 	cardLayout.AddLayout(resetRow.QLayout)
 
 	w.bindControllerSettings(w.controllerSettings)
 	if w.controllerLoadErr != nil {
-		w.controllerHint.SetText(w.controllerLoadErr.Error())
-		setObjectName(w.controllerHint.QObject, "noticeWarning")
-		refreshStyle(w.controllerHint.QWidget)
+		setNotice(w.controllerHint, "noticeWarning", w.controllerLoadErr.Error())
 	}
 	return card
 }
@@ -137,20 +145,49 @@ func (w *mainWindow) newDeadzoneRow(accessible string) (*qt.QSlider, *qt.QLabel)
 func (w *mainWindow) bindControllerSettings(settings guimodel.ControllerSettings) {
 	w.controllerSyncing = true
 	defer func() { w.controllerSyncing = false }()
+	// While the settings file cannot be read the card shows defaults it cannot
+	// save, so the controls are locked rather than left to claim a choice.
+	usable := w.controllerLoadErr == nil
 	if w.controllerEnable != nil {
 		w.controllerEnable.SetChecked(settings.Enabled)
-		w.controllerEnable.SetText(controllerToggleText(settings.Enabled))
+		if usable {
+			w.controllerEnable.SetText(controllerToggleText(settings.Enabled))
+		} else {
+			w.controllerEnable.SetText(controllerUnreadableToggleText)
+		}
+		w.controllerEnable.SetEnabled(usable)
 	}
 	if w.controllerDeadL != nil {
 		w.controllerDeadL.SetValue(deadzoneSliderValue(settings.Deadzone))
+		w.controllerDeadL.SetEnabled(usable)
 	}
 	if w.controllerDeadLValue != nil {
-		w.controllerDeadLValue.SetText(fmt.Sprintf("%.2f", settings.Deadzone))
+		w.controllerDeadLValue.SetText(fmt.Sprintf("%.2f", float64(deadzoneSliderValue(settings.Deadzone))/100))
 	}
 	if w.controllerFaceLayout != nil {
 		w.setComboIndex(w.controllerFaceLayout, controllerFaceButtonLayoutIndex(w.controllerFaceButtonLayout))
+		w.controllerFaceLayout.SetEnabled(usable)
+	}
+	if w.controllerReset != nil {
+		w.controllerReset.SetEnabled(usable)
 	}
 	w.updateControllerStateNote()
+}
+
+// controllerChangeFromWidgets reports which controls differ from the last
+// state this card knows to be on disk.
+func (w *mainWindow) controllerChangeFromWidgets() controllerChange {
+	var change controllerChange
+	if w.controllerEnable != nil {
+		change.enabled = w.controllerEnable.IsChecked() != w.controllerSettings.Enabled
+	}
+	if w.controllerDeadL != nil {
+		change.deadzone = w.controllerDeadL.Value() != deadzoneSliderValue(w.controllerSettings.Deadzone)
+	}
+	if w.controllerFaceLayout != nil {
+		change.layout = controllerFaceButtonLayoutIndex(w.readControllerFaceButtonLayout()) != controllerFaceButtonLayoutIndex(w.controllerFaceButtonLayout)
+	}
+	return change
 }
 
 func controllerFaceButtonLayoutIndex(layout gamepad.FaceButtonLayout) int {
@@ -189,27 +226,30 @@ func (w *mainWindow) readControllerWidgets() guimodel.ControllerSettings {
 	return settings
 }
 
-// persistControllerSettings saves the current widget state to the canonical
-// gamepad section. Graphics settings above are never touched.
+// persistControllerSettings saves the control the user just changed to the
+// canonical gamepad section and then shows what is on disk. Graphics settings
+// above are never touched. If the save fails the card snaps back to the
+// persisted state, so it never claims a choice that is not saved.
 func (w *mainWindow) persistControllerSettings() {
 	if w.controllerSyncing || w.controllerEnable == nil {
 		return
 	}
-	settings := w.readControllerWidgets()
-	layout := w.readControllerFaceButtonLayout()
-	if err := saveControllerSettingsWithFaceButtonLayout(settings, layout); err != nil {
-		w.controllerHint.SetText("Could not save controller settings: " + err.Error())
-		setObjectName(w.controllerHint.QObject, "noticeError")
-		refreshStyle(w.controllerHint.QWidget)
+	change := w.controllerChangeFromWidgets()
+	if !change.any() {
 		return
 	}
-	w.controllerSettings = settings
+	saved, layout, err := saveControllerChange(w.readControllerWidgets(), w.readControllerFaceButtonLayout(), change)
+	if err != nil {
+		w.reloadControllerSettings()
+		message := "Could not save controller settings: " + err.Error()
+		setNotice(w.controllerHint, "noticeError", message)
+		w.showStatus(message)
+		return
+	}
+	w.controllerSettings = saved
 	w.controllerFaceButtonLayout = layout
-	w.controllerEnable.SetText(controllerToggleText(settings.Enabled))
-	w.controllerHint.SetText("Controller settings saved. A running Roblox picks them up " + controllerAppliesLiveText + ".")
-	setObjectName(w.controllerHint.QObject, "noticeSuccess")
-	refreshStyle(w.controllerHint.QWidget)
-	w.updateControllerStateNote()
+	w.bindControllerSettings(saved)
+	setNotice(w.controllerHint, "noticeSuccess", "Controller settings saved. A running Roblox picks them up "+controllerAppliesLiveText+".")
 }
 
 func (w *mainWindow) updateControllerStateNote() {
@@ -217,6 +257,8 @@ func (w *mainWindow) updateControllerStateNote() {
 		return
 	}
 	switch {
+	case w.controllerLoadErr != nil:
+		w.controllerStateNote.SetText(controllerUnreadableNote)
 	case !w.controllerEnable.IsChecked():
 		w.controllerStateNote.SetText("Controller input is off — the engine sees zero pads.")
 	case !controllerEffectiveEnabled(w.readControllerWidgets()):
@@ -229,17 +271,15 @@ func (w *mainWindow) updateControllerStateNote() {
 func (w *mainWindow) resetControllerSettings() {
 	settings := guimodel.DefaultControllerSettings()
 	if err := saveControllerSettingsWithFaceButtonLayout(settings, gamepad.FaceButtonLayoutXbox); err != nil {
-		w.controllerHint.SetText("Could not reset controller settings: " + err.Error())
-		setObjectName(w.controllerHint.QObject, "noticeError")
-		refreshStyle(w.controllerHint.QWidget)
+		message := "Could not reset controller settings: " + err.Error()
+		setNotice(w.controllerHint, "noticeError", message)
+		w.showStatus(message)
 		return
 	}
 	w.controllerSettings = settings
 	w.controllerFaceButtonLayout = gamepad.FaceButtonLayoutXbox
 	w.bindControllerSettings(settings)
-	w.controllerHint.SetText("Controller settings reset to defaults (on, Xbox face buttons, device-flat deadzone).")
-	setObjectName(w.controllerHint.QObject, "noticeSuccess")
-	refreshStyle(w.controllerHint.QWidget)
+	setNotice(w.controllerHint, "noticeSuccess", "Controller settings reset to defaults (on, Xbox face buttons, device-flat deadzone).")
 }
 
 func clearControllerRows(layout *qt.QVBoxLayout) {

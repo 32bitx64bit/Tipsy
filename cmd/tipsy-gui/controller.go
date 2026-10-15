@@ -82,6 +82,51 @@ func saveControllerSettingsWithFaceButtonLayout(settings guimodel.ControllerSett
 	})
 }
 
+// controllerChange names the controller controls the user just edited. The
+// card saves only those fields over the section it reads under the config
+// lock, so a card that went stale (settings file edited elsewhere) can never
+// write its old values back over fields the user did not touch.
+type controllerChange struct {
+	enabled, deadzone, layout bool
+}
+
+func (c controllerChange) any() bool { return c.enabled || c.deadzone || c.layout }
+
+// saveControllerChange overlays only the changed fields on the persisted
+// gamepad section and returns what is now on disk, so the card can show it.
+func saveControllerChange(want guimodel.ControllerSettings, layout gamepad.FaceButtonLayout, change controllerChange) (guimodel.ControllerSettings, gamepad.FaceButtonLayout, error) {
+	if err := guimodel.ValidateControllerSettings(want); err != nil {
+		return guimodel.ControllerSettings{}, gamepad.FaceButtonLayoutXbox, err
+	}
+	var persisted gamepad.GamepadConfig
+	err := config.UpdateJSON(func(data []byte) ([]byte, error) {
+		cfg, err := gamepad.ParseGamepadSection(data)
+		if err != nil {
+			return nil, fmt.Errorf("controller settings not saved: existing settings file is invalid (%v)", err)
+		}
+		if change.enabled {
+			cfg.Enabled = want.Enabled
+		}
+		if change.deadzone {
+			cfg.Deadzone = want.Deadzone
+		}
+		if change.layout {
+			cfg.FaceButtonLayout = layout
+		}
+		cfg.Normalize()
+		merged, err := gamepad.UpsertGamepadSection(data, cfg)
+		if err != nil {
+			return nil, fmt.Errorf("controller settings not saved: existing settings file is invalid (%v)", err)
+		}
+		persisted = cfg
+		return append(merged, '\n'), nil
+	})
+	if err != nil {
+		return guimodel.ControllerSettings{}, gamepad.FaceButtonLayoutXbox, err
+	}
+	return controllerSettingsFromGamepad(persisted), persisted.FaceButtonLayout, nil
+}
+
 // saveControllerSettingsAt overlays the "gamepad" section onto path,
 // preserving every other top-level key. A malformed existing file is never
 // overwritten, so unrelated keys cannot be destroyed by a gamepad write.

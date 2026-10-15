@@ -62,6 +62,7 @@ type mainWindow struct {
 	controllerLoadErr                                error
 	controllerSyncing                                bool
 	controllerEnable                                 *qt.QCheckBox
+	controllerReset                                  *qt.QPushButton
 	controllerFaceLayout                             *qt.QComboBox
 	controllerStateNote                              *qt.QLabel
 	controllerPadRows                                *qt.QVBoxLayout
@@ -158,6 +159,13 @@ func newWindowBase(service guimodel.Service, icon *qt.QIcon) *mainWindow {
 	w.win.OnShowEvent(func(super func(*qt.QShowEvent), event *qt.QShowEvent) {
 		super(event)
 		w.startVisibleTimers()
+		w.reloadInputSettingsOnReturn()
+	})
+	w.win.OnChangeEvent(func(super func(*qt.QEvent), event *qt.QEvent) {
+		super(event)
+		if event.Type() == qt.QEvent__ActivationChange && w.win.IsActiveWindow() {
+			w.reloadInputSettingsOnReturn()
+		}
 	})
 	w.win.OnHideEvent(func(super func(*qt.QHideEvent), event *qt.QHideEvent) {
 		super(event)
@@ -317,6 +325,11 @@ func (w *mainWindow) selectPage(index int) {
 	}
 	if index == 3 {
 		w.runDoctor()
+	}
+	if index == settingsPageIndex {
+		// The settings file may have changed since this window was built (a
+		// hand edit, another Tipsy window); show what is persisted now.
+		w.reloadInputSettings()
 	}
 	if index == 2 && w.integrationStatus != nil {
 		// Another install may have adopted or released the launcher since this
