@@ -1033,3 +1033,42 @@ func assertNoForbiddenTextureOverrides(t *testing.T, got map[string]any) {
 		}
 	}
 }
+
+func TestPersistentStartupDefaultsPinMeshLodGateAndAreValidFastFlags(t *testing.T) {
+	got := PersistentStartupDefaults()
+	want := map[string]string{
+		"FFlagRenderPipelineVersioningFlag4":        "True",
+		"FIntEnableRenderPipelineHundredthsPercent": "10000",
+	}
+	if len(got) != len(want) {
+		t.Fatalf("defaults=%v want %v", got, want)
+	}
+	for name, value := range want {
+		if got[name] != value {
+			t.Fatalf("default %s=%q want %q", name, got[name], value)
+		}
+	}
+	// Defaults must be valid custom Fast Flag values.
+	var flags []FastFlag
+	for name, value := range got {
+		flags = append(flags, FastFlag{Name: name, Value: value})
+	}
+	if err := ValidateFastFlags(flags); err != nil {
+		t.Fatalf("defaults are not valid Fast Flags: %v", err)
+	}
+	// The returned map is a copy.
+	got[FlagRenderPipelineVersioning] = "False"
+	if PersistentStartupDefaults()[FlagRenderPipelineVersioning] != "True" {
+		t.Fatal("PersistentStartupDefaults shares state between calls")
+	}
+	// Gate keys must not reach the ordinary settings map.
+	overrides, err := OverridesWithFastFlags(Default(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for name := range want {
+		if _, ok := overrides[name]; ok {
+			t.Fatalf("ordinary overrides contain persistent key %s", name)
+		}
+	}
+}

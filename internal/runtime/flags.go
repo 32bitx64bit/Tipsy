@@ -243,10 +243,11 @@ func withFlogOverrides(overrides map[string]any, spec, luaSpec string) (map[stri
 	return overrides, flogGroupCount(extra), len(lua) > 0
 }
 
-// splitRendererStartupOverrides removes an explicit OpenGL request from the
-// ordinary settings merge and serializes it for the APK's external override
-// path. Auto and explicit Vulkan keep the settings-envelope behavior.
-func splitRendererStartupOverrides(overrides map[string]any, testOpenGL bool) (map[string]any, string, error) {
+// splitStartupOverrides returns the persistent override layer JSON (second
+// nativeInitClientSettings argument) and the settings map without its keys.
+// Mesh LOD gate defaults always go in; a custom Fast Flag replaces them, and
+// nil removes the key from both layers. Explicit OpenGL keys move to the layer.
+func splitStartupOverrides(overrides map[string]any, testOpenGL bool) (map[string]any, string, error) {
 	if testOpenGL {
 		overrides = cloneFlagMap(overrides)
 		delete(overrides, flagPreferVulkan)
@@ -255,45 +256,49 @@ func splitRendererStartupOverrides(overrides map[string]any, testOpenGL bool) (m
 		overrides[flagDisableVulkan] = "True"
 		overrides[flagDisableVulkan11] = "True"
 	}
-	if _, explicitOpenGL := overrides[flagPreferOpenGL]; !explicitOpenGL {
-		return overrides, "", nil
-	}
-	keys := [...]string{
-		flagPreferOpenGL,
-		flagPreferVulkan,
-		flagDisableOpenGL,
-		flagDisableVulkan,
-		flagDisableVulkan11,
-	}
-	renderer := make(map[string]any, len(keys))
-	for _, key := range keys {
-		if value, ok := overrides[key]; ok && value != nil {
-			renderer[key] = value
+	settings := cloneFlagMap(overrides)
+	external := make(map[string]any, 7)
+	if _, explicitOpenGL := overrides[flagPreferOpenGL]; explicitOpenGL {
+		for _, key := range [...]string{
+			flagPreferOpenGL,
+			flagPreferVulkan,
+			flagDisableOpenGL,
+			flagDisableVulkan,
+			flagDisableVulkan11,
+		} {
+			if value, ok := overrides[key]; ok && value != nil {
+				external[key] = value
+			}
+			delete(settings, key)
 		}
 	}
-	if len(renderer) == 0 {
-		return overrides, "", nil
+	for key, def := range clientsettings.PersistentStartupDefaults() {
+		custom, present := overrides[key]
+		switch {
+		case !present:
+			external[key] = def
+		case custom != nil:
+			external[key] = custom
+			delete(settings, key)
+		}
 	}
-	raw, err := json.Marshal(renderer)
+	raw, err := json.Marshal(external)
 	if err != nil {
 		return nil, "", err
-	}
-	settings := cloneFlagMap(overrides)
-	for _, key := range keys {
-		delete(settings, key)
 	}
 	return settings, string(raw), nil
 }
 
 type androidAppOverrides struct {
-	values   map[string]any
-	renderer string
+	values map[string]any
+	// external is the persistent override layer JSON; see splitStartupOverrides.
+	external string
 }
 
 // loadAndroidAppOverrides resolves Tipsy's local settings once while the
 // client lock is held, against the launch's host renderer snapshot. Explicit
-// OpenGL controls are separated for the APK's external override path; all
-// other settings retain the ordinary AndroidApp response merge.
+// OpenGL controls and mesh LOD gate keys go to the persistent override layer;
+// other settings keep the ordinary AndroidApp merge.
 func loadAndroidAppOverrides(ctx context.Context, cachePath string, testOpenGL bool, caps graphics.RendererCapabilities) (androidAppOverrides, error) {
 	if ctx == nil {
 		ctx = context.Background()
@@ -322,11 +327,11 @@ func loadAndroidAppOverrides(ctx context.Context, cachePath string, testOpenGL b
 	if flogGroups > 0 || luaLog {
 		logging.Logger(logging.CatGameActivity).Info("log level overrides applied", "flogGroups", flogGroups, "luaLogger", luaLog)
 	}
-	overrides, rendererOverrides, err := splitRendererStartupOverrides(overrides, testOpenGL)
+	overrides, external, err := splitStartupOverrides(overrides, testOpenGL)
 	if err != nil {
-		return androidAppOverrides{}, fmt.Errorf("renderer startup overrides: %w", err)
+		return androidAppOverrides{}, fmt.Errorf("startup overrides: %w", err)
 	}
-	return androidAppOverrides{values: overrides, renderer: rendererOverrides}, nil
+	return androidAppOverrides{values: overrides, external: external}, nil
 }
 
 func loadAndroidAppSettings(ctx context.Context, cachePath, version string, overrides androidAppOverrides) (string, int, error) {

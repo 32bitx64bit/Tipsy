@@ -515,7 +515,7 @@ func startGameActivity(ctx context.Context, vm *jni.VM, mod *loader.Module, aw *
 		return nil, fmt.Errorf("initializeNativeCode: %w", err)
 	}
 	var handle int64
-	runMainGameActivityOnCreateBoundary(overrides.renderer, func(payload string) {
+	runMainGameActivityOnCreateBoundary(overrides.external, func(payload string) {
 		callRobloxJNI(mod, env.Raw(), activity, "Java_com_roblox_client_startup_MainGameActivity_nativePreloadFlagOverrides", env.NewStringUTF(payload))
 	}, func() {
 		handle = loader.CallP8(fn, env.Raw(), activity, env.NewStringUTF(files), env.NewStringUTF(obb), env.NewStringUTF(files), assetsObj, 0, cfg)
@@ -851,8 +851,8 @@ func initRobloxLocalStorageManager(mod *loader.Module, env *jni.Env, files, cach
 
 const androidAppSettingsGroup = "GoogleAndroidApp"
 
-func androidClientSettingsInitArgs(settings, rendererOverrides string) [3]string {
-	return [3]string{settings, rendererOverrides, androidAppSettingsGroup}
+func androidClientSettingsInitArgs(settings, externalOverrides string) [3]string {
+	return [3]string{settings, externalOverrides, androidAppSettingsGroup}
 }
 
 func newClientSettingsInitLocals(env *jni.Env, args [3]string) [3]uintptr {
@@ -873,10 +873,10 @@ func releaseClientSettingsInitLocals(env *jni.Env, locals [3]uintptr) {
 
 // runMainGameActivityOnCreateBoundary preserves MainGameActivity's order: a
 // non-empty external override is preloaded before the super.onCreate equivalent
-// initializes native code. Ordinary launches make no synthetic empty preload.
-func runMainGameActivityOnCreateBoundary(rendererOverrides string, preload func(string), superCreate func()) {
-	if rendererOverrides != "" {
-		preload(rendererOverrides)
+// initializes native code. An empty layer skips the preload.
+func runMainGameActivityOnCreateBoundary(externalOverrides string, preload func(string), superCreate func()) {
+	if externalOverrides != "" {
+		preload(externalOverrides)
 	}
 	superCreate()
 }
@@ -895,7 +895,7 @@ func startRobloxApp(ctx context.Context, mod *loader.Module, env *jni.Env, activ
 	if gl == 0 {
 		gl = activity
 	}
-	initArgs := androidClientSettingsInitArgs(flags, overrides.renderer)
+	initArgs := androidClientSettingsInitArgs(flags, overrides.external)
 	initLocals := newClientSettingsInitLocals(env, initArgs)
 	settingsStatus := callRobloxJNI(mod, env.Raw(), gl, "Java_com_roblox_engine_jni_NativeGLInterface_nativeInitClientSettings", initLocals[0], initLocals[1], initLocals[2])
 	callRobloxJNI(mod, env.Raw(), gl, "Java_com_roblox_engine_jni_NativeGLInterface_nativePostClientSettingsLoadedInitialization3", env.NewArrayList())

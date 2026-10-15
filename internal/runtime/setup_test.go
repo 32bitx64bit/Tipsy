@@ -198,60 +198,150 @@ func TestApplicationSettingsFromResponse(t *testing.T) {
 	}
 }
 
-func TestSplitRendererStartupOverridesUsesOnlyOfficialExternalPath(t *testing.T) {
-	settings, raw, err := splitRendererStartupOverrides(map[string]any{
-		flagPreferOpenGL:    "True",
-		flagDisableVulkan:   "True",
-		flagDisableVulkan11: "True",
-		"FFlagCustom":       "kept-out",
-	}, false)
-	if err != nil {
-		t.Fatal(err)
-	}
+func decodeExternalOverrides(t *testing.T, raw string) map[string]any {
+	t.Helper()
 	var got map[string]any
 	if err := json.Unmarshal([]byte(raw), &got); err != nil {
-		t.Fatal(err)
+		t.Fatalf("external override layer %q is not a JSON object: %v", raw, err)
 	}
-	if len(got) != 3 || got[flagPreferOpenGL] != "True" || got[flagDisableVulkan] != "True" || got[flagDisableVulkan11] != "True" {
-		t.Fatalf("renderer startup overrides=%v", got)
+	return got
+}
+
+var gateKeys = []string{clientsettings.FlagRenderPipelineVersioning, clientsettings.IntEnableRenderPipelineHundredthsPercent}
+
+func TestSplitStartupOverridesCarriesMeshLodGateAndOfficialExternalPath(t *testing.T) {
+	const gateJSON = `{"FFlagRenderPipelineVersioningFlag4":"True","FIntEnableRenderPipelineHundredthsPercent":"10000"}`
+	rendererKeys := []string{flagPreferOpenGL, flagPreferVulkan, flagDisableOpenGL, flagDisableVulkan, flagDisableVulkan11}
+	cases := []struct {
+		name       string
+		input      map[string]any
+		testOpenGL bool
+		wantExt    map[string]any
+		wantSet    map[string]any
+	}{
+		{
+			name:    "nil overrides carry only the gate pair",
+			input:   nil,
+			wantExt: map[string]any{gateKeys[0]: "True", gateKeys[1]: "10000"},
+			wantSet: map[string]any{},
+		},
+		{
+			name:    "ordinary launch keeps unrelated flags in the settings blob",
+			input:   map[string]any{"FFlagCustom": "True"},
+			wantExt: map[string]any{gateKeys[0]: "True", gateKeys[1]: "10000"},
+			wantSet: map[string]any{"FFlagCustom": "True"},
+		},
+		{
+			name:    "explicit Vulkan stays in the settings blob",
+			input:   map[string]any{flagPreferVulkan: "True"},
+			wantExt: map[string]any{gateKeys[0]: "True", gateKeys[1]: "10000"},
+			wantSet: map[string]any{flagPreferVulkan: "True"},
+		},
+		{
+			name: "explicit OpenGL shares the object with the gate pair",
+			input: map[string]any{
+				flagPreferOpenGL:    "True",
+				flagDisableVulkan:   "True",
+				flagDisableVulkan11: "True",
+				"FFlagCustom":       "kept-out",
+			},
+			wantExt: map[string]any{
+				flagPreferOpenGL:    "True",
+				flagDisableVulkan:   "True",
+				flagDisableVulkan11: "True",
+				gateKeys[0]:         "True",
+				gateKeys[1]:         "10000",
+			},
+			wantSet: map[string]any{"FFlagCustom": "kept-out"},
+		},
+		{
+			name:       "process-only OpenGL replaces Vulkan keys",
+			input:      map[string]any{flagPreferVulkan: "True", flagDisableOpenGL: "True", "FFlagCustom": "kept"},
+			testOpenGL: true,
+			wantExt: map[string]any{
+				flagPreferOpenGL:    "True",
+				flagDisableVulkan:   "True",
+				flagDisableVulkan11: "True",
+				gateKeys[0]:         "True",
+				gateKeys[1]:         "10000",
+			},
+			wantSet: map[string]any{"FFlagCustom": "kept"},
+		},
+		{
+			name:    "custom Fast Flags win and leave the settings blob",
+			input:   map[string]any{gateKeys[0]: "False", gateKeys[1]: "1", "FFlagCustom": "True"},
+			wantExt: map[string]any{gateKeys[0]: "False", gateKeys[1]: "1"},
+			wantSet: map[string]any{"FFlagCustom": "True"},
+		},
+		{
+			name:    "one custom value keeps the other default",
+			input:   map[string]any{gateKeys[1]: "5000"},
+			wantExt: map[string]any{gateKeys[0]: "True", gateKeys[1]: "5000"},
+			wantSet: map[string]any{},
+		},
+		{
+			name:    "nil custom value omits the key from the external layer and stays a removal in the settings blob",
+			input:   map[string]any{gateKeys[0]: nil},
+			wantExt: map[string]any{gateKeys[1]: "10000"},
+			wantSet: map[string]any{gateKeys[0]: nil},
+		},
+		{
+			name: "custom gate values combine with explicit OpenGL",
+			input: map[string]any{
+				flagPreferOpenGL: "True",
+				gateKeys[0]:      "False",
+			},
+			wantExt: map[string]any{flagPreferOpenGL: "True", gateKeys[0]: "False", gateKeys[1]: "10000"},
+			wantSet: map[string]any{},
+		},
 	}
-	if _, ok := got["FFlagCustom"]; ok {
-		t.Fatalf("unrelated flag leaked into renderer startup overrides: %v", got)
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var before map[string]any
+			if tc.input != nil {
+				before = cloneFlagMap(tc.input)
+			}
+			settings, raw, err := splitStartupOverrides(tc.input, tc.testOpenGL)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got := decodeExternalOverrides(t, raw); !reflect.DeepEqual(got, tc.wantExt) {
+				t.Fatalf("external layer=%v want %v", got, tc.wantExt)
+			}
+			if !reflect.DeepEqual(settings, tc.wantSet) {
+				t.Fatalf("settings blob=%v want %v", settings, tc.wantSet)
+			}
+			if !reflect.DeepEqual(tc.input, before) && !(tc.input == nil && before == nil) {
+				t.Fatalf("input mutated: %v want %v", tc.input, before)
+			}
+			// Output must be deterministic.
+			for i := 0; i < 8; i++ {
+				_, again, err := splitStartupOverrides(tc.input, tc.testOpenGL)
+				if err != nil || again != raw {
+					t.Fatalf("non-deterministic external layer: %q vs %q err=%v", again, raw, err)
+				}
+			}
+		})
 	}
-	if settings["FFlagCustom"] != "kept-out" {
-		t.Fatalf("ordinary override lost from settings envelope: %v", settings)
+
+	// Default layer is exactly the two-key object.
+	_, raw, err := splitStartupOverrides(map[string]any{"FFlagCustom": "True"}, false)
+	if err != nil || raw != gateJSON {
+		t.Fatalf("default external layer=%q err=%v want %q", raw, err, gateJSON)
 	}
-	for _, key := range []string{flagPreferOpenGL, flagPreferVulkan, flagDisableOpenGL, flagDisableVulkan, flagDisableVulkan11} {
-		if _, exists := settings[key]; exists {
-			t.Fatalf("renderer key %q remained in settings envelope: %v", key, settings)
-		}
-	}
-	ordinary := map[string]any{"FFlagCustom": "True"}
-	if unchanged, empty, err := splitRendererStartupOverrides(ordinary, false); err != nil || empty != "" || !reflect.DeepEqual(unchanged, ordinary) {
-		t.Fatalf("ordinary split settings=%v overrides=%q err=%v", unchanged, empty, err)
-	}
-	ordinaryVulkan := map[string]any{flagPreferVulkan: "True"}
-	if unchanged, payload, err := splitRendererStartupOverrides(ordinaryVulkan, false); err != nil || payload != "" || !reflect.DeepEqual(unchanged, ordinaryVulkan) {
-		t.Fatalf("ordinary Vulkan split settings=%v overrides=%q err=%v", unchanged, payload, err)
-	}
-	testInput := map[string]any{flagPreferVulkan: "True", flagDisableOpenGL: "True", "FFlagCustom": "kept"}
-	testSettings, testRaw, err := splitRendererStartupOverrides(testInput, true)
+	// Renderer and gate keys stay out of the settings blob.
+	settings, _, err := splitStartupOverrides(map[string]any{flagPreferOpenGL: "True", flagPreferVulkan: "True"}, false)
 	if err != nil {
 		t.Fatal(err)
 	}
-	got = nil
-	if err := json.Unmarshal([]byte(testRaw), &got); err != nil {
-		t.Fatal(err)
-	}
-	if len(got) != 3 || got[flagPreferOpenGL] != "True" || got[flagDisableVulkan] != "True" || got[flagDisableVulkan11] != "True" || testSettings["FFlagCustom"] != "kept" {
-		t.Fatalf("process-only split settings=%v overrides=%v", testSettings, got)
-	}
-	if testInput[flagPreferVulkan] != "True" || testInput[flagDisableOpenGL] != "True" {
-		t.Fatalf("process-only split mutated its input: %v", testInput)
+	for _, key := range append(append([]string{}, rendererKeys...), gateKeys...) {
+		if _, exists := settings[key]; exists {
+			t.Fatalf("key %q remained in settings blob: %v", key, settings)
+		}
 	}
 }
 
-func TestLoadAndroidAppOverridesLeavesOrdinaryLaunchInertAndTestOverrideTransient(t *testing.T) {
+func TestLoadAndroidAppOverridesOrdinaryLaunchCarriesOnlyGatePairAndTestOverrideTransient(t *testing.T) {
 	configHome := t.TempDir()
 	t.Setenv("XDG_CONFIG_HOME", configHome)
 	t.Setenv(flogOverridesEnv, "")
@@ -262,8 +352,14 @@ func TestLoadAndroidAppOverridesLeavesOrdinaryLaunchInertAndTestOverrideTransien
 	if err != nil {
 		t.Fatal(err)
 	}
-	if ordinary.renderer != "" {
-		t.Fatalf("ordinary renderer preload=%q", ordinary.renderer)
+	// Ordinary launch layer holds only the gate pair; the settings blob has neither.
+	if got := decodeExternalOverrides(t, ordinary.external); !reflect.DeepEqual(got, map[string]any{gateKeys[0]: "True", gateKeys[1]: "10000"}) {
+		t.Fatalf("ordinary external layer=%v", got)
+	}
+	for _, key := range gateKeys {
+		if _, exists := ordinary.values[key]; exists {
+			t.Fatalf("ordinary settings blob kept persistent key %q: %v", key, ordinary.values)
+		}
 	}
 	if ordinary.values[flagPreferOpenGL] != nil || ordinary.values[flagDisableVulkan] != nil || ordinary.values[flagDisableVulkan11] != nil {
 		t.Fatalf("ordinary launch invented OpenGL controls: %v", ordinary.values)
@@ -273,20 +369,58 @@ func TestLoadAndroidAppOverridesLeavesOrdinaryLaunchInertAndTestOverrideTransien
 	if err != nil {
 		t.Fatal(err)
 	}
-	var renderer map[string]any
-	if err := json.Unmarshal([]byte(strict.renderer), &renderer); err != nil {
-		t.Fatal(err)
+	renderer := decodeExternalOverrides(t, strict.external)
+	wantStrict := map[string]any{flagPreferOpenGL: "True", flagDisableVulkan: "True", flagDisableVulkan11: "True", gateKeys[0]: "True", gateKeys[1]: "10000"}
+	if !reflect.DeepEqual(renderer, wantStrict) {
+		t.Fatalf("strict external layer=%v want %v", renderer, wantStrict)
 	}
-	if len(renderer) != 3 || renderer[flagPreferOpenGL] != "True" || renderer[flagDisableVulkan] != "True" || renderer[flagDisableVulkan11] != "True" {
-		t.Fatalf("strict renderer preload=%v", renderer)
-	}
-	for _, key := range []string{flagPreferOpenGL, flagDisableVulkan, flagDisableVulkan11} {
+	for _, key := range append([]string{flagPreferOpenGL, flagDisableVulkan, flagDisableVulkan11}, gateKeys...) {
 		if _, exists := strict.values[key]; exists {
 			t.Fatalf("strict renderer key %q duplicated in settings envelope: %v", key, strict.values)
 		}
 	}
 	if _, err := os.Stat(clientsettings.New().Path); !os.IsNotExist(err) {
 		t.Fatalf("process-only renderer override wrote settings: err=%v", err)
+	}
+}
+
+func TestLoadAndroidAppOverridesCustomFastFlagsWinInPersistentLayer(t *testing.T) {
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	t.Setenv(flogOverridesEnv, "")
+	t.Setenv(luaLogEnv, "")
+	svc := clientsettings.New()
+	if err := os.MkdirAll(filepath.Dir(svc.Path), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	doc := `{"fastFlags":[{"name":"FFlagRenderPipelineVersioningFlag4","value":"False"},{"name":"FIntEnableRenderPipelineHundredthsPercent","value":"2500"},{"name":"FFlagCustomOther","value":"True"}]}`
+	if err := os.WriteFile(svc.Path, []byte(doc), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	got, err := loadAndroidAppOverrides(context.Background(), filepath.Join(t.TempDir(), "ClientAppSettings.json"), false, graphics.ProbeRendererCapabilities())
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := map[string]any{gateKeys[0]: "False", gateKeys[1]: "2500"}
+	if ext := decodeExternalOverrides(t, got.external); !reflect.DeepEqual(ext, want) {
+		t.Fatalf("custom external layer=%v want %v", ext, want)
+	}
+	for _, key := range gateKeys {
+		if _, exists := got.values[key]; exists {
+			t.Fatalf("custom persistent key %q duplicated in settings blob: %v", key, got.values)
+		}
+	}
+	if got.values["FFlagCustomOther"] != "True" {
+		t.Fatalf("unrelated custom flag lost from settings blob: %v", got.values)
+	}
+	// Settings blob must not contain the gate keys either.
+	js, _, err := applicationSettingsFromResponseWithOverrides([]byte(`{"applicationSettings":{"Official":"kept"}}`), got.values)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, key := range gateKeys {
+		if strings.Contains(js, key) {
+			t.Fatalf("arg0 settings JSON carries persistent key %q: %s", key, js)
+		}
 	}
 }
 

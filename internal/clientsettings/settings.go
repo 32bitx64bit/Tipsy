@@ -88,6 +88,25 @@ const (
 	engineDefaultFramerateCap = "-1"
 )
 
+// Mesh LOD gate flags, sent on every launch in the persistent override layer.
+// Flag4 suffix is runtime-versioned: re-pin after a Roblox update.
+const (
+	FlagRenderPipelineVersioning             = "FFlagRenderPipelineVersioningFlag4"
+	IntEnableRenderPipelineHundredthsPercent = "FIntEnableRenderPipelineHundredthsPercent"
+	// 10000 = 100%.
+	renderPipelineVersioningDefault = "True"
+	renderPipelineHundredthsDefault = "10000"
+)
+
+// PersistentStartupDefaults returns Tipsy's default persistent-layer values.
+// The map is a fresh copy; a custom Fast Flag replaces a value.
+func PersistentStartupDefaults() map[string]string {
+	return map[string]string{
+		FlagRenderPipelineVersioning:             renderPipelineVersioningDefault,
+		IntEnableRenderPipelineHundredthsPercent: renderPipelineHundredthsDefault,
+	}
+}
+
 type RendererOption struct {
 	Renderer  Renderer `json:"renderer"`
 	Available bool     `json:"available"`

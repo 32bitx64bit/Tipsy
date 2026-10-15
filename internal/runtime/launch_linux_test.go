@@ -8,6 +8,7 @@ package runtime
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -89,9 +90,36 @@ func TestAndroidClientSettingsInitArgsMatchOfficialAPK(t *testing.T) {
 		t.Fatalf("nativeInitClientSettings args=%q want %q", got, want)
 	}
 
-	ordinary := androidClientSettingsInitArgs(settings, "")
-	if ordinary != [3]string{settings, "", "GoogleAndroidApp"} {
-		t.Fatalf("ordinary nativeInitClientSettings args=%q", ordinary)
+	empty := androidClientSettingsInitArgs(settings, "")
+	if empty != [3]string{settings, "", "GoogleAndroidApp"} {
+		t.Fatalf("empty-layer nativeInitClientSettings args=%q", empty)
+	}
+}
+
+func TestAndroidClientSettingsInitArgsPlaceMeshLodGateInPersistentLayer(t *testing.T) {
+	ordinary, external, err := splitStartupOverrides(map[string]any{"FFlagCustom": "True"}, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	flags, _, err := applicationSettingsFromResponseWithOverrides([]byte(`{"applicationSettings":{"Official":"kept"}}`), ordinary)
+	if err != nil {
+		t.Fatal(err)
+	}
+	args := androidClientSettingsInitArgs(flags, external)
+	if args[1] != `{"FFlagRenderPipelineVersioningFlag4":"True","FIntEnableRenderPipelineHundredthsPercent":"10000"}` {
+		t.Fatalf("arg1 persistent layer=%q", args[1])
+	}
+	var layer map[string]string
+	if err := json.Unmarshal([]byte(args[1]), &layer); err != nil || len(layer) != 2 {
+		t.Fatalf("arg1 is not the two-key JSON object: %q err=%v", args[1], err)
+	}
+	if args[2] != "GoogleAndroidApp" {
+		t.Fatalf("arg2=%q", args[2])
+	}
+	for _, key := range gateKeys {
+		if strings.Contains(args[0], key) {
+			t.Fatalf("arg0 carries persistent key %q: %s", key, args[0])
+		}
 	}
 }
 
@@ -126,20 +154,39 @@ func TestClientSettingsInitLocalsReleaseAfterNativeInit(t *testing.T) {
 	}
 }
 
-func TestRendererPreloadPrecedesGameActivitySuperAndOrdinaryIsInert(t *testing.T) {
-	var order []string
-	runMainGameActivityOnCreateBoundary(`{"renderer":"opengl"}`, func(payload string) {
-		if payload != `{"renderer":"opengl"}` {
-			t.Fatalf("preload payload=%q", payload)
+func TestExternalOverridePreloadPrecedesGameActivitySuper(t *testing.T) {
+	// Preload runs before the super.onCreate equivalent.
+	payloads := []string{
+		`{"renderer":"opengl"}`,
+		`{"FFlagRenderPipelineVersioningFlag4":"True","FIntEnableRenderPipelineHundredthsPercent":"10000"}`,
+	}
+	for _, want := range payloads {
+		var order []string
+		runMainGameActivityOnCreateBoundary(want, func(payload string) {
+			if payload != want {
+				t.Fatalf("preload payload=%q want %q", payload, want)
+			}
+			order = append(order, "preload")
+		}, func() {
+			order = append(order, "super_create")
+		})
+		if !reflect.DeepEqual(order, []string{"preload", "super_create"}) {
+			t.Fatalf("GameActivity order=%v", order)
 		}
-		order = append(order, "preload")
-	}, func() {
-		order = append(order, "super_create")
-	})
-	if !reflect.DeepEqual(order, []string{"preload", "super_create"}) {
-		t.Fatalf("GameActivity order=%v", order)
 	}
 
+	// Default layer is non-empty, so it preloads.
+	_, external, err := splitStartupOverrides(nil, false)
+	if err != nil || external == "" {
+		t.Fatalf("default external layer=%q err=%v", external, err)
+	}
+	var order []string
+	runMainGameActivityOnCreateBoundary(external, func(string) { order = append(order, "preload") }, func() { order = append(order, "super_create") })
+	if !reflect.DeepEqual(order, []string{"preload", "super_create"}) {
+		t.Fatalf("default launch GameActivity order=%v", order)
+	}
+
+	// Empty layer does not preload.
 	order = nil
 	runMainGameActivityOnCreateBoundary("", func(string) {
 		order = append(order, "unexpected_preload")
@@ -147,7 +194,7 @@ func TestRendererPreloadPrecedesGameActivitySuperAndOrdinaryIsInert(t *testing.T
 		order = append(order, "super_create")
 	})
 	if !reflect.DeepEqual(order, []string{"super_create"}) {
-		t.Fatalf("ordinary GameActivity order=%v", order)
+		t.Fatalf("empty-layer GameActivity order=%v", order)
 	}
 }
 
