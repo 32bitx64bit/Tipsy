@@ -34,6 +34,7 @@ func TestVersionedProviderAcceptsExactOwnedCapabilities(t *testing.T) {
 		{library: "libc.so", symbol: "in6addr_any", version: "LIBC_N"},
 		{library: "libc.so", symbol: "in6addr_loopback", version: "LIBC_N"},
 		{library: "libc.so", symbol: "__sendto_chk", version: "LIBC_O"},
+		{library: "libc.so", symbol: "system", version: "LIBC"},
 		{library: "libm.so", symbol: "sinf", version: "LIBC"},
 		{library: "libdl.so", symbol: "dlopen", version: "LIBC"},
 	} {

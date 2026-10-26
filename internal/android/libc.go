@@ -99,7 +99,7 @@ var libcSymbols = []string{
 	"raise", "kill", "abort", "exit", "_exit", "_Exit", "quick_exit", "signal",
 	"setjmp", "longjmp", "siglongjmp",
 	// misc
-	"syscall", "sysinfo", "uname", "getcwd", "getenv", "setenv", "unsetenv", "putenv",
+	"syscall", "sysinfo", "system", "uname", "getcwd", "getenv", "setenv", "unsetenv", "putenv",
 	"secure_getenv", "clearenv", "qsort", "bsearch", "abs", "labs", "llabs", "ldiv",
 	"rand", "srand", "random", "srandom",
 	"sched_yield", "sched_getaffinity", "sched_setaffinity", "sched_getcpu",

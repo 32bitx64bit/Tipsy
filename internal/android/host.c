@@ -8,6 +8,7 @@
 #include "../x11/focused_text_foreground.h"
 
 #include <dlfcn.h>
+#include <errno.h>
 #include <link.h>
 #include <pthread.h>
 #include <string.h>
@@ -18,6 +19,7 @@
 #include <time.h>
 
 extern void GoAndroid_LogMissing(char *name);
+extern void GoAndroid_LogWrite(int prio, char *tag, char *text);
 
 static void *lib_libc;
 static void *lib_libm;
@@ -3475,4 +3477,20 @@ void *tipsy_gles_dlsym(const char *name)
 		}
 	}
 	return NULL;
+}
+
+/* Refusing system(): no host shell, popen, fork or exec is ever reached.
+ * Logs once with fixed text; guest command text is never logged or run. */
+static _Atomic int tipsy_system_refusal_logged;
+
+int tipsy_system(const char *command)
+{
+	if (command == NULL) {
+		return 0;
+	}
+	if (!atomic_exchange_explicit(&tipsy_system_refusal_logged, 1, memory_order_relaxed)) {
+		GoAndroid_LogWrite(5, "tipsy", "system() refused: guest shell execution is not supported");
+	}
+	errno = ENOSYS;
+	return -1;
 }

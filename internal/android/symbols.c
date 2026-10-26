@@ -195,6 +195,7 @@ extern void tipsy_gcov_nop(void);
 extern void *tipsy_zstd_trace_begin(const void *);
 extern void tipsy_zstd_trace_end(void *, const void *);
 extern long tipsy_sysconf(int);
+extern int tipsy_system(const char *);
 extern int tipsy_fflush(void *);
 extern int tipsy_pthread_cond_wait(void *, void *);
 extern int tipsy_pthread_cond_timedwait(void *, void *, void *);
@@ -297,6 +298,7 @@ static const struct sym table[] = {
 	{ "libc.so", "ZSTD_trace_decompress_begin", (void *)tipsy_zstd_trace_begin },
 	{ "libc.so", "ZSTD_trace_decompress_end", (void *)tipsy_zstd_trace_end },
 	{ "libc.so", "sysconf", (void *)tipsy_sysconf },
+	{ "libc.so", "system", (void *)tipsy_system },
 	{ "libc.so", "pthread_cond_wait", (void *)tipsy_pthread_cond_wait },
 	{ "libc.so", "pthread_cond_timedwait", (void *)tipsy_pthread_cond_timedwait },
 	{ "libc.so", "pthread_mutex_lock", (void *)tipsy_pthread_mutex_lock },
