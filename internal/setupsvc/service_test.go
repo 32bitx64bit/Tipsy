@@ -364,15 +364,24 @@ func TestInstallStagesThenAtomicallyActivatesGeneration(t *testing.T) {
 	}
 	s.verify = func(context.Context, *apk.Report) error { return nil }
 	s.prepare = func() error { return nil }
-	compatibilityChecked := false
+	compatibilityChecked, importsChecked := false, false
 	s.authorizeStaged = func(context.Context, integrity.Store, string, TrustPolicy) error {
 		if !compatibilityChecked {
 			return errors.New("staged authorization ran before compatibility validation")
+		}
+		if !importsChecked {
+			return errors.New("staged authorization ran before the native import preflight")
 		}
 		return nil
 	}
 	s.compatibility = func(context.Context, string) error {
 		compatibilityChecked = true
+		return nil
+	}
+	// The fixture libroblox.so is not an ELF; import resolution is covered by
+	// import_preflight_test.go.
+	s.importPreflight = func(context.Context, string) error {
+		importsChecked = true
 		return nil
 	}
 	s.snapshot = func(_ context.Context, storeRoot string, _ TrustPolicy) (InstallSnapshot, error) {

@@ -29,6 +29,7 @@ type Service struct {
 	prepare         func() error
 	authorizeStaged func(context.Context, integrity.Store, string, TrustPolicy) error
 	compatibility   func(context.Context, string) error
+	importPreflight func(context.Context, string) error
 	snapshot        func(context.Context, string, TrustPolicy) (InstallSnapshot, error)
 }
 
@@ -185,6 +186,24 @@ func (s *Service) Install(ctx context.Context, req InstallRequest, progress Prog
 		}
 		return nil, setupError(ErrCompatibility, "check client compatibility", "the verified client does not satisfy the loader's named startup contract", err)
 	}
+	// Nothing below this point may run for a build the loader cannot bind:
+	// provenance authorization, generation staging and activation all mark a
+	// client as verified, and a client that fails on first launch is not.
+	report(progress, PhaseExtracting, 0, 0, "Checking that the client's native imports can be bound or safely rejected")
+	if err := s.importPreflightFn()(ctx, stagedRuntime); err != nil {
+		kind := ErrorKindOf(err)
+		if kind == "" {
+			kind = ErrCompatibility
+		}
+		if kind != ErrCanceled {
+			logging.Logger(logging.CatAPK).Error("Roblox client native import preflight failed",
+				"kind", string(kind), "detail", err.Error())
+		}
+		if ErrorKindOf(err) != "" {
+			return nil, err
+		}
+		return nil, setupError(ErrCompatibility, "check client imports", "the verified client imports native symbols the loader cannot bind", err)
+	}
 	if err := s.prepareFn()(); err != nil {
 		return nil, setupError(ErrInstall, "preserve account data", "persistent account storage could not be prepared", err)
 	}
@@ -293,6 +312,13 @@ func (s *Service) compatibilityFn() func(context.Context, string) error {
 		return s.compatibility
 	}
 	return ValidateExtractedClientCompatibility
+}
+
+func (s *Service) importPreflightFn() func(context.Context, string) error {
+	if s != nil && s.importPreflight != nil {
+		return s.importPreflight
+	}
+	return ValidateExtractedClientImports
 }
 
 func (s *Service) snapshotFn() func(context.Context, string, TrustPolicy) (InstallSnapshot, error) {

@@ -52,6 +52,33 @@ func TestLibcTableContainsMemcpy(t *testing.T) {
 	}
 }
 
+func TestAndroidLookupImageReaderAndHardwareBuffer(t *testing.T) {
+	r := Provider()
+	want := map[string][]string{
+		"libmediandk.so": {
+			"AImageReader_newWithUsage",
+			"AImageReader_acquireNextImage",
+			"AImageReader_getWindow",
+			"AImageReader_delete",
+			"AImage_getTimestamp",
+			"AImage_getHardwareBuffer",
+			"AImage_delete",
+		},
+		"libandroid.so": {
+			"AHardwareBuffer_acquire",
+			"AHardwareBuffer_release",
+		},
+	}
+	for lib, names := range want {
+		for _, name := range names {
+			p, err := r.Lookup(lib, name)
+			if err != nil || p == 0 {
+				t.Errorf("%s %s: p=%v err=%v", lib, name, p, err)
+			}
+		}
+	}
+}
+
 func TestAndroidLookupALooper(t *testing.T) {
 	r := Provider()
 	p, err := r.Lookup("libandroid.so", "ALooper_pollOnce")

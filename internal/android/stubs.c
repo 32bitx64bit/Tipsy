@@ -162,6 +162,75 @@ int32_t tipsy_AMediaCodec_setParameters(void *codec, void *params)
 	return media_err("AMediaCodec_setParameters");
 }
 
+/* AImageReader / AImage (libmediandk) and AHardwareBuffer (libandroid).
+ * Roblox 2.746 imports these for its Vulkan screenshot path; relocations must
+ * succeed even though the desktop host has no camera or gralloc buffers. */
+int32_t tipsy_AImageReader_newWithUsage(int32_t width, int32_t height, int32_t format,
+					uint64_t usage, int32_t maxImages, void **reader)
+{
+	(void)width;
+	(void)height;
+	(void)format;
+	(void)usage;
+	(void)maxImages;
+	if (reader) {
+		*reader = NULL;
+	}
+	return media_err("AImageReader_newWithUsage");
+}
+int32_t tipsy_AImageReader_acquireNextImage(void *reader, void **image)
+{
+	(void)reader;
+	if (image) {
+		*image = NULL;
+	}
+	return media_err("AImageReader_acquireNextImage");
+}
+int32_t tipsy_AImageReader_getWindow(void *reader, void **window)
+{
+	(void)reader;
+	if (window) {
+		*window = NULL;
+	}
+	return media_err("AImageReader_getWindow");
+}
+void tipsy_AImageReader_delete(void *reader)
+{
+	(void)reader;
+	GoAndroid_LogMissing("AImageReader_delete");
+}
+int32_t tipsy_AImage_getTimestamp(void *image, int64_t *timestampNs)
+{
+	(void)image;
+	if (timestampNs) {
+		*timestampNs = 0;
+	}
+	return media_err("AImage_getTimestamp");
+}
+int32_t tipsy_AImage_getHardwareBuffer(void *image, void **buffer)
+{
+	(void)image;
+	if (buffer) {
+		*buffer = NULL;
+	}
+	return media_err("AImage_getHardwareBuffer");
+}
+void tipsy_AImage_delete(void *image)
+{
+	(void)image;
+	GoAndroid_LogMissing("AImage_delete");
+}
+void tipsy_AHardwareBuffer_acquire(void *buffer)
+{
+	(void)buffer;
+	GoAndroid_LogMissing("AHardwareBuffer_acquire");
+}
+void tipsy_AHardwareBuffer_release(void *buffer)
+{
+	(void)buffer;
+	GoAndroid_LogMissing("AHardwareBuffer_release");
+}
+
 void *tipsy_AMediaFormat_new(void)
 {
 	return media_null("AMediaFormat_new");

@@ -118,6 +118,15 @@ extern void tipsy_AMediaFormat_setInt64(void *, const char *, int64_t);
 extern void tipsy_AMediaFormat_setFloat(void *, const char *, float);
 extern void tipsy_AMediaFormat_setString(void *, const char *, const char *);
 extern void tipsy_AMediaFormat_setBuffer(void *, const char *, void *, size_t);
+extern int32_t tipsy_AImageReader_newWithUsage(int32_t, int32_t, int32_t, uint64_t, int32_t, void **);
+extern int32_t tipsy_AImageReader_acquireNextImage(void *, void **);
+extern int32_t tipsy_AImageReader_getWindow(void *, void **);
+extern void tipsy_AImageReader_delete(void *);
+extern int32_t tipsy_AImage_getTimestamp(void *, int64_t *);
+extern int32_t tipsy_AImage_getHardwareBuffer(void *, void **);
+extern void tipsy_AImage_delete(void *);
+extern void tipsy_AHardwareBuffer_acquire(void *);
+extern void tipsy_AHardwareBuffer_release(void *);
 extern uint32_t tipsy_slCreateEngine(void *, uint32_t, const void *, uint32_t, const void *, const void *);
 extern uint32_t tipsy_xaCreateEngine(void *, uint32_t, const void *, uint32_t, const void *, const void *);
 extern int32_t tipsy_AndroidBitmap_getInfo(void *, void *, void *);
@@ -378,6 +387,8 @@ static const struct sym table[] = {
 	{ "libandroid.so", "ANativeWindow_setBuffersGeometry", (void *)tipsy_ANativeWindow_setBuffersGeometry },
 	{ "libandroid.so", "ANativeWindow_lock", (void *)tipsy_ANativeWindow_lock },
 	{ "libandroid.so", "ANativeWindow_unlockAndPost", (void *)tipsy_ANativeWindow_unlockAndPost },
+	{ "libandroid.so", "AHardwareBuffer_acquire", (void *)tipsy_AHardwareBuffer_acquire },
+	{ "libandroid.so", "AHardwareBuffer_release", (void *)tipsy_AHardwareBuffer_release },
 
 	{ "libEGL.so", "eglGetPlatformDisplay", (void *)tipsy_eglGetPlatformDisplay },
 	{ "libEGL.so", "eglGetDisplay", (void *)tipsy_eglGetDisplay },
@@ -414,6 +425,13 @@ static const struct sym table[] = {
 	{ "libmediandk.so", "AMediaCodec_getName", (void *)tipsy_AMediaCodec_getName },
 	{ "libmediandk.so", "AMediaCodec_releaseName", (void *)tipsy_AMediaCodec_releaseName },
 	{ "libmediandk.so", "AMediaCodec_setParameters", (void *)tipsy_AMediaCodec_setParameters },
+	{ "libmediandk.so", "AImageReader_newWithUsage", (void *)tipsy_AImageReader_newWithUsage },
+	{ "libmediandk.so", "AImageReader_acquireNextImage", (void *)tipsy_AImageReader_acquireNextImage },
+	{ "libmediandk.so", "AImageReader_getWindow", (void *)tipsy_AImageReader_getWindow },
+	{ "libmediandk.so", "AImageReader_delete", (void *)tipsy_AImageReader_delete },
+	{ "libmediandk.so", "AImage_getTimestamp", (void *)tipsy_AImage_getTimestamp },
+	{ "libmediandk.so", "AImage_getHardwareBuffer", (void *)tipsy_AImage_getHardwareBuffer },
+	{ "libmediandk.so", "AImage_delete", (void *)tipsy_AImage_delete },
 	{ "libmediandk.so", "AMediaFormat_new", (void *)tipsy_AMediaFormat_new },
 	{ "libmediandk.so", "AMediaFormat_delete", (void *)tipsy_AMediaFormat_delete },
 	{ "libmediandk.so", "AMediaFormat_toString", (void *)tipsy_AMediaFormat_toString },

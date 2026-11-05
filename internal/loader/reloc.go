@@ -54,7 +54,7 @@ func applyReloc(m *Module, r Reloc, rela bool) error {
 		}
 		return m.write64(r.Off, sym+add)
 	case elf.R_X86_64_GLOB_DAT, elf.R_X86_64_JMP_SLOT:
-		sym, err := m.symbolValue(relocSym(r.Info))
+		sym, err := m.symbolValueFor(relocSym(r.Info), typ == elf.R_X86_64_JMP_SLOT)
 		if err != nil {
 			return err
 		}
@@ -167,6 +167,8 @@ func (m *Module) relocate() error {
 		}
 	}
 
+	// Only imports that cannot take the unsupported fallback (data imports,
+	// or anything under TIPSY_STRICT_SYMBOLS=1) are recorded in m.missing.
 	if len(m.missing) > 0 {
 		for _, name := range m.missing {
 			logMissing(name)

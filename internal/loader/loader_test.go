@@ -175,6 +175,9 @@ func TestOpenMissingSymbol(t *testing.T) {
 	if syscall.Getpagesize() != synthPage {
 		t.Skip("test ELF layout assumes 4KiB pages")
 	}
+	// Missing functions bind to the unsupported fallback by default; the
+	// abort this test checks is the strict mode.
+	t.Setenv("TIPSY_STRICT_SYMBOLS", "1")
 	path := filepath.Join(t.TempDir(), "libmissing.so")
 	raw := buildSynthELF(synthOpts{imports: []string{"tipsy_missing"}})
 	if err := os.WriteFile(path, raw, 0o644); err != nil {

@@ -9,6 +9,7 @@ import (
 	"debug/elf"
 	"encoding/binary"
 	"fmt"
+	"log/slog"
 )
 
 const (
@@ -223,6 +224,16 @@ func (m *Module) symbolAddr(s dynSym) (uintptr, error) {
 }
 
 func (m *Module) symbolValue(idx uint32) (uint64, error) {
+	return m.symbolValueFor(idx, false)
+}
+
+// jumpSlotKey tags the memo entry of a NOTYPE import reached through
+// R_X86_64_JUMP_SLOT, whose fallback eligibility differs from GLOB_DAT.
+const jumpSlotKey = 1 << 31
+
+// symbolValueFor is symbolValue for a relocation of known kind; jumpSlot is
+// true for R_X86_64_JUMP_SLOT.
+func (m *Module) symbolValueFor(idx uint32, jumpSlot bool) (uint64, error) {
 	if int(idx) >= len(m.syms) {
 		return 0, fmt.Errorf("loader: dynsym index %d out of range", idx)
 	}
@@ -234,31 +245,35 @@ func (m *Module) symbolValue(idx uint32) (uint64, error) {
 		a, err := m.symbolAddr(s)
 		return uint64(a), err
 	}
-	return m.resolveUndefIndexed(idx, s)
+	return m.resolveUndefIndexed(idx, s, jumpSlot)
 }
 
 // resolveUndefIndexed memoizes resolveUndef per undefined dynsym index. The
 // lock is never held across resolver callbacks to avoid re-entrant deadlock.
-func (m *Module) resolveUndefIndexed(idx uint32, s dynSym) (uint64, error) {
+func (m *Module) resolveUndefIndexed(idx uint32, s dynSym, jumpSlot bool) (uint64, error) {
+	key := idx
+	if jumpSlot && s.typ() == byte(elf.STT_NOTYPE) {
+		key |= jumpSlotKey
+	}
 	m.undefMu.Lock()
-	if r, ok := m.resolved[idx]; ok {
+	if r, ok := m.resolved[key]; ok {
 		m.undefMu.Unlock()
 		return r.value, r.err
 	}
 	m.undefMu.Unlock()
 
-	value, err := m.resolveUndef(s)
+	value, err := m.resolveUndef(s, jumpSlot)
 
 	m.undefMu.Lock()
 	if m.resolved == nil {
 		m.resolved = make(map[uint32]undefResult)
 	}
-	m.resolved[idx] = undefResult{value: value, err: err}
+	m.resolved[key] = undefResult{value: value, err: err}
 	m.undefMu.Unlock()
 	return value, err
 }
 
-func (m *Module) resolveUndef(s dynSym) (uint64, error) {
+func (m *Module) resolveUndef(s dynSym, jumpSlot bool) (uint64, error) {
 	if s.version.requirement != nil {
 		return m.resolveVersionedUndef(s, *s.version.requirement)
 	}
@@ -279,6 +294,13 @@ func (m *Module) resolveUndef(s dynSym) (uint64, error) {
 	}
 	if s.bind() == stbWeak {
 		return 0, nil
+	}
+	if !strictSymbols() && fallbackEligible(s, jumpSlot) {
+		if addr, ok := unsupportedTable.thunk(s.name); ok {
+			slog.Warn("native symbol bound to unsupported fallback: " + s.name)
+			return uint64(addr), nil
+		}
+		slog.Error("[loader] unsupported fallback slots exhausted: " + s.name)
 	}
 	m.noteMissing(s.name)
 	return 0, errMissing{Name: s.name}
