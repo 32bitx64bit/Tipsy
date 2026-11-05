@@ -520,24 +520,6 @@ func TestVulkanDeviceCapabilityObservationIsOneTime(t *testing.T) {
 	}
 }
 
-func TestVulkanPacingProcQueryCounts(t *testing.T) {
-	before := testVulkanPacingQueryCounts()
-	testVulkanNotePacingQuery("vkWaitForPresentKHR")
-	testVulkanNotePacingQuery("vkWaitForPresentKHR")
-	testVulkanNotePacingQuery("vkGetPastPresentationTimingEXT")
-	testVulkanNotePacingQuery("vkQueuePresentKHR")
-	after := testVulkanPacingQueryCounts()
-	if after[0] != before[0]+2 || after[3] != before[3]+1 {
-		t.Fatalf("pacing counts before=%v after=%v", before, after)
-	}
-	if after[1] != before[1] || after[2] != before[2] {
-		t.Fatalf("unqueried pacing names moved: before=%v after=%v", before, after)
-	}
-	if !testVulkanPacingQueryLogged() {
-		t.Fatal("pacing query observation never logged")
-	}
-}
-
 func TestVulkanSwapchainResolverPrefersLoaderTrampoline(t *testing.T) {
 	want := testVulkanHostLoaderSymbol("vkCreateSwapchainKHR")
 	if want == 0 {

@@ -30,9 +30,6 @@ extern void GoAndroid_LogMissing(char *name);
 extern void GoAndroid_LogVulkanDevice(char **names, uint32_t n, int host_present_wait,
 	int host_present_wait2, int host_present_id, int host_present_id2,
 	int host_present_timing, int host_support_probed);
-extern void GoAndroid_LogVulkanPacingQueries(uint64_t wait_for_present,
-	uint64_t wait_for_present2, uint64_t set_present_timing_queue_size,
-	uint64_t get_past_presentation_timing);
 extern void GoAndroid_LogVulkanPresentMode(int vsync, int requested, int effective,
 	int primaryOK, int primaryError, int fallbackOK, int fallbackError);
 
@@ -247,8 +244,6 @@ static int host_has_xlib;
  * no per-call logging, no result change. The client extension list is read
  * from the first vkCreateDevice call and forwarded once to Go; host support
  * comes from a single device-extension enumeration on that physical device.
- * vkGetDeviceProcAddr pacing-name queries are counted (relaxed) and reported
- * once, the first time any count becomes non-zero.
  */
 #define TIPSY_VK_HOST_PACING_EXTENSIONS 5
 static const char *const vk_pacing_extension_names[TIPSY_VK_HOST_PACING_EXTENSIONS] = {
@@ -258,16 +253,7 @@ static const char *const vk_pacing_extension_names[TIPSY_VK_HOST_PACING_EXTENSIO
 	"VK_KHR_present_id2",
 	"VK_EXT_present_timing",
 };
-#define TIPSY_VK_PACING_QUERY_NAMES 4
-static const char *const vk_pacing_query_names[TIPSY_VK_PACING_QUERY_NAMES] = {
-	"vkWaitForPresentKHR",
-	"vkWaitForPresent2KHR",
-	"vkSetSwapchainPresentTimingQueueSizeEXT",
-	"vkGetPastPresentationTimingEXT",
-};
 static _Atomic int vk_create_device_logged;
-static _Atomic int vk_pacing_query_logged;
-static _Atomic uint64_t vk_pacing_query_counts[TIPSY_VK_PACING_QUERY_NAMES];
 
 static Display *wsi_dpy;
 static unsigned long wsi_xid;
@@ -458,35 +444,6 @@ static int tipsy_vk_observe_device_create(TipsyVkPhysicalDevice physical_device,
 	GoAndroid_LogVulkanDevice((char **)names, name_count, support[0], support[1],
 		support[2], support[3], support[4], probed);
 	return 1;
-}
-
-static void tipsy_vk_note_pacing_query(const char *name)
-{
-	uint32_t i;
-	int index = -1;
-	int expected = 0;
-
-	if (name == NULL) {
-		return;
-	}
-	for (i = 0; i < TIPSY_VK_PACING_QUERY_NAMES; i++) {
-		if (strcmp(name, vk_pacing_query_names[i]) == 0) {
-			index = (int)i;
-			break;
-		}
-	}
-	if (index < 0) {
-		return;
-	}
-	atomic_fetch_add_explicit(&vk_pacing_query_counts[index], 1, memory_order_relaxed);
-	if (atomic_compare_exchange_strong_explicit(&vk_pacing_query_logged, &expected, 1,
-		memory_order_acq_rel, memory_order_acquire)) {
-		uint64_t counts[TIPSY_VK_PACING_QUERY_NAMES];
-		for (i = 0; i < TIPSY_VK_PACING_QUERY_NAMES; i++) {
-			counts[i] = atomic_load_explicit(&vk_pacing_query_counts[i], memory_order_relaxed);
-		}
-		GoAndroid_LogVulkanPacingQueries(counts[0], counts[1], counts[2], counts[3]);
-	}
 }
 
 static void tipsy_vk_note_present_result_at(TipsyVkResult result, uint64_t test_ns, uint64_t duration_ns)
@@ -1696,9 +1653,8 @@ static void *tipsy_vkGetDeviceProcAddr(TipsyVkDevice device, const char *name)
 	if (name == NULL) {
 		return NULL;
 	}
-	// E1 observation: count (never alter) client queries for the pacing
-	// entry points; report the counts once, on the first non-zero count.
-	tipsy_vk_note_pacing_query(name);
+	// E1 observation is gone: vkGetDeviceProcAddr returns the same entry points
+	// in the same order as before, with no query counting or report.
 	if (strcmp(name, "vkGetDeviceProcAddr") == 0) {
 		TIPSY_VK_RETURN_GDPA(device, "vkGetDeviceProcAddr", tipsy_vkGetDeviceProcAddr);
 	}
@@ -1914,27 +1870,6 @@ int tipsy_test_vk_observe_device_create(char **names, uint32_t n)
 	info.enabledExtensionCount = n;
 	info.ppEnabledExtensionNames = (const char *const *)names;
 	return tipsy_vk_observe_device_create(NULL, &info);
-}
-
-void tipsy_test_vk_note_pacing_query(const char *name)
-{
-	tipsy_vk_note_pacing_query(name);
-}
-
-void tipsy_test_vk_pacing_query_counts(uint64_t *out)
-{
-	uint32_t i;
-	if (out == NULL) {
-		return;
-	}
-	for (i = 0; i < TIPSY_VK_PACING_QUERY_NAMES; i++) {
-		out[i] = atomic_load_explicit(&vk_pacing_query_counts[i], memory_order_relaxed);
-	}
-}
-
-int tipsy_test_vk_pacing_query_logged(void)
-{
-	return atomic_load_explicit(&vk_pacing_query_logged, memory_order_relaxed);
 }
 
 void *tipsy_test_vk_host_loader_symbol(const char *name)

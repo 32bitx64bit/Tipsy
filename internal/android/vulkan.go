@@ -15,9 +15,6 @@ uint32_t tipsy_vk_present_call_durations(uint64_t after, uint64_t *out_ns,
 	uint32_t capacity, uint64_t *out_cursor, uint64_t *out_overwritten);
 void tipsy_test_vk_note_present_result_duration(int32_t result, uint64_t now_ns, uint64_t duration_ns);
 int tipsy_test_vk_observe_device_create(const char **names, uint32_t n);
-void tipsy_test_vk_note_pacing_query(const char *name);
-void tipsy_test_vk_pacing_query_counts(uint64_t *out);
-int tipsy_test_vk_pacing_query_logged(void);
 void *tipsy_test_vk_host_loader_symbol(const char *name);
 void *tipsy_test_vk_resolve_create_swapchain(void);
 int tipsy_test_vk_device_proc_cache(void);
@@ -348,18 +345,8 @@ func GoAndroid_LogVulkanDevice(names **C.char, n C.uint32_t, hostPresentWait, ho
 		"host_support_probed", hostSupportProbed != 0)
 }
 
-// GoAndroid_LogVulkanPacingQueries is the one-time counter report, emitted the
-// first time any vkGetDeviceProcAddr query for a pacing entry point is
-// observed.
-//
-//export GoAndroid_LogVulkanPacingQueries
-func GoAndroid_LogVulkanPacingQueries(waitForPresent, waitForPresent2, setPresentTimingQueueSize, getPastPresentationTiming C.uint64_t) {
-	logging.Logger(logging.CatGraphics).Info("Android Vulkan pacing proc queries",
-		"vkWaitForPresentKHR", uint64(waitForPresent),
-		"vkWaitForPresent2KHR", uint64(waitForPresent2),
-		"vkSetSwapchainPresentTimingQueueSizeEXT", uint64(setPresentTimingQueueSize),
-		"vkGetPastPresentationTimingEXT", uint64(getPastPresentationTiming))
-}
+// The E1 pacing-query report is gone: no vkGetDeviceProcAddr query is
+// counted or logged.
 
 func testVulkanProcIsWrapped(name string) bool {
 	cName := C.CString(name)
@@ -679,22 +666,6 @@ func testVulkanObserveDeviceCreate(extensions []string) bool {
 		}
 	}()
 	return C.tipsy_test_vk_observe_device_create((**C.char)(unsafe.Pointer(&ptrs[0])), C.uint32_t(len(ptrs))) != 0
-}
-
-func testVulkanNotePacingQuery(name string) {
-	cName := C.CString(name)
-	defer C.free(unsafe.Pointer(cName))
-	C.tipsy_test_vk_note_pacing_query(cName)
-}
-
-func testVulkanPacingQueryCounts() [4]uint64 {
-	var counts [4]C.uint64_t
-	C.tipsy_test_vk_pacing_query_counts(&counts[0])
-	return [4]uint64{uint64(counts[0]), uint64(counts[1]), uint64(counts[2]), uint64(counts[3])}
-}
-
-func testVulkanPacingQueryLogged() bool {
-	return C.tipsy_test_vk_pacing_query_logged() != 0
 }
 
 func testVulkanHostLoaderSymbol(name string) uintptr {
