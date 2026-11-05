@@ -160,6 +160,9 @@ export GOOS=linux
 export GOARCH=amd64
 # Public AppImages are x86-64-v3 (AVX2). Do not inherit a host GOAMD64=v2.
 export GOAMD64=v3
+# Append the release ISA flags to whatever the caller set instead of dropping
+# their hardening, include, or sysroot flags.
+export CGO_CFLAGS="${CGO_CFLAGS:+$CGO_CFLAGS }-O2 -g -march=x86-64-v3 -fno-plt -fno-semantic-interposition"
 export CGO_ENABLED=1
 export GOTOOLCHAIN=local
 export GOPROXY=off
@@ -189,8 +192,12 @@ install -d \
 channel=stable
 [[ "$mode" != developer ]] || channel=dev
 ldflags="-buildid= -s -w -X github.com/tipsy-linux/tipsy/internal/version.Version=$version -X github.com/tipsy-linux/tipsy/internal/version.Channel=$channel"
-(cd "$repo" && go build -buildvcs=false -mod=readonly -trimpath -ldflags "$ldflags" -o "$appdir/usr/bin/tipsy" ./cmd/tipsy)
-(cd "$repo" && go build -buildvcs=false -mod=readonly -trimpath -ldflags "$ldflags" -o "$appdir/usr/bin/tipsy-gui" ./cmd/tipsy-gui)
+tipsy_build=(go build -buildvcs=false -mod=readonly -trimpath -ldflags "$ldflags" -o "$appdir/usr/bin/tipsy")
+[[ ! -f "$repo/cmd/tipsy/default.pgo" ]] || tipsy_build+=(-pgo="$repo/cmd/tipsy/default.pgo")
+gui_build=(go build -buildvcs=false -mod=readonly -trimpath -ldflags "$ldflags" -o "$appdir/usr/bin/tipsy-gui")
+[[ ! -f "$repo/cmd/tipsy-gui/default.pgo" ]] || gui_build+=(-pgo="$repo/cmd/tipsy-gui/default.pgo")
+(cd "$repo" && "${tipsy_build[@]}" ./cmd/tipsy)
+(cd "$repo" && "${gui_build[@]}" ./cmd/tipsy-gui)
 
 install -m 0755 "$repo/packaging/appimage/AppRun" "$appdir/AppRun"
 install -m 0644 "$repo/packaging/appimage/qt.conf" "$appdir/usr/bin/qt.conf"

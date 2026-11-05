@@ -46,16 +46,31 @@ repo=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 mkdir -p "$output_dir"
 output_dir=$(CDPATH= cd -- "$output_dir" && pwd)
 
-# Official packages target x86-64-v3 (AVX2). Override with GOAMD64=v2 only for
-# a local fallback on older CPUs; that is not a public release baseline.
+# Official packages target x86-64-v3 (AVX2). A local build may pick any
+# supported GOAMD64 level; the cgo -march flag follows it so the C and Go
+# objects keep the same ISA baseline.
 export GOAMD64="${GOAMD64:-v3}"
+case "$GOAMD64" in
+	v1) cgo_march=x86-64 ;;
+	v2) cgo_march=x86-64-v2 ;;
+	v3) cgo_march=x86-64-v3 ;;
+	v4) cgo_march=x86-64-v4 ;;
+	*) fail "GOAMD64 must be v1, v2, v3, or v4 (got $GOAMD64)" ;;
+esac
+# Keep flags the caller already set (hardening, include paths) and append the
+# release ISA flags instead of replacing the whole variable.
+export CGO_CFLAGS="${CGO_CFLAGS:+$CGO_CFLAGS }-O2 -g -march=$cgo_march -fno-plt -fno-semantic-interposition"
 if [ -d /tmp/tipsy-ci-pkgconfig ]; then
 	export PKG_CONFIG_PATH="/tmp/tipsy-ci-pkgconfig${PKG_CONFIG_PATH:+:$PKG_CONFIG_PATH}"
 fi
 ldflags="-buildid= -s -w -X github.com/tipsy-linux/tipsy/internal/version.Version=${version} -X github.com/tipsy-linux/tipsy/internal/version.Channel=${channel}"
 cd "$repo"
-go build -buildvcs=false -mod=readonly -trimpath -ldflags "$ldflags" -o "$output_dir/tipsy" ./cmd/tipsy
-go build -buildvcs=false -mod=readonly -trimpath -ldflags "$ldflags" -o "$output_dir/tipsy-gui" ./cmd/tipsy-gui
+tipsy_build=(-buildvcs=false -mod=readonly -trimpath -ldflags "$ldflags" -o "$output_dir/tipsy")
+[[ ! -f "$repo/cmd/tipsy/default.pgo" ]] || tipsy_build+=(-pgo="$repo/cmd/tipsy/default.pgo")
+gui_build=(-buildvcs=false -mod=readonly -trimpath -ldflags "$ldflags" -o "$output_dir/tipsy-gui")
+[[ ! -f "$repo/cmd/tipsy-gui/default.pgo" ]] || gui_build+=(-pgo="$repo/cmd/tipsy-gui/default.pgo")
+go build "${tipsy_build[@]}" ./cmd/tipsy
+go build "${gui_build[@]}" ./cmd/tipsy-gui
 [[ -x "$output_dir/tipsy" && -x "$output_dir/tipsy-gui" ]] || fail 'binaries were not produced'
 
 printf 'build-tipsy-binaries: %s\n' "$output_dir"

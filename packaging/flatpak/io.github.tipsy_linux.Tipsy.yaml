@@ -63,6 +63,7 @@ modules:
       # live here rather than in an `export` line.
       env:
         CGO_ENABLED: '1'
+        CGO_CFLAGS: -O2 -g -march=x86-64-v3 -fno-plt -fno-semantic-interposition
         GOAMD64: v3
         GOFLAGS: -buildvcs=false -mod=readonly -modcacherw -trimpath
         GOTOOLCHAIN: local
@@ -80,9 +81,9 @@ modules:
         tag: main
     build-commands:
       - mkdir -p /app/bin
-      - go build -ldflags "-buildid= -s -w -X github.com/tipsy-linux/tipsy/internal/version.Version=@VERSION@
+      - if [ -f cmd/tipsy/default.pgo ]; then set -- -pgo=cmd/tipsy/default.pgo; else set --; fi; go build "$@" -ldflags "-buildid= -s -w -X github.com/tipsy-linux/tipsy/internal/version.Version=@VERSION@
           -X github.com/tipsy-linux/tipsy/internal/version.Channel=stable" -o /app/bin/tipsy ./cmd/tipsy
-      - go build -ldflags "-buildid= -s -w -X github.com/tipsy-linux/tipsy/internal/version.Version=@VERSION@
+      - if [ -f cmd/tipsy-gui/default.pgo ]; then set -- -pgo=cmd/tipsy-gui/default.pgo; else set --; fi; go build "$@" -ldflags "-buildid= -s -w -X github.com/tipsy-linux/tipsy/internal/version.Version=@VERSION@
           -X github.com/tipsy-linux/tipsy/internal/version.Channel=stable" -o /app/bin/tipsy-gui ./cmd/tipsy-gui
       # Flatpak only exports icons and desktop files named after the app id, so
       # the app-id file must exist under its exported name. tipsy.png is
