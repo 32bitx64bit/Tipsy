@@ -3,9 +3,12 @@ package perf
 import (
 	"os"
 	"path/filepath"
+	"runtime/pprof"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/tipsy-linux/tipsy/internal/android"
 )
 
 func TestStartFromEnvIsNoopWhenUnset(t *testing.T) {
@@ -47,6 +50,40 @@ func TestStartProcessProfileWritesCPUAndHeap(t *testing.T) {
 	summary := SummarizeProfile(filepath.Join(dir, "cpu.pprof"), 10)
 	if summary.Error != "" && !strings.Contains(summary.Error, "no function rows") {
 		t.Fatalf("summarize cpu profile: %s", summary.Error)
+	}
+}
+
+// TestStartProcessProfileCPUAlreadyRunningDisarms pins the error path: when a
+// CPU profile is already running, StartProcessProfile fails before it arms the
+// frame-time ring, so no presenter counter moves and no poll goroutine is left
+// behind.
+func TestStartProcessProfileCPUAlreadyRunningDisarms(t *testing.T) {
+	android.ResetFrameTimeRing()
+	t.Cleanup(android.ResetFrameTimeRing)
+	running, err := os.CreateTemp(t.TempDir(), "running-cpu-*.pprof")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := pprof.StartCPUProfile(running); err != nil {
+		t.Fatal(err)
+	}
+	defer func() {
+		pprof.StopCPUProfile()
+		_ = running.Close()
+	}()
+
+	dir := t.TempDir()
+	stop, err := StartProcessProfile(dir, ProfileOptions{CPU: true})
+	if err == nil {
+		stop()
+		t.Fatal("StartProcessProfile succeeded while a CPU profile was already running")
+	}
+	android.RecordFrameTimePresent(12345)
+	if got := android.FrameTimeAttempts(); got != 0 {
+		t.Fatalf("frame-time ring left armed after the CPU profile error: attempts = %d", got)
+	}
+	if _, statErr := os.Stat(filepath.Join(dir, "framestats.json")); !os.IsNotExist(statErr) {
+		t.Fatalf("failed start wrote framestats.json: %v", statErr)
 	}
 }
 

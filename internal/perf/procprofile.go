@@ -115,6 +115,12 @@ func StartProcessProfile(dir string, opt ProfileOptions) (func(), error) {
 		}
 		state.cpu = cpu
 	}
+	// A profile directory also arms the frame-time capture: framestats.json
+	// and framestats.txt are written by the same stop() that closes the
+	// pprof artifacts, so one capture directory describes one run. Arm only
+	// after every fallible start step above, so an error return leaves no
+	// armed ring and no poll goroutine behind.
+	state.frameTimes = startFrameTimeCapture(abs)
 
 	var once sync.Once
 	done := make(chan struct{})
@@ -156,6 +162,7 @@ type processProfile struct {
 	cpu             *os.File
 	prevMutex       int
 	contentionArmed bool
+	frameTimes      *FrameTimeCapture
 }
 
 func (p *processProfile) restoreRates() {
@@ -176,6 +183,11 @@ func (p *processProfile) snapshot() {
 func (p *processProfile) stop() {
 	p.mu.Lock()
 	defer p.mu.Unlock()
+	if p.frameTimes != nil {
+		// Disarm and finalize while offline snapshots cannot interleave.
+		p.frameTimes.stopCapture()
+		p.frameTimes = nil
+	}
 	if p.cpu != nil {
 		pprof.StopCPUProfile()
 		_ = p.cpu.Close()

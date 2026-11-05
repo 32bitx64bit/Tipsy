@@ -20,6 +20,8 @@ int tipsy_test_vk_create_device_antilag(int extension_present, int anti_lag_bit,
 int tipsy_test_vk_create_device_unarmed(void);
 int tipsy_test_vk_queue_present_unarmed(void);
 int tipsy_test_vk_unarmed_queue_destroy(void);
+void tipsy_test_vk_clock_reads_reset(void);
+uint64_t tipsy_test_vk_clock_reads(void);
 int tipsy_test_vk_latency_lock_count(void);
 int tipsy_test_vk_latency_log_count(void);
 void tipsy_test_vk_latency_reset_counters(void);
@@ -703,6 +705,14 @@ func testVulkanQueuePresentUnarmed() bool {
 
 func testVulkanUnarmedQueueDestroy() bool {
 	return C.tipsy_test_vk_unarmed_queue_destroy() != 0
+}
+
+func testVulkanClockReadsReset() {
+	C.tipsy_test_vk_clock_reads_reset()
+}
+
+func testVulkanClockReads() uint64 {
+	return uint64(C.tipsy_test_vk_clock_reads())
 }
 
 func testVulkanLatencyLockCount() int {

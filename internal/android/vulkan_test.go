@@ -676,6 +676,38 @@ func BenchmarkVulkanQueuePresentUnarmed(b *testing.B) {
 	}
 }
 
+// The whole vkQueuePresentKHR wrapper with frame stats disarmed must read no
+// clock. Before the fix, tipsy_vk_note_frame_time took CLOCK_MONOTONIC itself
+// whenever present timing was off, then tipsy_frmstats_present discovered the
+// capture was disarmed. The counter is proven live first on a path that does
+// read the clock, so a zero below cannot come from a dead seam.
+func TestVulkanUnarmedPresentReadsNoClock(t *testing.T) {
+	resetLatencyTest(t)
+	t.Setenv("TIPSY_ANTILAG", "")
+	SetFrameTimeArmed(false)
+
+	// Positive control: the same counter sees the two reads present timing takes.
+	SetVulkanPresentTiming(true)
+	testVulkanClockReadsReset()
+	ok := testVulkanQueuePresentUnarmed()
+	wantTiming := testVulkanClockReads()
+	SetVulkanPresentTiming(false)
+	if !ok {
+		t.Fatal("present timing on: unarmed vkQueuePresentKHR did not reach the host stub")
+	}
+	if wantTiming != 2 {
+		t.Fatalf("present timing on: vkQueuePresentKHR read the clock %d times; want 2 (start and end)", wantTiming)
+	}
+
+	testVulkanClockReadsReset()
+	if !testVulkanQueuePresentUnarmed() {
+		t.Fatal("unarmed vkQueuePresentKHR did not reach the host stub")
+	}
+	if got := testVulkanClockReads(); got != 0 {
+		t.Errorf("unarmed vkQueuePresentKHR read the clock %d times; want 0", got)
+	}
+}
+
 func TestVulkanSwapchainResolverPrefersLoaderTrampoline(t *testing.T) {
 	want := testVulkanHostLoaderSymbol("vkCreateSwapchainKHR")
 	if want == 0 {

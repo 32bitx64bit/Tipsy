@@ -14,6 +14,12 @@
 #include "vulkan_output.h"
 #include "vulkan_latency.h"
 
+// The frame-time ring is a separate C unit. cgo compiles every C file of a
+// package but never links a dependency's C files, so this package carries its
+// own ring (frmstats_ring.c) and Go wrappers (frmstats_linux_amd64.go); a
+// binary that imports only internal/android still resolves the ring symbols.
+#include "frmstats.h"
+
 #include <dlfcn.h>
 #include <pthread.h>
 #include <stdatomic.h>
@@ -375,9 +381,18 @@ static int android_exclusive_proc(const char *name)
 		strstr(name, "Gralloc") != NULL;
 }
 
+/* Test-visible clock accounting. Counting is off in production, where the
+ * branch is one relaxed load on a path that already takes the clock; tests use
+ * it to prove the unarmed present wrapper reads no clock at all. */
+static _Atomic int vk_test_clock_counting;
+static _Atomic uint64_t vk_test_clock_reads;
+
 static uint64_t tipsy_vk_monotonic_ns(void)
 {
 	struct timespec ts;
+	if (atomic_load_explicit(&vk_test_clock_counting, memory_order_relaxed) != 0) {
+		atomic_fetch_add_explicit(&vk_test_clock_reads, 1, memory_order_relaxed);
+	}
 	if (clock_gettime(CLOCK_MONOTONIC, &ts) != 0) {
 		return 0;
 	}
@@ -500,6 +515,20 @@ static void tipsy_vk_note_present_result_at(TipsyVkResult result, uint64_t test_
 	if (result == TIPSY_VK_SUCCESS) {
 		tipsy_vk_record_present_timing(test_ns, duration_ns);
 	}
+}
+
+// tipsy_vk_note_frame_time hands one successful present return to the
+// frame-time ring. When present timing is on, now_ns is its return-boundary
+// clock, so present timing and frame-time capture never disagree. When it is
+// off, now_ns is 0 and the ring takes the clock itself, but only after its own
+// armed check: a disarmed present reads no clock at all. The call stays one
+// relaxed load when the capture is disarmed.
+void tipsy_vk_note_frame_time(TipsyVkResult result, uint64_t now_ns)
+{
+	if (result != TIPSY_VK_SUCCESS) {
+		return;
+	}
+	tipsy_frmstats_present(now_ns);
 }
 
 static void tipsy_vk_note_present_result(TipsyVkResult result, uint64_t test_ns)
@@ -1688,6 +1717,9 @@ static TipsyVkResult tipsy_vkQueuePresentKHR(TipsyVkQueue queue, const void *pPr
 			duration_ns = end_ns - start_ns;
 		}
 	}
+	// Frame-time capture is independent of the present-timing epoch: it is one
+	// load when disarmed and takes its timestamp before diagnostic bookkeeping.
+	tipsy_vk_note_frame_time(result, end_ns);
 	tipsy_vk_note_present_result_at(result, end_ns, duration_ns);
 	return result;
 }
@@ -2035,6 +2067,13 @@ void tipsy_test_vk_note_present_result(int32_t result, uint64_t now_ns)
 	tipsy_vk_note_present_result(result, now_ns);
 }
 
+// tipsy_test_vk_note_frame_time exposes the present wrapper's frame-time note
+// to a package test, which cannot import "C" from a _test.go file.
+void tipsy_test_vk_note_frame_time(int32_t result, uint64_t now_ns)
+{
+	tipsy_vk_note_frame_time(result, now_ns);
+}
+
 void tipsy_test_vk_note_present_result_duration(int32_t result, uint64_t now_ns, uint64_t duration_ns)
 {
 	tipsy_vk_note_present_result_at(result, now_ns, duration_ns);
@@ -2328,6 +2367,20 @@ int tipsy_test_vk_queue_present_unarmed(void)
 	result = tipsy_vkQueuePresentKHR(NULL, NULL);
 	host_vkQueuePresentKHR = saved_present;
 	return result == TIPSY_VK_SUCCESS;
+}
+
+/* Tests: count the wrapper's CLOCK_MONOTONIC reads around one observation. */
+void tipsy_test_vk_clock_reads_reset(void)
+{
+	atomic_store_explicit(&vk_test_clock_reads, 0, memory_order_relaxed);
+	atomic_store_explicit(&vk_test_clock_counting, 1, memory_order_relaxed);
+}
+
+uint64_t tipsy_test_vk_clock_reads(void)
+{
+	uint64_t reads = atomic_load_explicit(&vk_test_clock_reads, memory_order_relaxed);
+	atomic_store_explicit(&vk_test_clock_counting, 0, memory_order_relaxed);
+	return reads;
 }
 
 void *tipsy_test_vk_host_loader_symbol(const char *name)
