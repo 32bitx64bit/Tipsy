@@ -276,6 +276,13 @@ func (w *mainWindow) buildShell() {
 	outer.AddWidget(top)
 	w.stack = qt.NewQStackedWidget2()
 	setObjectName(w.stack.QObject, "contentStack")
+	// Apply lives in the fixed footer below, but the Settings page disables it
+	// while it is built, so create it before the pages.
+	w.settingsApply = qt.NewQPushButton3("Apply changes")
+	setObjectName(w.settingsApply.QObject, "primaryButton")
+	w.settingsApply.SetAccessibleDescription("Save renderer, frame-rate, VSync, texture quality, Discord, default-monitor, and Tipsy fullscreen-start settings")
+	w.settingsApply.OnClicked(w.applySettings)
+	w.settingsApply.Hide()
 	w.stack.AddWidget(w.buildHomePage())
 	w.stack.AddWidget(w.buildInstallPage())
 	w.stack.AddWidget(w.buildSettingsPage())
@@ -303,6 +310,10 @@ func (w *mainWindow) buildShell() {
 		foot.AddWidget(button.QWidget)
 	}
 	w.appearanceButtons[appearanceSystem].SetToolTip("Follow the desktop color scheme; use the platform palette when no preference is provided")
+	// The Settings Apply button lives in this fixed footer, just right of the
+	// appearance buttons, so it stays put while the page scrolls.
+	foot.AddSpacing(12)
+	foot.AddWidget(w.settingsApply.QWidget)
 	outer.AddWidget(footer)
 	w.win.SetCentralWidget(root)
 	quit := qt.NewQAction2("Quit")
@@ -321,6 +332,10 @@ func (w *mainWindow) selectPage(index int) {
 		return
 	}
 	w.stack.SetCurrentIndex(index)
+	if w.settingsApply != nil {
+		// Apply only belongs to the Settings page; the footer itself stays.
+		w.settingsApply.SetVisible(index == settingsPageIndex)
+	}
 	if index < len(w.nav) {
 		w.nav[index].SetChecked(true)
 	}
