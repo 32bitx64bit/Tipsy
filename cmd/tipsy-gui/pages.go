@@ -345,6 +345,7 @@ func (w *mainWindow) buildSettingsPage() *qt.QWidget {
 	layout.AddWidget(w.buildControllerCard().QWidget)
 	layout.AddWidget(w.buildMicrophoneCard().QWidget)
 	layout.AddWidget(w.buildIntegrationCard().QWidget)
+	layout.AddWidget(w.buildExperimentalPerformanceCard().QWidget)
 
 	if w.settingsErr != nil {
 		w.settingsHint.SetText("Settings could not be loaded: " + w.settingsErr.Error())
@@ -360,6 +361,7 @@ func (w *mainWindow) buildSettingsPage() *qt.QWidget {
 		w.settingsStartFullscreen.SetEnabled(false)
 		w.settingsApply.SetEnabled(false)
 		w.settingsReset.SetEnabled(false)
+		w.experimental.setInteractive(false)
 		w.populateDisplayChoices(guimodel.DisplayPrimary)
 	} else {
 		w.bindSettings(w.settings.View().Draft)
@@ -439,6 +441,7 @@ func (w *mainWindow) bindSettings(settings guimodel.Settings) {
 	w.populateDisplayChoices(settings.Display)
 	w.setCheckBoxChecked(w.settingsStartFullscreen, settings.StartFullscreen)
 	w.setCheckBoxText(w.settingsStartFullscreen, startFullscreenToggleText(settings.StartFullscreen))
+	w.bindExperimentalSettings(settings)
 }
 
 func (w *mainWindow) populateDisplayChoices(selected string) {
@@ -500,7 +503,17 @@ func (w *mainWindow) settingsEdited() {
 			display = w.settingsDisplayKeys[idx]
 		}
 	}
-	w.settings.Edit(guimodel.Settings{Renderer: renderer, FPSMode: fpsMode, FrameRate: w.settingsFPS.Value(), VSync: w.settingsVSync.IsChecked(), LowTextureMode: w.settingsLowTexture.IsChecked(), Display: display, StartFullscreen: w.settingsStartFullscreen.IsChecked(), DiscordRichPresence: w.settingsDiscordPresence.IsChecked(), DiscordJoinButton: w.settingsDiscordJoin.IsChecked()})
+	draft := w.settings.View().Draft
+	draft.Renderer = renderer
+	draft.FPSMode = fpsMode
+	draft.FrameRate = w.settingsFPS.Value()
+	draft.VSync = w.settingsVSync.IsChecked()
+	draft.LowTextureMode = w.settingsLowTexture.IsChecked()
+	draft.Display = display
+	draft.StartFullscreen = w.settingsStartFullscreen.IsChecked()
+	draft.DiscordRichPresence = w.settingsDiscordPresence.IsChecked()
+	draft.DiscordJoinButton = w.settingsDiscordJoin.IsChecked()
+	w.settings.Edit(draft)
 	w.updateSettingsControls()
 }
 

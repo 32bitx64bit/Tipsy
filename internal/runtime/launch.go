@@ -207,6 +207,14 @@ func Launch(ctx context.Context, opt LaunchOptions) error {
 		settings.Renderer = clientsettings.RendererOpenGL
 		logging.Logger(logging.CatGraphics).Info("transient renderer override", "renderer", clientsettings.RendererOpenGL)
 	}
+	// Resolve experimental performance preferences into this process's environment
+	// before this launch creates any Vulkan instance and before guest startup.
+	// The caller's environment always wins over stored settings; values Tipsy
+	// exported for an earlier in-process launch do not. Failures are reported,
+	// never fatal: the preference is opt-in and must not block a launch.
+	if err := ApplyExperimentalPrefs(settings); err != nil {
+		logging.Logger(logging.CatRuntime).Warn("experimental performance preferences", "err", err)
+	}
 	configureVulkanAntiLag()
 	// Roblox may normalize experimental values on shutdown. Reapply the Tipsy-owned
 	// value after the loop exits, while the launch lock still excludes GUI writes.

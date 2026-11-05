@@ -56,6 +56,7 @@ type mainWindow struct {
 	settingsStartFullscreen                          *qt.QCheckBox
 	settingsFastFlags                                *qt.QPushButton
 	settingsDisplayKeys                              []string
+	experimental                                     experimentalCardWidgets
 	settingsSyncing                                  bool
 	controllerSettings                               guimodel.ControllerSettings
 	controllerFaceButtonLayout                       gamepad.FaceButtonLayout

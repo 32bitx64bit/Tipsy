@@ -177,6 +177,11 @@ type Settings struct {
 	// explicitly enabled.
 	DiscordRichPresence bool `json:"discordRichPresence"`
 	DiscordJoinButton   bool `json:"discordJoinButton"`
+	// AntiLag is the only remaining experimental arm. It defaults to false and
+	// a missing JSON key reads as false. It is a pure opt-in: the launch probe
+	// runs only after the user enables it and must prove VK_AMD_anti_lag
+	// before Tipsy exports anything for the driver.
+	AntiLag bool `json:"antiLag"`
 }
 
 // FastFlag is one user-owned Roblox Fast Flag override. Name identifies a
@@ -435,20 +440,23 @@ func NormalizeDisplay(display string) string {
 }
 
 // settingsDocumentOnlyChange reports a draft that differs only in host-side
-// startup preferences or Discord Rich Presence. Neither changes Roblox's XML
-// nor a live client, so it is safe to save while Roblox holds the client lock.
+// startup preferences, Discord Rich Presence, or the anti-lag opt-in. None
+// changes Roblox's XML or a live client, so it is safe to save while Roblox
+// holds the client lock. The anti-lag choice only takes effect on the next
+// launch.
 func settingsDocumentOnlyChange(draft, saved Settings) bool {
 	draft = normalized(draft)
 	saved = normalized(saved)
-	if draft.DiscordRichPresence == saved.DiscordRichPresence &&
-		draft.DiscordJoinButton == saved.DiscordJoinButton &&
-		draft.StartFullscreen == saved.StartFullscreen {
+	if draft == saved {
 		return false
 	}
-	draft.DiscordRichPresence, draft.DiscordJoinButton = false, false
-	saved.DiscordRichPresence, saved.DiscordJoinButton = false, false
-	draft.StartFullscreen, saved.StartFullscreen = false, false
-	return draft == saved
+	documentOnly := func(s Settings) Settings {
+		s.DiscordRichPresence, s.DiscordJoinButton = false, false
+		s.StartFullscreen = false
+		s.AntiLag = false
+		return s
+	}
+	return documentOnly(draft) == documentOnly(saved)
 }
 
 func normalized(s Settings) Settings {
@@ -487,7 +495,9 @@ func (s *Service) Apply(ctx context.Context, wanted Settings) (ApplyResult, erro
 			return ApplyResult{}, err
 		}
 		defer release()
-		return s.applyLocked(ctx, wanted)
+		// A document-only save must never read, reconcile, or rewrite Roblox's
+		// XML settings, because it deliberately does not take the client lock.
+		return s.applyDocumentOnlyLocked(ctx, wanted)
 	}
 	release, err := AcquireClientLock()
 	if err != nil {
@@ -626,6 +636,41 @@ func (s *Service) applyLocked(ctx context.Context, wanted Settings) (ApplyResult
 		FrameRateApplied: frameRateApplied,
 		FrameRateNote:    applyNote,
 	}, nil
+}
+
+// applyDocumentOnlyLocked persists a change that affects only Tipsy's own
+// settings document: host-side window preferences, Discord Rich Presence, or
+// the anti-lag opt-in. The caller holds the settings-document lock and
+// deliberately does not hold the client lock, so this path must not read,
+// reconcile, or rewrite Roblox's XML settings file.
+func (s *Service) applyDocumentOnlyLocked(ctx context.Context, wanted Settings) (ApplyResult, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if err := ctx.Err(); err != nil {
+		return ApplyResult{}, err
+	}
+	oldDoc, err := s.loadDocument(ctx)
+	if err != nil {
+		return ApplyResult{}, err
+	}
+	newDoc := oldDoc
+	newDoc.Settings = wanted
+	if !samePersistedSettings(oldDoc, newDoc) {
+		if err := s.writeDocument(newDoc); err != nil {
+			return ApplyResult{}, err
+		}
+	}
+	applyNote := ""
+	switch {
+	case oldDoc.Display != wanted.Display:
+		applyNote = noteForDisplay(wanted.Display)
+	case oldDoc.StartFullscreen != wanted.StartFullscreen:
+		applyNote = noteForStartFullscreen(wanted.StartFullscreen)
+	case oldDoc.DiscordRichPresence != wanted.DiscordRichPresence || oldDoc.DiscordJoinButton != wanted.DiscordJoinButton:
+		applyNote = noteForDiscord(wanted)
+	}
+	return ApplyResult{Settings: wanted, FrameRateNote: applyNote}, nil
 }
 
 // ReconcileWhileClientLocked writes a working Roblox settings document when
@@ -937,6 +982,7 @@ type persistedWire struct {
 	StartFullscreen     bool       `json:"startFullscreen"`
 	DiscordRichPresence *bool      `json:"discordRichPresence"`
 	DiscordJoinButton   bool       `json:"discordJoinButton"`
+	AntiLag             bool       `json:"antiLag"`
 	FastFlags           []FastFlag `json:"fastFlags"`
 	FPSOwned            bool       `json:"fpsOwned,omitempty"`
 	FPSOriginal         string     `json:"fpsOriginal,omitempty"`
@@ -952,6 +998,7 @@ type persistedWriteWire struct {
 	StartFullscreen     bool       `json:"startFullscreen"`
 	DiscordRichPresence bool       `json:"discordRichPresence"`
 	DiscordJoinButton   bool       `json:"discordJoinButton"`
+	AntiLag             bool       `json:"antiLag"`
 	FastFlags           []FastFlag `json:"fastFlags,omitempty"`
 	FPSOwned            bool       `json:"fpsOwned,omitempty"`
 	FPSOriginal         string     `json:"fpsOriginal,omitempty"`
@@ -961,7 +1008,12 @@ type persistedWriteWire struct {
 var persistedSettingKeys = map[string]struct{}{
 	"renderer": {}, "frameRate": {}, "vsync": {}, "lowTextureMode": {},
 	"display": {}, "startFullscreen": {}, "discordRichPresence": {},
-	"discordJoinButton": {}, "fastFlags": {}, "fpsOwned": {},
+	"discordJoinButton": {}, "antiLag": {},
+	// Retired experimental keys stay known so a document written by an older
+	// version loads without error and the next save drops them instead of
+	// carrying stale opt-ins forward as unmodelled data.
+	"gcArm": {}, "threadPriority": {}, "cpuAffinity": {},
+	"jniFastPaths": {}, "fastFlags": {}, "fpsOwned": {},
 	"fpsOriginal": {}, "fpsApplied": {},
 }
 
@@ -1000,6 +1052,7 @@ func decodePersisted(data []byte, got *persistedSettings) error {
 			StartFullscreen:     wire.StartFullscreen,
 			DiscordRichPresence: presence,
 			DiscordJoinButton:   wire.DiscordJoinButton,
+			AntiLag:             wire.AntiLag,
 		},
 		FastFlags:   cloneFastFlags(wire.FastFlags),
 		FPSOwned:    wire.FPSOwned,
@@ -1022,6 +1075,7 @@ func (doc persistedSettings) MarshalJSON() ([]byte, error) {
 		StartFullscreen:     doc.StartFullscreen,
 		DiscordRichPresence: doc.DiscordRichPresence,
 		DiscordJoinButton:   doc.DiscordJoinButton,
+		AntiLag:             doc.AntiLag,
 		FastFlags:           doc.FastFlags,
 		FPSOwned:            doc.FPSOwned,
 		FPSOriginal:         doc.FPSOriginal,

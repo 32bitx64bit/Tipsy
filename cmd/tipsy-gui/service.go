@@ -302,8 +302,16 @@ func (s *productionService) RendererOptions(context.Context) []guimodel.Renderer
 }
 
 func (s *productionService) ApplySettings(ctx context.Context, settings guimodel.Settings) (guimodel.ApplyResult, error) {
+	saved, err := s.settings.Load(ctx)
+	if err != nil {
+		return guimodel.ApplyResult{}, err
+	}
 	result, err := s.settings.Apply(ctx, backendSettings(settings))
-	return guimodel.ApplyResult{RestartRequired: result.RestartRequired, FrameRateNote: result.FrameRateNote}, err
+	// The Experimental anti-lag opt-in is read only when Roblox starts, so
+	// changing it needs a relaunch even though the save itself is
+	// document-only and never takes the client lock.
+	restart := result.RestartRequired || experimentalSettingsDiffer(saved, backendSettings(settings))
+	return guimodel.ApplyResult{RestartRequired: restart, FrameRateNote: result.FrameRateNote}, err
 }
 
 func (s *productionService) ResetSettings(ctx context.Context) (guimodel.Settings, error) {
@@ -402,7 +410,7 @@ func (s *productionService) Doctor(ctx context.Context) (guimodel.DoctorSummary,
 }
 
 func guiSettings(settings clientsettings.Settings) guimodel.Settings {
-	result := guimodel.Settings{Renderer: guimodel.Renderer(settings.Renderer), FPSMode: guimodel.FPSMode(settings.FrameRate.Mode), FrameRate: settings.FrameRate.Limit, VSync: settings.VSync, LowTextureMode: settings.LowTextureMode, Display: guimodel.NormalizeDisplay(settings.Display), StartFullscreen: settings.StartFullscreen, DiscordRichPresence: settings.DiscordRichPresence, DiscordJoinButton: settings.DiscordJoinButton}
+	result := guimodel.Settings{Renderer: guimodel.Renderer(settings.Renderer), FPSMode: guimodel.FPSMode(settings.FrameRate.Mode), FrameRate: settings.FrameRate.Limit, VSync: settings.VSync, LowTextureMode: settings.LowTextureMode, Display: guimodel.NormalizeDisplay(settings.Display), StartFullscreen: settings.StartFullscreen, DiscordRichPresence: settings.DiscordRichPresence, DiscordJoinButton: settings.DiscordJoinButton, AntiLag: settings.AntiLag}
 	if result.Renderer == "" {
 		result.Renderer = guimodel.RendererAuto
 	}
@@ -425,6 +433,7 @@ func backendSettings(settings guimodel.Settings) clientsettings.Settings {
 		StartFullscreen:     settings.StartFullscreen,
 		DiscordRichPresence: settings.DiscordRichPresence,
 		DiscordJoinButton:   settings.DiscordJoinButton,
+		AntiLag:             settings.AntiLag,
 		FrameRate: clientsettings.FrameRate{
 			Mode:  clientsettings.FrameRateMode(settings.FPSMode),
 			Limit: limit,

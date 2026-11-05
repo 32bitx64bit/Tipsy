@@ -42,6 +42,9 @@ type Settings struct {
 	StartFullscreen     bool
 	DiscordRichPresence bool
 	DiscordJoinButton   bool
+	// AntiLag is the only experimental performance arm. It defaults off and is
+	// a pure opt-in gated by the driver probe.
+	AntiLag bool
 }
 
 // RendererOption is a backend-provided capability. The GUI keeps every known

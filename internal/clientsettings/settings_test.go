@@ -84,6 +84,101 @@ func TestDefaultsAndRestartSurvival(t *testing.T) {
 	}
 }
 
+func TestAntiLagDefaultsOffAndRoundTrips(t *testing.T) {
+	s := testService(t)
+	writeXML(t, s, "-1")
+	if err := os.MkdirAll(filepath.Dir(s.Path), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	// A pre-experimental document has no anti-lag key; it must read as off
+	// rather than as a missing/invalid value.
+	old := []byte(`{"renderer":"auto","frameRate":{"mode":"auto"}}`)
+	if err := os.WriteFile(s.Path, old, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	loaded, err := s.Load(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if loaded.AntiLag {
+		t.Fatalf("absent anti-lag key did not read as off: %+v", loaded)
+	}
+
+	wanted := loaded
+	wanted.Display = NormalizeDisplay(wanted.Display)
+	wanted.AntiLag = true
+	result, err := s.Apply(context.Background(), wanted)
+	if err != nil {
+		t.Fatalf("save anti-lag setting: %v", err)
+	}
+	if result.RestartRequired {
+		t.Fatalf("anti-lag-only save demanded a graphics restart: %+v", result)
+	}
+	reloaded, err := (&Service{Path: s.Path, XMLPath: s.XMLPath}).Load(context.Background())
+	if err != nil || reloaded != wanted {
+		t.Fatalf("anti-lag round trip=%+v want=%+v err=%v", reloaded, wanted, err)
+	}
+
+	raw, err := os.ReadFile(s.Path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var document map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &document); err != nil {
+		t.Fatal(err)
+	}
+	if string(document["antiLag"]) != "true" {
+		t.Fatalf("persisted antiLag=%s want true", document["antiLag"])
+	}
+}
+
+// TestAntiLagSaveLeavesRobloxXMLUntouched guards the settings-write isolation:
+// a document-only save must not read, reconcile, or rewrite Roblox's settings
+// file while the client lock is not held.
+func TestAntiLagSaveLeavesRobloxXMLUntouched(t *testing.T) {
+	s := testService(t)
+	raw := writeXML(t, s, "60")
+	settings, err := s.Load(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if settings.AntiLag {
+		t.Fatalf("anti-lag must default off: %+v", settings)
+	}
+	wanted := settings
+	wanted.AntiLag = true
+	result, err := s.Apply(context.Background(), wanted)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.RestartRequired {
+		t.Fatalf("anti-lag-only save demanded a restart: %+v", result)
+	}
+	got, err := os.ReadFile(s.XMLPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(got, raw) {
+		t.Fatalf("anti-lag save rewrote Roblox XML:\n got %q\nwant %q", got, raw)
+	}
+}
+
+func TestExperimentalSettingsAreDocumentOnlyChanges(t *testing.T) {
+	if !settingsDocumentOnlyChange(Settings{AntiLag: true}, Settings{}) {
+		t.Fatal("anti-lag-only change must be safe to save while Roblox runs")
+	}
+	if settingsDocumentOnlyChange(Settings{Renderer: RendererVulkan}, Settings{}) {
+		t.Fatal("renderer change must not be treated as a document-only change")
+	}
+}
+
+func TestExperimentalPerformanceSettingsDefaultStructIsOff(t *testing.T) {
+	defaults := Default()
+	if defaults.AntiLag {
+		t.Fatalf("Default() enabled anti-lag: %+v", defaults)
+	}
+}
+
 func TestLowTextureModeDefaultsOffAndEmitsAllowlistedOverrides(t *testing.T) {
 	s := testService(t)
 	writeXML(t, s, "-1")
@@ -1070,5 +1165,70 @@ func TestPersistentStartupDefaultsPinMeshLodGateAndAreValidFastFlags(t *testing.
 		if _, ok := overrides[name]; ok {
 			t.Fatalf("ordinary overrides contain persistent key %s", name)
 		}
+	}
+}
+
+// TestRetiredExperimentalKeysLoadWithoutError guards the retirement of the
+// GC, thread-priority, CPU-affinity, and JNI fast-path arms: a document written
+// by an older version must keep loading and a later save must not resurrect
+// their stale opt-ins.
+func TestRetiredExperimentalKeysLoadWithoutError(t *testing.T) {
+	s := testService(t)
+	if err := os.MkdirAll(filepath.Dir(s.Path), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	old := []byte(`{"renderer":"vulkan","frameRate":{"mode":"limited","limit":60},"vsync":true,"gcArm":true,"threadPriority":true,"cpuAffinity":true,"jniFastPaths":true}`)
+	if err := os.WriteFile(s.Path, old, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	loaded, err := s.Load(context.Background())
+	if err != nil {
+		t.Fatalf("a settings file with the retired experimental keys must still load: %v", err)
+	}
+	if loaded.Renderer != RendererVulkan || loaded.FrameRate.Limit != 60 || !loaded.VSync {
+		t.Fatalf("legacy document loaded as %+v", loaded)
+	}
+	if loaded.AntiLag {
+		t.Fatalf("retired keys enabled anti-lag: %+v", loaded)
+	}
+	wanted := loaded
+	wanted.DiscordRichPresence = true
+	if _, err := s.Apply(context.Background(), wanted); err != nil {
+		t.Fatalf("save after retirement: %v", err)
+	}
+	data, err := os.ReadFile(s.Path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, key := range []string{"gcArm", "threadPriority", "cpuAffinity", "jniFastPaths"} {
+		if bytes.Contains(data, []byte(`"`+key+`"`)) {
+			t.Fatalf("retired key %q survived a save: %s", key, data)
+		}
+	}
+	st, err := os.Stat(s.Path)
+	if err != nil || st.Mode().Perm() != 0o600 {
+		t.Fatalf("mode=%v err=%v", st, err)
+	}
+}
+
+// TestLegacyPacingKeyStillLoads guards the retirement of the pacing arm: a
+// document written by an older version must keep loading. The key is assembled
+// so the removed setting's spelling does not stay in the tree.
+func TestLegacyPacingKeyStillLoads(t *testing.T) {
+	s := testService(t)
+	if err := os.MkdirAll(filepath.Dir(s.Path), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	legacyKey := "present" + "Pacing"
+	old := []byte(`{"renderer":"vulkan","frameRate":{"mode":"limited","limit":60},"vsync":true,"` + legacyKey + `":true}`)
+	if err := os.WriteFile(s.Path, old, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	loaded, err := s.Load(context.Background())
+	if err != nil {
+		t.Fatalf("a settings file with the retired pacing key must still load: %v", err)
+	}
+	if loaded.Renderer != RendererVulkan || loaded.FrameRate.Limit != 60 || !loaded.VSync {
+		t.Fatalf("legacy document loaded as %+v", loaded)
 	}
 }
