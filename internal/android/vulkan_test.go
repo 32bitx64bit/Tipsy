@@ -12,6 +12,7 @@ import (
 	"sync"
 	"testing"
 	"time"
+	"unsafe"
 )
 
 func TestVulkanOutputKeepsOldKhronosHeaderFallbacks(t *testing.T) {
@@ -517,6 +518,161 @@ func TestVulkanDeviceCapabilityObservationIsOneTime(t *testing.T) {
 	}
 	if testVulkanObserveDeviceCreate(nil) {
 		t.Fatal("device-capability observation logged more than once")
+	}
+}
+
+func TestVulkanCreateDeviceRequiresAntiLagFeatureBit(t *testing.T) {
+	resetLatencyTest(t)
+	t.Setenv("TIPSY_ANTILAG", "1")
+	armTestAntiLag(t)
+	// The driver advertises VK_AMD_anti_lag but features2 reports antiLag=0.
+	// Extension support alone must not inject the extension or the feature.
+	if got := testVulkanCreateDeviceAntiLag(true, false, false); got != 4 {
+		t.Fatalf("extension-only device create bits = %d; want 4 (host called once, nothing injected)", got)
+	}
+	if VulkanAntiLagArmed() {
+		t.Fatal("antiLag=0 must close the gate, not only skip the injection")
+	}
+	// The same physical device with the antiLag bit set injects both.
+	if !tipsyTestArmAntiLag("radv", true, testDevice(t)) {
+		t.Fatal("re-arm for the positive case")
+	}
+	if got := testVulkanCreateDeviceAntiLag(true, true, false); got != 15 {
+		t.Fatalf("antiLag=1 device create bits = %d; want 15 (extension + feature + host call + armed)", got)
+	}
+}
+
+func TestVulkanCreateDeviceProbeFailsClosedWithoutFeatures2(t *testing.T) {
+	resetLatencyTest(t)
+	t.Setenv("TIPSY_ANTILAG", "1")
+	armTestAntiLag(t)
+	// features2 is NULL: the probe cannot prove antiLag, so the create must
+	// neither inject nor stay armed.
+	if got := testVulkanCreateDeviceAntiLag(true, true, true); got != 4 {
+		t.Fatalf("NULL features2 device create bits = %d; want 4 (host called once, nothing injected)", got)
+	}
+	if VulkanAntiLagArmed() {
+		t.Fatal("NULL features2 must close the gate")
+	}
+}
+
+func TestVulkanCreateDeviceQualifiesPhysicalDevice(t *testing.T) {
+	resetLatencyTest(t)
+	t.Setenv("TIPSY_ANTILAG", "1")
+	for _, tc := range []struct {
+		name                string
+		qualification, want int
+	}{
+		{"name fallback", 0, 15},
+		{"non AMD", 1, 4},
+		{"non RADV driver ID", 2, 4},
+		{"RADV driver ID", 3, 15},
+		{"CPU device", 4, 4},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if !tipsyTestArmAntiLag("radv", true, testDevice(t)) {
+				t.Fatal("could not arm anti-lag")
+			}
+			if got := testVulkanCreateDeviceAntiLagQualified(true, true, false, tc.qualification); got != tc.want {
+				t.Fatalf("device create bits = %d, want %d", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestVulkanConcurrentQueueRegistration(t *testing.T) {
+	resetLatencyTest(t)
+	t.Setenv("TIPSY_ANTILAG", "1")
+	armTestAntiLag(t)
+	const count = 8
+	var devices, queues [count]unsafe.Pointer
+	for i := range devices {
+		devices[i] = testVulkanLatencyAllocHandle()
+		queues[i] = testVulkanLatencyAllocHandle()
+		defer testVulkanLatencyFreeHandle(devices[i])
+		defer testVulkanLatencyFreeHandle(queues[i])
+	}
+	var wg sync.WaitGroup
+	start := make(chan struct{})
+	for i := range devices {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			<-start
+			for n := 0; n < 1000; n++ {
+				testVulkanLatencyObserveQueue(devices[i], queues[i])
+			}
+		}(i)
+	}
+	close(start)
+	wg.Wait()
+	for i := range devices {
+		if got := testVulkanLatencyQueueDevice(queues[i]); got != devices[i] {
+			t.Errorf("queue %d owner = %p, want %p", i, got, devices[i])
+		}
+	}
+}
+
+// The whole vkCreateDevice wrapper on the success path with anti-lag unarmed.
+// Before the A7 gate, tipsy_vk_latency_open_device ran anyway: the latency
+// resolver declined, but open_session(device, NULL) closed the feature, which
+// took vk_latency_mu and logged once. Both counters must stay zero.
+func TestVulkanUnarmedCreateDeviceSuccessTakesNoLatencyLockOrLog(t *testing.T) {
+	resetLatencyTest(t)
+	t.Setenv("TIPSY_ANTILAG", "")
+	testVulkanLatencyResetCounters()
+
+	if !testVulkanCreateDeviceUnarmed() {
+		t.Fatal("unarmed whole-wrapper vkCreateDevice did not report the stub's VK_SUCCESS")
+	}
+	if got := testVulkanLatencyLockCount(); got != 0 {
+		t.Errorf("unarmed successful vkCreateDevice took %d latency locks; want 0", got)
+	}
+	if got := testVulkanLatencyLogCount(); got != 0 {
+		t.Errorf("unarmed successful vkCreateDevice made %d anti-lag logs; want 0", got)
+	}
+}
+
+func TestVulkanUnarmedQueueAndDestroySkipLatency(t *testing.T) {
+	resetLatencyTest(t)
+	t.Setenv("TIPSY_ANTILAG", "")
+	testVulkanLatencyResetCounters()
+	if !testVulkanUnarmedQueueDestroy() {
+		t.Fatal("queue wrappers did not forward host queues")
+	}
+	if got := testVulkanLatencyLockCount(); got != 0 {
+		t.Errorf("unarmed queue or destroy took %d latency locks", got)
+	}
+	if got := testVulkanLatencyLogCount(); got != 0 {
+		t.Errorf("unarmed queue or destroy made %d latency logs", got)
+	}
+}
+
+func BenchmarkVulkanCreateDeviceUnarmed(b *testing.B) {
+	tipsyTestLatencyReset()
+	if !testVulkanCreateDeviceUnarmed() {
+		b.Fatal("unarmed vkCreateDevice benchmark seam did not take the success path")
+	}
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		if !testVulkanCreateDeviceUnarmed() {
+			b.Fatal("unarmed vkCreateDevice left the success path")
+		}
+	}
+}
+
+func BenchmarkVulkanQueuePresentUnarmed(b *testing.B) {
+	tipsyTestLatencyReset()
+	if !testVulkanQueuePresentUnarmed() {
+		b.Fatal("unarmed vkQueuePresentKHR benchmark seam did not take the success path")
+	}
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		if !testVulkanQueuePresentUnarmed() {
+			b.Fatal("unarmed vkQueuePresentKHR left the success path")
+		}
 	}
 }
 

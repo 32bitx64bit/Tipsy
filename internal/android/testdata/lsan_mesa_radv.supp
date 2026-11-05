@@ -1,0 +1,5 @@
+# LeakSanitizer suppressions for the Mesa RADV anti-lag child only.
+# The 128-byte allocation is made by the driver/layer and is not reachable
+# after Mesa unloads them; it must not hide a Tipsy allocation.
+leak:libvulkan_radeon.so
+leak:libVkLayer_MESA_anti_lag.so

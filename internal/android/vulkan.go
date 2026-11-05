@@ -15,6 +15,16 @@ uint32_t tipsy_vk_present_call_durations(uint64_t after, uint64_t *out_ns,
 	uint32_t capacity, uint64_t *out_cursor, uint64_t *out_overwritten);
 void tipsy_test_vk_note_present_result_duration(int32_t result, uint64_t now_ns, uint64_t duration_ns);
 int tipsy_test_vk_observe_device_create(const char **names, uint32_t n);
+int tipsy_test_vk_create_device_antilag(int extension_present, int anti_lag_bit,
+	int features2_null, int qualification);
+int tipsy_test_vk_create_device_unarmed(void);
+int tipsy_test_vk_queue_present_unarmed(void);
+int tipsy_test_vk_unarmed_queue_destroy(void);
+int tipsy_test_vk_latency_lock_count(void);
+int tipsy_test_vk_latency_log_count(void);
+void tipsy_test_vk_latency_reset_counters(void);
+void tipsy_vk_latency_queue_observed(void *device, void *queue);
+void *tipsy_test_vk_latency_queue_device(void *queue);
 void *tipsy_test_vk_host_loader_symbol(const char *name);
 void *tipsy_test_vk_resolve_create_swapchain(void);
 int tipsy_test_vk_device_proc_cache(void);
@@ -667,6 +677,56 @@ func testVulkanObserveDeviceCreate(extensions []string) bool {
 	}()
 	return C.tipsy_test_vk_observe_device_create((**C.char)(unsafe.Pointer(&ptrs[0])), C.uint32_t(len(ptrs))) != 0
 }
+
+func testVulkanCreateDeviceAntiLag(extensionPresent, antiLagBit, features2Null bool) int {
+	return testVulkanCreateDeviceAntiLagQualified(extensionPresent, antiLagBit, features2Null, 0)
+}
+
+func testVulkanCreateDeviceAntiLagQualified(extensionPresent, antiLagBit, features2Null bool, qualification int) int {
+	b2i := func(b bool) C.int {
+		if b {
+			return 1
+		}
+		return 0
+	}
+	return int(C.tipsy_test_vk_create_device_antilag(
+		b2i(extensionPresent), b2i(antiLagBit), b2i(features2Null), C.int(qualification)))
+}
+
+func testVulkanCreateDeviceUnarmed() bool {
+	return C.tipsy_test_vk_create_device_unarmed() != 0
+}
+
+func testVulkanQueuePresentUnarmed() bool {
+	return C.tipsy_test_vk_queue_present_unarmed() != 0
+}
+
+func testVulkanUnarmedQueueDestroy() bool {
+	return C.tipsy_test_vk_unarmed_queue_destroy() != 0
+}
+
+func testVulkanLatencyLockCount() int {
+	return int(C.tipsy_test_vk_latency_lock_count())
+}
+
+func testVulkanLatencyLogCount() int {
+	return int(C.tipsy_test_vk_latency_log_count())
+}
+
+func testVulkanLatencyResetCounters() {
+	C.tipsy_test_vk_latency_reset_counters()
+}
+
+func testVulkanLatencyObserveQueue(device, queue unsafe.Pointer) {
+	C.tipsy_vk_latency_queue_observed(device, queue)
+}
+
+func testVulkanLatencyQueueDevice(queue unsafe.Pointer) unsafe.Pointer {
+	return C.tipsy_test_vk_latency_queue_device(queue)
+}
+
+func testVulkanLatencyAllocHandle() unsafe.Pointer { return C.malloc(1) }
+func testVulkanLatencyFreeHandle(p unsafe.Pointer) { C.free(p) }
 
 func testVulkanHostLoaderSymbol(name string) uintptr {
 	cName := C.CString(name)

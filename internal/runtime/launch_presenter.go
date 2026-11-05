@@ -482,6 +482,23 @@ func configureVulkanPresentationPolicy(settings clientsettings.Settings) {
 		"unthrottledPresentation", settings.NeedsUnthrottledPresentation())
 }
 
+// configureVulkanAntiLag arms VK_AMD_anti_lag only when the user opted in with
+// TIPSY_ANTILAG=1 and the isolated driver probe proved RADV on this machine.
+// Every launch updates the gate, even when another renderer is selected.
+func configureVulkanAntiLag() {
+	if !graphics.AntiLagRequested(os.Getenv(graphics.EnvAntiLag)) {
+		android.ArmVulkanAntiLag("", false)
+		return
+	}
+	support := graphics.ProbeAntiLagSupport()
+	enabled := graphics.AntiLagEnabled(support, true)
+	android.ArmVulkanAntiLag("radv", enabled)
+	logging.Logger(logging.CatGraphics).Info("Android Vulkan anti-lag policy",
+		"requested", true, "available", support.Available,
+		"needsLayerEnv", support.NeedsLayerEnv, "enabled", enabled,
+		"driver", support.Driver, "reason", support.Reason)
+}
+
 func bindClientPresenter(win *x11.Window, settings clientsettings.Settings, caps graphics.RendererCapabilities) (*clientPresenter, error) {
 	resolved, err := caps.Resolve(graphics.Renderer(settings.Renderer))
 	if err != nil {

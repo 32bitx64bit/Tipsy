@@ -12,6 +12,7 @@ import (
 	"syscall"
 
 	"github.com/tipsy-linux/tipsy/internal/app"
+	"github.com/tipsy-linux/tipsy/internal/graphics"
 	"github.com/tipsy-linux/tipsy/internal/logging"
 	"github.com/tipsy-linux/tipsy/internal/perf"
 )
@@ -24,6 +25,12 @@ func main() {
 }
 
 func tipsyMain(args []string) int {
+	// Isolated anti-lag driver probe. It runs before logging or profiling setup
+	// so the helper sees the user's environment verbatim and writes only its
+	// key=value report.
+	if len(args) > 0 && args[0] == graphics.AntiLagProbeCommand {
+		return graphics.RunAntiLagProbeMain()
+	}
 	logging.Init()
 	stop, err := perf.StartFromEnv()
 	if err != nil {

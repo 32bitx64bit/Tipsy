@@ -207,6 +207,7 @@ func Launch(ctx context.Context, opt LaunchOptions) error {
 		settings.Renderer = clientsettings.RendererOpenGL
 		logging.Logger(logging.CatGraphics).Info("transient renderer override", "renderer", clientsettings.RendererOpenGL)
 	}
+	configureVulkanAntiLag()
 	// Roblox may normalize experimental values on shutdown. Reapply the Tipsy-owned
 	// value after the loop exits, while the launch lock still excludes GUI writes.
 	defer func() {

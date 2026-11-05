@@ -12,6 +12,7 @@
  */
 #include "android_bridge.h"
 #include "vulkan_output.h"
+#include "vulkan_latency.h"
 
 #include <dlfcn.h>
 #include <pthread.h>
@@ -75,6 +76,30 @@ typedef struct {
 	char extensionName[TIPSY_VK_EXT_NAME_SIZE];
 	uint32_t specVersion;
 } TipsyVkExtensionProperties;
+
+/* Same x86-64 Vulkan property layouts and RADV rules as the GUI probe. */
+typedef struct {
+	uint32_t apiVersion, driverVersion, vendorID, deviceID, deviceType;
+	char deviceName[256];
+	uint8_t uuid[16];
+	_Alignas(8) uint8_t limits[504];
+	uint8_t sparse[20];
+} TipsyVkPhysicalProperties;
+typedef struct {
+	uint32_t sType;
+	void *pNext;
+	TipsyVkPhysicalProperties properties;
+} TipsyVkPhysicalProperties2;
+typedef struct {
+	uint32_t sType;
+	void *pNext;
+	uint32_t driverID;
+	char driverName[256], driverInfo[256];
+	uint8_t conformance[4];
+} TipsyVkDriverProperties;
+_Static_assert(sizeof(TipsyVkPhysicalProperties) == 824, "VkPhysicalDeviceProperties ABI");
+_Static_assert(sizeof(TipsyVkPhysicalProperties2) == 840, "VkPhysicalDeviceProperties2 ABI");
+_Static_assert(sizeof(TipsyVkDriverProperties) == 536, "VkPhysicalDeviceDriverProperties ABI");
 
 typedef struct {
 	uint32_t sType;
@@ -254,6 +279,10 @@ static const char *const vk_pacing_extension_names[TIPSY_VK_HOST_PACING_EXTENSIO
 	"VK_EXT_present_timing",
 };
 static _Atomic int vk_create_device_logged;
+/* One host present-id and one host present-wait observation from the same
+ * read-only enumeration. Pacing needs both on the same device. */
+static _Atomic int vk_host_has_present_id;
+static _Atomic int vk_host_has_present_wait;
 
 static Display *wsi_dpy;
 static unsigned long wsi_xid;
@@ -293,6 +322,16 @@ static void *tipsy_vkGetDeviceProcAddr(TipsyVkDevice device, const char *name);
 static void *host_proc(TipsyVkInstance instance, const char *name);
 static TipsyVkResult tipsy_vkCreateInstance(const TipsyVkInstanceCreateInfo *pCreateInfo, const void *pAllocator, TipsyVkInstance *pInstance);
 static TipsyVkResult tipsy_vkCreateDevice(TipsyVkPhysicalDevice physicalDevice, const TipsyVkDeviceCreateInfo *pCreateInfo, const void *pAllocator, TipsyVkDevice *pDevice);
+static void tipsy_vk_latency_open_device(TipsyVkDevice device);
+static void *resolve_device_proc(TipsyVkDevice device, const char *name);
+static void *resolve_latency_device_proc(TipsyVkDevice device, const char *name);
+/* Test seams: fake host lookups for the latency resolver (NULL: production). */
+static void *(*test_host_proc)(TipsyVkInstance instance, const char *name);
+static void *(*test_latency_device_proc)(TipsyVkDevice device, const char *name);
+/* Test seam: replace the features2 lookup the anti-lag create probe uses.
+ * NULL: dlsym the real host entry point. */
+static void *(*test_vk_features2)(const char *name);
+static void *(*test_vk_properties)(const char *name);
 static TipsyVkResult tipsy_vkEnumerateInstanceExtensionProperties(const char *pLayerName, uint32_t *pPropertyCount, TipsyVkExtensionProperties *pProperties);
 static TipsyVkResult tipsy_vkCreateAndroidSurfaceKHR(TipsyVkInstance instance, const TipsyVkAndroidSurfaceCreateInfoKHR *pCreateInfo, const void *pAllocator, TipsyVkSurfaceKHR *pSurface);
 static TipsyVkResult tipsy_vkGetPhysicalDeviceSurfacePresentModesKHR(TipsyVkPhysicalDevice physicalDevice, TipsyVkSurfaceKHR surface, uint32_t *pPresentModeCount, uint32_t *pPresentModes);
@@ -436,6 +475,10 @@ static int tipsy_vk_observe_device_create(TipsyVkPhysicalDevice physical_device,
 						support[i] = vk_host_supports_extension(vk_pacing_extension_names[i],
 							props, got);
 					}
+					atomic_store_explicit(&vk_host_has_present_id, support[2],
+						memory_order_release);
+					atomic_store_explicit(&vk_host_has_present_wait, support[0],
+						memory_order_release);
 				}
 				free(props);
 			}
@@ -578,6 +621,11 @@ static void vk_scan_host_wsi(void)
 
 static void vk_init_once(void)
 {
+	// The latency unit resolves its own entry points through the adapter so a
+	// cached device dispatch and the instance-level lookup stay in one place.
+	// Install once here, not per wrapper entry: the present and create paths
+	// then do no new work compared with the last commit.
+	(void)tipsy_vk_latency_install_get_proc((void *)resolve_latency_device_proc);
 	/*
 	 * The Android Vulkan contract requires ETC2, while desktop RADV leaves
 	 * its conformant shader emulation opt-in on hardware without native ETC2.
@@ -916,6 +964,11 @@ static TipsyVkResult tipsy_vkCreateInstance(const TipsyVkInstanceCreateInfo *pCr
 		GoAndroid_LogMissing("vkCreateInstance");
 		return TIPSY_VK_ERROR_INITIALIZATION_FAILED;
 	}
+	// Ordering guard: an anti-lag probe must have finished (or given up) before
+	// the client instance exists. Returns one on the first attempt only.
+	if (tipsy_vk_instance_creation_begin()) {
+		tipsy_vk_latency_log_shader_cache();
+	}
 	if (pCreateInfo == NULL) {
 		result = host_vkCreateInstance(pCreateInfo, pAllocator, pInstance);
 		tipsy_vk_output_instance_created(
@@ -947,10 +1000,40 @@ static TipsyVkResult tipsy_vkCreateInstance(const TipsyVkInstanceCreateInfo *pCr
 	return result;
 }
 
+static int tipsy_vk_antilag_device_qualified(TipsyVkPhysicalDevice device)
+{
+	void (*properties)(void *, void *);
+	void (*properties2)(void *, void *);
+	TipsyVkPhysicalProperties props = {0};
+	TipsyVkPhysicalProperties2 props2 = {0};
+	TipsyVkDriverProperties driver = {0};
+	int named_radv;
+	if (device == NULL) return 0;
+	properties = test_vk_properties != NULL ? test_vk_properties("vkGetPhysicalDeviceProperties") :
+		(lib_vulkan != NULL ? dlsym(lib_vulkan, "vkGetPhysicalDeviceProperties") : NULL);
+	properties2 = test_vk_properties != NULL ? test_vk_properties("vkGetPhysicalDeviceProperties2") :
+		(lib_vulkan != NULL ? dlsym(lib_vulkan, "vkGetPhysicalDeviceProperties2") : NULL);
+	if (properties == NULL) return 0;
+	properties(device, &props);
+	props.deviceName[sizeof(props.deviceName) - 1] = '\0';
+	if (props.vendorID != 0x1002u || props.deviceType == 4u ||
+		strstr(props.deviceName, "llvmpipe") || strstr(props.deviceName, "lavapipe") ||
+		strstr(props.deviceName, "softpipe") || strstr(props.deviceName, "swiftshader") ||
+		strstr(props.deviceName, "SwiftShader")) return 0;
+	named_radv = strncmp(props.deviceName, "RADV", 4) == 0 || strstr(props.deviceName, "RADV ") != NULL;
+	if (properties2 == NULL) return named_radv;
+	props2.sType = 1000059001u;
+	props2.pNext = &driver;
+	driver.sType = 1000196000u;
+	properties2(device, &props2);
+	return driver.driverID == 3u || (driver.driverID == 0 && named_radv);
+}
+
 static TipsyVkResult tipsy_vkCreateDevice(TipsyVkPhysicalDevice physicalDevice,
 	const TipsyVkDeviceCreateInfo *pCreateInfo, const void *pAllocator, TipsyVkDevice *pDevice)
 {
 	TipsyVkResult result;
+	int antilag_armed;
 
 	ensure_vulkan();
 	if (host_vkCreateDevice == NULL) {
@@ -965,13 +1048,74 @@ static TipsyVkResult tipsy_vkCreateDevice(TipsyVkPhysicalDevice physicalDevice,
 	// returned unchanged.
 	tipsy_vk_observe_device_create(physicalDevice, pCreateInfo);
 	tipsy_vk_output_device_preparing(physicalDevice, pCreateInfo);
-	result = host_vkCreateDevice(physicalDevice, pCreateInfo, pAllocator, pDevice);
+	// Read once: the closed gate must cost the create path nothing beyond this
+	// load. The tail uses the same value to keep the latency session closed.
+	antilag_armed = tipsy_vk_antilag_armed();
+	if (antilag_armed && !tipsy_vk_antilag_device_qualified(physicalDevice)) {
+		(void)tipsy_vk_antilag_arm(NULL, 0);
+		antilag_armed = 0;
+	}
+	{
+		// Opt-in latency: the anti-lag gate is closed unless TIPSY_ANTILAG=1
+		// and the driver probe proved RADV. With it closed this is one
+		// acquire load and local_info is unused.
+		TipsyVkDeviceCreateInfo local_info;
+		int added = 0;
+		int supported = 0;
+		const TipsyVkDeviceCreateInfo *host_info = pCreateInfo;
+		if (antilag_armed && host_vkEnumerateDeviceExtensionProperties != NULL && physicalDevice != NULL) {
+			uint32_t count = 0;
+			if (host_vkEnumerateDeviceExtensionProperties(physicalDevice, NULL, &count, NULL) == TIPSY_VK_SUCCESS && count > 0) {
+				TipsyVkExtensionProperties *props = calloc(count, sizeof(*props));
+				if (props != NULL) {
+					uint32_t got = count;
+					TipsyVkResult status = host_vkEnumerateDeviceExtensionProperties(physicalDevice, NULL, &got, props);
+					if (status == TIPSY_VK_SUCCESS) {
+						supported = vk_host_supports_extension("VK_AMD_anti_lag", props, got);
+					}
+					free(props);
+				}
+			}
+			if (supported) {
+				void *query = test_vk_features2 != NULL ?
+					test_vk_features2("vkGetPhysicalDeviceFeatures2") :
+					(lib_vulkan != NULL ? dlsym(lib_vulkan, "vkGetPhysicalDeviceFeatures2") : NULL);
+				supported = tipsy_vk_latency_feature_supported(physicalDevice, query);
+			}
+		}
+		if (antilag_armed && pCreateInfo != NULL &&
+			tipsy_vk_latency_prepare_device_create(physicalDevice, pCreateInfo,
+				&local_info, (uint32_t)sizeof(local_info), &added, supported)) {
+			host_info = &local_info;
+		}
+		result = host_vkCreateDevice(physicalDevice, host_info, pAllocator, pDevice);
+		if (added) {
+			tipsy_vk_latency_release_device_create(&local_info);
+		}
+	}
 	tipsy_vk_output_device_created(physicalDevice,
 		result == TIPSY_VK_SUCCESS && pDevice != NULL ? *pDevice : NULL, result);
 	if (result == TIPSY_VK_SUCCESS && pDevice != NULL) {
 		vk_device_procs_publish(*pDevice);
+		// Unarmed: no resolver, no session, no latency mutex, no log. The
+		// value read before the host call gates this tail as well.
+		if (antilag_armed && tipsy_vk_antilag_armed()) {
+			tipsy_vk_latency_open_device(*pDevice);
+		}
 	}
 	return result;
+}
+
+/* Records the per-device anti-lag entry point actually exposed. The resolver
+ * installed by ensure_vulkan is used, never the instance. */
+static void tipsy_vk_latency_open_device(TipsyVkDevice device)
+{
+	void *anti_lag = NULL;
+	/* Resolved only here: the host vkCreateDevice already returned
+	 * VK_SUCCESS with this VkDevice. */
+	tipsy_vk_latency_resolve_anti_lag(device, &anti_lag);
+	tipsy_vk_latency_open_session(device, anti_lag,
+		"vkAntiLagUpdateAMD is unresolved");
 }
 
 static TipsyVkResult tipsy_vkCreateAndroidSurfaceKHR(TipsyVkInstance instance,
@@ -1052,6 +1196,26 @@ static void *resolve_device_proc(TipsyVkDevice device, const char *name)
 	}
 	if (p == NULL) {
 		p = host_proc(NULL, name);
+	}
+	return p;
+}
+
+/*
+ * vkAntiLagUpdateAMD and vkWaitForPresentKHR belong to one created VkDevice.
+ * An instance/loader lookup returns an entry from another dispatch table that
+ * cannot be used with that device, so these names are resolved only with
+ * vkGetDeviceProcAddr on the device and a NULL result stays NULL; the latency
+ * unit then closes the feature softly.
+ */
+static void *resolve_latency_device_proc(TipsyVkDevice device, const char *name)
+{
+	void *p = NULL;
+	ensure_vulkan();
+	if (test_latency_device_proc != NULL) {
+		return test_latency_device_proc(device, name);
+	}
+	if (host_vkGetDeviceProcAddr != NULL && device != NULL) {
+		p = host_vkGetDeviceProcAddr(device, name);
 	}
 	return p;
 }
@@ -1192,6 +1356,7 @@ static void tipsy_vkGetDeviceQueue(TipsyVkDevice device, uint32_t queueFamilyInd
 	if (pQueue != NULL) {
 		tipsy_vk_output_queue_observed(device, queueFamilyIndex, queueIndex, 0,
 			*pQueue);
+		if (tipsy_vk_antilag_armed()) tipsy_vk_latency_queue_observed(device, *pQueue);
 	}
 }
 
@@ -1211,6 +1376,7 @@ static void tipsy_vkGetDeviceQueue2(TipsyVkDevice device,
 	if (pQueueInfo != NULL && pQueue != NULL) {
 		tipsy_vk_output_queue_observed(device, pQueueInfo->queueFamilyIndex,
 			pQueueInfo->queueIndex, pQueueInfo->flags, *pQueue);
+		if (tipsy_vk_antilag_armed()) tipsy_vk_latency_queue_observed(device, *pQueue);
 	}
 }
 
@@ -1501,13 +1667,20 @@ static TipsyVkResult tipsy_vkQueuePresentKHR(TipsyVkQueue queue, const void *pPr
 	if ((epoch & 1) != 0) {
 		start_ns = tipsy_vk_monotonic_ns();
 	}
-	output_handled = tipsy_vk_output_present(queue, pPresentInfo,
-		(void *)host_vkQueuePresentKHR,
-		&output_guest_result);
-	if (output_handled) {
-		result = output_guest_result;
-	} else {
-		result = host_vkQueuePresentKHR(queue, pPresentInfo);
+	{
+		// Opt-in anti-lag update. The gate is closed by default, so an
+		// ordinary present does one acquire load and nothing else.
+		if (tipsy_vk_antilag_armed()) {
+			tipsy_vk_latency_present(queue);
+		}
+		output_handled = tipsy_vk_output_present(queue, pPresentInfo,
+			(void *)host_vkQueuePresentKHR,
+			&output_guest_result);
+		if (output_handled) {
+			result = output_guest_result;
+		} else {
+			result = host_vkQueuePresentKHR(queue, pPresentInfo);
+		}
 	}
 	if (start_ns != 0) {
 		end_ns = tipsy_vk_monotonic_ns();
@@ -1532,6 +1705,7 @@ static void tipsy_vkDestroyDevice(TipsyVkDevice device, const void *pAllocator)
 	}
 	/* Retire first: the host may hand this handle to the next device. */
 	vk_device_procs_retire(device);
+	if (tipsy_vk_antilag_armed()) tipsy_vk_latency_device_destroyed(device);
 	tipsy_vk_output_device_destroying(device);
 	fn(device, pAllocator);
 }
@@ -1539,6 +1713,9 @@ static void tipsy_vkDestroyDevice(TipsyVkDevice device, const void *pAllocator)
 static void *host_proc(TipsyVkInstance instance, const char *name)
 {
 	void *p = NULL;
+	if (test_host_proc != NULL) {
+		return test_host_proc(instance, name);
+	}
 	if (host_vkGetInstanceProcAddr != NULL) {
 		p = host_vkGetInstanceProcAddr(instance, name);
 	}
@@ -1872,6 +2049,287 @@ int tipsy_test_vk_observe_device_create(char **names, uint32_t n)
 	return tipsy_vk_observe_device_create(NULL, &info);
 }
 
+/* ---- Test seams: whole-wrapper timing and the A1 create probe. ---- */
+
+static int test_create_host_calls;
+static int test_create_saw_antilag_extension;
+static int test_create_saw_antilag_feature;
+static int test_device_extension_present;
+static int test_features2_anti_lag;
+static int test_device_qualification;
+
+static void test_properties_query(void *device, void *raw)
+{
+	TipsyVkPhysicalProperties *props = raw;
+	(void)device;
+	props->vendorID = test_device_qualification == 1 ? 0x10deu : 0x1002u;
+	props->deviceType = test_device_qualification == 4 ? 4u : 2u;
+	strcpy(props->deviceName, test_device_qualification == 3 ? "AMD GPU" : "RADV test");
+}
+
+static void test_properties2_query(void *device, void *raw)
+{
+	TipsyVkPhysicalProperties2 *props = raw;
+	TipsyVkDriverProperties *driver = props->pNext;
+	(void)device;
+	driver->driverID = test_device_qualification == 2 ? 1u :
+		(test_device_qualification == 3 ? 3u : 0u);
+}
+
+static void *test_properties_lookup(const char *name)
+{
+	if (strcmp(name, "vkGetPhysicalDeviceProperties") == 0) return (void *)&test_properties_query;
+	return (void *)&test_properties2_query;
+}
+
+static void test_features2_query(void *physical_device, void *raw_features)
+{
+	uint32_t *anti_lag;
+
+	(void)physical_device;
+	if (raw_features == NULL) {
+		return;
+	}
+	/* VkPhysicalDeviceFeatures2: sType(0), pNext(8). */
+	anti_lag = *(uint32_t **)((uint8_t *)raw_features + 8u);
+	if (anti_lag == NULL) {
+		return;
+	}
+	/* VkPhysicalDeviceAntiLagFeaturesAMD: sType(0), pNext(8), antiLag(16). */
+	anti_lag[4] = (uint32_t)test_features2_anti_lag;
+}
+
+static void *test_features2_lookup(const char *name)
+{
+	(void)name;
+	return (void *)&test_features2_query;
+}
+
+static void *test_features2_absent(const char *name)
+{
+	(void)name;
+	return NULL;
+}
+
+static TipsyVkResult test_enumerate_device_extensions(TipsyVkPhysicalDevice physical_device,
+	const char *layer_name, uint32_t *count, TipsyVkExtensionProperties *props)
+{
+	(void)physical_device;
+	(void)layer_name;
+	if (count == NULL) {
+		return TIPSY_VK_ERROR_UNKNOWN;
+	}
+	if (props == NULL) {
+		*count = 1;
+		return TIPSY_VK_SUCCESS;
+	}
+	if (*count == 0) {
+		return TIPSY_VK_INCOMPLETE;
+	}
+	memset(props, 0, sizeof(*props));
+	if (test_device_extension_present) {
+		strcpy(props[0].extensionName, "VK_AMD_anti_lag");
+	} else {
+		strcpy(props[0].extensionName, "VK_KHR_swapchain");
+	}
+	*count = 1;
+	return TIPSY_VK_SUCCESS;
+}
+
+/* Records what the wrapper forwarded to the host and fails the create, so the
+ * observation never mutates the live device table. */
+static TipsyVkResult test_create_device_stub(TipsyVkPhysicalDevice physical_device,
+	const TipsyVkDeviceCreateInfo *info, const void *pAllocator, TipsyVkDevice *pDevice)
+{
+	const uint8_t *chain;
+	uint32_t i;
+	int steps = 0;
+
+	(void)physical_device;
+	(void)pAllocator;
+	(void)pDevice;
+	test_create_host_calls++;
+	test_create_saw_antilag_extension = 0;
+	test_create_saw_antilag_feature = 0;
+	if (info == NULL) {
+		return TIPSY_VK_ERROR_INITIALIZATION_FAILED;
+	}
+	for (i = 0; i < info->enabledExtensionCount; i++) {
+		if (info->ppEnabledExtensionNames != NULL &&
+			info->ppEnabledExtensionNames[i] != NULL &&
+			strcmp(info->ppEnabledExtensionNames[i], "VK_AMD_anti_lag") == 0) {
+			test_create_saw_antilag_extension = 1;
+		}
+	}
+	chain = (const uint8_t *)info->pNext;
+	while (chain != NULL && steps < 64) {
+		uint32_t type;
+		const void *next;
+		memcpy(&type, chain, sizeof(type));
+		if (type == TIPSY_VK_ANTI_LAG_FEATURES_STYPE) {
+			uint32_t anti_lag;
+			memcpy(&anti_lag, chain + 16u, sizeof(anti_lag));
+			test_create_saw_antilag_feature = anti_lag != 0;
+			break;
+		}
+		memcpy(&next, chain + 8u, sizeof(next));
+		chain = (const uint8_t *)next;
+		steps++;
+	}
+	return TIPSY_VK_ERROR_INITIALIZATION_FAILED;
+}
+
+/* Returns bit 0: host saw VK_AMD_anti_lag, bit 1: host saw antiLag=1,
+ * bit 2: the host create was called exactly once, bit 3: gate still armed. */
+int tipsy_test_vk_create_device_antilag(int extension_present, int anti_lag_bit,
+	int features2_null, int qualification)
+{
+	tipsy_vkCreateDevice_fn saved_create;
+	tipsy_vkEnumerateDeviceExtensionProperties_fn saved_enumerate;
+	TipsyVkDeviceCreateInfo info;
+	TipsyVkDevice device = NULL;
+	int bits;
+
+	ensure_vulkan();
+	saved_create = host_vkCreateDevice;
+	saved_enumerate = host_vkEnumerateDeviceExtensionProperties;
+	host_vkCreateDevice = test_create_device_stub;
+	host_vkEnumerateDeviceExtensionProperties = test_enumerate_device_extensions;
+	test_vk_features2 = features2_null ? test_features2_absent : test_features2_lookup;
+	test_vk_properties = test_properties_lookup;
+	test_device_qualification = qualification;
+	test_device_extension_present = extension_present;
+	test_features2_anti_lag = anti_lag_bit;
+	test_create_host_calls = 0;
+	memset(&info, 0, sizeof(info));
+	info.sType = 3u; /* VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO */
+	(void)tipsy_vkCreateDevice((TipsyVkPhysicalDevice)1, &info, NULL, &device);
+	bits = test_create_saw_antilag_extension |
+		(test_create_saw_antilag_feature << 1) |
+		((test_create_host_calls == 1 ? 1 : 0) << 2) |
+		((tipsy_vk_antilag_armed() ? 1 : 0) << 3);
+	host_vkCreateDevice = saved_create;
+	host_vkEnumerateDeviceExtensionProperties = saved_enumerate;
+	test_vk_features2 = NULL;
+	test_vk_properties = NULL;
+	return bits;
+}
+
+/* Minimal host stand-in for the unarmed timing seam, identical in both trees
+ * under measurement: only the wrapper body differs. It returns VK_SUCCESS and
+ * a non-NULL device so the timed loop reaches the create tail. */
+#define TIPSY_TEST_UNARMED_CREATE_DEVICE ((TipsyVkDevice)(uintptr_t)0xa7d0u)
+
+static void *test_unarmed_device_proc(TipsyVkDevice device, const char *name)
+{
+	(void)name;
+	return (void *)(uintptr_t)device;
+}
+
+static void test_unarmed_get_queue(TipsyVkDevice device, uint32_t family,
+	uint32_t index, TipsyVkQueue *queue)
+{
+	(void)family;
+	(void)index;
+	*queue = device;
+}
+
+static void test_unarmed_get_queue2(TipsyVkDevice device,
+	const TipsyVkDeviceQueueInfo2 *info, TipsyVkQueue *queue)
+{
+	(void)info;
+	*queue = device;
+}
+
+static void test_unarmed_destroy(TipsyVkDevice device, const void *allocator)
+{
+	(void)device;
+	(void)allocator;
+}
+
+static void *test_unarmed_queue_device_proc(TipsyVkDevice device, const char *name)
+{
+	(void)device;
+	if (strcmp(name, "vkGetDeviceQueue") == 0) return (void *)&test_unarmed_get_queue;
+	if (strcmp(name, "vkGetDeviceQueue2") == 0) return (void *)&test_unarmed_get_queue2;
+	if (strcmp(name, "vkDestroyDevice") == 0) return (void *)&test_unarmed_destroy;
+	return NULL;
+}
+
+int tipsy_test_vk_unarmed_queue_destroy(void)
+{
+	void *(*saved_resolver)(TipsyVkDevice, const char *) = test_resolve_device_proc;
+	TipsyVkDevice device = TIPSY_TEST_UNARMED_CREATE_DEVICE;
+	TipsyVkDeviceQueueInfo2 info = {0};
+	TipsyVkQueue first = NULL, second = NULL;
+	test_resolve_device_proc = test_unarmed_queue_device_proc;
+	vk_device_procs_publish(device);
+	tipsy_vkGetDeviceQueue(device, 0, 0, &first);
+	tipsy_vkGetDeviceQueue2(device, &info, &second);
+	tipsy_vkDestroyDevice(device, NULL);
+	test_resolve_device_proc = saved_resolver;
+	return first == device && second == device;
+}
+
+static TipsyVkResult test_unarmed_create_stub(TipsyVkPhysicalDevice physical_device,
+	const TipsyVkDeviceCreateInfo *info, const void *pAllocator, TipsyVkDevice *pDevice)
+{
+	(void)physical_device;
+	(void)info;
+	(void)pAllocator;
+	if (pDevice != NULL) {
+		*pDevice = TIPSY_TEST_UNARMED_CREATE_DEVICE;
+	}
+	return TIPSY_VK_SUCCESS;
+}
+
+/* Whole vkCreateDevice wrapper, anti-lag unarmed, on the success path. The
+ * stub host create and resolver keep the observation off real driver state.
+ * Returns 1 only when the wrapper reported success for the stub device. */
+int tipsy_test_vk_create_device_unarmed(void)
+{
+	tipsy_vkCreateDevice_fn saved_create;
+	void *(*saved_resolver)(TipsyVkDevice, const char *);
+	TipsyVkDeviceCreateInfo info;
+	TipsyVkDevice device = NULL;
+	TipsyVkResult result;
+
+	ensure_vulkan();
+	saved_create = host_vkCreateDevice;
+	saved_resolver = test_resolve_device_proc;
+	host_vkCreateDevice = test_unarmed_create_stub;
+	test_resolve_device_proc = test_unarmed_device_proc;
+	memset(&info, 0, sizeof(info));
+	info.sType = 3u;
+	result = tipsy_vkCreateDevice(NULL, &info, NULL, &device);
+	vk_device_procs_retire(device);
+	host_vkCreateDevice = saved_create;
+	test_resolve_device_proc = saved_resolver;
+	return result == TIPSY_VK_SUCCESS && device == TIPSY_TEST_UNARMED_CREATE_DEVICE;
+}
+
+static TipsyVkResult test_queue_present_stub(TipsyVkQueue queue, const void *present_info)
+{
+	(void)queue;
+	(void)present_info;
+	return TIPSY_VK_SUCCESS;
+}
+
+/* Whole vkQueuePresentKHR wrapper, anti-lag and present timing unarmed, on
+ * the success path. Returns 1 when the host stub's VK_SUCCESS was forwarded. */
+int tipsy_test_vk_queue_present_unarmed(void)
+{
+	tipsy_vkQueuePresent_fn saved_present;
+	TipsyVkResult result;
+
+	ensure_vulkan();
+	saved_present = host_vkQueuePresentKHR;
+	host_vkQueuePresentKHR = test_queue_present_stub;
+	result = tipsy_vkQueuePresentKHR(NULL, NULL);
+	host_vkQueuePresentKHR = saved_present;
+	return result == TIPSY_VK_SUCCESS;
+}
+
 void *tipsy_test_vk_host_loader_symbol(const char *name)
 {
 	ensure_vulkan();
@@ -1960,6 +2418,52 @@ out:
 	}
 	test_resolve_device_proc = NULL;
 	return step;
+}
+
+/* The fake instance/loader lookup a resolver that still fell back would call.
+ * It answers every name so a fallback cannot be mistaken for a NULL result. */
+static int test_latency_instance_calls;
+
+static void *test_latency_instance_proc(TipsyVkInstance instance, const char *name)
+{
+	(void)instance;
+	(void)name;
+	test_latency_instance_calls++;
+	return (void *)(intptr_t)&resolve_latency_device_proc;
+}
+
+static void *test_latency_null_device_proc(TipsyVkDevice device, const char *name)
+{
+	(void)device;
+	(void)name;
+	return NULL;
+}
+
+/* Tests: installs the adapter's own latency resolver (the same function
+ * production installs) with a fake host vkGetDeviceProcAddr that returns NULL
+ * and a fake instance/loader lookup that answers every name, then resolves
+ * vkAntiLagUpdateAMD and vkWaitForPresentKHR for device through the real
+ * latency hooks. Returns bit 0 when anti-lag stayed resolved, bit 1 when
+ * present-wait resolved, bit 2 when the instance fallback was consulted. */
+int tipsy_test_vk_latency_adapter_resolver(void *device)
+{
+	void *update = NULL;
+	int result = 0;
+
+	test_latency_instance_calls = 0;
+	test_host_proc = test_latency_instance_proc;
+	test_latency_device_proc = test_latency_null_device_proc;
+	(void)tipsy_vk_latency_install_get_proc((void *)resolve_latency_device_proc);
+	if (tipsy_vk_latency_resolve_anti_lag(device, &update) != 0 || update != NULL) {
+		result |= 1;
+	}
+	if (test_latency_instance_calls != 0) {
+		result |= 4;
+	}
+	test_host_proc = NULL;
+	test_latency_device_proc = NULL;
+	tipsy_test_vk_latency_install_test_procs();
+	return result;
 }
 
 int tipsy_test_vk_proc_is_wrapped(const char *name)

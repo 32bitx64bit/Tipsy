@@ -9,12 +9,18 @@ import (
 
 	qt "github.com/mappu/miqt/qt6"
 
+	"github.com/tipsy-linux/tipsy/internal/graphics"
 	"github.com/tipsy-linux/tipsy/internal/logging"
 	"github.com/tipsy-linux/tipsy/internal/perf"
 	"github.com/tipsy-linux/tipsy/internal/version"
 )
 
 func main() {
+	// The Settings card's isolated anti-lag probe re-executes this binary.
+	// Answer it before Qt starts so it cannot open a second window.
+	if len(os.Args) > 1 && os.Args[1] == graphics.AntiLagProbeCommand {
+		os.Exit(graphics.RunAntiLagProbeMain())
+	}
 	logging.Init()
 	stop, err := perf.StartFromEnv()
 	if err != nil {
