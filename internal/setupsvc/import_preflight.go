@@ -4,9 +4,11 @@
 package setupsvc
 
 import (
+	"bytes"
 	"context"
 	"debug/elf"
 	"encoding/binary"
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -14,6 +16,7 @@ import (
 	"strings"
 
 	"github.com/tipsy-linux/tipsy/internal/android"
+	"github.com/tipsy-linux/tipsy/internal/integrity"
 	"github.com/tipsy-linux/tipsy/internal/loader"
 	"github.com/tipsy-linux/tipsy/internal/logging"
 )
@@ -38,6 +41,126 @@ type MissingImport struct {
 	Version string // GNU verneed version, empty for an unversioned import
 }
 
+// ClientImportReport is the non-logging form of the loader's missing-import
+// policy. Fatal imports and AbsentLibraries abort launch. Fallback imports are
+// plain, unversioned functions that bind to the unsupported fallback.
+type ClientImportReport struct {
+	Fatal           []MissingImport
+	Fallback        []MissingImport
+	AbsentLibraries []string
+}
+
+// ActiveClientImportReport identifies the active generation whose libroblox.so
+// was inspected. Inspection reads files only; it does not authorize, stage,
+// activate, or execute the generation.
+type ActiveClientImportReport struct {
+	GenerationID string
+	VersionName  string
+	VersionCode  int64
+	Imports      ClientImportReport
+}
+
+// InspectExtractedClientImports applies the same fatal/fallback partition used
+// by setup without logging or converting the result into a setup error.
+func InspectExtractedClientImports(ctx context.Context, runtimeDir string) (ClientImportReport, error) {
+	missing, absent, err := findClientImports(ctx, runtimeDir)
+	if err != nil {
+		return ClientImportReport{}, err
+	}
+	fatal, fallback := partitionMissingImports(missing)
+	// With an absent dependency the loader aborts before calling any fallback.
+	// Keep setup and diagnostics from presenting those functions as bound.
+	if len(absent) > 0 {
+		fallback = nil
+	}
+	return ClientImportReport{Fatal: fatal, Fallback: fallback, AbsentLibraries: absent}, nil
+}
+
+// InspectActiveClientImports reads the active record for trust's slot and
+// inspects that generation's libroblox.so. Unlike integrity.Store.Active, this
+// diagnostic path never creates the store or migrates an active record.
+func InspectActiveClientImports(ctx context.Context, storeRoot string, trust TrustPolicy) (ActiveClientImportReport, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if err := ctx.Err(); err != nil {
+		return ActiveClientImportReport{}, err
+	}
+	store := StoreForTrust(storeRoot, trust)
+	active, err := readActiveClient(store.Root, store.ActiveSlot)
+	if err != nil {
+		return ActiveClientImportReport{}, err
+	}
+	imports, err := InspectExtractedClientImports(ctx, filepath.Join(store.Root, "generations", active.record.Generation))
+	if err != nil {
+		return ActiveClientImportReport{}, err
+	}
+	return ActiveClientImportReport{
+		GenerationID: active.record.Generation,
+		VersionName:  active.inventory.VersionName,
+		VersionCode:  active.inventory.VersionCode,
+		Imports:      imports,
+	}, nil
+}
+
+type activeClient struct {
+	record    integrity.ActiveRecord
+	inventory integrity.Inventory
+}
+
+func readActiveClient(storeRoot, slot string) (activeClient, error) {
+	if slot == integrity.ActiveSlotDevelopment {
+		active, err := readActiveClientRecord(storeRoot, "active-development.json")
+		if err == nil {
+			return active, nil
+		}
+		legacy, legacyErr := readActiveClientRecord(storeRoot, "active.json")
+		if legacyErr == nil && legacy.inventory.AuthorizationMode == string(DevelopmentUnrestricted) {
+			return legacy, nil
+		}
+		return activeClient{}, err
+	}
+	active, err := readActiveClientRecord(storeRoot, "active.json")
+	if err != nil {
+		return activeClient{}, err
+	}
+	if slot == integrity.ActiveSlotOfficial && active.inventory.AuthorizationMode == string(DevelopmentUnrestricted) {
+		return activeClient{}, fmt.Errorf("integrity: official active record points at a development generation: %w", os.ErrNotExist)
+	}
+	return active, nil
+}
+
+func readActiveClientRecord(storeRoot, name string) (activeClient, error) {
+	raw, err := os.ReadFile(filepath.Join(storeRoot, name))
+	if err != nil {
+		return activeClient{}, err
+	}
+	if len(raw) == 0 || len(raw) > 4096 {
+		return activeClient{}, fmt.Errorf("integrity: invalid active record size")
+	}
+	var record integrity.ActiveRecord
+	if err := json.Unmarshal(raw, &record); err != nil || record.Schema != integrity.ActiveSchema || integrity.ValidateGenerationID(record.Generation) != nil {
+		return activeClient{}, fmt.Errorf("integrity: active record is malformed")
+	}
+	canonical, err := json.Marshal(record)
+	if err != nil || !bytes.Equal(canonical, raw) {
+		return activeClient{}, fmt.Errorf("integrity: active record is not canonical")
+	}
+	generationRoot := filepath.Join(storeRoot, "generations", record.Generation)
+	rawInventory, err := os.ReadFile(filepath.Join(generationRoot, "inventory.json"))
+	if err != nil {
+		return activeClient{}, err
+	}
+	inventory, digest, err := integrity.DecodeInventory(rawInventory)
+	if err != nil {
+		return activeClient{}, err
+	}
+	if digest != record.Generation || record.InventorySHA256 != digest {
+		return activeClient{}, fmt.Errorf("integrity: active inventory digest mismatch")
+	}
+	return activeClient{record: record, inventory: inventory}, nil
+}
+
 // ValidateExtractedClientImports applies the loader's missing-symbol policy to
 // libroblox.so before a build is activated. Unresolvable data imports abort the
 // load, so they fail setup, listing every name. Unresolvable functions bind to
@@ -47,30 +170,26 @@ type MissingImport struct {
 // TIPSY_STRICT_SYMBOLS=1 restores the loader's abort for every missing import
 // and therefore fails setup for functions too.
 func ValidateExtractedClientImports(ctx context.Context, runtimeDir string) error {
-	missing, absent, err := findClientImports(ctx, runtimeDir)
+	report, err := InspectExtractedClientImports(ctx, runtimeDir)
 	if err != nil {
 		return setupError(ErrCompatibility, "check client imports", "the verified root client library's native imports could not be read", err)
 	}
-	fatal, unsupported := partitionMissingImports(missing)
-	// A missing bundled library makes every symbol that might come from it
-	// look unresolved, so a fallback warning would name functions the loader
-	// never reaches. Report the absent library instead.
-	if len(absent) == 0 && len(unsupported) > 0 {
-		names := missingImportNames(unsupported)
+	if len(report.Fallback) > 0 {
+		names := missingImportNames(report.Fallback)
 		list := strings.Join(names, ", ")
 		logging.Logger(logging.CatAPK).Warn(
 			fmt.Sprintf("the verified client needs %d native function(s) that Tipsy cannot provide; the loader will bind them to its unsupported fallback: %s", len(names), list),
 			"count", len(names), "symbols", list)
 	}
-	if len(fatal) == 0 && len(absent) == 0 {
+	if len(report.Fatal) == 0 && len(report.AbsentLibraries) == 0 {
 		return nil
 	}
 	var details []string
-	if len(absent) > 0 {
-		details = append(details, fmt.Sprintf("the verified client needs %d bundled native library(ies) absent from lib/x86_64: %s", len(absent), strings.Join(absent, ", ")))
+	if len(report.AbsentLibraries) > 0 {
+		details = append(details, fmt.Sprintf("the verified client needs %d bundled native library(ies) absent from lib/x86_64: %s", len(report.AbsentLibraries), strings.Join(report.AbsentLibraries, ", ")))
 	}
-	if len(fatal) > 0 {
-		names := missingImportNames(fatal)
+	if len(report.Fatal) > 0 {
+		names := missingImportNames(report.Fatal)
 		details = append(details, fmt.Sprintf("the verified client needs %d native symbol(s) that Tipsy cannot provide: %s", len(names), strings.Join(names, ", ")))
 	}
 	return setupError(ErrCompatibility, "check client imports", strings.Join(details, "; "), nil)

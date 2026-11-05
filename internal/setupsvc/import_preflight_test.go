@@ -377,6 +377,61 @@ func TestValidateExtractedClientImportsRejectsNotypeDataRelocation(t *testing.T)
 	}
 }
 
+func TestInspectExtractedClientReportsFatalAndFallbackImports(t *testing.T) {
+	runtimeDir := writeRuntimeLibs(t, map[string][]byte{
+		"libroblox.so":  clientWithUnresolvableImports(),
+		"libbundled.so": bundledLibrary(),
+	})
+	report, err := InspectExtractedClientImports(context.Background(), runtimeDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantFatal := []MissingImport{
+		{Name: "tipsy_missing_data", Kind: ImportData},
+		{Name: "tipsy_missing_libc", Kind: ImportFunction, Library: "libc.so", Version: "LIBC"},
+	}
+	wantFallback := []MissingImport{{Name: "AImageReader_tipsyMissing", Kind: ImportFunction}}
+	if !slices.Equal(report.Fatal, wantFatal) || !slices.Equal(report.Fallback, wantFallback) || len(report.AbsentLibraries) != 0 {
+		t.Fatalf("report=%+v", report)
+	}
+}
+
+func TestInspectExtractedClientReportsAbsentLibraryWithoutFallbackClaim(t *testing.T) {
+	report, err := InspectExtractedClientImports(context.Background(), writeRuntimeLibs(t, map[string][]byte{
+		"libroblox.so": clientWithUnresolvableImports(),
+	}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Equal(report.AbsentLibraries, []string{"libbundled.so"}) || len(report.Fallback) != 0 {
+		t.Fatalf("report=%+v", report)
+	}
+}
+
+func TestInspectExtractedClientStrictMakesFunctionFatal(t *testing.T) {
+	t.Setenv("TIPSY_STRICT_SYMBOLS", "1")
+	report, err := InspectExtractedClientImports(context.Background(), writeRuntimeLibs(t, map[string][]byte{
+		"libroblox.so": clientWithUnresolvableFunction(),
+	}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []MissingImport{{Name: "AImageReader_tipsyMissing", Kind: ImportFunction}}
+	if !slices.Equal(report.Fatal, want) || len(report.Fallback) != 0 {
+		t.Fatalf("strict report=%+v", report)
+	}
+}
+
+func TestInspectActiveClientImportsDoesNotCreateMissingStore(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "missing-generations")
+	if _, err := InspectActiveClientImports(context.Background(), root, DevelopmentTrustPolicy()); err == nil {
+		t.Fatal("missing active generation was accepted")
+	}
+	if _, err := os.Lstat(root); !os.IsNotExist(err) {
+		t.Fatalf("diagnostic created store root: %v", err)
+	}
+}
+
 func TestFindMissingClientImportsAcceptsResolvableClient(t *testing.T) {
 	runtimeDir := writeRuntimeLibs(t, map[string][]byte{
 		"libroblox.so": buildFakeELF([]string{"liblog.so", "libc.so"}, []fakeSym{

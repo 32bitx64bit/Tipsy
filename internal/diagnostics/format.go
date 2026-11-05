@@ -56,6 +56,16 @@ func FormatDoctor(r *DoctorReport) string {
 	w("Roblox")
 	w("  Data dir: %s", nz(r.Roblox.DataDir, "unknown"))
 	w("  Runtime files: %s", nz(r.Roblox.RuntimeFiles, "unknown"))
+	if r.Roblox.Generation != "" {
+		w("  Active generation: %s", r.Roblox.Generation)
+		if r.Roblox.Version != "" {
+			w("  Client version: %s", r.Roblox.Version)
+		}
+		w("  Native imports: %s", r.Roblox.ImportStatus)
+	}
+	if r.Roblox.ImportDetail != "" {
+		w("  Import detail: %s", r.Roblox.ImportDetail)
+	}
 	if r.Roblox.Note != "" {
 		w("  Note: %s", r.Roblox.Note)
 	}

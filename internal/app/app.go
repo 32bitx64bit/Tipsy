@@ -81,7 +81,14 @@ func cmdDoctor(ctx context.Context, args []string, stdout, stderr io.Writer) int
 		fmt.Fprintf(stderr, "doctor: unexpected argument %q\n", f.rest[0])
 		return 2
 	}
-	rep := diagnostics.Doctor(ctx)
+	var rep *diagnostics.DoctorReport
+	if trust, err := PackageAuthorizationTrust(ctx, false); err == nil {
+		rep = diagnostics.DoctorForTrust(ctx, trust)
+	} else {
+		// Doctor remains available when release authority or development
+		// consent cannot be resolved; its exit code is unchanged.
+		rep = diagnostics.Doctor(ctx)
+	}
 	if f.json {
 		b, err := diagnostics.FormatDoctorJSON(rep)
 		if err != nil {
@@ -113,9 +120,15 @@ func cmdDiagnose(ctx context.Context, args []string, stdout, stderr io.Writer) i
 		fmt.Fprintf(stderr, "diagnose: unexpected extra argument %q\n", f.rest[1])
 		return 2
 	}
+	diagnose := diagnostics.Diagnose
+	if trust, err := PackageAuthorizationTrust(ctx, false); err == nil {
+		diagnose = func(ctx context.Context, subsystem string) *diagnostics.SubsystemReport {
+			return diagnostics.DiagnoseForTrust(ctx, subsystem, trust)
+		}
+	}
 	if sub == "" {
 		for i, name := range []string{"x11", "graphics", "audio", "jni", "loader", "roblox", "auth", "gamepad"} {
-			rep := diagnostics.Diagnose(ctx, name)
+			rep := diagnose(ctx, name)
 			if f.json {
 				b, err := diagnostics.FormatSubsystemJSON(rep)
 				if err != nil {
@@ -132,7 +145,7 @@ func cmdDiagnose(ctx context.Context, args []string, stdout, stderr io.Writer) i
 		}
 		return 0
 	}
-	rep := diagnostics.Diagnose(ctx, sub)
+	rep := diagnose(ctx, sub)
 	if rep.Status == "unknown" {
 		fmt.Fprintln(stderr, logging.Redact(rep.Message))
 		return 2

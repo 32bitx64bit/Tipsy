@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/tipsy-linux/tipsy/internal/config"
+	"github.com/tipsy-linux/tipsy/internal/setupsvc"
 )
 
 func probeSystem() SystemInfo {
@@ -291,25 +292,63 @@ func probeQt(ctx context.Context) QtInfo {
 	return QtInfo{Widgets: "not found (CLI still builds; GUI needs Qt 6)"}
 }
 
-func probeRoblox() RobloxInfo {
-	dir := config.Paths().DataDir
+func probeRoblox(ctx context.Context, trust setupsvc.TrustPolicy) RobloxInfo {
+	paths := config.Paths()
 	info := RobloxInfo{
-		DataDir: dir,
+		DataDir: paths.DataDir,
 		Note:    "Package cookies and tokens are not read.",
 	}
-	fi, err := os.Stat(dir)
+	fi, err := os.Stat(paths.DataDir)
 	if err != nil || !fi.IsDir() {
 		info.RuntimeFiles = "not present"
-		return info
-	}
-	entries, err := os.ReadDir(dir)
-	if err != nil || len(entries) == 0 {
+	} else if entries, readErr := os.ReadDir(paths.DataDir); readErr != nil || len(entries) == 0 {
 		info.RuntimeFiles = "empty"
+	} else {
+		info.DataDirPresent = true
+		info.RuntimeFiles = "present"
+	}
+
+	storeRoot := setupsvc.GenerationStoreDir(filepath.Join(paths.DataDir, "runtime"))
+	active, err := setupsvc.InspectActiveClientImports(ctx, storeRoot, trust)
+	if err != nil {
+		// No active generation (or one that cannot be read) retains the
+		// historical data-directory-only diagnostic.
 		return info
 	}
-	info.DataDirPresent = true
-	info.RuntimeFiles = "present"
+	info.Generation = active.GenerationID
+	info.Version = active.VersionName
+	if info.Version == "" && active.VersionCode != 0 {
+		info.Version = strconv.FormatInt(active.VersionCode, 10)
+	}
+	info.ImportStatus = ImportsOK
+	label := "Roblox generation " + info.Generation
+	if info.Version != "" {
+		label += " (" + info.Version + ")"
+	}
+	imports := active.Imports
+	if len(imports.Fatal) > 0 || len(imports.AbsentLibraries) > 0 {
+		var details []string
+		if len(imports.Fatal) > 0 {
+			details = append(details, "unresolvable native symbol(s): "+strings.Join(importNames(imports.Fatal), ", "))
+		}
+		if len(imports.AbsentLibraries) > 0 {
+			details = append(details, "bundled native libraries absent from lib/x86_64: "+strings.Join(imports.AbsentLibraries, ", "))
+		}
+		info.ImportStatus = ImportsBlocked
+		info.ImportDetail = label + " cannot launch: " + strings.Join(details, "; ")
+	} else if len(imports.Fallback) > 0 {
+		info.ImportStatus = ImportsWarning
+		info.ImportDetail = label + " binds missing native function(s) to Tipsy's unsupported fallback (returns 0): " + strings.Join(importNames(imports.Fallback), ", ")
+	}
 	return info
+}
+
+func importNames(imports []setupsvc.MissingImport) []string {
+	names := make([]string, len(imports))
+	for i, missing := range imports {
+		names[i] = missing.Name
+	}
+	return names
 }
 
 func pkgConfigExists(ctx context.Context, name string) bool {

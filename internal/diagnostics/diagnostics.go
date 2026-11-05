@@ -12,6 +12,7 @@ import (
 
 	"github.com/tipsy-linux/tipsy/internal/config"
 	"github.com/tipsy-linux/tipsy/internal/logging"
+	"github.com/tipsy-linux/tipsy/internal/setupsvc"
 	"github.com/tipsy-linux/tipsy/internal/version"
 )
 
@@ -60,8 +61,18 @@ type RobloxInfo struct {
 	DataDir        string `json:"dataDir"`
 	DataDirPresent bool   `json:"dataDirPresent"`
 	RuntimeFiles   string `json:"runtimeFiles"`
+	Generation     string `json:"generation,omitempty"`
+	Version        string `json:"version,omitempty"`
+	ImportStatus   string `json:"importStatus,omitempty"`
+	ImportDetail   string `json:"importDetail,omitempty"`
 	Note           string `json:"note,omitempty"`
 }
+
+const (
+	ImportsOK      = "ok"
+	ImportsWarning = "warning"
+	ImportsBlocked = "blocked"
+)
 
 type RuntimeInfo struct {
 	NativeSymbols string `json:"nativeSymbols"`
@@ -98,6 +109,12 @@ type SubsystemReport struct {
 var DiagnoseSubsystems = []string{"x11", "graphics", "audio", "jni", "loader", "roblox", "auth", "gamepad"}
 
 func Doctor(ctx context.Context) *DoctorReport {
+	return DoctorForTrust(ctx, setupsvc.OfficialTrustPolicy())
+}
+
+// DoctorForTrust checks the active generation for the same trust slot that a
+// launch in the current session would use.
+func DoctorForTrust(ctx context.Context, trust setupsvc.TrustPolicy) *DoctorReport {
 	if ctx == nil {
 		ctx = context.Background()
 	}
@@ -111,7 +128,7 @@ func Doctor(ctx context.Context) *DoctorReport {
 	r.Audio = probeAudio(ctx)
 	r.Qt = probeQt(ctx)
 	r.Gamepad = probeGamepad()
-	r.Roblox = probeRoblox()
+	r.Roblox = probeRoblox(ctx, trust)
 	r.Runtime = RuntimeInfo{
 		NativeSymbols: "official x86_64 client maps and runs (JNI_OnLoad and initializeNativeCode complete)",
 		JNIMethods:    "Android/JNI compatibility surface is active",
@@ -150,6 +167,12 @@ func reportEnv() map[string]string {
 }
 
 func Diagnose(ctx context.Context, subsystem string) *SubsystemReport {
+	return DiagnoseForTrust(ctx, subsystem, setupsvc.OfficialTrustPolicy())
+}
+
+// DiagnoseForTrust includes active-generation import status in loader and
+// Roblox reports without opening or executing that generation.
+func DiagnoseForTrust(ctx context.Context, subsystem string, trust setupsvc.TrustPolicy) *SubsystemReport {
 	if ctx == nil {
 		ctx = context.Background()
 	}
@@ -159,7 +182,7 @@ func Diagnose(ctx context.Context, subsystem string) *SubsystemReport {
 		return &SubsystemReport{
 			Subsystem: "all",
 			Status:    "ok",
-			Facts:     diagnoseAllFacts(ctx),
+			Facts:     diagnoseAllFacts(ctx, trust),
 			Message:   "Specify a subsystem: " + strings.Join(DiagnoseSubsystems, ", "),
 		}
 	case "x11":
@@ -205,7 +228,7 @@ func Diagnose(ctx context.Context, subsystem string) *SubsystemReport {
 			Message: "The official client's JNI surface is active: JNI_OnLoad returns 0x10006 and initializeNativeCode returns a non-zero handle. Login, join, and gameplay are separate stages this diagnostic does not verify.",
 		}
 	case "loader":
-		return &SubsystemReport{
+		rep := &SubsystemReport{
 			Subsystem: "loader",
 			Status:    "active",
 			Facts: []string{
@@ -216,9 +239,10 @@ func Diagnose(ctx context.Context, subsystem string) *SubsystemReport {
 			},
 			Message: "The Android x86-64 ELF loader maps the official libroblox.so and applies its relocations. This diagnostic does not start Roblox or verify a rendered frame.",
 		}
+		return withActiveImportStatus(rep, probeRoblox(ctx, trust))
 	case "roblox":
-		rb := probeRoblox()
-		return &SubsystemReport{
+		rb := probeRoblox(ctx, trust)
+		rep := &SubsystemReport{
 			Subsystem: "roblox",
 			Status:    "active",
 			Facts: []string{
@@ -229,6 +253,7 @@ func Diagnose(ctx context.Context, subsystem string) *SubsystemReport {
 			},
 			Message: "The official client maps, completes JNI initialization, and renders its logged-out login UI on X11. Login, join, gameplay, and in-experience state are not verified by this diagnostic.",
 		}
+		return withActiveImportStatus(rep, rb)
 	case "auth":
 		return &SubsystemReport{
 			Subsystem: "auth",
@@ -250,6 +275,30 @@ func Diagnose(ctx context.Context, subsystem string) *SubsystemReport {
 			Message:   "Unknown subsystem " + sub + ". Choose: " + strings.Join(DiagnoseSubsystems, ", "),
 		}
 	}
+}
+
+func withActiveImportStatus(rep *SubsystemReport, roblox RobloxInfo) *SubsystemReport {
+	if roblox.Generation == "" {
+		return rep
+	}
+	label := roblox.Generation
+	if roblox.Version != "" {
+		label += " (" + roblox.Version + ")"
+	}
+	rep.Facts = append(rep.Facts, "Active generation: "+label)
+	switch roblox.ImportStatus {
+	case ImportsBlocked:
+		rep.Status = "blocked"
+		rep.Facts = append(rep.Facts, "Native imports: "+roblox.ImportDetail)
+		rep.Message = roblox.ImportDetail
+	case ImportsWarning:
+		rep.Status = "warning"
+		rep.Facts = append(rep.Facts, "Native imports: "+roblox.ImportDetail)
+		rep.Message = roblox.ImportDetail
+	case ImportsOK:
+		rep.Facts = append(rep.Facts, "Native imports: all libroblox.so imports can be bound")
+	}
+	return rep
 }
 
 func collectIssues(r *DoctorReport) []string {
@@ -275,13 +324,19 @@ func collectIssues(r *DoctorReport) []string {
 	if !r.Roblox.DataDirPresent {
 		issues = append(issues, "Roblox data directory is empty or missing; run `tipsy setup` to install the official client")
 	}
+	switch r.Roblox.ImportStatus {
+	case ImportsBlocked:
+		issues = append(issues, "Blocking: "+r.Roblox.ImportDetail)
+	case ImportsWarning:
+		issues = append(issues, "Warning: "+r.Roblox.ImportDetail)
+	}
 	return issues
 }
 
-func diagnoseAllFacts(ctx context.Context) []string {
+func diagnoseAllFacts(ctx context.Context, trust setupsvc.TrustPolicy) []string {
 	var facts []string
 	for _, s := range DiagnoseSubsystems {
-		rep := Diagnose(ctx, s)
+		rep := DiagnoseForTrust(ctx, s, trust)
 		facts = append(facts, s+": "+rep.Status)
 	}
 	return facts

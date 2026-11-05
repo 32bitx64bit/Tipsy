@@ -370,7 +370,13 @@ func (s *productionService) MicrophoneStatus(ctx context.Context) (guimodel.Micr
 }
 
 func (s *productionService) Doctor(ctx context.Context) (guimodel.DoctorSummary, error) {
-	report := diagnostics.Doctor(ctx)
+	trust := setupsvc.OfficialTrustPolicy()
+	if s != nil && s.packageTrust != nil {
+		if current, err := s.packageTrust(ctx); err == nil {
+			trust = current
+		}
+	}
+	report := diagnostics.DoctorForTrust(ctx, trust)
 	if report == nil {
 		return guimodel.DoctorSummary{}, fmt.Errorf("diagnostics returned no report")
 	}
@@ -393,12 +399,7 @@ func (s *productionService) Doctor(ctx context.Context) (guimodel.DoctorSummary,
 			Status: status(!strings.EqualFold(report.GPU.EGL, "not found"), guimodel.CheckBlocked),
 			Remedy: "Install working Mesa or vendor EGL/OpenGL drivers.",
 		},
-		{
-			Name:   "Roblox client",
-			Detail: report.Roblox.RuntimeFiles,
-			Status: status(report.Roblox.DataDirPresent, guimodel.CheckWarning),
-			Remedy: "Use the setup assistant to choose an official APK or bundle.",
-		},
+		robloxDoctorCheck(report.Roblox),
 	}
 	ready := true
 	for _, check := range checks {
@@ -439,6 +440,27 @@ func backendSettings(settings guimodel.Settings) clientsettings.Settings {
 			Limit: limit,
 		},
 	}
+}
+
+func robloxDoctorCheck(info diagnostics.RobloxInfo) guimodel.DoctorCheck {
+	check := guimodel.DoctorCheck{
+		Name:   "Roblox client",
+		Detail: info.RuntimeFiles,
+		Status: status(info.DataDirPresent, guimodel.CheckWarning),
+		Remedy: "Use the setup assistant to choose an official APK or bundle.",
+	}
+	if info.ImportDetail != "" {
+		check.Detail = info.ImportDetail
+	}
+	switch info.ImportStatus {
+	case diagnostics.ImportsBlocked:
+		check.Status = guimodel.CheckBlocked
+		check.Remedy = "Update Tipsy or reinstall a supported Roblox client; this generation cannot launch."
+	case diagnostics.ImportsWarning:
+		check.Status = guimodel.CheckWarning
+		check.Remedy = "Update Tipsy for native implementations; unsupported fallbacks return 0."
+	}
+	return check
 }
 
 func status(ok bool, failure guimodel.CheckStatus) guimodel.CheckStatus {
