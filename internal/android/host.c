@@ -51,6 +51,7 @@ typedef EGLBoolean (*egl_swap_interval_fn)(EGLDisplay, EGLint);
 typedef EGLBoolean (*egl_swap_buffers_fn)(EGLDisplay, EGLSurface);
 typedef EGLBoolean (*egl_destroy_surface_fn)(EGLDisplay, EGLSurface);
 typedef EGLBoolean (*egl_destroy_context_fn)(EGLDisplay, void *);
+typedef EGLBoolean (*egl_terminate_fn)(EGLDisplay);
 typedef EGLint (*egl_get_error_fn)(void);
 typedef EGLDisplay (*egl_get_current_display_fn)(void);
 typedef EGLSurface (*egl_get_current_surface_fn)(EGLint);
@@ -72,6 +73,7 @@ static egl_swap_interval_fn host_eglSwapInterval;
 static egl_swap_buffers_fn host_eglSwapBuffers;
 static egl_destroy_surface_fn host_eglDestroySurface;
 static egl_destroy_context_fn host_eglDestroyContext;
+static egl_terminate_fn host_eglTerminate;
 static egl_get_error_fn host_eglGetError;
 static egl_get_current_display_fn host_eglGetCurrentDisplay;
 static egl_get_current_surface_fn host_eglGetCurrentSurface;
@@ -433,6 +435,14 @@ struct tipsy_egl_text_state {
 	TipsyGLint geometry_surface_width, geometry_surface_height;
 	uint64_t generation;
 	int initialized, es3, srgb_write_control, geometry_valid;
+	/* Capabilities the guest cannot change behind Tipsy: a texture size limit
+	 * and extension presence. They are queried once per context and dropped
+	 * when the live GL version string changes. Every piece of state the guest
+	 * can mutate (bindings, enables, masks, blend, unpack, attributes) stays a
+	 * live query in tipsy_egl_text_save_state. */
+	int caps_valid;
+	TipsyGLint max_texture_size;
+	uint64_t caps_version_hash;
 	struct tipsy_egl_text_state *next;
 };
 
@@ -458,6 +468,10 @@ struct tipsy_gl_saved_state {
 };
 
 static struct tipsy_gl_api egl_text_gl;
+/* Test-only: forces the pre-cache behaviour (query capabilities every frame) so
+ * a harness can compare rendered pixels and live query counts with the cache
+ * on and off. Production code never sets it. */
+static int tipsy_egl_text_caps_cache_disabled;
 static pthread_mutex_t egl_text_mu = PTHREAD_MUTEX_INITIALIZER;
 static struct tipsy_egl_text_state *egl_text_states;
 static _Atomic uint32_t egl_text_cached_textures;
@@ -850,6 +864,7 @@ static void open_egl_libraries(void)
 		host_eglSwapBuffers = (egl_swap_buffers_fn)dlsym(lib_egl, "eglSwapBuffers");
 		host_eglDestroySurface = (egl_destroy_surface_fn)dlsym(lib_egl, "eglDestroySurface");
 		host_eglDestroyContext = (egl_destroy_context_fn)dlsym(lib_egl, "eglDestroyContext");
+		host_eglTerminate = (egl_terminate_fn)dlsym(lib_egl, "eglTerminate");
 		host_eglGetError = (egl_get_error_fn)dlsym(lib_egl, "eglGetError");
 		host_eglGetCurrentDisplay = (egl_get_current_display_fn)dlsym(lib_egl, "eglGetCurrentDisplay");
 		host_eglGetCurrentSurface = (egl_get_current_surface_fn)dlsym(lib_egl, "eglGetCurrentSurface");
@@ -1022,6 +1037,20 @@ static void tipsy_egl_text_restore_attrib(TipsyGLuint index, const struct tipsy_
 		(TipsyGLboolean)in->normalized, in->stride, in->pointer);
 	if (in->enabled != 0) egl_text_gl.EnableVertexAttribArray(index);
 	else egl_text_gl.DisableVertexAttribArray(index);
+}
+
+/* A context can be destroyed and recreated at the same handle value. The
+ * version string is already fetched live to classify GLES 2 versus 3; its hash
+ * is what tells a cached capability set that it belongs to another context. */
+static uint64_t tipsy_egl_text_version_hash(const unsigned char *version)
+{
+	uint64_t hash = 1469598103934665603ull;
+	if (version == NULL) return 0;
+	while (*version != '\0') {
+		hash ^= (uint64_t)*version++;
+		hash *= 1099511628211ull;
+	}
+	return hash == 0 ? 1 : hash;
 }
 
 static int tipsy_egl_text_has_srgb_write_control(int es3)
@@ -1308,6 +1337,7 @@ static void tipsy_egl_compose_focused_text(EGLDisplay dpy, EGLSurface surface)
 	void *current_context;
 	EGLint surface_width = 0, surface_height = 0, swap_behavior = 0;
 	TipsyGLint max_texture = 0;
+	uint64_t version_hash = 0;
 	int acquired, es3;
 	const unsigned char *version;
 	if (egl_text_frame_acquire_fn == NULL || egl_text_frame_release_fn == NULL ||
@@ -1364,6 +1394,7 @@ static void tipsy_egl_compose_focused_text(EGLDisplay dpy, EGLSurface surface)
 		goto out;
 	}
 	es3 = ((const char *)version)[10] == '3';
+	version_hash = tipsy_egl_text_version_hash(version);
 	state = tipsy_egl_text_find_locked(dpy, surface, current_context, acquired == 1);
 	if (state == NULL) {
 		goto out;
@@ -1372,15 +1403,24 @@ static void tipsy_egl_compose_focused_text(EGLDisplay dpy, EGLSurface surface)
 		goto out;
 	}
 	state->es3 = es3;
-	if (!state->initialized) {
+	/* Only capability and extension presence are cached. A new context, or a
+	 * context whose handle now reports another GL version, re-queries them. */
+	if (!state->caps_valid || state->caps_version_hash != version_hash ||
+		tipsy_egl_text_caps_cache_disabled) {
+		TipsyGLint limit = 0;
+		egl_text_gl.GetIntegerv(TIPSY_GL_MAX_TEXTURE_SIZE, &limit);
+		if (limit < 1) goto out;
+		state->max_texture_size = limit;
 		state->srgb_write_control = tipsy_egl_text_has_srgb_write_control(es3);
+		state->caps_version_hash = version_hash;
+		state->caps_valid = 1;
 	}
 	tipsy_egl_text_save_state(&saved, state);
 	if (state->es3 && saved.transform_feedback_active) {
 		tipsy_egl_text_restore_state(&saved, state);
 		goto out;
 	}
-	egl_text_gl.GetIntegerv(TIPSY_GL_MAX_TEXTURE_SIZE, &max_texture);
+	max_texture = state->max_texture_size;
 	if (!tipsy_egl_text_frame_valid(&frame, max_texture)) {
 		tipsy_egl_text_restore_state(&saved, state);
 		goto out;
@@ -1902,6 +1942,21 @@ EGLBoolean tipsy_eglDestroyContext(EGLDisplay dpy, void *context)
 	return ok;
 }
 
+EGLBoolean tipsy_eglTerminate(EGLDisplay dpy)
+{
+	ensure_egl();
+	/* Terminating a display frees every context and surface it owns, so every
+	 * cached overlay entry for it is stale even if the host later hands the
+	 * same display handle back. Drop them before forwarding, while no entry
+	 * can still name live objects: eglTerminate requires no current context. */
+	tipsy_egl_text_forget(dpy, NULL, NULL);
+	if (host_eglTerminate == NULL) {
+		GoAndroid_LogMissing("eglTerminate");
+		return TIPSY_EGL_FALSE;
+	}
+	return host_eglTerminate(dpy);
+}
+
 /* Both dlsym and eglGetProcAddress must expose the same compatibility
  * wrappers. Keep that identity table in one place so new EGL seams cannot be
  * accidentally visible through only one loader path. */
@@ -1923,6 +1978,7 @@ static void *tipsy_egl_wrapped_proc(const char *name)
 	if (strcmp(name, "eglSwapBuffers") == 0) return (void *)tipsy_eglSwapBuffers;
 	if (strcmp(name, "eglDestroySurface") == 0) return (void *)tipsy_eglDestroySurface;
 	if (strcmp(name, "eglDestroyContext") == 0) return (void *)tipsy_eglDestroyContext;
+	if (strcmp(name, "eglTerminate") == 0) return (void *)tipsy_eglTerminate;
 	if (strcmp(name, "eglGetProcAddress") == 0) return (void *)tipsy_eglGetProcAddress;
 	return NULL;
 }
@@ -3030,6 +3086,399 @@ int tipsy_test_egl_foreground_fixture(void)
 	egl_text_gl = saved_gl;
 	active_egl_foreground_test = NULL;
 	return passed;
+}
+
+/* Real-GL pixel equivalence harness for the focused-text overlay. A surfaceless
+ * Mesa EGL display with a pbuffer renders the same three overlay frames twice:
+ * once with the capability cache on and once with it forced off (the previous
+ * per-frame query behaviour). Both runs must produce byte-identical pixels,
+ * and both must issue the same number of guest-state queries, which proves the
+ * cache only ever removed capability queries. */
+#define TIPSY_TEXT_PIXEL_WIDTH 48
+#define TIPSY_TEXT_PIXEL_HEIGHT 24
+#define TIPSY_TEXT_PIXEL_FRAMES 3
+#define TIPSY_TEXT_PIXEL_TEXT_WIDTH 8
+#define TIPSY_TEXT_PIXEL_TEXT_HEIGHT 4
+#define TIPSY_TEXT_PIXEL_BYTES \
+	(TIPSY_TEXT_PIXEL_WIDTH * TIPSY_TEXT_PIXEL_HEIGHT * 4)
+
+typedef EGLSurface (*tipsy_egl_create_pbuffer_surface_fn)(EGLDisplay, EGLConfig,
+	const EGLint *);
+typedef EGLBoolean (*tipsy_egl_bind_api_fn)(EGLenum);
+
+struct tipsy_egl_text_pixel_stats {
+	uint64_t capability_queries;
+	uint64_t state_queries;
+};
+
+static struct tipsy_egl_text_pixel_stats tipsy_egl_text_pixel_stats;
+static void (*tipsy_egl_text_pixel_real_get_integerv)(TipsyGLenum, TipsyGLint *);
+static TipsyGLboolean (*tipsy_egl_text_pixel_real_is_enabled)(TipsyGLenum);
+static void (*tipsy_egl_text_pixel_real_get_booleanv)(TipsyGLenum, TipsyGLboolean *);
+static uint8_t tipsy_egl_text_pixel_rgba[TIPSY_TEXT_PIXEL_TEXT_WIDTH *
+	TIPSY_TEXT_PIXEL_TEXT_HEIGHT * 4];
+static uint8_t tipsy_egl_text_pixel_output[2][TIPSY_TEXT_PIXEL_FRAMES]
+	[TIPSY_TEXT_PIXEL_BYTES];
+static struct tipsy_focused_text_frame tipsy_egl_text_pixel_frame;
+
+static void tipsy_egl_text_pixel_get_integerv(TipsyGLenum pname, TipsyGLint *params)
+{
+	if (pname == TIPSY_GL_MAX_TEXTURE_SIZE || pname == TIPSY_GL_NUM_EXTENSIONS) {
+		tipsy_egl_text_pixel_stats.capability_queries++;
+	} else {
+		tipsy_egl_text_pixel_stats.state_queries++;
+	}
+	tipsy_egl_text_pixel_real_get_integerv(pname, params);
+}
+
+static TipsyGLboolean tipsy_egl_text_pixel_is_enabled(TipsyGLenum cap)
+{
+	tipsy_egl_text_pixel_stats.state_queries++;
+	return tipsy_egl_text_pixel_real_is_enabled(cap);
+}
+
+static void tipsy_egl_text_pixel_get_booleanv(TipsyGLenum pname, TipsyGLboolean *out)
+{
+	tipsy_egl_text_pixel_stats.state_queries++;
+	tipsy_egl_text_pixel_real_get_booleanv(pname, out);
+}
+
+static int tipsy_egl_text_pixel_acquire(struct tipsy_focused_text_frame *frame)
+{
+	if (frame == NULL) return -1;
+	*frame = tipsy_egl_text_pixel_frame;
+	frame->lease = 1;
+	return 1;
+}
+
+static void tipsy_egl_text_pixel_release(uint64_t lease)
+{
+	(void)lease;
+}
+
+static int tipsy_egl_text_pixel_live(void)
+{
+	return 1;
+}
+
+/* Both runs must upload the same pixels. Frame 2 re-colours the same rectangle
+ * so a generation-driven upload is compared too. */
+static void tipsy_egl_text_pixel_fill(uint32_t colour)
+{
+	size_t i;
+	for (i = 0; i < sizeof(tipsy_egl_text_pixel_rgba); i += 4) {
+		if (colour == 2u) {
+			tipsy_egl_text_pixel_rgba[i + 0] = 40;
+			tipsy_egl_text_pixel_rgba[i + 1] = 220;
+			tipsy_egl_text_pixel_rgba[i + 2] = 90;
+			tipsy_egl_text_pixel_rgba[i + 3] = 255;
+		} else {
+			/* Premultiplied white with a semi transparent first column. */
+			tipsy_egl_text_pixel_rgba[i + 0] = 255;
+			tipsy_egl_text_pixel_rgba[i + 1] = 255;
+			tipsy_egl_text_pixel_rgba[i + 2] = 255;
+			tipsy_egl_text_pixel_rgba[i + 3] = (i % (TIPSY_TEXT_PIXEL_TEXT_WIDTH * 4)) < 4 ?
+				60 : 255;
+		}
+	}
+}
+
+static size_t tipsy_egl_text_pixel_non_clear(const uint8_t *pixels)
+{
+	static const uint8_t clear[4] = {26, 51, 77, 255};
+	size_t count = 0;
+	size_t i;
+	for (i = 0; i < TIPSY_TEXT_PIXEL_WIDTH * TIPSY_TEXT_PIXEL_HEIGHT; i++) {
+		if (memcmp(pixels + i * 4, clear, 4) != 0) count++;
+	}
+	return count;
+}
+
+/* One full run: fresh display, config, pbuffer and GLES2 context. Returns 0 on
+ * success, or a step code when the environment cannot run or the frames are
+ * empty. */
+static int tipsy_egl_text_pixel_run(int disable_cache, uint32_t slot,
+	struct tipsy_egl_text_pixel_stats *stats)
+{
+	static const EGLint config_attribs[] = {
+		0x3033 /* EGL_SURFACE_TYPE */, 0x0001 /* EGL_PBUFFER_BIT */,
+		0x3040 /* EGL_RENDERABLE_TYPE */, 0x0004 /* EGL_OPENGL_ES2_BIT */,
+		0x3024, 8, 0x3023, 8, 0x3022, 8, 0x3021, 8,
+		0x3038 /* EGL_NONE */,
+	};
+	static const EGLint surface_attribs[] = {
+		TIPSY_EGL_WIDTH, TIPSY_TEXT_PIXEL_WIDTH,
+		TIPSY_EGL_HEIGHT, TIPSY_TEXT_PIXEL_HEIGHT,
+		0x3038 /* EGL_NONE */,
+	};
+	static const EGLint context_attribs[] = {
+		0x3098 /* EGL_CONTEXT_CLIENT_VERSION */, 2,
+		0x3038 /* EGL_NONE */,
+	};
+	EGLDisplay dpy = NULL;
+	EGLConfig config = NULL;
+	EGLSurface surface = NULL;
+	EGLContext context = NULL;
+	tipsy_egl_create_pbuffer_surface_fn create_pbuffer;
+	tipsy_egl_bind_api_fn bind_api;
+	void (*clear_color)(float, float, float, float);
+	void (*clear)(TipsyGLuint);
+	void (*read_pixels)(TipsyGLint, TipsyGLint, TipsyGLsizei, TipsyGLsizei,
+		TipsyGLenum, TipsyGLenum, void *);
+	void (*finish)(void);
+	EGLint count = 0;
+	int result = 0;
+	uint32_t frame;
+	struct tipsy_gl_api saved_gl;
+	egl_get_current_display_fn saved_current_display;
+	egl_get_current_surface_fn saved_current_surface;
+	egl_get_current_context_fn saved_current_context;
+	egl_query_surface_fn saved_query_surface;
+	tipsy_egl_text_frame_acquire_fn saved_acquire;
+	tipsy_egl_text_frame_release_fn saved_release;
+	tipsy_egl_text_overlay_live_fn saved_live;
+	int saved_cache_disabled;
+
+	ensure_egl();
+	if (lib_egl == NULL || lib_gles == NULL || host_eglInitialize == NULL ||
+		host_eglChooseConfig == NULL || host_eglCreateContext == NULL ||
+		host_eglMakeCurrent == NULL || host_eglGetCurrentDisplay == NULL ||
+		host_eglGetCurrentSurface == NULL || host_eglGetCurrentContext == NULL ||
+		host_eglQuerySurface == NULL || host_eglDestroySurface == NULL ||
+		host_eglDestroyContext == NULL) {
+		return -1;
+	}
+	create_pbuffer = (tipsy_egl_create_pbuffer_surface_fn)
+		dlsym(lib_egl, "eglCreatePbufferSurface");
+	bind_api = (tipsy_egl_bind_api_fn)dlsym(lib_egl, "eglBindAPI");
+	if (create_pbuffer == NULL || bind_api == NULL) return -1;
+	if (host_eglGetPlatformDisplayEXT != NULL) {
+		dpy = host_eglGetPlatformDisplayEXT(0x31DD /* surfaceless */, NULL, NULL);
+	} else if (host_eglGetPlatformDisplay != NULL) {
+		dpy = host_eglGetPlatformDisplay(0x31DD, NULL, NULL);
+	}
+	if (dpy == NULL || host_eglInitialize(dpy, &count, &count) != TIPSY_EGL_TRUE) {
+		return -1;
+	}
+	if (bind_api(0x30A0 /* EGL_OPENGL_ES_API */) != TIPSY_EGL_TRUE) return -1;
+	if (host_eglChooseConfig(dpy, config_attribs, &config, 1, &count) != TIPSY_EGL_TRUE ||
+		count < 1 || config == NULL) {
+		return -1;
+	}
+	surface = create_pbuffer(dpy, config, surface_attribs);
+	if (surface == NULL) return -1;
+	context = host_eglCreateContext(dpy, config, NULL, context_attribs);
+	if (context == NULL) return -1;
+	if (host_eglMakeCurrent(dpy, surface, surface, context) != TIPSY_EGL_TRUE) {
+		return -1;
+	}
+
+	saved_gl = egl_text_gl;
+	memset(&egl_text_gl, 0, sizeof(egl_text_gl));
+	if (!tipsy_egl_text_resolve_gl_locked()) {
+		egl_text_gl = saved_gl;
+		result = 1;
+		goto done;
+	}
+	clear_color = (void (*)(float, float, float, float))
+		tipsy_egl_gl_proc("glClearColor");
+	clear = (void (*)(TipsyGLuint))tipsy_egl_gl_proc("glClear");
+	read_pixels = (void (*)(TipsyGLint, TipsyGLint, TipsyGLsizei, TipsyGLsizei,
+		TipsyGLenum, TipsyGLenum, void *))tipsy_egl_gl_proc("glReadPixels");
+	finish = (void (*)(void))tipsy_egl_gl_proc("glFinish");
+	if (clear_color == NULL || clear == NULL || read_pixels == NULL || finish == NULL) {
+		egl_text_gl = saved_gl;
+		result = 2;
+		goto done;
+	}
+
+	saved_current_display = host_eglGetCurrentDisplay;
+	saved_current_surface = host_eglGetCurrentSurface;
+	saved_current_context = host_eglGetCurrentContext;
+	saved_query_surface = host_eglQuerySurface;
+	saved_acquire = egl_text_frame_acquire_fn;
+	saved_release = egl_text_frame_release_fn;
+	saved_live = egl_text_overlay_live_fn;
+	saved_cache_disabled = tipsy_egl_text_caps_cache_disabled;
+
+	tipsy_egl_text_pixel_real_get_integerv = egl_text_gl.GetIntegerv;
+	tipsy_egl_text_pixel_real_is_enabled = egl_text_gl.IsEnabled;
+	tipsy_egl_text_pixel_real_get_booleanv = egl_text_gl.GetBooleanv;
+	egl_text_gl.GetIntegerv = tipsy_egl_text_pixel_get_integerv;
+	egl_text_gl.IsEnabled = tipsy_egl_text_pixel_is_enabled;
+	egl_text_gl.GetBooleanv = tipsy_egl_text_pixel_get_booleanv;
+	egl_text_frame_acquire_fn = tipsy_egl_text_pixel_acquire;
+	egl_text_frame_release_fn = tipsy_egl_text_pixel_release;
+	egl_text_overlay_live_fn = tipsy_egl_text_pixel_live;
+	tipsy_egl_text_caps_cache_disabled = disable_cache;
+	memset(&tipsy_egl_text_pixel_stats, 0, sizeof(tipsy_egl_text_pixel_stats));
+
+	for (frame = 0; frame < TIPSY_TEXT_PIXEL_FRAMES; frame++) {
+		memset(&tipsy_egl_text_pixel_frame, 0, sizeof(tipsy_egl_text_pixel_frame));
+		tipsy_egl_text_pixel_frame.rgba = tipsy_egl_text_pixel_rgba;
+		tipsy_egl_text_pixel_frame.width = TIPSY_TEXT_PIXEL_TEXT_WIDTH;
+		tipsy_egl_text_pixel_frame.height = TIPSY_TEXT_PIXEL_TEXT_HEIGHT;
+		tipsy_egl_text_pixel_frame.stride = TIPSY_TEXT_PIXEL_TEXT_WIDTH * 4;
+		if (frame == 0) {
+			tipsy_egl_text_pixel_frame.x = 4;
+			tipsy_egl_text_pixel_frame.y = 2;
+			tipsy_egl_text_pixel_frame.generation = 1;
+		} else {
+			/* Frame 1 moves the same text; frame 2 moves nothing but
+			 * re-uploads new opaque pixels. */
+			tipsy_egl_text_pixel_frame.x = 20;
+			tipsy_egl_text_pixel_frame.y = 10;
+			tipsy_egl_text_pixel_frame.generation = frame == 1 ? 1u : 2u;
+		}
+		tipsy_egl_text_pixel_fill(frame == 2 ? 2u : 0u);
+		clear_color(0.1f, 0.2f, 0.3f, 1.0f);
+		clear(0x4000 /* GL_COLOR_BUFFER_BIT */);
+		tipsy_egl_compose_focused_text(dpy, surface);
+		finish();
+		read_pixels(0, 0, TIPSY_TEXT_PIXEL_WIDTH, TIPSY_TEXT_PIXEL_HEIGHT, 0x1908,
+			0x1401, tipsy_egl_text_pixel_output[slot][frame]);
+		if (tipsy_egl_text_pixel_non_clear(
+			tipsy_egl_text_pixel_output[slot][frame]) == 0) {
+			result = 3;
+			break;
+		}
+	}
+	*stats = tipsy_egl_text_pixel_stats;
+	tipsy_egl_text_forget(dpy, surface, context);
+
+	egl_text_frame_acquire_fn = saved_acquire;
+	egl_text_frame_release_fn = saved_release;
+	egl_text_overlay_live_fn = saved_live;
+	tipsy_egl_text_caps_cache_disabled = saved_cache_disabled;
+	host_eglGetCurrentDisplay = saved_current_display;
+	host_eglGetCurrentSurface = saved_current_surface;
+	host_eglGetCurrentContext = saved_current_context;
+	host_eglQuerySurface = saved_query_surface;
+	egl_text_gl = saved_gl;
+
+done:
+	tipsy_egl_text_forget(dpy, surface, context);
+	host_eglMakeCurrent(dpy, NULL, NULL, NULL);
+	if (context != NULL) host_eglDestroyContext(dpy, context);
+	if (surface != NULL) host_eglDestroySurface(dpy, surface);
+	return result;
+}
+
+/* Returns 0 when both runs are pixel identical and only capability queries
+ * were saved, -1 when this host cannot create a headless GL context, and a
+ * positive code otherwise. */
+int tipsy_test_egl_text_overlay_pixel_fixture(int *capability_queries_saved)
+{
+	struct tipsy_egl_text_pixel_stats cached;
+	struct tipsy_egl_text_pixel_stats live;
+	size_t i;
+	uint32_t frame;
+	int result;
+	tipsy_egl_text_pixel_fill(0u);
+	memset(tipsy_egl_text_pixel_output, 0, sizeof(tipsy_egl_text_pixel_output));
+	memset(&cached, 0, sizeof(cached));
+	memset(&live, 0, sizeof(live));
+
+	result = tipsy_egl_text_pixel_run(0, 0, &cached);
+	if (result != 0) return result;
+	result = tipsy_egl_text_pixel_run(1, 1, &live);
+	if (result != 0) return 100 + result;
+	for (frame = 0; frame < TIPSY_TEXT_PIXEL_FRAMES; frame++) {
+		for (i = 0; i < TIPSY_TEXT_PIXEL_BYTES; i++) {
+			if (tipsy_egl_text_pixel_output[0][frame][i] !=
+				tipsy_egl_text_pixel_output[1][frame][i]) {
+				return 200 + (int)frame;
+			}
+		}
+	}
+	/* The guest can change every one of these itself between frames. */
+	if (cached.state_queries != live.state_queries || cached.state_queries == 0) {
+		return 201;
+	}
+	if (cached.capability_queries == 0 ||
+		cached.capability_queries >= live.capability_queries) {
+		return 202;
+	}
+	if (capability_queries_saved != NULL) {
+		*capability_queries_saved = (int)(live.capability_queries -
+			cached.capability_queries);
+	}
+	return 0;
+}
+
+static int tipsy_test_egl_terminate_calls;
+static EGLBoolean tipsy_test_egl_terminate(EGLDisplay dpy)
+{
+	(void)dpy;
+	tipsy_test_egl_terminate_calls++;
+	return TIPSY_EGL_TRUE;
+}
+
+/* Seeds two cache entries for one display and one for another, terminates the
+ * first display through the real wrapper (with a stub host eglTerminate), and
+ * proves every entry for that display is gone, a lookup creates a fresh
+ * uncached state, and the other display's entry survives. */
+int tipsy_test_egl_terminate_drops_caps(void)
+{
+	EGLDisplay dpy = (EGLDisplay)(uintptr_t)0x1001;
+	EGLDisplay other_dpy = (EGLDisplay)(uintptr_t)0x1002;
+	EGLSurface surface = (EGLSurface)(uintptr_t)0x2001;
+	EGLSurface second_surface = (EGLSurface)(uintptr_t)0x2002;
+	void *context = (void *)(uintptr_t)0x3001;
+	void *second_context = (void *)(uintptr_t)0x3002;
+	struct tipsy_egl_text_state *state;
+	egl_terminate_fn saved_terminate;
+	int result = 0;
+
+	ensure_egl();
+	saved_terminate = host_eglTerminate;
+	tipsy_test_egl_terminate_calls = 0;
+	host_eglTerminate = tipsy_test_egl_terminate;
+
+	pthread_mutex_lock(&egl_text_mu);
+	state = tipsy_egl_text_find_locked(dpy, surface, context, 1);
+	if (state != NULL) {
+		state->caps_valid = 1;
+		state->caps_version_hash = 42;
+		state->max_texture_size = 4096;
+	}
+	if (state == NULL ||
+		tipsy_egl_text_find_locked(dpy, second_surface, second_context, 1) == NULL ||
+		tipsy_egl_text_find_locked(other_dpy, surface, context, 1) == NULL) {
+		result = 1;
+		goto out_locked;
+	}
+	pthread_mutex_unlock(&egl_text_mu);
+
+	if (tipsy_eglTerminate(dpy) != TIPSY_EGL_TRUE) {
+		result = 2;
+	} else if (tipsy_test_egl_terminate_calls != 1) {
+		result = 3;
+	}
+
+	pthread_mutex_lock(&egl_text_mu);
+	if (result == 0 && (tipsy_egl_text_find_locked(dpy, surface, context, 0) != NULL ||
+		tipsy_egl_text_find_locked(dpy, second_surface, second_context, 0) != NULL)) {
+		result = 4;
+	}
+	state = tipsy_egl_text_find_locked(dpy, surface, context, 1);
+	/* A display handle reused with the same GL version must recompute caps. */
+	if (result == 0 && (state == NULL || state->caps_valid ||
+		state->max_texture_size != 0 || state->caps_version_hash != 0)) {
+		result = 5;
+	}
+	if (result == 0 && tipsy_egl_text_find_locked(other_dpy, surface, context, 0) == NULL) {
+		result = 6;
+	}
+out_locked:
+	pthread_mutex_unlock(&egl_text_mu);
+	if (result == 0 && tipsy_egl_wrapped_proc("eglTerminate") != (void *)tipsy_eglTerminate) {
+		result = 7;
+	}
+	host_eglTerminate = saved_terminate;
+	tipsy_egl_text_forget(dpy, NULL, NULL);
+	tipsy_egl_text_forget(other_dpy, NULL, NULL);
+	return result;
 }
 
 void *tipsy_egl_dlsym(const char *name)

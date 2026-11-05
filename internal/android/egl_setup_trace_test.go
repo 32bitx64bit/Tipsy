@@ -32,6 +32,7 @@ func TestEGLImportsResolveToWrappersFromEarlierDTNeeded(t *testing.T) {
 		"eglSwapInterval",
 		"eglDestroySurface",
 		"eglDestroyContext",
+		"eglTerminate",
 	}
 	earlier := []string{
 		"libOpenMAXAL.so",

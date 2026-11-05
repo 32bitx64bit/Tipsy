@@ -207,6 +207,16 @@ int tipsy_test_egl_guest_handoff_fixture(TipsyEGLGuestHandoffFixture *out);
  * display or invokes a host driver. */
 int tipsy_test_egl_foreground_fixture(void);
 
+/* Real-GL pixel equivalence for the focused-text overlay. Returns 0 when the
+ * cached and per-frame query paths render identical pixels, -1 when this host
+ * cannot create a headless GL context, and a positive failure code otherwise.
+ * *capability_queries_saved receives the queries the cache removed. */
+int tipsy_test_egl_text_overlay_pixel_fixture(int *capability_queries_saved);
+
+/* Terminates a synthetic display through the wrapper with a stub host
+ * eglTerminate and verifies its cached overlay capabilities are dropped. */
+int tipsy_test_egl_terminate_drops_caps(void);
+
 /* liblog.so: C-side VERBOSE/DEBUG skip when slog Debug is off. */
 void tipsy_android_set_debug_log(int enabled);
 int tipsy_android_debug_log_enabled(void);

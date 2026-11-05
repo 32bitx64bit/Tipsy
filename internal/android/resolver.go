@@ -192,6 +192,21 @@ func testEGLForegroundFixture() bool {
 	return C.tipsy_test_egl_foreground_fixture() != 0
 }
 
+// testEGLTextOverlayPixelFixture renders the focused-text overlay through real
+// Mesa EGL/GLES with the capability cache on and off and compares the pixels.
+// It returns -1 when this host has no headless GL context.
+func testEGLTextOverlayPixelFixture() (code int, capabilityQueriesSaved int) {
+	var saved C.int
+	code = int(C.tipsy_test_egl_text_overlay_pixel_fixture(&saved))
+	return code, int(saved)
+}
+
+// testEGLTextOverlayTerminateDropsCaps checks that eglTerminate drops every
+// cached overlay capability entry for the terminated display.
+func testEGLTextOverlayTerminateDropsCaps() int {
+	return int(C.tipsy_test_egl_terminate_drops_caps())
+}
+
 func eglVSyncEnabled() bool {
 	return C.tipsy_egl_vsync_enabled() != 0
 }

@@ -79,6 +79,7 @@ extern uint32_t tipsy_eglSwapInterval(void *, int32_t);
 extern uint32_t tipsy_eglSwapBuffers(void *, void *);
 extern uint32_t tipsy_eglDestroySurface(void *, void *);
 extern uint32_t tipsy_eglDestroyContext(void *, void *);
+extern uint32_t tipsy_eglTerminate(void *);
 extern void *tipsy_egl_dlsym(const char *);
 extern void *tipsy_gles_dlsym(const char *);
 
@@ -389,6 +390,7 @@ static const struct sym table[] = {
 	{ "libEGL.so", "eglSwapBuffers", (void *)tipsy_eglSwapBuffers },
 	{ "libEGL.so", "eglDestroySurface", (void *)tipsy_eglDestroySurface },
 	{ "libEGL.so", "eglDestroyContext", (void *)tipsy_eglDestroyContext },
+	{ "libEGL.so", "eglTerminate", (void *)tipsy_eglTerminate },
 	{ "libEGL.so", "eglGetProcAddress", (void *)tipsy_eglGetProcAddress },
 
 	{ "libmediandk.so", "AMediaCodec_createDecoderByType", (void *)tipsy_AMediaCodec_createDecoderByType },
