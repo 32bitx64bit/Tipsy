@@ -594,6 +594,7 @@ func wireRobloxDirectInput(mod *loader.Module, env *jni.Env) {
 	}
 	class := env.FindClass("com/roblox/engine/jni/NativeInputInterface")
 	jni.SetRobloxDirectInputTarget(env.Raw(), class, buttonFn, moveFn, wheelFn, lockedFn)
+	jni.InitEngineCursorHidden(mod.Base, mod.Size)
 }
 
 // wireRobloxDirectKey resolves the separate key route. NativeGLInterface owns

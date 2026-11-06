@@ -397,9 +397,6 @@ func DispatchRobloxDirectScroll(x, y, deltaX, deltaY float32) bool {
 	}
 	directInputTarget.mu.RLock()
 	env, class, fn := directInputTarget.env, directInputTarget.class, directInputTarget.wheelFn
-	// A wheel detent is a point, not motion: pin the captured logical to the
-	// live surface so zoom hit-tests on-view.
-	x, y = clampPointerLogical(x, y)
 	directInputTarget.mu.RUnlock()
 	if env == 0 || class == 0 || fn == 0 {
 		dropDirectEvent("scroll: no direct wheel target wired")
@@ -409,6 +406,17 @@ func DispatchRobloxDirectScroll(x, y, deltaX, deltaY float32) bool {
 		C.float(x), C.float(y), C.float(deltaY))
 	atomic.AddUint64(&directInputStats.WheelDelivered, 1)
 	return true
+}
+
+// clampCapturedWheelPosition pins a captured logical wheel point to the live
+// surface so zoom hit-tests land on-view. A wheel detent is a point, not
+// motion. Free-pointer wheel coordinates are the real pointer and must not be
+// passed through here: DispatchRobloxDirectScroll delivers exactly what it is
+// given.
+func clampCapturedWheelPosition(x, y float32) (float32, float32) {
+	directInputTarget.mu.RLock()
+	defer directInputTarget.mu.RUnlock()
+	return clampPointerLogical(x, y)
 }
 
 func dropDirectEvent(reason string) {
@@ -562,6 +570,13 @@ func ClearRobloxDirectPointerFallback() {
 // captured pointer delivery with the evolving logical pair. It never queries
 // or overrides the engine getter.
 func DispatchRobloxDirectPointerFallbackDelta(dx, dy float32) bool {
+	return dispatchRobloxDirectPointerFallbackDelta(dx, dy, false)
+}
+
+// dispatchRobloxDirectPointerFallbackDelta keeps the logical position for
+// captured buttons and wheels, while optionally pinning the move sent to the
+// engine. The native receives relative axes independently of its position.
+func dispatchRobloxDirectPointerFallbackDelta(dx, dy float32, pinCenter bool) bool {
 	directInputTarget.mu.Lock()
 	env, class := directInputTarget.env, directInputTarget.class
 	moveFn := directInputTarget.moveFn
@@ -588,6 +603,9 @@ func DispatchRobloxDirectPointerFallbackDelta(dx, dy float32) bool {
 	}
 	directInputTarget.fallbackX = x
 	directInputTarget.fallbackY = y
+	if pinCenter {
+		x, y = pointerViewportCenter()
+	}
 	directInputTarget.havePointer = true
 	directInputTarget.lastX = x
 	directInputTarget.lastY = y
@@ -641,7 +659,9 @@ func RobloxDirectFallbackOffView() (off, ok bool) {
 
 // SnapRobloxDirectPointerFallbackToCenter re-seeds the captured logical pair
 // to the live viewport center and reports that point; the pair is never
-// pinned. ok is false when no capture holds the integrator.
+// pinned. ok is false when no capture holds the integrator. Only the opt-in
+// TIPSY_MOUSE_CAPTURE=zoomlock wheel heuristic calls it; the default capture
+// state machine never snaps a pointer or a wheel detent to the center.
 func SnapRobloxDirectPointerFallbackToCenter() (x, y float32, ok bool) {
 	directInputTarget.mu.Lock()
 	defer directInputTarget.mu.Unlock()
@@ -657,8 +677,9 @@ func SnapRobloxDirectPointerFallbackToCenter() (x, y float32, ok bool) {
 
 // SeedRobloxDirectPointerAtCenter re-seeds the direct dispatcher's origin
 // and the captured integrator to the live viewport center and reports that
-// point. Unlike SnapRobloxDirectPointerFallbackToCenter it also applies to a
-// centered LockCenter stream, which holds no fallback integrator.
+// point. It is the entry seed for the engine-centered LockCenter stream (which
+// holds no fallback integrator) and for the state machine's centered persistent
+// entries (CursorHidden, AlwaysOptIn).
 func SeedRobloxDirectPointerAtCenter() (x, y float32) {
 	directInputTarget.mu.Lock()
 	defer directInputTarget.mu.Unlock()

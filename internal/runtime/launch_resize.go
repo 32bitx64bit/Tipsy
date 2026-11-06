@@ -32,6 +32,16 @@ func clampRobloxSurfaceSize(width, height int) (int, int) {
 	return width, height
 }
 
+// seedPointerClampViewport primes the captured-pointer clamp with the startup
+// surface size. The initial surface geometry reaches the engine through the
+// GameActivity contract, so no ConfigureNotify republishes it; without this
+// seed pointerViewportCenter would stay at the 1280x720 default until the
+// window is genuinely resized. Later resizes supersede it through
+// engineResizeSink.setDisplaySize.
+func seedPointerClampViewport(width, height int) {
+	jni.SetPointerClampViewport(width, height)
+}
+
 // surfaceResizeDebouncer keeps only the most recent positive X11 rectangle from
 // a resize burst, coalescing the GameActivity lifecycle work that must not
 // re-enter per pixel of a drag. It is owned by the Launch goroutine.

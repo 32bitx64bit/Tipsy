@@ -286,7 +286,7 @@ func setPointerLockLocked(w *Window, locked bool, anchor pointerAnchor) (bool, e
 		w.pointerAnchorY = int(anchorY)
 		logging.Logger(logging.CatX11).Info("X11 pointer lock acquired",
 			"xid", w.xid, "anchorX", w.pointerAnchorX, "anchorY", w.pointerAnchorY,
-			"center", anchor != anchorCursor, "sticky", anchor == anchorCenterSticky)
+			"center", anchor == anchorCenter)
 		return true, nil
 	case 2:
 		w.pointerCaptured = false

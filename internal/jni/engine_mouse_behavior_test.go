@@ -13,6 +13,7 @@ import (
 
 const (
 	fakeGetterOff   = 0x1000
+	fakeHelperOff   = 0x1800
 	fakeAccessorOff = 0x2000
 	fakeSingletonA  = 0x3000
 	fakeSingletonB  = 0x4000
@@ -25,6 +26,26 @@ type fakeGetterShape struct {
 	objOffset  uint32
 	enumOffset uint32
 	locked     uint8
+}
+
+// The wrapper and helper reproduce the active 2.746.1266 instruction shapes;
+// only relocations are adjusted to point into the synthetic image.
+func (img *fakeEngineImage) writeDelegatingGetter(branch byte) {
+	g := img.mem[fakeGetterOff:]
+	copy(g, []byte{0x55, 0x48, 0x89, 0xe5, 0x53, 0x48, 0x83, 0xec, 0x48,
+		0x48, 0x8b, 0x1d, 0x15, 0x67, 0x4b, 0x04, 0x48, 0x8b, 0x03,
+		0x48, 0x89, 0x45, 0xf0, 0xbf, 4, 0, 0, 0, 0xe8, 0, 0, 0, 0,
+		0x48, 0x89, 0xc7, branch, 0, 0, 0, 0, 0x48, 0x8b, 0x0b,
+		0x48, 0x3b, 0x4d, 0xf0, 0x75, 7, 0x48, 0x83, 0xc4, 0x48, 0x5b, 0x5d, 0xc3})
+	binary.LittleEndian.PutUint32(g[29:], uint32(int32(fakeAccessorOff-(fakeGetterOff+33))))
+	binary.LittleEndian.PutUint32(g[37:], uint32(int32(fakeHelperOff-(fakeGetterOff+41))))
+	copy(img.mem[fakeHelperOff:], []byte{
+		0x55, 0x48, 0x89, 0xe5, 0x41, 0x56, 0x53, 0x49, 0x89, 0xfe,
+		0x48, 0x8d, 0x5f, 0x50, 0xbe, 1, 0, 0, 0, 0x48, 0x89, 0xdf,
+		0xe8, 0xc5, 0x5d, 0xc3, 0xfc, 0x49, 0x8b, 0x86, 0xb8, 0x10, 0, 0,
+		0x44, 0x8b, 0xb0, 0x88, 0, 0, 0, 0xbe, 1, 0, 0, 0,
+		0x48, 0x89, 0xdf, 0xe8, 0xca, 0x5e, 0xc3, 0xfc,
+		0x41, 0x83, 0xfe, 1, 0x0f, 0x94, 0xc0, 0x5b, 0x41, 0x5e, 0x5d, 0xc3})
 }
 
 var fakeLiveShape = fakeGetterShape{
@@ -162,6 +183,64 @@ func buildLiveShape(t *testing.T, pivot uint8) *fakeEngineImage {
 	img.writeGetter(fakeLiveShape)
 	img.writeAccessor(pivot)
 	return img
+}
+
+func TestDecodeMouseBehaviorLibraryShapes(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		branch byte
+		object uint32
+	}{
+		{"legacy direct", 0, 0xa10},
+		{"2.746.1266 call", 0xe8, 0x10b8},
+		{"delegating jump", 0xe9, 0x10b8},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			img := newFakeEngineImage(t)
+			if tc.branch == 0 {
+				img.writeGetter(fakeGetterShape{4, tc.object, 0x88, 1})
+			} else {
+				img.writeDelegatingGetter(tc.branch)
+			}
+			img.writeAccessor(3)
+			useFakeEngineMemory(t, img)
+			got, err := decodeMouseBehavior(img.addr(fakeGetterOff))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got.getter != img.addr(fakeGetterOff) || got.accessor != img.addr(fakeAccessorOff) ||
+				got.singleton != img.addr(fakeSingletonB) || got.index != 4 || got.objOffset != tc.object ||
+				got.enumOffset != 0x88 || got.lockedValue != 1 {
+				t.Fatalf("unexpected layout: %+v", got)
+			}
+		})
+	}
+}
+
+func TestDecodeMouseBehaviorRejectsInvalidDelegation(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		mutate func(*fakeEngineImage)
+	}{
+		{"unreadable helper", func(img *fakeEngineImage) {
+			binary.LittleEndian.PutUint32(img.mem[fakeGetterOff+37:], uint32(fakeImageSize+0x1000-(fakeGetterOff+41)))
+		}},
+		{"indirect branch", func(img *fakeEngineImage) { img.mem[fakeGetterOff+36] = 0xff }},
+		{"different compare", func(img *fakeEngineImage) { img.mem[fakeHelperOff+57] = 2 }},
+		{"misaligned offset", func(img *fakeEngineImage) { img.mem[fakeHelperOff+30]++ }},
+		{"second delegation", func(img *fakeEngineImage) { img.mem[fakeHelperOff] = 0xe9 }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			img := newFakeEngineImage(t)
+			img.writeDelegatingGetter(0xe8)
+			img.writeAccessor(3)
+			tc.mutate(img)
+			useFakeEngineMemory(t, img)
+			if _, err := decodeMouseBehavior(img.addr(fakeGetterOff)); err == nil {
+				t.Fatal("accepted invalid delegation")
+			}
+		})
+	}
 }
 
 // TestDecodeMouseBehaviorGetterBothSingletonBranches pins the accessor's cmove: index == pivot selects A, anything else selects B.

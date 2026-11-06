@@ -188,13 +188,13 @@ func clearActiveWindow(w *Window) {
 	activeWindow.Unlock()
 }
 
-// SetPointerLock applies Roblox's current native mouse-lock request to the
-// sole client window. First-person / shift-lock grabs warp to and confine at
-// the window center; release leaves the desktop pointer there. Acquisition is
-// refused while the window is unfocused so Alt-Tab cannot leave a background
-// grab in place.
+// SetPointerLock applies a centered mouse lock to the sole client window: it
+// warps the pointer to the window center, then confines it there; release
+// leaves the desktop pointer at the center. Acquisition is refused while the
+// window is unfocused so Alt-Tab cannot leave a background grab in place, and
+// focus loss drops the grab; the caller decides whether to re-acquire.
 func SetPointerLock(locked bool) (bool, error) {
-	return setPointerLock(locked, anchorCenterSticky)
+	return setPointerLock(locked, anchorCenter)
 }
 
 // SetPointerLockAtCursor is the held-RMB camera-look grab. It confines the
@@ -204,22 +204,12 @@ func SetPointerLockAtCursor(locked bool) (bool, error) {
 	return setPointerLock(locked, anchorCursor)
 }
 
-// SetPointerLockAtCenter is the desktop zoom-lock grab: it warps to and
-// confines at the window center like SetPointerLock, but it is not sticky —
-// focus loss drops it and only the caller decides whether the next motion
-// re-acquires.
-func SetPointerLockAtCenter(locked bool) (bool, error) {
-	return setPointerLock(locked, anchorCenter)
-}
-
-// pointerAnchor selects where a grab confines the pointer and whether the
-// native side re-applies it by itself when focus returns.
+// pointerAnchor selects where a grab confines the pointer.
 type pointerAnchor int
 
 const (
-	anchorCursor       pointerAnchor = 0 // live cursor, no sticky recapture
-	anchorCenterSticky pointerAnchor = 1 // window center, sticky tab-back
-	anchorCenter       pointerAnchor = 2 // window center, no sticky recapture
+	anchorCursor pointerAnchor = 0 // live cursor
+	anchorCenter pointerAnchor = 1 // window center
 )
 
 func setPointerLock(locked bool, anchor pointerAnchor) (bool, error) {

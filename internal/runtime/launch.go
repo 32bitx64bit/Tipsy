@@ -285,6 +285,7 @@ func Launch(ctx context.Context, opt LaunchOptions) error {
 	vm.SetAppVersion(ver)
 	logging.Logger(logging.CatRuntime).Info("installed client", "version", ver)
 	vm.SetDisplaySize(opt.Width, opt.Height)
+	seedPointerClampViewport(opt.Width, opt.Height)
 	jni.SetRbxTextOverlayViewport(opt.Width, opt.Height, 1)
 	if mmW, mmH := jni.X11DisplayPhysicalSizeMM(win.Display()); mmW > 0 && mmH > 0 {
 		vm.SetDisplayPhysicalSizeMM(mmW, mmH)

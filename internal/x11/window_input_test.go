@@ -1067,7 +1067,7 @@ func TestPointerLockAtCursorKeepsPressAnchor(t *testing.T) {
 	}
 }
 
-func TestPointerLockReacquiresCenteredOnFocusIn(t *testing.T) {
+func TestPointerLockDoesNotReacquireOnFocusIn(t *testing.T) {
 	const winW, winH = 320, 180
 	centerX, centerY := winW/2, winH/2
 	w := openInputWindowSize(t, winW, winH)
@@ -1107,23 +1107,21 @@ func TestPointerLockReacquiresCenteredOnFocusIn(t *testing.T) {
 		t.Fatal(err)
 	}
 	ev = c.next(t, w)
-	if ev.Kind != InputPointerCapture || !ev.Captured || ev.X != float32(centerX) || ev.Y != float32(centerY) {
-		t.Fatalf("focus-return capture = %+v, want acquired at center (%d,%d)", ev, centerX, centerY)
-	}
-	ev = c.next(t, w)
 	if ev.Kind != InputFocus || !ev.FocusGained {
-		t.Fatalf("focus-return focus = %+v", ev)
+		t.Fatalf("focus-return first event = %+v, want plain focus gain (no recapture)", ev)
 	}
-	if captured, x, y := w.PointerCapture(); !captured || x != centerX || y != centerY {
-		t.Fatalf("PointerCapture after FocusIn = %t (%d,%d), want true (%d,%d)", captured, x, y, centerX, centerY)
+	if captured, _, _ := w.PointerCapture(); captured {
+		t.Fatal("engine center grab re-acquired itself on FocusIn")
 	}
+	// No grab may be held after FocusIn, so another client can take the pointer.
+	if err := x11probe.GrabPointer(w.XID()); err != nil {
+		t.Fatalf("probe could not grab after FocusIn: %v", err)
+	}
+	x11probe.UngrabPointer()
 	waitPointerPosition(t, w, centerX, centerY)
-	if changed, err := SetPointerLock(false); err != nil || !changed {
-		t.Fatalf("SetPointerLock(false) = changed %t, err %v", changed, err)
-	}
 }
 
-func TestPointerLockAtCenterConfinesAtCenterWithoutStickyTabBack(t *testing.T) {
+func TestPointerLockWarpsToCenterThenConfines(t *testing.T) {
 	const winW, winH = 320, 180
 	centerX, centerY := winW/2, winH/2
 	w := openInputWindowSize(t, winW, winH)
@@ -1132,16 +1130,16 @@ func TestPointerLockAtCenterConfinesAtCenterWithoutStickyTabBack(t *testing.T) {
 	requirePointerGrabAvailable(t, w)
 	c.clearAndSettle(t, w)
 
-	// Start away from the center: the zoom lock must warp there, unlike the
+	// Start away from the center: the lock must warp there first, unlike the
 	// held-RMB cursor anchor.
 	if err := x11probe.WarpPointer(w.XID(), 20, 30); err != nil {
 		t.Fatalf("pre-lock warp: %v", err)
 	}
 	waitPointerPosition(t, w, 20, 30)
 	c.clear()
-	changed, err := SetPointerLockAtCenter(true)
+	changed, err := SetPointerLock(true)
 	if err != nil || !changed {
-		t.Fatalf("SetPointerLockAtCenter(true) = changed %t, err %v", changed, err)
+		t.Fatalf("SetPointerLock(true) = changed %t, err %v", changed, err)
 	}
 	ev := c.next(t, w)
 	if ev.Kind != InputPointerCapture || !ev.Captured || ev.X != float32(centerX) || ev.Y != float32(centerY) {
@@ -1162,8 +1160,7 @@ func TestPointerLockAtCenterConfinesAtCenterWithoutStickyTabBack(t *testing.T) {
 	}
 	waitPointerPosition(t, w, centerX, centerY)
 
-	// Focus loss drops the grab; focus return must not re-grab by itself
-	// (that is the sticky contract, not the zoom lock's).
+	// Focus loss drops the grab; focus return must not re-grab by itself.
 	if err := x11probe.Focus(w.XID(), false); err != nil {
 		t.Fatal(err)
 	}
@@ -1183,22 +1180,22 @@ func TestPointerLockAtCenterConfinesAtCenterWithoutStickyTabBack(t *testing.T) {
 	}
 	ev = c.next(t, w)
 	if ev.Kind != InputFocus || !ev.FocusGained {
-		t.Fatalf("focus-return first event = %+v, want plain focus gain (no sticky recapture)", ev)
+		t.Fatalf("focus-return first event = %+v, want plain focus gain (no recapture)", ev)
 	}
 	if captured, _, _ := w.PointerCapture(); captured {
-		t.Fatal("non-sticky center grab re-acquired itself on FocusIn")
+		t.Fatal("center grab re-acquired itself on FocusIn")
 	}
 	waitPointerPosition(t, w, centerX, centerY)
 
 	// A fresh acquire and an explicit release both leave the pointer at the
 	// center, where the engine cursor reappears after zoom-out.
 	c.clear()
-	if changed, err := SetPointerLockAtCenter(true); err != nil || !changed {
-		t.Fatalf("re-acquire SetPointerLockAtCenter(true) = changed %t, err %v", changed, err)
+	if changed, err := SetPointerLock(true); err != nil || !changed {
+		t.Fatalf("re-acquire SetPointerLock(true) = changed %t, err %v", changed, err)
 	}
 	_ = c.next(t, w)
-	if changed, err := SetPointerLockAtCenter(false); err != nil || !changed {
-		t.Fatalf("SetPointerLockAtCenter(false) = changed %t, err %v", changed, err)
+	if changed, err := SetPointerLock(false); err != nil || !changed {
+		t.Fatalf("SetPointerLock(false) = changed %t, err %v", changed, err)
 	}
 	ev = c.next(t, w)
 	if ev.Kind != InputPointerCapture || ev.Captured || ev.CaptureFailed {

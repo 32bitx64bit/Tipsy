@@ -581,7 +581,6 @@ static int tipsy_x11_set_raw_motion(Display *dpy, int enabled) {
 
 struct tipsy_pointer_capture {
 	int active;
-	int sticky;
 	int center;
 	int right_down;
 	int have_last;
@@ -1068,13 +1067,12 @@ static int tipsy_pointer_unlock(Display *dpy, Window win, int notify,
 	return 1;
 }
 
-// Grab/recenter. Caller holds tipsy_event_mu. center==1 is the engine's
-// first-person lock (window center, sticky tab-back). center==2 is the
-// desktop zoom lock (window center, no sticky recapture: the Go side decides
-// whether to re-acquire after focus returns). center==0 is held-RMB camera
-// look (live cursor, no sticky recapture). Returns 1 for a new grab, 0 for
-// unchanged (including an already-active grab that was re-centered), and -1
-// for a rejected grab.
+// Grab/recenter. Caller holds tipsy_event_mu. center!=0 warps to and
+// confines at the window center; center==0 (held-RMB camera look) confines at
+// the live cursor. No grab is ever restored implicitly: after focus returns the Go side decides
+// whether to re-acquire. Returns 1 for a new grab, 0 for unchanged
+// (including an already-active grab that was re-centered), and -1 for a
+// rejected grab.
 static int tipsy_pointer_lock_apply(Display *dpy, Window win, int center,
 	int *out_status) {
 	if (dpy == NULL || win == 0 || tipsy_x_io_error) {
@@ -1098,9 +1096,6 @@ static int tipsy_pointer_lock_apply(Display *dpy, Window win, int center,
 		tipsy_capture.win == win) {
 		if (center) {
 			tipsy_capture.center = 1;
-			// Never downgrade an engine sticky grab; a zoom-lock re-center
-			// of a held-RMB grab stays non-sticky.
-			if (center == 1) tipsy_capture.sticky = 1;
 			tipsy_capture.anchor_x = center_x;
 			tipsy_capture.anchor_y = center_y;
 			tipsy_capture.last_x = center_x;
@@ -1143,7 +1138,6 @@ static int tipsy_pointer_lock_apply(Display *dpy, Window win, int center,
 		return -1;
 	}
 	tipsy_capture.active = 1;
-	tipsy_capture.sticky = (center == 1);
 	tipsy_capture.raw_motion = raw_motion;
 	tipsy_capture.last_raw_motion_time = CurrentTime;
 	tipsy_warp_to_anchor_force(dpy, win);
@@ -1154,18 +1148,12 @@ static int tipsy_pointer_lock_apply(Display *dpy, Window win, int center,
 static void tipsy_apply_host_focus(Display *dpy, Window win, int gained) {
 	if (gained) {
 		if (tipsy_have_keyboard_focus) {
-			if (tipsy_capture.sticky) {
-				(void)tipsy_pointer_lock_apply(dpy, win, tipsy_capture.center, NULL);
-			}
 			return;
 		}
 		tipsy_have_keyboard_focus = 1;
 		tipsy_capture.failed_status = 0;
 		if (tipsy_xic != NULL) {
 			XSetICFocus(tipsy_xic);
-		}
-		if (tipsy_capture.sticky) {
-			(void)tipsy_pointer_lock_apply(dpy, win, tipsy_capture.center, NULL);
 		}
 		tipsy_input_push(TIPSY_INPUT_FOCUS, 1, 0, 0, 0, 0);
 		return;
@@ -1195,7 +1183,6 @@ int tipsy_x11_set_pointer_lock(uintptr_t dpy_ptr, unsigned long xid,
 	int result = 0;
 	if (!locked) {
 		tipsy_capture.failed_status = 0;
-		tipsy_capture.sticky = 0;
 		tipsy_capture.center = 0;
 		result = tipsy_pointer_unlock(dpy, win, 1, 0) ? 2 : 0;
 		goto done;
@@ -1988,14 +1975,12 @@ int tipsy_x11_pump(uintptr_t dpy_ptr, unsigned long xid, unsigned long wm_delete
 						XUnsetICFocus(tipsy_xic);
 					}
 				} else {
-					// Re-apply a sticky first-person grab on the same FocusIn.
+					// Focus return never restores a grab. The Go side
+					// re-reads the engine and re-acquires explicitly.
 					tipsy_have_keyboard_focus = 1;
 					tipsy_capture.failed_status = 0;
 					if (tipsy_xic != NULL) {
 						XSetICFocus(tipsy_xic);
-					}
-					if (tipsy_capture.sticky) {
-						(void)tipsy_pointer_lock_apply(dpy, win, tipsy_capture.center, NULL);
 					}
 				}
 				tipsy_input_push(TIPSY_INPUT_FOCUS,

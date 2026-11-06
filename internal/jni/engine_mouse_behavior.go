@@ -147,6 +147,57 @@ func decodeMouseBehaviorGetter(code []byte, addr uintptr) (mouseBehaviorLayout, 
 	return out, nil
 }
 
+// decodeDelegatingMouseBehavior recognizes a singleton fetch immediately passed
+// to one direct helper. The helper must match the locked enum read and compare;
+// arbitrary calls, indirect branches and further delegation are not followed.
+func decodeDelegatingMouseBehavior(code []byte, addr uintptr) (mouseBehaviorLayout, error) {
+	for i := 0; i+18 <= len(code); i++ {
+		if code[i] != 0xbf || code[i+5] != 0xe8 ||
+			code[i+10] != 0x48 || code[i+11] != 0x89 || code[i+12] != 0xc7 ||
+			(code[i+13] != 0xe8 && code[i+13] != 0xe9) {
+			continue
+		}
+		out := mouseBehaviorLayout{
+			getter:   addr,
+			index:    binary.LittleEndian.Uint32(code[i+1:]),
+			accessor: addr + uintptr(i) + 10 + uintptr(int64(int32(binary.LittleEndian.Uint32(code[i+6:])))),
+		}
+		target := addr + uintptr(i) + 18 + uintptr(int64(int32(binary.LittleEndian.Uint32(code[i+14:]))))
+		helper, ok := engineMem.bytes(target, mouseBehaviorGetterWindow)
+		if !ok {
+			return out, fmt.Errorf("delegated getter body at %#x is not readable", target)
+		}
+		// push rbp; mov rsp,rbp; push r14; push rbx; mov rdi,r14;
+		// lea 0x50(rdi),rbx; mov $1,esi; mov rbx,rdi; call lock;
+		// mov disp32(r14),rax; mov disp32(rax),r14d;
+		// mov $1,esi; mov rbx,rdi; call unlock; cmp $1,r14d; sete al.
+		prefix := []byte{0x55, 0x48, 0x89, 0xe5, 0x41, 0x56, 0x53, 0x49, 0x89, 0xfe, 0x48, 0x8d, 0x5f, 0x50, 0xbe, 1, 0, 0, 0, 0x48, 0x89, 0xdf, 0xe8}
+		matches := func(off int, want []byte) bool {
+			for j, b := range want {
+				if helper[off+j] != b {
+					return false
+				}
+			}
+			return true
+		}
+		if !matches(0, prefix) || !matches(27, []byte{0x49, 0x8b, 0x86}) ||
+			!matches(34, []byte{0x44, 0x8b, 0xb0}) ||
+			!matches(41, []byte{0xbe, 1, 0, 0, 0, 0x48, 0x89, 0xdf, 0xe8}) ||
+			!matches(54, []byte{0x41, 0x83, 0xfe, 1, 0x0f, 0x94, 0xc0, 0x5b, 0x41, 0x5e, 0x5d, 0xc3}) {
+			return out, fmt.Errorf("%w: unrecognized delegated getter", errMouseBehaviorShape)
+		}
+		out.objOffset = binary.LittleEndian.Uint32(helper[30:34])
+		out.enumOffset = binary.LittleEndian.Uint32(helper[37:41])
+		out.lockedValue = uint8(MouseBehaviorLockCenter)
+		if out.objOffset == 0 || out.objOffset > mouseBehaviorMaxOffset || out.objOffset%8 != 0 ||
+			out.enumOffset == 0 || out.enumOffset > mouseBehaviorMaxOffset || out.enumOffset%4 != 0 {
+			return out, fmt.Errorf("%w: implausible delegated offsets object=%#x behavior=%#x", errMouseBehaviorShape, out.objOffset, out.enumOffset)
+		}
+		return out, nil
+	}
+	return mouseBehaviorLayout{getter: addr}, fmt.Errorf("%w: no supported delegated getter", errMouseBehaviorShape)
+}
+
 // decodeSingletonAccessor decodes the singleton accessor. It returns the
 // selected static address for index; pivot is the accessor's compare
 // immediate.
@@ -386,7 +437,7 @@ func mouseBehaviorLayoutFor(getter uintptr) *mouseBehaviorLayout {
 	return mouseBehaviorAuthority.layout
 }
 
-// decodeMouseBehavior walks the exported symbol's own instructions in the live
+// decodeMouseBehavior walks the exported symbol and at most one helper in the live
 // image. Nothing is read from disk, so the decode always matches the client
 // that is actually loaded.
 func decodeMouseBehavior(getter uintptr) (mouseBehaviorLayout, error) {
@@ -396,7 +447,10 @@ func decodeMouseBehavior(getter uintptr) (mouseBehaviorLayout, error) {
 	}
 	layout, err := decodeMouseBehaviorGetter(code, getter)
 	if err != nil {
-		return layout, err
+		layout, err = decodeDelegatingMouseBehavior(code, getter)
+		if err != nil {
+			return layout, err
+		}
 	}
 	accessor, ok := engineMem.bytes(layout.accessor, mouseBehaviorAccessorWindow)
 	if !ok {
@@ -467,4 +521,5 @@ func resetEngineMouseBehavior() {
 	mouseBehaviorAuthority.disabled.Store(false)
 	mouseBehaviorAuthority.seen.Store(false)
 	mouseBehaviorAuthority.mismatch.Store(0)
+	resetEngineCursorHidden()
 }

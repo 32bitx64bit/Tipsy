@@ -2076,6 +2076,18 @@ func TestSurfaceResizePublishesPointerClampViewport(t *testing.T) {
 	}
 }
 
+// TestSeedPointerClampViewportUsesInitialSurfaceSize pins the launch seed: the
+// clamp viewport starts at the real initial surface bounds, not the 1280x720
+// default, so pointerViewportCenter is correct before any ConfigureNotify.
+func TestSeedPointerClampViewportUsesInitialSurfaceSize(t *testing.T) {
+	t.Cleanup(func() { jni.SetPointerClampViewport(1280, 720) })
+
+	seedPointerClampViewport(2560, 1440)
+	if w, h := jni.PointerClampViewport(); w != 2560 || h != 1440 {
+		t.Fatalf("clamp viewport = %dx%d, want 2560x1440", w, h)
+	}
+}
+
 func TestPostAndroidAppCmdUsesOwnedWriter(t *testing.T) {
 	var pipeFDs [2]int
 	if err := syscall.Pipe2(pipeFDs[:], syscall.O_CLOEXEC|syscall.O_NONBLOCK); err != nil {

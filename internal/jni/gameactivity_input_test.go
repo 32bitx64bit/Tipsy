@@ -7,11 +7,1090 @@ package jni
 
 import (
 	"math"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/tipsy-linux/tipsy/internal/x11"
 )
+
+// --- Capture state machine ---
+
+// stubCursorHidden substitutes the engine cursor-hidden reader. The returned
+// struct is the live reading; mutate it between events.
+type cursorHiddenReading struct{ hidden, ok bool }
+
+func stubCursorHidden(t *testing.T, hidden, ok bool) *cursorHiddenReading {
+	t.Helper()
+	r := &cursorHiddenReading{hidden: hidden, ok: ok}
+	old := engineCursorHiddenSource
+	engineCursorHiddenSource = func() (bool, bool) { return r.hidden, r.ok }
+	t.Cleanup(func() { engineCursorHiddenSource = old })
+	return r
+}
+
+func lastVisible(t *testing.T, calls *captureCalls) bool {
+	t.Helper()
+	if len(calls.visible) == 0 {
+		t.Fatal("no cursor visibility call recorded")
+	}
+	return calls.visible[len(calls.visible)-1]
+}
+
+// TestSelectCaptureStatePriorityEdges names every priority edge: the gates
+// (Unfocused, Home, LeftAlt) beat everything, then Center, Anchor, CursorHidden
+// (only a known reading), RMB, Always, Free.
+func TestSelectCaptureStatePriorityEdges(t *testing.T) {
+	open := captureInputs{focused: true, experience: true}
+	with := func(f func(*captureInputs)) captureInputs {
+		in := open
+		f(&in)
+		return in
+	}
+	every := with(func(in *captureInputs) {
+		in.center, in.anchor, in.hidden, in.hiddenOK, in.rmb, in.always = true, true, true, true, true, true
+	})
+	cases := []struct {
+		name string
+		in   captureInputs
+		want captureState
+	}{
+		{"nothing is Free", open, captureFree},
+		{"center", with(func(in *captureInputs) { in.center = true }), captureEngineCenter},
+		{"anchor", with(func(in *captureInputs) { in.anchor = true }), captureEngineAnchor},
+		{"hidden", with(func(in *captureInputs) { in.hidden, in.hiddenOK = true, true }), captureCursorHidden},
+		{"rmb", with(func(in *captureInputs) { in.rmb = true }), captureRMBFallback},
+		{"always", with(func(in *captureInputs) { in.always = true }), captureAlwaysOptIn},
+		{"center outranks anchor hidden rmb always", every, captureEngineCenter},
+		{"anchor outranks hidden rmb always", with(func(in *captureInputs) {
+			*in = every
+			in.center = false
+		}), captureEngineAnchor},
+		{"hidden outranks rmb always", with(func(in *captureInputs) {
+			*in = every
+			in.center, in.anchor = false, false
+		}), captureCursorHidden},
+		{"rmb outranks always", with(func(in *captureInputs) {
+			*in = every
+			in.center, in.anchor, in.hidden = false, false, false
+		}), captureRMBFallback},
+		{"always is the last capture", with(func(in *captureInputs) {
+			*in = every
+			in.center, in.anchor, in.hidden, in.rmb = false, false, false, false
+		}), captureAlwaysOptIn},
+		{"an unknown hidden reading never captures", with(func(in *captureInputs) {
+			*in = every
+			in.center, in.anchor, in.hiddenOK = false, false, false
+		}), captureRMBFallback},
+		{"a visible reading never captures", with(func(in *captureInputs) {
+			in.hidden, in.hiddenOK = false, true
+		}), captureFree},
+		{"unfocused is Free", with(func(in *captureInputs) { *in = every; in.focused = false }), captureFree},
+		{"Home is Free", with(func(in *captureInputs) { *in = every; in.experience = false }), captureFree},
+		{"LeftAlt is Free", with(func(in *captureInputs) { *in = every; in.released = true }), captureFree},
+	}
+	for _, tc := range cases {
+		if got := selectCaptureState(tc.in); got != tc.want {
+			t.Errorf("%s: state %v, want %v", tc.name, got, tc.want)
+		}
+	}
+}
+
+// TestSelectCaptureStateExhaustive checks all 512 input combinations against
+// an independent statement of the priority order.
+func TestSelectCaptureStateExhaustive(t *testing.T) {
+	for bits := 0; bits < 512; bits++ {
+		in := captureInputs{
+			focused: bits&1 != 0, experience: bits&2 != 0, released: bits&4 != 0,
+			center: bits&8 != 0, anchor: bits&16 != 0, hidden: bits&32 != 0,
+			hiddenOK: bits&64 != 0, rmb: bits&128 != 0, always: bits&256 != 0,
+		}
+		want := captureFree
+		if in.focused && in.experience && !in.released {
+			switch {
+			case in.center:
+				want = captureEngineCenter
+			case in.anchor:
+				want = captureEngineAnchor
+			case in.hidden && in.hiddenOK:
+				want = captureCursorHidden
+			case in.rmb:
+				want = captureRMBFallback
+			case in.always:
+				want = captureAlwaysOptIn
+			}
+		}
+		if got := selectCaptureState(in); got != want {
+			t.Fatalf("inputs %+v: state %v, want %v", in, got, want)
+		}
+	}
+}
+
+func TestCapturePolicyValues(t *testing.T) {
+	cases := []struct {
+		value                 string
+		enabled, always, zoom bool
+		name                  string
+	}{
+		{"", true, false, false, "auto"},
+		{"auto", true, false, false, "auto"},
+		{"AUTO", true, false, false, "auto"},
+		{"nonsense", true, false, false, "auto"},
+		{"always", true, true, false, "always"},
+		{"zoomlock", true, false, true, "zoomlock"},
+		{" ZoomLock ", true, false, true, "zoomlock"},
+		{"off", false, false, false, "auto"},
+		{"0", false, false, false, "auto"},
+	}
+	for _, tc := range cases {
+		selectMouseCapture(t, tc.value)
+		if pointerCapturePolicyEnabled() != tc.enabled || pointerCaptureAlways() != tc.always ||
+			pointerCaptureZoomLock() != tc.zoom || pointerCapturePolicyName() != tc.name {
+			t.Errorf("TIPSY_MOUSE_CAPTURE=%q: enabled=%t always=%t zoomlock=%t name=%s", tc.value,
+				pointerCapturePolicyEnabled(), pointerCaptureAlways(), pointerCaptureZoomLock(), pointerCapturePolicyName())
+		}
+	}
+}
+
+// With no engine lock, no RMB and no readable cursor-hidden state the pointer
+// is Free: no grab is requested, the host cursor stays hidden and every wheel
+// detent carries the real pointer position, never the viewport center.
+func TestAutoCaptureStaysFreeWithoutEngineSignals(t *testing.T) {
+	selectPointerPath(t, "direct")
+	selectMouseCapture(t, "auto")
+	wireRecordingDirectTarget(t, 0x1234, 0x5678)
+	calls := stubCaptureSeams(t)
+	vm := newCaptureVM(t)
+	enterExperienceForTest(t, vm, 79966250354565)
+	testDirectRecSetMouseLocked(false)
+	stubCursorHidden(t, false, false)
+
+	moveAbsolute(111, 193)
+	for i := 0; i < zoomLockArmDetents+1; i++ {
+		handleX11InputEvent(x11.InputEvent{Kind: x11.InputScroll, X: 111, Y: 193, ScrollY: 1})
+		if x, y := testDirectRecWheelFloat(0), testDirectRecWheelFloat(1); x != 111 || y != 193 {
+			t.Fatalf("detent %d wheel=(%v,%v), want the pointer (111,193)", i, x, y)
+		}
+	}
+	if zoomLockArmed() {
+		t.Fatal("auto armed the legacy zoom lock")
+	}
+	// The real pointer is passed through untouched, even outside the viewport.
+	handleX11InputEvent(x11.InputEvent{Kind: x11.InputScroll, X: -7, Y: 900, ScrollY: -1})
+	if x, y := testDirectRecWheelFloat(0), testDirectRecWheelFloat(1); x != -7 || y != 900 {
+		t.Fatalf("free wheel=(%v,%v), want the real pointer (-7,900)", x, y)
+	}
+	handleX11InputEvent(x11.InputEvent{Kind: x11.InputPointer, PointerAction: x11.PointerDown, Button: 1, X: 111, Y: 193})
+	handleX11InputEvent(x11.InputEvent{Kind: x11.InputPointer, PointerAction: x11.PointerUp, Button: 1, X: 111, Y: 193})
+	moveAbsolute(115, 190)
+	if calls.grabs() != 0 {
+		t.Fatalf("Free requested a grab: %+v", calls)
+	}
+	for _, visible := range calls.visible {
+		if visible {
+			t.Fatalf("cursor calls=%v, want the host cursor never shown while Free", calls.visible)
+		}
+	}
+	if st := currentCaptureState(); st != captureFree {
+		t.Fatalf("state=%v, want free", st)
+	}
+	if want := wantedCaptureState(observeEngineLock()); want != captureFree {
+		t.Fatalf("wanted state=%v, want free", want)
+	}
+}
+
+// CursorHidden follows the engine reading: capture while it reads hidden, free
+// the moment it reads visible or unknown, wheel at the clamped logical point
+// while captured and at the real pointer once Free.
+func TestAutoCaptureCursorHiddenTransitions(t *testing.T) {
+	selectPointerPath(t, "direct")
+	selectMouseCapture(t, "auto")
+	wireRecordingDirectTarget(t, 0x1234, 0x5678)
+	calls := stubCaptureSeams(t)
+	vm := newCaptureVM(t)
+	enterExperienceForTest(t, vm, 79966250354565)
+	testDirectRecSetMouseLocked(false)
+	reading := stubCursorHidden(t, false, true)
+
+	moveAbsolute(100, 200)
+	if calls.grabs() != 0 || currentCaptureState() != captureFree {
+		t.Fatalf("a visible cursor captured: state=%v calls=%+v", currentCaptureState(), calls)
+	}
+
+	reading.hidden = true
+	movesBefore := RobloxDirectInputStats().MoveDelivered
+	moveAbsolute(111, 193)
+	if len(calls.center) != 1 || !calls.center[0] || len(calls.cursor) != 0 {
+		t.Fatalf("hidden cursor grab calls=%+v, want one centered SetPointerLock(true)", calls)
+	}
+	if fx, fy, ok := RobloxDirectFallbackPosition(); !ok || fx != 640 || fy != 360 {
+		t.Fatalf("hidden cursor entry seeded logical=(%v,%v,%v), want center (640,360,true)", fx, fy, ok)
+	}
+	if currentCaptureState() != captureCursorHidden || !persistentPointerCapture.Load() || lastVisible(t, calls) {
+		t.Fatalf("state=%v persistent=%t, want cursor-hidden with the host cursor hidden",
+			currentCaptureState(), persistentPointerCapture.Load())
+	}
+	if got := RobloxDirectInputStats().MoveDelivered - movesBefore; got != 1 {
+		t.Fatalf("the acquire sample delivered %d moves, want one center announcement", got)
+	}
+	if x, y, dx, dy := testDirectRecMoveFloat(0), testDirectRecMoveFloat(1), testDirectRecMoveFloat(2), testDirectRecMoveFloat(3); x != 640 || y != 360 || dx != 0 || dy != 0 {
+		t.Fatalf("center announcement=(%v,%v,%v,%v), want (640,360,0,0)", x, y, dx, dy)
+	}
+	lookRelative(1000, -1000)
+	zoomDetent(1)
+	if x, y := testDirectRecWheelFloat(0), testDirectRecWheelFloat(1); x != 1279 || y != 0 {
+		t.Fatalf("captured wheel=(%v,%v), want the clamped logical point (1279,0), never the center", x, y)
+	}
+	if zoomLockArmed() {
+		t.Fatal("auto armed the legacy zoom lock")
+	}
+
+	// The engine shows its cursor again: the next sample frees the pointer.
+	reading.hidden = false
+	movesBefore = RobloxDirectInputStats().MoveDelivered
+	lookRelative(1, 1)
+	if currentCaptureState() != captureFree || persistentPointerCapture.Load() {
+		t.Fatalf("visible cursor kept the grab: state=%v", currentCaptureState())
+	}
+	if len(calls.center) != 2 || !calls.center[0] || calls.center[1] || lastVisible(t, calls) {
+		t.Fatalf("release calls=%+v visible=%v, want the centered acquire then one ungrab and the host cursor still hidden", calls, calls.visible)
+	}
+	if got := RobloxDirectInputStats().MoveDelivered - movesBefore; got != 0 {
+		t.Fatalf("the release sample delivered %d moves, want 0 (consumed)", got)
+	}
+	handleX11InputEvent(x11.InputEvent{Kind: x11.InputScroll, X: -7, Y: 900, ScrollY: 1})
+	if x, y := testDirectRecWheelFloat(0), testDirectRecWheelFloat(1); x != -7 || y != 900 {
+		t.Fatalf("free wheel=(%v,%v), want the real pointer (-7,900)", x, y)
+	}
+
+	// A click while hidden captures on the edge; the reader turning itself off
+	// frees the pointer on the next sample (the cursor stays free when unsure).
+	reading.hidden = true
+	handleX11InputEvent(x11.InputEvent{Kind: x11.InputPointer, PointerAction: x11.PointerDown, Button: 1, X: 50, Y: 60})
+	handleX11InputEvent(x11.InputEvent{Kind: x11.InputPointer, PointerAction: x11.PointerUp, Button: 1, X: 50, Y: 60})
+	if currentCaptureState() != captureCursorHidden {
+		t.Fatalf("a click while hidden did not capture: state=%v", currentCaptureState())
+	}
+	reading.ok = false
+	lookRelative(2, 2)
+	if currentCaptureState() != captureFree || persistentPointerCapture.Load() {
+		t.Fatalf("an unavailable reading kept the grab: state=%v", currentCaptureState())
+	}
+}
+
+// TestAlwaysOptInEntryCentersPointer pins result 3 for the always policy: the
+// entry warps the host grab and the logical pair to the window center once, and
+// later wheel detents keep using the clamped logical point instead of snapping
+// back to the center.
+func TestAlwaysOptInEntryCentersPointer(t *testing.T) {
+	selectPointerPath(t, "direct")
+	selectMouseCapture(t, "always")
+	wireRecordingDirectTarget(t, 0x1234, 0x5678)
+	calls := stubCaptureSeams(t)
+	vm := newCaptureVM(t)
+	enterExperienceForTest(t, vm, 79966250354565)
+	testDirectRecSetMouseLocked(false)
+
+	moveAbsolute(100, 200)
+	if len(calls.center) != 1 || !calls.center[0] || len(calls.cursor) != 0 {
+		t.Fatalf("always entry grab calls=%+v, want one centered SetPointerLock(true)", calls)
+	}
+	if !persistentPointerCapture.Load() || currentCaptureState() != captureAlwaysOptIn {
+		t.Fatalf("state=%v persistent=%t, want always", currentCaptureState(), persistentPointerCapture.Load())
+	}
+	if fx, fy, ok := RobloxDirectFallbackPosition(); !ok || fx != 640 || fy != 360 {
+		t.Fatalf("always entry seeded logical=(%v,%v,%v), want center (640,360,true)", fx, fy, ok)
+	}
+
+	// Drift off-view, then scroll: the detent lands on the clamped logical
+	// point, not the center, and the entry does not run again.
+	lookRelative(1000, -1000)
+	zoomDetent(1)
+	if x, y := testDirectRecWheelFloat(0), testDirectRecWheelFloat(1); x != 1279 || y != 0 {
+		t.Fatalf("captured wheel=(%v,%v), want the clamped logical point (1279,0)", x, y)
+	}
+	if len(calls.center) != 1 {
+		t.Fatalf("always entry re-centered after a wheel: %+v", calls)
+	}
+	if fx, fy, _ := RobloxDirectFallbackPosition(); fx != 1640 || fy != -640 {
+		t.Fatalf("integrator after wheel=(%v,%v), want the unbounded logical pair (1640,-640)", fx, fy)
+	}
+}
+
+func TestTipsyCapturePinsEngineMotion(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		policy string
+		hidden bool
+		state  captureState
+	}{
+		{"cursor-hidden", "auto", true, captureCursorHidden},
+		{"always", "always", false, captureAlwaysOptIn},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("TIPSY_TRACE_CURSOR_STATE", "1")
+			selectPointerPath(t, "direct")
+			selectMouseCapture(t, tc.policy)
+			wireRecordingDirectTarget(t, 0x1234, 0x5678)
+			stubCaptureSeams(t)
+			enterExperienceForTest(t, newCaptureVM(t), 79966250354565)
+			testDirectRecSetMouseLocked(false)
+			stubCursorHidden(t, tc.hidden, true)
+			logs := captureLogs(t)
+			moveAbsolute(100, 200)
+			if got := currentCaptureState(); got != tc.state {
+				t.Fatalf("capture state=%v, want %v", got, tc.state)
+			}
+			for _, delta := range [][2]float32{{5, 3}, {-12.5, 7.25}, {1000, -1000}, {0, -0.5}} {
+				before := RobloxDirectInputStats().MoveDelivered
+				lookRelative(delta[0], delta[1])
+				if got := RobloxDirectInputStats().MoveDelivered - before; got != 1 {
+					t.Fatalf("motion delivered %d moves, want 1", got)
+				}
+				if x, y, dx, dy := testDirectRecMoveFloat(0), testDirectRecMoveFloat(1), testDirectRecMoveFloat(2), testDirectRecMoveFloat(3); x != 640 || y != 360 || dx != delta[0] || dy != delta[1] {
+					t.Fatalf("motion=(%v,%v,%v,%v), want (640,360,%v,%v)", x, y, dx, dy, delta[0], delta[1])
+				}
+			}
+			if log := logs.String(); !strings.Contains(log, "capture pinned motion") || !strings.Contains(log, "x=640") || !strings.Contains(log, "y=360") {
+				t.Fatalf("missing pinned-position trace: %s", log)
+			}
+		})
+	}
+}
+
+// TestEngineCenterEntrySeedsLogicalCenter pins result 3 for the engine's own
+// LockCenter: the centered sticky host grab is also the point the logical pair
+// starts from, so the first captured delta is continuous.
+func TestEngineCenterEntrySeedsLogicalCenter(t *testing.T) {
+	selectPointerPath(t, "direct")
+	selectMouseCapture(t, "auto")
+	wireRecordingDirectTarget(t, 0x1234, 0x5678)
+	calls := stubCaptureSeams(t)
+	vm := newCaptureVM(t)
+	enterExperienceForTest(t, vm, 79966250354565)
+	testDirectRecSetMouseLocked(false)
+
+	moveAbsolute(900, 220)
+	if calls.grabs() != 0 || pointerLockSticky.Load() {
+		t.Fatalf("third person grabbed: %+v", calls)
+	}
+
+	// The engine enters LockCenter; the transition move is consumed.
+	testDirectRecSetMouseLocked(true)
+	moveAbsolute(901, 221)
+	if !pointerLockSticky.Load() {
+		t.Fatal("LockCenter did not take the centered sticky grab")
+	}
+	if len(calls.center) != 1 || !calls.center[0] {
+		t.Fatalf("center entry calls=%+v, want [true]", calls.center)
+	}
+	if lx, ly, ok := robloxDirectLastPosition(); !ok || lx != 640 || ly != 360 {
+		t.Fatalf("LockCenter entry seeded logical=(%v,%v,%v), want center (640,360,true)", lx, ly, ok)
+	}
+	lookRelative(5, 3)
+	if x, y, dx, dy := testDirectRecMoveFloat(0), testDirectRecMoveFloat(1), testDirectRecMoveFloat(2), testDirectRecMoveFloat(3); x != 645 || y != 363 || dx != 5 || dy != 3 {
+		t.Fatalf("centered motion=(%v,%v,%v,%v), want (645,363,5,3) from the center", x, y, dx, dy)
+	}
+}
+
+// TestHeldRMBEntryKeepsPointerInPlace pins that the RMB entry is unchanged:
+// only the persistent states and EngineCenter center, while a held RMB keeps
+// the cursor-anchored grab at the click.
+func TestHeldRMBEntryKeepsPointerInPlace(t *testing.T) {
+	selectPointerPath(t, "direct")
+	selectMouseCapture(t, "auto")
+	wireRecordingDirectTarget(t, 0x1234, 0x5678)
+	calls := stubCaptureSeams(t)
+	joinExperienceForTest(t)
+	testDirectRecSetMouseLocked(false)
+
+	moveAbsolute(20, 22)
+	handleX11InputEvent(x11.InputEvent{Kind: x11.InputPointer, PointerAction: x11.PointerDown, Button: 3, X: 20, Y: 22})
+	if len(calls.cursor) != 1 || !calls.cursor[0] || len(calls.center) != 0 {
+		t.Fatalf("RMB entry calls=%+v, want one cursor-anchored grab and no centering", calls)
+	}
+	if fx, fy, ok := RobloxDirectFallbackPosition(); !ok || fx != 20 || fy != 22 {
+		t.Fatalf("RMB entry seeded logical=(%v,%v,%v), want the click (20,22,true)", fx, fy, ok)
+	}
+}
+
+// TestFreeKeepsHostCursorHidden pins result 3: ordinary Free never shows the
+// host cursor, including after a capture release and after FocusIn into Free.
+// Only the explicit LeftAlt release is allowed to show it.
+func TestFreeKeepsHostCursorHidden(t *testing.T) {
+	selectPointerPath(t, "direct")
+	selectMouseCapture(t, "auto")
+	wireRecordingDirectTarget(t, 0x1234, 0x5678)
+	calls := stubCaptureSeams(t)
+	vm := newCaptureVM(t)
+	enterExperienceForTest(t, vm, 79966250354565)
+	testDirectRecSetMouseLocked(false)
+	reading := stubCursorHidden(t, true, true)
+
+	moveAbsolute(100, 200)
+	if currentCaptureState() != captureCursorHidden || !persistentPointerCapture.Load() {
+		t.Fatalf("setup: state=%v persistent=%t, want cursor-hidden",
+			currentCaptureState(), persistentPointerCapture.Load())
+	}
+
+	// The engine cursor becomes visible: releasePersistentCapture frees the
+	// grab, but the host cursor must stay hidden.
+	reading.hidden = false
+	lookRelative(1, 1)
+	if currentCaptureState() != captureFree || persistentPointerCapture.Load() {
+		t.Fatalf("release: state=%v persistent=%t, want free",
+			currentCaptureState(), persistentPointerCapture.Load())
+	}
+	for _, visible := range calls.visible {
+		if visible {
+			t.Fatalf("release to Free showed the host cursor: %v", calls.visible)
+		}
+	}
+
+	// FocusIn into plain Free (no LeftAlt release) hides rather than shows.
+	calls.visible = nil
+	handleX11InputEvent(x11.InputEvent{Kind: x11.InputFocus, FocusGained: false})
+	handleX11InputEvent(x11.InputEvent{Kind: x11.InputFocus, FocusGained: true})
+	if currentCaptureState() != captureFree {
+		t.Fatalf("FocusIn: state=%v, want free", currentCaptureState())
+	}
+	if len(calls.visible) == 0 || lastVisible(t, calls) {
+		t.Fatalf("FocusIn into Free cursor calls=%v, want hidden", calls.visible)
+	}
+}
+
+// The gates beat the engine: LeftAlt frees the pointer and shows the cursor;
+// focus loss and Home free it with the cursor hidden. The state is re-read on
+// LeftAlt re-arm and on FocusIn.
+func TestAutoCaptureLeftAltFocusAndHomeRelease(t *testing.T) {
+	selectPointerPath(t, "direct")
+	selectMouseCapture(t, "auto")
+	wireRecordingDirectTarget(t, 0x1234, 0x5678)
+	calls := stubCaptureSeams(t)
+	vm := newCaptureVM(t)
+	enterExperienceForTest(t, vm, 79966250354565)
+	testDirectRecSetMouseLocked(false)
+	reading := stubCursorHidden(t, true, true)
+
+	moveAbsolute(100, 200)
+	if currentCaptureState() != captureCursorHidden {
+		t.Fatalf("setup: state=%v, want cursor-hidden", currentCaptureState())
+	}
+
+	altDown := x11.InputEvent{Kind: x11.InputKey, KeyPressed: true, KeyCode: leftAltKeyCode, ScanCode: 64}
+	altUp := x11.InputEvent{Kind: x11.InputKey, KeyPressed: false, KeyCode: leftAltKeyCode, ScanCode: 64}
+	handleX11InputEvent(altDown)
+	handleX11InputEvent(altUp)
+	if currentCaptureState() != captureFree || !pointerCaptureReleased.Load() || !lastVisible(t, calls) {
+		t.Fatalf("LeftAlt: state=%v released=%t visible=%v, want free and visible",
+			currentCaptureState(), pointerCaptureReleased.Load(), calls.visible)
+	}
+	grabs := calls.grabs()
+	moveAbsolute(120, 210)
+	if calls.grabs() != grabs {
+		t.Fatalf("a released stream grabbed: %+v", calls)
+	}
+	handleX11InputEvent(altDown)
+	handleX11InputEvent(altUp)
+	if pointerCaptureReleased.Load() || lastVisible(t, calls) {
+		t.Fatalf("LeftAlt re-arm: released=%t visible=%v, want armed and hidden for the hidden state",
+			pointerCaptureReleased.Load(), calls.visible)
+	}
+	moveAbsolute(130, 220)
+	if currentCaptureState() != captureCursorHidden {
+		t.Fatalf("re-arm did not re-evaluate to cursor-hidden: state=%v", currentCaptureState())
+	}
+
+	// Focus loss frees the pointer; FocusIn re-reads the engine and does not grab.
+	// Neither is a LeftAlt release, so the host cursor stays hidden.
+	handleX11InputEvent(x11.InputEvent{Kind: x11.InputFocus, FocusGained: false})
+	if currentCaptureState() != captureFree || lastVisible(t, calls) ||
+		wantedCaptureState(observeEngineLock()) != captureFree {
+		t.Fatalf("focus loss: state=%v visible=%v, want free and hidden", currentCaptureState(), calls.visible)
+	}
+	grabs = calls.grabs()
+	handleX11InputEvent(x11.InputEvent{Kind: x11.InputFocus, FocusGained: true})
+	if calls.grabs() != grabs || currentCaptureState() != captureFree {
+		t.Fatalf("FocusIn grabbed on its own: state=%v calls=%+v", currentCaptureState(), calls)
+	}
+	if lastVisible(t, calls) {
+		t.Fatalf("FocusIn with a hidden engine cursor left the host cursor visible: %v", calls.visible)
+	}
+	moveAbsolute(140, 230)
+	if currentCaptureState() != captureCursorHidden {
+		t.Fatalf("motion after FocusIn did not re-acquire: state=%v", currentCaptureState())
+	}
+	handleX11InputEvent(x11.InputEvent{Kind: x11.InputFocus, FocusGained: false})
+	reading.hidden = false
+	handleX11InputEvent(x11.InputEvent{Kind: x11.InputFocus, FocusGained: true})
+	if currentCaptureState() != captureFree || lastVisible(t, calls) {
+		t.Fatalf("FocusIn with a visible engine cursor: state=%v visible=%v, want free and hidden",
+			currentCaptureState(), calls.visible)
+	}
+
+	// Home: leaving the experience frees a held grab on the next sample.
+	reading.hidden = true
+	moveAbsolute(150, 240)
+	if currentCaptureState() != captureCursorHidden {
+		t.Fatalf("setup: state=%v, want cursor-hidden", currentCaptureState())
+	}
+	if _, handled := vm.dispatch(jnull(), nativeHelperClass, "gameActivity_onGameLoaded", "(J)V", packJlong(0)); !handled {
+		t.Fatal("leave onGameLoaded not handled")
+	}
+	lookRelative(3, 3)
+	if currentCaptureState() != captureFree || persistentPointerCapture.Load() {
+		t.Fatalf("Home kept the grab: state=%v", currentCaptureState())
+	}
+}
+
+// An engine lock outranks the cursor-hidden signal and hands the pointer back
+// to it when the lock ends.
+func TestEngineLockOutranksCursorHidden(t *testing.T) {
+	selectPointerPath(t, "direct")
+	selectMouseCapture(t, "auto")
+	wireRecordingDirectTarget(t, 0x1234, 0x5678)
+	calls := stubCaptureSeams(t)
+	vm := newCaptureVM(t)
+	enterExperienceForTest(t, vm, 79966250354565)
+	script := stubEngineMouseBehavior(t,
+		MouseBehaviorDefault, MouseBehaviorLockCurrentPosition, MouseBehaviorDefault)
+	testDirectRecSetMouseLocked(false)
+	stubCursorHidden(t, true, true)
+
+	moveAbsolute(900, 220)
+	if currentCaptureState() != captureCursorHidden {
+		t.Fatalf("setup: state=%v, want cursor-hidden", currentCaptureState())
+	}
+	script.next()
+	lookRelative(5, 3)
+	if currentCaptureState() != captureEngineAnchor || persistentPointerCapture.Load() {
+		t.Fatalf("LockCurrentPosition did not outrank cursor-hidden: state=%v", currentCaptureState())
+	}
+	script.next()
+	lookRelative(1, 1)
+	if currentCaptureState() != captureCursorHidden {
+		t.Fatalf("the engine lock ended but cursor-hidden did not take the pointer back: state=%v", currentCaptureState())
+	}
+	if fx, fy, ok := RobloxDirectFallbackPosition(); !ok || fx != 640 || fy != 360 {
+		t.Fatalf("anchor handoff logical=(%v,%v,%v), want center", fx, fy, ok)
+	}
+	if len(calls.center) != 3 || !calls.center[1] || !calls.center[2] {
+		t.Fatalf("hidden anchor entry/handoff did not re-center host: %+v", calls)
+	}
+	if x, y, dx, dy := testDirectRecMoveFloat(0), testDirectRecMoveFloat(1), testDirectRecMoveFloat(2), testDirectRecMoveFloat(3); x != 640 || y != 360 || dx != 0 || dy != 0 {
+		t.Fatalf("handoff announcement=(%v,%v,%v,%v), want center and zero delta", x, y, dx, dy)
+	}
+}
+
+// Project 12 combines LockCurrentPosition with a hidden engine cursor. That
+// anchor is centered on entry, retains relative-delta delivery, and returns to
+// Free with one absolute center announcement after MouseBehavior reads Default.
+func TestHiddenEngineAnchorCentersAndReleasesAtCenter(t *testing.T) {
+	t.Setenv("TIPSY_TRACE_CURSOR_STATE", "1")
+	selectPointerPath(t, "direct")
+	selectMouseCapture(t, "auto")
+	wireRecordingDirectTarget(t, 0x1234, 0x5678)
+	calls := stubCaptureSeams(t)
+	vm := newCaptureVM(t)
+	enterExperienceForTest(t, vm, 79966250354565)
+	script := stubEngineMouseBehavior(t,
+		MouseBehaviorDefault, MouseBehaviorLockCurrentPosition, MouseBehaviorDefault)
+	testDirectRecSetMouseLocked(false)
+	reading := stubCursorHidden(t, false, true)
+	logs := captureLogs(t)
+
+	moveAbsolute(900, 220)
+	script.next()
+	reading.hidden = true
+	movesBefore := RobloxDirectInputStats().MoveDelivered
+	moveAbsolute(901, 221)
+	if currentCaptureState() != captureEngineAnchor || !engineAnchorCentered() {
+		t.Fatalf("hidden anchor state=%v centered=%t, want EngineAnchor(hidden)",
+			currentCaptureState(), engineAnchorCentered())
+	}
+	if len(calls.center) != 1 || !calls.center[0] || len(calls.cursor) != 0 {
+		t.Fatalf("hidden anchor entry calls=%+v, want one centered grab and no cursor grab", calls)
+	}
+	if x, y, ok := RobloxDirectFallbackPosition(); !ok || x != 640 || y != 360 {
+		t.Fatalf("hidden anchor seed=(%v,%v,%v), want center (640,360,true)", x, y, ok)
+	}
+	if got := RobloxDirectInputStats().MoveDelivered - movesBefore; got != 1 {
+		t.Fatalf("hidden anchor entry delivered %d moves, want one center announcement", got)
+	}
+	if x, y, dx, dy := testDirectRecMoveFloat(0), testDirectRecMoveFloat(1), testDirectRecMoveFloat(2), testDirectRecMoveFloat(3); x != 640 || y != 360 || dx != 0 || dy != 0 {
+		t.Fatalf("hidden anchor announcement=(%v,%v,%v,%v), want (640,360,0,0)", x, y, dx, dy)
+	}
+	var entryTrace string
+	for _, line := range strings.Split(logs.String(), "\n") {
+		if strings.Contains(line, "free -> EngineAnchor(hidden)") {
+			entryTrace = line
+		}
+	}
+	if entryTrace == "" || !strings.Contains(entryTrace, "warp=center") {
+		t.Fatalf("hidden anchor entry trace=%q, want EngineAnchor(hidden) with warp=center; logs=%s", entryTrace, logs.String())
+	}
+
+	// LockCurrentPosition still consumes relative deltas; centering changes the
+	// origin, not the anchor-style delivery function.
+	lookRelative(5, 3)
+	if x, y, dx, dy := testDirectRecMoveFloat(0), testDirectRecMoveFloat(1), testDirectRecMoveFloat(2), testDirectRecMoveFloat(3); x != 645 || y != 363 || dx != 5 || dy != 3 {
+		t.Fatalf("hidden anchor motion=(%v,%v,%v,%v), want (645,363,5,3)", x, y, dx, dy)
+	}
+	if len(calls.center) != 1 {
+		t.Fatalf("relative motion re-centered the hidden anchor: %+v", calls)
+	}
+
+	// The visibility and behavior edges can arrive together. The latch for the
+	// lock actually held selects a center release even though hidden is now false.
+	script.next()
+	reading.hidden = false
+	movesBefore = RobloxDirectInputStats().MoveDelivered
+	lookRelative(1, 1)
+	if currentCaptureState() != captureFree || engineAnchorActive() {
+		t.Fatalf("Default + visible state=%v anchor=%t, want Free", currentCaptureState(), engineAnchorActive())
+	}
+	if len(calls.zoom) != 2 || !calls.zoom[0] || calls.zoom[1] {
+		t.Fatalf("hidden anchor release calls=%+v, want center re-anchor then ungrab", calls)
+	}
+	if got := RobloxDirectInputStats().MoveDelivered - movesBefore; got != 1 {
+		t.Fatalf("hidden anchor release delivered %d moves, want one absolute center move", got)
+	}
+	if x, y, dx, dy := testDirectRecMoveFloat(0), testDirectRecMoveFloat(1), testDirectRecMoveFloat(2), testDirectRecMoveFloat(3); x != 640 || y != 360 || dx != 0 || dy != 0 {
+		t.Fatalf("hidden anchor release move=(%v,%v,%v,%v), want (640,360,0,0)", x, y, dx, dy)
+	}
+}
+
+func TestHiddenEngineAnchorVisibilityChangeReleasesAtCenter(t *testing.T) {
+	selectPointerPath(t, "direct")
+	selectMouseCapture(t, "auto")
+	wireRecordingDirectTarget(t, 0x1234, 0x5678)
+	calls := stubCaptureSeams(t)
+	vm := newCaptureVM(t)
+	enterExperienceForTest(t, vm, 79966250354565)
+	stubEngineMouseBehavior(t, MouseBehaviorLockCurrentPosition)
+	testDirectRecSetMouseLocked(false)
+	reading := stubCursorHidden(t, true, true)
+	moveAbsolute(900, 220)
+	if !engineAnchorCentered() {
+		t.Fatal("setup: hidden anchor was not centered")
+	}
+
+	reading.hidden = false
+	movesBefore := RobloxDirectInputStats().MoveDelivered
+	lookRelative(1, 1)
+	if currentCaptureState() != captureEngineAnchor || engineAnchorCentered() {
+		t.Fatalf("visible anchor state=%v centered=%t, want lock-in-place", currentCaptureState(), engineAnchorCentered())
+	}
+	if len(calls.zoom) != 2 || !calls.zoom[0] || calls.zoom[1] || len(calls.cursor) != 1 || !calls.cursor[0] {
+		t.Fatalf("hidden->visible calls=%+v, want center release then cursor-anchored grab", calls)
+	}
+	if x, y, ok := engineAnchorFrozenOrigin(); !ok || x != 640 || y != 360 {
+		t.Fatalf("visible anchor origin=(%v,%v,%v), want center", x, y, ok)
+	}
+	// MouseBehavior is still LockCurrentPosition: no absolute center release
+	// announcement is allowed, only the real relative sample goes to the engine.
+	if got := RobloxDirectInputStats().MoveDelivered - movesBefore; got != 1 {
+		t.Fatalf("hidden->visible delivered %d moves, want only the relative sample", got)
+	}
+	if x, y, dx, dy := testDirectRecMoveFloat(0), testDirectRecMoveFloat(1), testDirectRecMoveFloat(2), testDirectRecMoveFloat(3); x != 641 || y != 361 || dx != 1 || dy != 1 {
+		t.Fatalf("hidden->visible motion=(%v,%v,%v,%v), want (641,361,1,1)", x, y, dx, dy)
+	}
+}
+
+func TestHiddenEngineAnchorReleaseGates(t *testing.T) {
+	for _, gate := range []string{"LeftAlt", "focus", "Home"} {
+		t.Run(gate, func(t *testing.T) {
+			selectPointerPath(t, "direct")
+			selectMouseCapture(t, "auto")
+			wireRecordingDirectTarget(t, 0x1234, 0x5678)
+			calls := stubCaptureSeams(t)
+			vm := newCaptureVM(t)
+			enterExperienceForTest(t, vm, 79966250354565)
+			stubEngineMouseBehavior(t, MouseBehaviorLockCurrentPosition)
+			testDirectRecSetMouseLocked(false)
+			stubCursorHidden(t, true, true)
+			moveAbsolute(900, 220)
+			if currentCaptureState() != captureEngineAnchor || !engineAnchorCentered() {
+				t.Fatal("setup: hidden EngineAnchor did not acquire the centered grab")
+			}
+
+			switch gate {
+			case "LeftAlt":
+				handleX11InputEvent(x11.InputEvent{Kind: x11.InputKey, KeyPressed: true, KeyCode: leftAltKeyCode, ScanCode: 64})
+				handleX11InputEvent(x11.InputEvent{Kind: x11.InputKey, KeyPressed: false, KeyCode: leftAltKeyCode, ScanCode: 64})
+				if !pointerCaptureReleased.Load() || !lastVisible(t, calls) {
+					t.Fatal("LeftAlt did not leave the released, host-cursor-visible state")
+				}
+			case "focus":
+				handleX11InputEvent(x11.InputEvent{Kind: x11.InputFocus, FocusGained: false})
+			case "Home":
+				if _, handled := vm.dispatch(jnull(), nativeHelperClass, "gameActivity_onGameLoaded", "(J)V", packJlong(0)); !handled {
+					t.Fatal("leave onGameLoaded not handled")
+				}
+				lookRelative(1, 1)
+			}
+			if currentCaptureState() != captureFree {
+				t.Fatalf("%s left state=%v, want Free", gate, currentCaptureState())
+			}
+		})
+	}
+}
+
+func TestCursorHiddenOutranksHeldRMBAndCenters(t *testing.T) {
+	selectPointerPath(t, "direct")
+	selectMouseCapture(t, "auto")
+	wireRecordingDirectTarget(t, 0x1234, 0x5678)
+	calls := stubCaptureSeams(t)
+	// X11 returns changed=false while re-centering an already-held grab.
+	pointerLockSetter = func(locked bool) (bool, error) {
+		calls.center = append(calls.center, locked)
+		return false, nil
+	}
+	vm := newCaptureVM(t)
+	enterExperienceForTest(t, vm, 79966250354565)
+	testDirectRecSetMouseLocked(false)
+	reading := stubCursorHidden(t, false, true)
+	moveAbsolute(900, 220)
+	handleX11InputEvent(x11.InputEvent{Kind: x11.InputPointer, PointerAction: x11.PointerDown, Button: 3, X: 900, Y: 220})
+	if currentCaptureState() != captureRMBFallback {
+		t.Fatal("RMB did not acquire")
+	}
+	reading.hidden = true
+	before := RobloxDirectInputStats().MoveDelivered
+	lookRelative(5, 3)
+	if currentCaptureState() != captureCursorHidden || len(calls.center) != 1 || !calls.center[0] {
+		t.Fatalf("hidden did not take centered grab: state=%v calls=%+v", currentCaptureState(), calls)
+	}
+	if rmbPointerFallback.Load() || !persistentPointerCapture.Load() {
+		t.Fatalf("RMB->cursor-hidden conversion: rmb=%t persistent=%t, want only persistent",
+			rmbPointerFallback.Load(), persistentPointerCapture.Load())
+	}
+	if got := RobloxDirectInputStats().MoveDelivered - before; got != 2 {
+		t.Fatalf("got %d moves, want center announcement then relative motion", got)
+	}
+	if x, y, dx, dy := testDirectRecMoveFloat(0), testDirectRecMoveFloat(1), testDirectRecMoveFloat(2), testDirectRecMoveFloat(3); x != 640 || y != 360 || dx != 5 || dy != 3 {
+		t.Fatalf("relative motion=(%v,%v,%v,%v), want (640,360,5,3)", x, y, dx, dy)
+	}
+}
+
+func TestHiddenToAlwaysRecentersHeldGrab(t *testing.T) {
+	selectPointerPath(t, "direct")
+	selectMouseCapture(t, "always")
+	wireRecordingDirectTarget(t, 0x1234, 0x5678)
+	calls := stubCaptureSeams(t)
+	vm := newCaptureVM(t)
+	enterExperienceForTest(t, vm, 79966250354565)
+	testDirectRecSetMouseLocked(false)
+	reading := stubCursorHidden(t, true, true)
+	moveAbsolute(900, 220)
+	lookRelative(50, 30)
+	reading.hidden = false
+	lookRelative(2, 3)
+	if currentCaptureState() != captureAlwaysOptIn || len(calls.center) != 2 {
+		t.Fatalf("hidden-to-always state=%v calls=%+v", currentCaptureState(), calls)
+	}
+	if x, y, ok := RobloxDirectFallbackPosition(); !ok || x != 642 || y != 363 {
+		t.Fatalf("hidden-to-always logical=(%v,%v,%v), want (642,363,true)", x, y, ok)
+	}
+}
+
+// The GameActivity-only path delivers relative motion as absolute ev.X/ev.Y,
+// so it must never take a host grab: a grab would freeze camera look. The
+// direct path owns every centered entry.
+func TestGameActivityOnlyPathNeverGrabs(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		policy string
+		hidden bool
+		anchor bool
+	}{
+		{name: "cursor-hidden", policy: "auto", hidden: true},
+		{name: "hidden-engine-anchor", policy: "auto", hidden: true, anchor: true},
+		{name: "always", policy: "always"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			selectPointerPath(t, "gameactivity")
+			selectMouseCapture(t, tc.policy)
+			calls := stubCaptureSeams(t)
+			vm := inputTestVM(t, map[string]uintptr{
+				methodLogName(gameActivityClass, "onTouchEventNative", "(JLandroid/view/MotionEvent;IIIIIJJIIIIIIFF)Z"): testRecordTouchFn(),
+			})
+			SetGameActivityInputTarget(vm.Env().Raw(), 42, 77)
+			enterExperienceForTest(t, vm, 79966250354565)
+			SetPointerClampViewport(1280, 720)
+			t.Cleanup(ResetPointerClampViewportForTest)
+			stubCursorHidden(t, tc.hidden, true)
+			testDirectRecSetMouseLocked(false)
+			if tc.anchor {
+				stubEngineMouseBehavior(t, MouseBehaviorLockCurrentPosition)
+			}
+			// The RMB down edge below mutates the package-global pointerButtons
+			// state. Release it even when an assertion fails first, so the
+			// following tests still see a clear button set.
+			t.Cleanup(func() {
+				handleX11InputEvent(x11.InputEvent{Kind: x11.InputPointer, PointerAction: x11.PointerUp, Button: 3, X: 900, Y: 220})
+				if got := pointerButtonState(0, false); got != 0 {
+					t.Errorf("button state after RMB release = %d, want 0", got)
+				}
+			})
+
+			moveAbsolute(900, 220)
+			// A held RMB is another capture state this path must not honour.
+			handleX11InputEvent(x11.InputEvent{Kind: x11.InputPointer, PointerAction: x11.PointerDown, Button: 3, X: 900, Y: 220})
+
+			if calls.grabs() != 0 {
+				t.Fatalf("GameActivity-only path took a host grab: %+v", calls)
+			}
+			if persistentPointerCapture.Load() || pointerLockSticky.Load() ||
+				engineAnchorActive() || rmbPointerFallback.Load() {
+				t.Fatalf("GameActivity-only capture flags: persistent=%t sticky=%t anchor=%t rmb=%t",
+					persistentPointerCapture.Load(), pointerLockSticky.Load(),
+					engineAnchorActive(), rmbPointerFallback.Load())
+			}
+			if state := currentCaptureState(); state != captureFree {
+				t.Fatalf("GameActivity-only state=%v, want free", state)
+			}
+		})
+	}
+}
+
+// The GameActivity-only stream must not turn an engine lock re-read on FocusIn
+// into a host grab either: every state stays free on this path.
+func TestGameActivityOnlyFocusInDoesNotGrab(t *testing.T) {
+	selectPointerPath(t, "gameactivity")
+	selectMouseCapture(t, "auto")
+	wireRecordingDirectTarget(t, 0x1234, 0x5678)
+	calls := stubCaptureSeams(t)
+	vm := newCaptureVM(t)
+	enterExperienceForTest(t, vm, 79966250354565)
+	stubEngineMouseBehavior(t, MouseBehaviorLockCenter)
+	testDirectRecSetMouseLocked(true)
+
+	handleX11InputEvent(x11.InputEvent{Kind: x11.InputFocus, FocusGained: false})
+	handleX11InputEvent(x11.InputEvent{Kind: x11.InputFocus, FocusGained: true})
+
+	if calls.grabs() != 0 || pointerLockSticky.Load() || engineAnchorActive() {
+		t.Fatalf("FocusIn on GameActivity-only grabbed: calls=%+v sticky=%t anchor=%t",
+			calls, pointerLockSticky.Load(), engineAnchorActive())
+	}
+	if state := currentCaptureState(); state != captureFree {
+		t.Fatalf("GameActivity-only FocusIn state=%v, want free", state)
+	}
+}
+
+// The GameActivity-only bridge must keep delivering the real absolute pointer,
+// never a capture anchor: this is the camera-look path that a grab froze.
+func TestGameActivityOnlyPathDeliversRealAbsolutePosition(t *testing.T) {
+	selectPointerPath(t, "gameactivity")
+	selectMouseCapture(t, "auto")
+	calls := stubCaptureSeams(t)
+	vm := inputTestVM(t, map[string]uintptr{
+		methodLogName(gameActivityClass, "onTouchEventNative", "(JLandroid/view/MotionEvent;IIIIIJJIIIIIIFF)Z"): testRecordTouchFn(),
+	})
+	SetGameActivityInputTarget(vm.Env().Raw(), 42, 77)
+	enterExperienceForTest(t, vm, 79966250354565)
+	SetPointerClampViewport(1280, 720)
+	t.Cleanup(ResetPointerClampViewportForTest)
+	stubCursorHidden(t, true, true)
+	moveAbsolute(900, 220)
+
+	if calls.grabs() != 0 {
+		t.Fatalf("GameActivity-only path took a host grab: %+v", calls)
+	}
+	o := vm.get(int64(testRecTouchID(3)))
+	if o == nil || o.fields["x"] != float32(900) || o.fields["y"] != float32(220) {
+		t.Fatalf("GameActivity delivery=%+v, want the real absolute (900,220)", o)
+	}
+}
+
+// The default policy releases LockCurrentPosition at the frozen origin on a
+// wheel detent and never re-centers; only zoomlock marks a zoom-out exit.
+func TestAutoAnchorWheelReleaseRestoresTheFrozenOrigin(t *testing.T) {
+	selectPointerPath(t, "direct")
+	selectMouseCapture(t, "auto")
+	wireRecordingDirectTarget(t, 0x1234, 0x5678)
+	calls := stubCaptureSeams(t)
+	vm := newCaptureVM(t)
+	enterExperienceForTest(t, vm, 79966250354565)
+	script := stubEngineMouseBehavior(t,
+		MouseBehaviorDefault, MouseBehaviorLockCurrentPosition, MouseBehaviorDefault)
+	testDirectRecSetMouseLocked(false)
+	stubCursorHidden(t, false, true)
+
+	moveAbsolute(900, 220)
+	script.next()
+	lookRelative(5, 3)
+	lookRelative(400, 100)
+	if currentCaptureState() != captureEngineAnchor {
+		t.Fatalf("setup: state=%v, want engine-anchor", currentCaptureState())
+	}
+	script.next()
+	handleX11InputEvent(x11.InputEvent{Kind: x11.InputScroll, X: 100, Y: 200, ScrollY: -1})
+	if x, y := testDirectRecWheelFloat(0), testDirectRecWheelFloat(1); x != 100 || y != 200 {
+		t.Fatalf("anchored wheel=(%v,%v), want the detent point (100,200), never the center", x, y)
+	}
+	if engineAnchorActive() || len(calls.zoom) != 0 {
+		t.Fatalf("anchor=%t zoom calls=%v, want released at the origin without a center warp", engineAnchorActive(), calls.zoom)
+	}
+	if lx, ly, ok := robloxDirectLastPosition(); !ok || lx != 900 || ly != 220 {
+		t.Fatalf("last origin=(%v,%v,%v), want the frozen origin (900,220,true)", lx, ly, ok)
+	}
+}
+
+// Zoom-lock is reachable only through TIPSY_MOUSE_CAPTURE=zoomlock.
+func TestZoomLockRunsOnlyUnderTheExplicitPolicy(t *testing.T) {
+	for _, tc := range []struct {
+		value string
+		armed bool
+	}{{"auto", false}, {"always", false}, {"zoomlock", true}} {
+		t.Run(tc.value, func(t *testing.T) {
+			selectPointerPath(t, "direct")
+			selectMouseCapture(t, tc.value)
+			wireRecordingDirectTarget(t, 0x1234, 0x5678)
+			stubCaptureSeams(t)
+			vm := newCaptureVM(t)
+			enterExperienceForTest(t, vm, 79966250354565)
+			testDirectRecSetMouseLocked(false)
+			fakeZoomClock(t)
+
+			moveAbsolute(111, 193)
+			for i := 0; i < zoomLockArmDetents; i++ {
+				handleX11InputEvent(x11.InputEvent{Kind: x11.InputScroll, X: 111, Y: 193, ScrollY: 1})
+			}
+			if zoomLockArmed() != tc.armed {
+				t.Fatalf("zoomLockArmed=%t, want %t", zoomLockArmed(), tc.armed)
+			}
+			if tc.armed && !persistentPointerCapture.Load() {
+				t.Fatal("zoomlock did not take its centered grab")
+			}
+		})
+	}
+}
+
+// zoomInLockSetup joins Project 12 under the default policy with the enum
+// authority scripted Default -> LockCurrentPosition -> Default and the
+// cursor-hidden reader reporting a visible cursor: the case that used to lock
+// the pointer wherever it was.
+func zoomInLockSetup(t *testing.T) (*captureCalls, *scriptedEngineMouseBehavior, *cursorHiddenReading) {
+	t.Helper()
+	selectPointerPath(t, "direct")
+	selectMouseCapture(t, "auto")
+	wireRecordingDirectTarget(t, 0x1234, 0x5678)
+	calls := stubCaptureSeams(t)
+	enterExperienceForTest(t, newCaptureVM(t), 79966250354565)
+	script := stubEngineMouseBehavior(t,
+		MouseBehaviorDefault, MouseBehaviorLockCurrentPosition, MouseBehaviorDefault)
+	testDirectRecSetMouseLocked(false)
+	reading := stubCursorHidden(t, false, true)
+	pointerButtons.mu.Lock()
+	pointerButtons.state = 0
+	pointerButtons.mu.Unlock()
+	return calls, script, reading
+}
+
+// Zooming into first person in a game without LockCenter centers the pointer
+// and then locks it there, whatever the cursor-hidden reader says.
+func TestZoomInLockCentersThenLocks(t *testing.T) {
+	calls, script, reading := zoomInLockSetup(t)
+
+	moveAbsolute(900, 220)
+	for i := 0; i < 3; i++ {
+		zoomDetent(1)
+	}
+	if calls.grabs() != 0 {
+		t.Fatalf("zoom detents grabbed before the engine locked: %+v", calls)
+	}
+	script.next()
+	movesBefore := RobloxDirectInputStats().MoveDelivered
+	moveAbsolute(905, 223)
+	if currentCaptureState() != captureEngineAnchor || !engineAnchorZoomCentered() {
+		t.Fatalf("state=%v zoom=%t, want the centered zoom-in lock", currentCaptureState(), engineAnchorZoomCentered())
+	}
+	if len(calls.center) != 1 || !calls.center[0] || len(calls.cursor) != 0 || len(calls.zoom) != 0 {
+		t.Fatalf("lock calls=%+v, want one centered SetPointerLock(true) and no lock-in-place grab", calls)
+	}
+	if got := RobloxDirectInputStats().MoveDelivered - movesBefore; got != 1 {
+		t.Fatalf("entry delivered %d moves, want one center announcement", got)
+	}
+	if x, y, dx, dy := testDirectRecMoveFloat(0), testDirectRecMoveFloat(1), testDirectRecMoveFloat(2), testDirectRecMoveFloat(3); x != 640 || y != 360 || dx != 0 || dy != 0 {
+		t.Fatalf("entry announcement=(%v,%v,%v,%v), want (640,360,0,0)", x, y, dx, dy)
+	}
+
+	// Look integrates from the center; visibility edges never reshape the lock.
+	lookRelative(5, 3)
+	reading.hidden = true
+	lookRelative(1, 1)
+	reading.hidden, reading.ok = false, false
+	lookRelative(1, 1)
+	if x, y := testDirectRecMoveFloat(0), testDirectRecMoveFloat(1); x != 647 || y != 365 {
+		t.Fatalf("look=(%v,%v), want (647,365) from the center", x, y)
+	}
+	if len(calls.center) != 1 || len(calls.cursor) != 0 || len(calls.zoom) != 0 {
+		t.Fatalf("visibility edges touched the grab: %+v", calls)
+	}
+
+	// Zooming out ends the lock at the center.
+	zoomDetent(-1)
+	script.next()
+	lookRelative(1, 1)
+	if currentCaptureState() != captureFree || engineAnchorActive() {
+		t.Fatalf("zoom-out state=%v anchor=%t, want Free", currentCaptureState(), engineAnchorActive())
+	}
+	if len(calls.zoom) != 2 || !calls.zoom[0] || calls.zoom[1] {
+		t.Fatalf("release calls=%+v, want center re-anchor then ungrab", calls)
+	}
+	if x, y := testDirectRecMoveFloat(0), testDirectRecMoveFloat(1); x != 640 || y != 360 {
+		t.Fatalf("release move=(%v,%v), want the center", x, y)
+	}
+}
+
+// RMB camera-look still locks where the cursor is, even after a zoom-in.
+func TestZoomInLockLeavesHeldRMBLookInPlace(t *testing.T) {
+	calls, script, _ := zoomInLockSetup(t)
+
+	moveAbsolute(900, 220)
+	zoomDetent(1)
+	handleX11InputEvent(x11.InputEvent{Kind: x11.InputPointer, PointerAction: x11.PointerDown, Button: 3, X: 900, Y: 220})
+	t.Cleanup(func() {
+		pointerButtons.mu.Lock()
+		pointerButtons.state = 0
+		pointerButtons.mu.Unlock()
+	})
+	script.next()
+	lookRelative(4, 2)
+	if currentCaptureState() != captureEngineAnchor || engineAnchorCentered() {
+		t.Fatalf("state=%v centered=%t, want lock-in-place", currentCaptureState(), engineAnchorCentered())
+	}
+	if len(calls.center) != 0 {
+		t.Fatalf("RMB look centered the pointer: %+v", calls)
+	}
+	if x, y, ok := engineAnchorFrozenOrigin(); !ok || x != 900 || y != 220 {
+		t.Fatalf("frozen origin=(%v,%v,%v), want the click (900,220)", x, y, ok)
+	}
+}
+
+// A zoom-out after the zoom-in, or a zoom-in in another experience, is not a
+// zoom-in lock.
+func TestZoomInLockNeedsTheLastDetentToZoomIn(t *testing.T) {
+	for _, tc := range []string{"zoom-out", "rejoin"} {
+		t.Run(tc, func(t *testing.T) {
+			calls, script, _ := zoomInLockSetup(t)
+			moveAbsolute(900, 220)
+			zoomDetent(1)
+			switch tc {
+			case "zoom-out":
+				zoomDetent(-1)
+			case "rejoin":
+				enterExperienceForTest(t, newCaptureVM(t), 79966250354565)
+			}
+			script.next()
+			moveAbsolute(900, 220)
+			if currentCaptureState() != captureEngineAnchor || engineAnchorCentered() || len(calls.center) != 0 {
+				t.Fatalf("state=%v centered=%t calls=%+v, want lock-in-place", currentCaptureState(), engineAnchorCentered(), calls)
+			}
+		})
+	}
+}
 
 // The tests drive the production dispatch and delivery paths directly;
 // cgo is unsupported in this package's test files, so the fake engine
