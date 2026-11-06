@@ -314,6 +314,13 @@ func (w *mainWindow) buildSettingsPage() *qt.QWidget {
 	w.settingsStartFullscreen.SetToolTip("Off by default. Applies to the next Roblox window and does not mirror Roblox's in-app fullscreen toggle.")
 	form.AddRow3("Start Roblox fullscreen", w.settingsStartFullscreen.QWidget)
 
+	w.settingsUpdateNotice = qt.NewQCheckBox3(updateNoticeToggleText(true))
+	setObjectName(w.settingsUpdateNotice.QObject, "vsyncToggle")
+	w.settingsUpdateNotice.SetAccessibleName("Show update notice when launching Roblox")
+	w.settingsUpdateNotice.SetAccessibleDescription("When enabled, a small Tipsy card appears at the top of the game window at launch when a newer release is available. It disappears after five seconds, never takes focus, and never delays the launch.")
+	w.settingsUpdateNotice.SetToolTip("On by default. The card appears only when a newer Tipsy release exists, never blocks launching, and closes itself after five seconds.")
+	form.AddRow3("Show update notice when launching Roblox", w.settingsUpdateNotice.QWidget)
+
 	w.settingsFastFlags = qt.NewQPushButton3("Edit Fast Flags…")
 	setObjectName(w.settingsFastFlags.QObject, "secondaryButton")
 	w.settingsFastFlags.SetAccessibleName("Edit custom Fast Flags")
@@ -332,11 +339,12 @@ func (w *mainWindow) buildSettingsPage() *qt.QWidget {
 	actions.AddStretch()
 	w.settingsReset = qt.NewQPushButton3("Reset defaults")
 	setObjectName(w.settingsReset.QObject, "secondaryButton")
-	w.settingsReset.SetAccessibleDescription("Restore automatic renderer and frame-rate defaults with VSync disabled, high-quality textures, Discord Rich Presence off, Join button off, new Roblox windows windowed, and windows on the main monitor")
+	w.settingsReset.SetAccessibleDescription("Restore automatic renderer and frame-rate defaults with VSync disabled, high-quality textures, Discord Rich Presence off, Join button off, the launch update notice on, new Roblox windows windowed, and windows on the main monitor")
 	w.settingsReset.OnClicked(w.resetSettings)
 	actions.AddWidget(w.settingsReset.QWidget)
 	cardLayout.AddLayout(actions.QLayout)
 	layout.AddWidget(card.QWidget)
+	layout.AddWidget(w.buildUpdateCard().QWidget)
 	layout.AddWidget(w.buildControllerCard().QWidget)
 	layout.AddWidget(w.buildMicrophoneCard().QWidget)
 	layout.AddWidget(w.buildIntegrationCard().QWidget)
@@ -354,6 +362,7 @@ func (w *mainWindow) buildSettingsPage() *qt.QWidget {
 		w.settingsDiscordJoin.SetEnabled(false)
 		w.settingsDisplay.SetEnabled(false)
 		w.settingsStartFullscreen.SetEnabled(false)
+		w.settingsUpdateNotice.SetEnabled(false)
 		w.settingsApply.SetEnabled(false)
 		w.settingsReset.SetEnabled(false)
 		w.experimental.setInteractive(false)
@@ -382,6 +391,10 @@ func (w *mainWindow) buildSettingsPage() *qt.QWidget {
 		w.settingsDisplay.OnCurrentIndexChanged(func(int) { w.settingsEdited() })
 		w.settingsStartFullscreen.OnToggled(func(enabled bool) {
 			w.settingsStartFullscreen.SetText(startFullscreenToggleText(enabled))
+			w.settingsEdited()
+		})
+		w.settingsUpdateNotice.OnToggled(func(enabled bool) {
+			w.settingsUpdateNotice.SetText(updateNoticeToggleText(enabled))
 			w.settingsEdited()
 		})
 		w.updateSettingsControls()
@@ -436,6 +449,8 @@ func (w *mainWindow) bindSettings(settings guimodel.Settings) {
 	w.populateDisplayChoices(settings.Display)
 	w.setCheckBoxChecked(w.settingsStartFullscreen, settings.StartFullscreen)
 	w.setCheckBoxText(w.settingsStartFullscreen, startFullscreenToggleText(settings.StartFullscreen))
+	w.setCheckBoxChecked(w.settingsUpdateNotice, settings.ShowUpdateNotice)
+	w.setCheckBoxText(w.settingsUpdateNotice, updateNoticeToggleText(settings.ShowUpdateNotice))
 	w.bindExperimentalSettings(settings)
 }
 
@@ -476,7 +491,7 @@ func (w *mainWindow) populateDisplayChoices(selected string) {
 }
 
 func (w *mainWindow) settingsEdited() {
-	if w.settingsRenderer == nil || w.settingsVSync == nil || w.settingsLowTexture == nil || w.settingsDiscordPresence == nil || w.settingsDiscordJoin == nil || w.settingsStartFullscreen == nil || w.settingsSyncing {
+	if w.settingsRenderer == nil || w.settingsVSync == nil || w.settingsLowTexture == nil || w.settingsDiscordPresence == nil || w.settingsDiscordJoin == nil || w.settingsStartFullscreen == nil || w.settingsUpdateNotice == nil || w.settingsSyncing {
 		return
 	}
 	renderer := guimodel.RendererAuto
@@ -506,6 +521,7 @@ func (w *mainWindow) settingsEdited() {
 	draft.LowTextureMode = w.settingsLowTexture.IsChecked()
 	draft.Display = display
 	draft.StartFullscreen = w.settingsStartFullscreen.IsChecked()
+	draft.ShowUpdateNotice = w.settingsUpdateNotice.IsChecked()
 	draft.DiscordRichPresence = w.settingsDiscordPresence.IsChecked()
 	draft.DiscordJoinButton = w.settingsDiscordJoin.IsChecked()
 	w.settings.Edit(draft)
@@ -531,6 +547,9 @@ func (w *mainWindow) updateSettingsControls() {
 		setObjectName(w.settingsHint.QObject, "noticeWarning")
 	} else if view.Dirty && guimodel.DiscordOnlyChange(view.Draft, view.Saved) {
 		w.settingsHint.SetText("Changes are not saved yet. Discord Rich Presence applies while Roblox is running.")
+		setObjectName(w.settingsHint.QObject, "noticeWarning")
+	} else if view.Dirty && guimodel.UpdateNoticeOnlyChange(view.Draft, view.Saved) {
+		w.settingsHint.SetText("Changes are not saved yet. The in-game update notice applies to the next Tipsy launch.")
 		setObjectName(w.settingsHint.QObject, "noticeWarning")
 	} else if view.Dirty {
 		w.settingsHint.SetText("Changes are not saved yet. Applying them requires a Roblox restart.")
@@ -865,6 +884,13 @@ func startFullscreenToggleText(enabled bool) string {
 		return "✓ On — start in fullscreen"
 	}
 	return "Off — start in a window"
+}
+
+func updateNoticeToggleText(enabled bool) string {
+	if enabled {
+		return "✓ On — show the notice at launch"
+	}
+	return "Off — hide the in-game notice"
 }
 
 func displayTargetDisplay(settings guimodel.Settings) string {

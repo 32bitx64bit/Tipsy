@@ -411,7 +411,7 @@ func (s *productionService) Doctor(ctx context.Context) (guimodel.DoctorSummary,
 }
 
 func guiSettings(settings clientsettings.Settings) guimodel.Settings {
-	result := guimodel.Settings{Renderer: guimodel.Renderer(settings.Renderer), FPSMode: guimodel.FPSMode(settings.FrameRate.Mode), FrameRate: settings.FrameRate.Limit, VSync: settings.VSync, LowTextureMode: settings.LowTextureMode, Display: guimodel.NormalizeDisplay(settings.Display), StartFullscreen: settings.StartFullscreen, DiscordRichPresence: settings.DiscordRichPresence, DiscordJoinButton: settings.DiscordJoinButton, AntiLag: settings.AntiLag}
+	result := guimodel.Settings{Renderer: guimodel.Renderer(settings.Renderer), FPSMode: guimodel.FPSMode(settings.FrameRate.Mode), FrameRate: settings.FrameRate.Limit, VSync: settings.VSync, LowTextureMode: settings.LowTextureMode, Display: guimodel.NormalizeDisplay(settings.Display), StartFullscreen: settings.StartFullscreen, ShowUpdateNotice: settings.ShowUpdateNotice, DiscordRichPresence: settings.DiscordRichPresence, DiscordJoinButton: settings.DiscordJoinButton, AntiLag: settings.AntiLag}
 	if result.Renderer == "" {
 		result.Renderer = guimodel.RendererAuto
 	}
@@ -432,6 +432,7 @@ func backendSettings(settings guimodel.Settings) clientsettings.Settings {
 		LowTextureMode:      settings.LowTextureMode,
 		Display:             clientsettings.NormalizeDisplay(settings.Display),
 		StartFullscreen:     settings.StartFullscreen,
+		ShowUpdateNotice:    settings.ShowUpdateNotice,
 		DiscordRichPresence: settings.DiscordRichPresence,
 		DiscordJoinButton:   settings.DiscordJoinButton,
 		AntiLag:             settings.AntiLag,

@@ -15,6 +15,11 @@ int tipsy_focused_overlay_update(uintptr_t ptr, int visible, uint64_t version,
 	int multiline, int wrapped, int editable, int cursor_visible,
 	const unsigned char *text, int text_len, int cursor_byte);
 void tipsy_focused_overlay_free(uintptr_t ptr);
+int tipsy_update_notice_update(int visible, int viewport_width, int viewport_height,
+	int x, int y, int width, int height, double angle_degrees,
+	double opacity, double scale, const char *text, int text_len,
+	const uint32_t *icon_argb, int icon_width, int icon_height);
+void tipsy_update_notice_free(void);
 struct tipsy_focused_overlay_metrics {
 	int x, y, width, height;
 	uint32_t requested_argb;

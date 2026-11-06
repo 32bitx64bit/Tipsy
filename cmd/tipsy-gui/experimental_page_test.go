@@ -21,6 +21,9 @@ func TestMain(m *testing.M) {
 	probeAntiLagSupport = func() graphics.AntiLagSupport {
 		return graphics.AntiLagSupport{Reason: "anti-lag probe disabled in GUI tests"}
 	}
+	// No GUI test may reach the release API: every window built here starts
+	// with a fake fetch, and tests that need a result replace it per window.
+	updateCheckFetch = fakeReleaseFetch
 	os.Exit(m.Run())
 }
 

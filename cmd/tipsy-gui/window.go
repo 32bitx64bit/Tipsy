@@ -54,6 +54,7 @@ type mainWindow struct {
 	settingsDiscordJoin                              *qt.QCheckBox
 	settingsDisplay                                  *qt.QComboBox
 	settingsStartFullscreen                          *qt.QCheckBox
+	settingsUpdateNotice                             *qt.QCheckBox
 	settingsFastFlags                                *qt.QPushButton
 	settingsDisplayKeys                              []string
 	experimental                                     experimentalCardWidgets
@@ -128,6 +129,11 @@ type mainWindow struct {
 	doctorPending bool
 	doctorResult  chan doctorOutcome
 
+	updateCheck   *updateCheckState
+	updateSummary *qt.QLabel
+	updateDetail  *qt.QLabel
+	updateCommand *qt.QLabel
+
 	wizardDoctorPending bool
 	wizardDoctorResult  chan doctorOutcome
 	wizardDoctorStatus  *qt.QLabel
@@ -136,10 +142,11 @@ type mainWindow struct {
 
 func newWindowBase(service guimodel.Service, icon *qt.QIcon) *mainWindow {
 	w := &mainWindow{
-		icon:    icon,
-		metrics: &guiRuntimeMetrics{},
-		now:     time.Now,
-		quit:    qt.QCoreApplication_Quit,
+		icon:        icon,
+		metrics:     &guiRuntimeMetrics{},
+		now:         time.Now,
+		quit:        qt.QCoreApplication_Quit,
+		updateCheck: newUpdateCheckState(),
 	}
 
 	w.win = qt.NewQMainWindow2()
@@ -362,6 +369,11 @@ func (w *mainWindow) selectPage(index int) {
 		// only, no capture is opened.
 		w.refreshMicrophoneStatusAutomatically()
 	}
+	if index == settingsPageIndex {
+		// The first Settings open starts the one release check. Later opens
+		// reuse its result; nothing here waits for the network.
+		w.startUpdateCheck()
+	}
 	if index != 2 && w.controllerProbe != nil {
 		// Never hold a pad handle outside the Controller card.
 		w.stopControllerTest("Test is stopped.")
@@ -568,6 +580,7 @@ func (w *mainWindow) setLaunchAuthority(authority guimodel.LaunchAuthority) {
 
 func (w *mainWindow) refreshLaunchState() {
 	w.pollDoctor()
+	w.pollUpdateCheck()
 	if w.launchInitializing {
 		w.pollLaunchInitialization()
 		return

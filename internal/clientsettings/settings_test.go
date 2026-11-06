@@ -1232,3 +1232,47 @@ func TestLegacyPacingKeyStillLoads(t *testing.T) {
 		t.Fatalf("legacy document loaded as %+v", loaded)
 	}
 }
+
+func TestShowUpdateNoticeDefaultsOnPersistsAndResets(t *testing.T) {
+	s := testService(t)
+	writeXML(t, s, "-1")
+	if err := os.MkdirAll(filepath.Dir(s.Path), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	// A client-settings.json written before the toggle existed has no key.
+	old := []byte(`{"renderer":"auto","frameRate":{"mode":"auto"}}`)
+	if err := os.WriteFile(s.Path, old, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := s.Load(context.Background())
+	if err != nil || !got.ShowUpdateNotice {
+		t.Fatalf("old config update notice=%+v err=%v, want enabled", got, err)
+	}
+	if !Default().ShowUpdateNotice {
+		t.Fatalf("Default() update notice = false, want true")
+	}
+	unchanged, err := os.ReadFile(s.Path)
+	if err != nil || !bytes.Equal(unchanged, old) {
+		t.Fatalf("load rewrote old config=%q err=%v", unchanged, err)
+	}
+
+	got.ShowUpdateNotice = false
+	result, err := s.Apply(context.Background(), got)
+	if err != nil || result.RestartRequired || result.Settings.ShowUpdateNotice {
+		t.Fatalf("disable update notice result=%+v err=%v", result, err)
+	}
+	reloaded, err := s.Load(context.Background())
+	if err != nil || reloaded.ShowUpdateNotice {
+		t.Fatalf("reloaded update notice=%+v err=%v, want disabled", reloaded, err)
+	}
+	raw, err := os.ReadFile(s.Path)
+	if err != nil || !bytes.Contains(raw, []byte(`"showUpdateNotice": false`)) {
+		t.Fatalf("persisted update notice=%q err=%v", raw, err)
+	}
+
+	reset, err := s.Reset(context.Background())
+	if err != nil || !reset.ShowUpdateNotice || reset != Default() {
+		t.Fatalf("reset update notice=%+v err=%v", reset, err)
+	}
+}

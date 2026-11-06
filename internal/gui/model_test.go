@@ -403,13 +403,42 @@ func TestDiscordPresenceDefaultsOffAndDoesNotRestart(t *testing.T) {
 	if err := model.Load(context.Background()); err != nil {
 		t.Fatal(err)
 	}
-	view := model.Edit(Settings{Renderer: RendererAuto, FPSMode: FPSAuto, Display: DisplayPrimary, DiscordRichPresence: true, DiscordJoinButton: true})
+	view := model.Edit(Settings{Renderer: RendererAuto, FPSMode: FPSAuto, Display: DisplayPrimary, ShowUpdateNotice: true, DiscordRichPresence: true, DiscordJoinButton: true})
 	if !view.Dirty || !DiscordOnlyChange(view.Draft, view.Saved) {
 		t.Fatalf("join-only edit view=%+v", view)
 	}
 	result, err := model.Apply(context.Background())
 	if err != nil || result.RestartRequired || len(fake.applyCalls) != 1 || !fake.applyCalls[0].DiscordJoinButton {
 		t.Fatalf("discord apply result=%+v err=%v calls=%+v", result, err, fake.applyCalls)
+	}
+}
+
+func TestUpdateNoticeOnlyChangeNeedsNoRestart(t *testing.T) {
+	defaults := DefaultSettings()
+	if !defaults.ShowUpdateNotice {
+		t.Fatalf("update notice default = %+v, want enabled", defaults)
+	}
+	draft := defaults
+	draft.ShowUpdateNotice = false
+	if !UpdateNoticeOnlyChange(draft, defaults) || DiscordOnlyChange(draft, defaults) {
+		t.Fatalf("notice-only change draft=%+v saved=%+v", draft, defaults)
+	}
+	if UpdateNoticeOnlyChange(defaults, defaults) {
+		t.Fatal("unchanged settings reported a notice-only change")
+	}
+
+	fake := &fakeService{settings: defaults, noRestart: true}
+	model := NewSettingsModel(fake)
+	if err := model.Load(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	view := model.Edit(draft)
+	if !view.Dirty || !UpdateNoticeOnlyChange(view.Draft, view.Saved) {
+		t.Fatalf("notice-only edit view=%+v", view)
+	}
+	result, err := model.Apply(context.Background())
+	if err != nil || result.RestartRequired || len(fake.applyCalls) != 1 || fake.applyCalls[0].ShowUpdateNotice {
+		t.Fatalf("notice apply result=%+v err=%v calls=%+v", result, err, fake.applyCalls)
 	}
 }
 

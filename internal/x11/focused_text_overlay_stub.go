@@ -19,6 +19,12 @@ func (o *FocusedTextOverlay) Update(s FocusedTextSnapshot) error {
 	return ErrUnavailable
 }
 
+func (o *FocusedTextOverlay) UpdateNotice(frame UpdateNoticeFrame) error {
+	_ = o
+	_ = frame
+	return ErrUnavailable
+}
+
 func (o *FocusedTextOverlay) Close() error { return nil }
 
 func (o *FocusedTextOverlay) Diagnostics() FocusedTextOverlayDiagnostics {

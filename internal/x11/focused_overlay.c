@@ -17,6 +17,10 @@
 #include <stdlib.h>
 #include <string.h>
 
+#ifndef M_PI
+#define M_PI 3.14159265358979323846
+#endif
+
 /*
  * Font loading and Pango drawing happen on the writer-owned Cairo surface
  * with no reader-visible lock held, so a compositor's frame acquire waits at
@@ -47,11 +51,46 @@ struct tipsy_focused_overlay {
 	int text_origin_x, line_box_top, line_box_height, baseline_y;
 };
 
+/* The update card is an independent, passive layer. It shares the text
+ * compositor's lease API so both remain visible without an X11 child window. */
+struct tipsy_update_notice {
+	pthread_mutex_t writer;
+	pthread_mutex_t mutex;
+	pthread_cond_t readers_done;
+	unsigned readers;
+	int published;
+	int x, y, width, height, stride;
+	int viewport_width, viewport_height;
+	uint64_t generation;
+	uint8_t *rgba;
+	cairo_surface_t *surface;
+	cairo_t *cr;
+};
+
+struct tipsy_composite_lease {
+	struct tipsy_focused_overlay *text;
+	struct tipsy_update_notice *notice;
+	uint8_t *rgba;
+	size_t bytes;
+};
+
 static pthread_mutex_t published_mutex = PTHREAD_MUTEX_INITIALIZER;
 static struct tipsy_focused_overlay *published_overlay;
+static struct tipsy_update_notice update_notice = {
+	.writer = PTHREAD_MUTEX_INITIALIZER,
+	.mutex = PTHREAD_MUTEX_INITIALIZER,
+	.readers_done = PTHREAD_COND_INITIALIZER,
+};
+static struct tipsy_update_notice *published_notice;
 static _Atomic uint32_t overlay_live;
 
 static void wipe(void *p, size_t n) { if (p != NULL && n != 0) memset(p, 0, n); }
+
+static void tipsy_focused_overlay_update_live_locked(void)
+{
+	atomic_store_explicit(&overlay_live,
+		published_overlay != NULL || published_notice != NULL, memory_order_release);
+}
 
 static void tipsy_focused_overlay_mark_live_locked(void)
 {
@@ -60,11 +99,9 @@ static void tipsy_focused_overlay_mark_live_locked(void)
 
 static void tipsy_focused_overlay_clear_publish_locked(struct tipsy_focused_overlay *o)
 {
-	if (published_overlay == o) {
-		atomic_store_explicit(&overlay_live, 0, memory_order_release);
-		published_overlay = NULL;
-	}
+	if (published_overlay == o) published_overlay = NULL;
 	if (o != NULL) o->published = 0;
+	tipsy_focused_overlay_update_live_locked();
 }
 
 static void close_font(struct tipsy_focused_overlay *o) {
@@ -371,26 +408,399 @@ void tipsy_focused_overlay_free(uintptr_t ptr) {
 	pthread_mutex_destroy(&o->writer); wipe(o, sizeof(*o)); free(o);
 }
 
-int tipsy_focused_text_frame_acquire(struct tipsy_focused_text_frame *out) {
-	if (out == NULL) return 0;
-	memset(out, 0, sizeof(*out)); pthread_mutex_lock(&published_mutex);
-	struct tipsy_focused_overlay *o = published_overlay;
-	if (o == NULL) { pthread_mutex_unlock(&published_mutex); return 0; }
-	pthread_mutex_lock(&o->mutex);
-	if (!o->published || o->rgba == NULL) { pthread_mutex_unlock(&o->mutex); pthread_mutex_unlock(&published_mutex); return 0; }
-	o->readers++;
-	out->rgba = o->rgba; out->x = o->x; out->y = o->y; out->width = o->width;
-	out->height = o->height; out->stride = o->stride; out->generation = o->generation;
-	out->lease = (uintptr_t)o;
-	pthread_mutex_unlock(&o->mutex); pthread_mutex_unlock(&published_mutex); return 1;
+static void notice_wait_readers_locked(struct tipsy_update_notice *n) {
+	while (n->readers != 0) pthread_cond_wait(&n->readers_done, &n->mutex);
 }
 
-void tipsy_focused_text_frame_release(uintptr_t lease) {
-	struct tipsy_focused_overlay *o = (struct tipsy_focused_overlay *)lease;
-	if (o == NULL) return;
+static void notice_clear_surface(struct tipsy_update_notice *n) {
+	if (n->cr == NULL) return;
+	cairo_save(n->cr);
+	cairo_set_operator(n->cr, CAIRO_OPERATOR_CLEAR);
+	cairo_paint(n->cr);
+	cairo_restore(n->cr);
+	cairo_surface_flush(n->surface);
+}
+
+static void notice_discard_surface(struct tipsy_update_notice *n) {
+	notice_clear_surface(n);
+	if (n->cr != NULL) cairo_destroy(n->cr);
+	n->cr = NULL;
+	if (n->surface != NULL) cairo_surface_destroy(n->surface);
+	n->surface = NULL;
+}
+
+static void notice_unpublish(struct tipsy_update_notice *n) {
+	pthread_mutex_lock(&published_mutex);
+	pthread_mutex_lock(&n->mutex);
+	if (published_notice == n) published_notice = NULL;
+	n->published = 0;
+	tipsy_focused_overlay_update_live_locked();
+	pthread_mutex_unlock(&published_mutex);
+	notice_wait_readers_locked(n);
+	if (n->rgba != NULL) wipe(n->rgba, (size_t)n->stride * (size_t)n->height);
+	pthread_mutex_unlock(&n->mutex);
+}
+
+static int notice_ensure_surface(struct tipsy_update_notice *n, int width, int height) {
+	if (width < 1 || height < 1 || width > INT32_MAX / 4 ||
+		(size_t)height > SIZE_MAX / ((size_t)width * 4)) return -1;
+	if (n->surface != NULL && cairo_image_surface_get_width(n->surface) == width &&
+		cairo_image_surface_get_height(n->surface) == height) return 0;
+	notice_discard_surface(n);
+	n->surface = cairo_image_surface_create(CAIRO_FORMAT_ARGB32, width, height);
+	if (n->surface == NULL || cairo_surface_status(n->surface) != CAIRO_STATUS_SUCCESS) {
+		notice_discard_surface(n); return -1;
+	}
+	n->cr = cairo_create(n->surface);
+	if (n->cr == NULL || cairo_status(n->cr) != CAIRO_STATUS_SUCCESS) {
+		notice_discard_surface(n); return -1;
+	}
+	return 0;
+}
+
+static cairo_surface_t *notice_icon_surface(const uint32_t *pixels, int width, int height) {
+	if (pixels == NULL || width < 1 || height < 1 || width > INT32_MAX / 4 ||
+		(size_t)height > SIZE_MAX / ((size_t)width * 4)) return NULL;
+	cairo_surface_t *surface = cairo_image_surface_create(CAIRO_FORMAT_ARGB32, width, height);
+	if (surface == NULL || cairo_surface_status(surface) != CAIRO_STATUS_SUCCESS) {
+		if (surface != NULL) cairo_surface_destroy(surface);
+		return NULL;
+	}
+	uint8_t *destination = cairo_image_surface_get_data(surface);
+	int stride = cairo_image_surface_get_stride(surface);
+	for (int y = 0; y < height; ++y) for (int x = 0; x < width; ++x) {
+		uint32_t source = pixels[(size_t)y * (size_t)width + (size_t)x];
+		uint32_t alpha = source >> 24;
+		uint32_t red = (((source >> 16) & 255) * alpha + 127) / 255;
+		uint32_t green = (((source >> 8) & 255) * alpha + 127) / 255;
+		uint32_t blue = ((source & 255) * alpha + 127) / 255;
+		uint32_t converted = (alpha << 24) | (red << 16) | (green << 8) | blue;
+		memcpy(destination + (size_t)y * (size_t)stride + (size_t)x * 4, &converted, 4);
+	}
+	cairo_surface_mark_dirty(surface);
+	return surface;
+}
+
+static void notice_rounded_rectangle(cairo_t *cr, double width, double height, double radius) {
+	cairo_new_sub_path(cr);
+	cairo_arc(cr, width - radius, radius, radius, -M_PI / 2, 0);
+	cairo_arc(cr, width - radius, height - radius, radius, 0, M_PI / 2);
+	cairo_arc(cr, radius, height - radius, radius, M_PI / 2, M_PI);
+	cairo_arc(cr, radius, radius, radius, M_PI, 3 * M_PI / 2);
+	cairo_close_path(cr);
+}
+
+static int notice_rasterize(struct tipsy_update_notice *n, int width, int height,
+	double angle_degrees, double opacity, double scale, const char *text, int text_len,
+	const uint32_t *icon_argb, int icon_width, int icon_height) {
+	if (notice_ensure_surface(n, width, height) != 0) return -1;
+	notice_clear_surface(n);
+	cairo_save(n->cr);
+	cairo_set_operator(n->cr, CAIRO_OPERATOR_OVER);
+	cairo_translate(n->cr, (double)width / 2, (double)height / 2);
+	cairo_scale(n->cr, scale, scale);
+	cairo_translate(n->cr, -(double)width / 2, -(double)height / 2);
+	cairo_push_group(n->cr);
+	int result = -1;
+	notice_rounded_rectangle(n->cr, width, height, 14);
+	cairo_set_source_rgba(n->cr, 0.075, 0.085, 0.12, 0.96);
+	cairo_fill_preserve(n->cr);
+	cairo_set_source_rgba(n->cr, 0.45, 0.55, 0.78, 0.55);
+	cairo_set_line_width(n->cr, 1);
+	cairo_stroke(n->cr);
+
+	double icon_size = height - 24;
+	if (icon_size < 1 || icon_size > width - 48) goto group_done;
+	cairo_surface_t *icon = notice_icon_surface(icon_argb, icon_width, icon_height);
+	if (icon == NULL) goto group_done;
+	cairo_save(n->cr);
+	cairo_translate(n->cr, 12 + icon_size / 2, (double)height / 2);
+	cairo_rotate(n->cr, angle_degrees * M_PI / 180);
+	cairo_scale(n->cr, icon_size / icon_width, icon_size / icon_height);
+	cairo_set_source_surface(n->cr, icon, -(double)icon_width / 2, -(double)icon_height / 2);
+	cairo_paint(n->cr);
+	cairo_restore(n->cr);
+	cairo_surface_destroy(icon);
+
+	int text_x = 24 + (int)icon_size;
+	int text_width = width - text_x - 14;
+	if (text_width < 1) goto group_done;
+	PangoLayout *layout = pango_cairo_create_layout(n->cr);
+	PangoFontDescription *font = pango_font_description_new();
+	if (layout == NULL || font == NULL) {
+		if (layout != NULL) g_object_unref(layout);
+		if (font != NULL) pango_font_description_free(font);
+		goto group_done;
+	}
+	pango_font_description_set_family(font, "Sans");
+	pango_font_description_set_weight(font, PANGO_WEIGHT_SEMIBOLD);
+	pango_font_description_set_absolute_size(font, 15 * PANGO_SCALE);
+	pango_layout_set_font_description(layout, font);
+	pango_layout_set_single_paragraph_mode(layout, TRUE);
+	pango_layout_set_ellipsize(layout, PANGO_ELLIPSIZE_END);
+	pango_layout_set_width(layout, text_width * PANGO_SCALE);
+	pango_layout_set_text(layout, text, text_len);
+	PangoRectangle ink, logical;
+	pango_layout_get_pixel_extents(layout, &ink, &logical);
+	cairo_set_source_rgba(n->cr, 0.96, 0.97, 1, 1);
+	cairo_move_to(n->cr, text_x - logical.x, (height - logical.height) / 2 - logical.y);
+	pango_cairo_show_layout(n->cr, layout);
+	pango_font_description_free(font);
+	g_object_unref(layout);
+	result = 0;
+
+group_done:
+	if (result == 0) {
+		cairo_pop_group_to_source(n->cr);
+		cairo_paint_with_alpha(n->cr, opacity);
+	} else {
+		cairo_pattern_destroy(cairo_pop_group(n->cr));
+	}
+	cairo_restore(n->cr);
+	return result == 0 && cairo_status(n->cr) == CAIRO_STATUS_SUCCESS ? 0 : -1;
+}
+
+int tipsy_update_notice_update(int visible, int viewport_width, int viewport_height,
+	int x, int y, int width, int height, double angle_degrees,
+	double opacity, double scale, const char *text, int text_len,
+	const uint32_t *icon_argb, int icon_width, int icon_height) {
+	struct tipsy_update_notice *n = &update_notice;
+	pthread_mutex_lock(&n->writer);
+	if (!visible) {
+		notice_unpublish(n);
+		pthread_mutex_unlock(&n->writer);
+		return 0;
+	}
+	if (viewport_width < 1 || viewport_height < 1 || x < 0 || y < 0 ||
+		x >= viewport_width || y >= viewport_height || width < 1 || height < 1 ||
+		width > viewport_width || height > viewport_height || x > viewport_width - width ||
+		y > viewport_height - height || text == NULL || text_len < 1 || !isfinite(angle_degrees) ||
+		!isfinite(opacity) || opacity < 0 || opacity > 1 || !isfinite(scale) || scale <= 0) {
+		notice_unpublish(n);
+		pthread_mutex_unlock(&n->writer);
+		return -1;
+	}
+	if (notice_rasterize(n, width, height, angle_degrees, opacity, scale, text, text_len,
+		icon_argb, icon_width, icon_height) != 0) {
+		notice_unpublish(n);
+		pthread_mutex_unlock(&n->writer);
+		return -1;
+	}
+
+	pthread_mutex_lock(&published_mutex);
+	pthread_mutex_lock(&n->mutex);
+	notice_wait_readers_locked(n);
+	if (n->rgba == NULL || n->width != width || n->height != height) {
+		if (n->rgba != NULL) {
+			wipe(n->rgba, (size_t)n->stride * (size_t)n->height);
+			free(n->rgba);
+		}
+		n->rgba = calloc((size_t)width * 4, (size_t)height);
+		if (n->rgba == NULL) {
+			n->x = n->y = n->width = n->height = n->stride = 0;
+			published_notice = NULL;
+			n->published = 0;
+			tipsy_focused_overlay_update_live_locked();
+			pthread_mutex_unlock(&n->mutex);
+			pthread_mutex_unlock(&published_mutex);
+			pthread_mutex_unlock(&n->writer);
+			return -1;
+		}
+	}
+	int stride = width * 4;
+	cairo_surface_flush(n->surface);
+	const uint8_t *source = cairo_image_surface_get_data(n->surface);
+	int source_stride = cairo_image_surface_get_stride(n->surface);
+	for (int row = 0; row < height; ++row) for (int column = 0; column < width; ++column) {
+		uint32_t pixel = 0;
+		memcpy(&pixel, source + (size_t)row * (size_t)source_stride + (size_t)column * 4, 4);
+		uint8_t *out = n->rgba + (size_t)row * (size_t)stride + (size_t)column * 4;
+		out[0] = (uint8_t)(pixel >> 16);
+		out[1] = (uint8_t)(pixel >> 8);
+		out[2] = (uint8_t)pixel;
+		out[3] = (uint8_t)(pixel >> 24);
+	}
+	n->x = x; n->y = y; n->width = width; n->height = height; n->stride = stride;
+	n->viewport_width = viewport_width; n->viewport_height = viewport_height;
+	if (++n->generation == 0) n->generation = 1;
+	n->published = 1; published_notice = n;
+	tipsy_focused_overlay_mark_live_locked();
+	pthread_mutex_unlock(&n->mutex);
+	pthread_mutex_unlock(&published_mutex);
+	pthread_mutex_unlock(&n->writer);
+	return 0;
+}
+
+void tipsy_update_notice_free(void) {
+	struct tipsy_update_notice *n = &update_notice;
+	pthread_mutex_lock(&n->writer);
+	notice_unpublish(n);
+	notice_discard_surface(n);
+	if (n->rgba != NULL) wipe(n->rgba, (size_t)n->stride * (size_t)n->height);
+	free(n->rgba);
+	n->rgba = NULL;
+	n->x = n->y = n->width = n->height = n->stride = 0;
+	n->viewport_width = n->viewport_height = 0;
+	n->generation = 0;
+	pthread_mutex_unlock(&n->writer);
+}
+
+static void release_text_reader(struct tipsy_focused_overlay *o) {
 	pthread_mutex_lock(&o->mutex);
 	if (o->readers != 0 && --o->readers == 0) pthread_cond_broadcast(&o->readers_done);
 	pthread_mutex_unlock(&o->mutex);
+}
+
+static void release_notice_reader(struct tipsy_update_notice *n) {
+	pthread_mutex_lock(&n->mutex);
+	if (n->readers != 0 && --n->readers == 0) pthread_cond_broadcast(&n->readers_done);
+	pthread_mutex_unlock(&n->mutex);
+}
+
+static void composite_over(uint8_t *destination, int destination_width, int destination_height,
+	int destination_stride, const uint8_t *source, int source_width, int source_height,
+	int source_stride, int x, int y) {
+	int source_x0 = x < 0 ? -x : 0;
+	int source_y0 = y < 0 ? -y : 0;
+	int source_x1 = x + source_width > destination_width ? destination_width - x : source_width;
+	int source_y1 = y + source_height > destination_height ? destination_height - y : source_height;
+	if (source_x1 < 0) source_x1 = 0;
+	if (source_y1 < 0) source_y1 = 0;
+	if (source_x1 > source_width) source_x1 = source_width;
+	if (source_y1 > source_height) source_y1 = source_height;
+	for (int sy = source_y0; sy < source_y1; ++sy) for (int sx = source_x0; sx < source_x1; ++sx) {
+		const uint8_t *s = source + (size_t)sy * (size_t)source_stride + (size_t)sx * 4;
+		uint8_t *d = destination + (size_t)(y + sy) * (size_t)destination_stride + (size_t)(x + sx) * 4;
+		unsigned inverse = 255u - s[3];
+		for (int channel = 0; channel < 3; ++channel) {
+			d[channel] = (uint8_t)(s[channel] + ((unsigned)d[channel] * inverse + 127u) / 255u);
+		}
+		d[3] = (uint8_t)(s[3] + ((unsigned)d[3] * inverse + 127u) / 255u);
+	}
+}
+
+static int clip_to_viewport(int x, int y, int width, int height, int viewport_width,
+	int viewport_height, int *left, int *top, int *right, int *bottom) {
+	int64_t x0 = x < 0 ? 0 : x;
+	int64_t y0 = y < 0 ? 0 : y;
+	int64_t x1 = (int64_t)x + width > viewport_width ? viewport_width : (int64_t)x + width;
+	int64_t y1 = (int64_t)y + height > viewport_height ? viewport_height : (int64_t)y + height;
+	if (x0 >= x1 || y0 >= y1 || x1 <= 0 || y1 <= 0) return 0;
+	*left = (int)x0; *top = (int)y0; *right = (int)x1; *bottom = (int)y1;
+	return 1;
+}
+
+int tipsy_focused_text_frame_acquire(struct tipsy_focused_text_frame *out) {
+	if (out == NULL) return 0;
+	memset(out, 0, sizeof(*out));
+	pthread_mutex_lock(&published_mutex);
+	struct tipsy_focused_overlay *o = published_overlay;
+	struct tipsy_update_notice *n = published_notice;
+	if (o != NULL) {
+		pthread_mutex_lock(&o->mutex);
+		if (!o->published || o->rgba == NULL) {
+			pthread_mutex_unlock(&o->mutex);
+			o = NULL;
+		} else {
+			o->readers++;
+		}
+	}
+	if (n != NULL) {
+		pthread_mutex_lock(&n->mutex);
+		if (!n->published || n->rgba == NULL) {
+			pthread_mutex_unlock(&n->mutex);
+			n = NULL;
+		} else {
+			n->readers++;
+		}
+	}
+	if (o == NULL && n == NULL) {
+		pthread_mutex_unlock(&published_mutex);
+		return 0;
+	}
+	if (o != NULL && n != NULL) {
+		int tx0, ty0, tx1, ty1, nx0, ny0, nx1, ny1;
+		int text_visible = clip_to_viewport(o->x, o->y, o->width, o->height,
+			n->viewport_width, n->viewport_height, &tx0, &ty0, &tx1, &ty1);
+		int notice_visible = clip_to_viewport(n->x, n->y, n->width, n->height,
+			n->viewport_width, n->viewport_height, &nx0, &ny0, &nx1, &ny1);
+		if (notice_visible) {
+			int x0 = text_visible && tx0 < nx0 ? tx0 : nx0;
+			int y0 = text_visible && ty0 < ny0 ? ty0 : ny0;
+			int x1 = text_visible && tx1 > nx1 ? tx1 : nx1;
+			int y1 = text_visible && ty1 > ny1 ? ty1 : ny1;
+			int width = x1 - x0, height = y1 - y0;
+			struct tipsy_composite_lease *composite = calloc(1, sizeof(*composite));
+			if (composite != NULL && width > 0 && height > 0 && width <= INT32_MAX / 4 &&
+				(size_t)height <= SIZE_MAX / ((size_t)width * 4)) {
+				composite->bytes = (size_t)width * (size_t)height * 4;
+				composite->rgba = calloc(1, composite->bytes);
+			}
+			if (composite != NULL && composite->rgba != NULL) {
+				composite->text = o; composite->notice = n;
+				if (text_visible) {
+					composite_over(composite->rgba, width, height, width * 4,
+						o->rgba, o->width, o->height, o->stride, o->x - x0, o->y - y0);
+				}
+				composite_over(composite->rgba, width, height, width * 4,
+					n->rgba, n->width, n->height, n->stride, n->x - x0, n->y - y0);
+				out->rgba = composite->rgba; out->x = x0; out->y = y0;
+				out->width = width; out->height = height; out->stride = width * 4;
+				out->generation = (o->generation * UINT64_C(16777619)) ^ n->generation;
+				if (out->generation == 0) out->generation = 1;
+				out->lease = ((uintptr_t)composite) | 1u;
+				pthread_mutex_unlock(&n->mutex);
+				pthread_mutex_unlock(&o->mutex);
+				pthread_mutex_unlock(&published_mutex);
+				return 1;
+			}
+			if (composite != NULL) {
+				wipe(composite->rgba, composite->bytes);
+				free(composite->rgba); free(composite);
+			}
+		}
+		/* An off-viewport card or an allocation failure drops only the cosmetic
+		 * card; focused text keeps its own lease below. */
+	}
+	if (o != NULL) {
+		out->rgba = o->rgba; out->x = o->x; out->y = o->y; out->width = o->width;
+		out->height = o->height; out->stride = o->stride; out->generation = o->generation;
+		out->lease = (uintptr_t)o;
+		if (n != NULL) {
+			if (n->readers != 0 && --n->readers == 0) pthread_cond_broadcast(&n->readers_done);
+			pthread_mutex_unlock(&n->mutex);
+		}
+		pthread_mutex_unlock(&o->mutex);
+		pthread_mutex_unlock(&published_mutex);
+		return 1;
+	}
+	out->rgba = n->rgba; out->x = n->x; out->y = n->y; out->width = n->width;
+	out->height = n->height; out->stride = n->stride; out->generation = n->generation;
+	out->lease = ((uintptr_t)n) | 2u;
+	pthread_mutex_unlock(&n->mutex);
+	pthread_mutex_unlock(&published_mutex);
+	return 1;
+}
+
+void tipsy_focused_text_frame_release(uintptr_t lease) {
+	if (lease == 0) return;
+	uintptr_t raw = lease & ~(uintptr_t)3u;
+	switch (lease & 3u) {
+	case 1: {
+		struct tipsy_composite_lease *composite = (struct tipsy_composite_lease *)raw;
+		release_text_reader(composite->text);
+		release_notice_reader(composite->notice);
+		wipe(composite->rgba, composite->bytes);
+		free(composite->rgba); wipe(composite, sizeof(*composite)); free(composite);
+		break;
+	}
+	case 2:
+		release_notice_reader((struct tipsy_update_notice *)raw);
+		break;
+	default:
+		release_text_reader((struct tipsy_focused_overlay *)raw);
+		break;
+	}
 }
 
 int tipsy_focused_text_overlay_live(void) {

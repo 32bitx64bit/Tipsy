@@ -33,13 +33,16 @@ const (
 )
 
 type Settings struct {
-	Renderer            Renderer
-	FPSMode             FPSMode
-	FrameRate           int
-	VSync               bool
-	LowTextureMode      bool
-	Display             string
-	StartFullscreen     bool
+	Renderer        Renderer
+	FPSMode         FPSMode
+	FrameRate       int
+	VSync           bool
+	LowTextureMode  bool
+	Display         string
+	StartFullscreen bool
+	// ShowUpdateNotice enables the small in-game card shown at launch when a
+	// newer Tipsy release exists. It defaults on and never blocks a launch.
+	ShowUpdateNotice    bool
 	DiscordRichPresence bool
 	DiscordJoinButton   bool
 	// AntiLag is the only experimental performance arm. It defaults off and is
@@ -64,7 +67,7 @@ const (
 )
 
 func DefaultSettings() Settings {
-	return Settings{Renderer: RendererAuto, FPSMode: FPSAuto, VSync: false, LowTextureMode: false, Display: DisplayPrimary, StartFullscreen: false}
+	return Settings{Renderer: RendererAuto, FPSMode: FPSAuto, VSync: false, LowTextureMode: false, Display: DisplayPrimary, StartFullscreen: false, ShowUpdateNotice: true}
 }
 
 func ValidateSettings(settings Settings, renderers []RendererOption) error {
@@ -191,6 +194,19 @@ func DiscordOnlyChange(draft, saved Settings) bool {
 	}
 	draft.DiscordRichPresence, draft.DiscordJoinButton = false, false
 	saved.DiscordRichPresence, saved.DiscordJoinButton = false, false
+	return draft == saved
+}
+
+// UpdateNoticeOnlyChange reports a draft that differs from saved settings only
+// in the in-game update notice preference, which applies on the next Tipsy
+// launch and needs no Roblox restart.
+func UpdateNoticeOnlyChange(draft, saved Settings) bool {
+	draft = normalizeSettings(draft)
+	saved = normalizeSettings(saved)
+	if draft.ShowUpdateNotice == saved.ShowUpdateNotice {
+		return false
+	}
+	draft.ShowUpdateNotice, saved.ShowUpdateNotice = false, false
 	return draft == saved
 }
 

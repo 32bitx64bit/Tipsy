@@ -172,6 +172,12 @@ type Settings struct {
 	// window. It does not read, change, or mirror Roblox's in-app fullscreen
 	// setting. The missing JSON field keeps existing installations windowed.
 	StartFullscreen bool `json:"startFullscreen"`
+	// ShowUpdateNotice enables the small in-game card that appears when a
+	// newer Tipsy release exists. It is a Tipsy-owned preference, enabled by
+	// default: the missing JSON field keeps the notice on for existing
+	// installations. The launcher reads it at launch; it never blocks the
+	// launch or the update check.
+	ShowUpdateNotice bool `json:"showUpdateNotice"`
 	// DiscordRichPresence shows the current experience on Discord. Missing
 	// JSON and Default() leave it off. DiscordJoinButton stays off unless
 	// explicitly enabled.
@@ -382,9 +388,10 @@ func RobloxSettingsPath() string {
 
 func Default() Settings {
 	return Settings{
-		Renderer:  RendererAuto,
-		FrameRate: FrameRate{Mode: FrameRateAuto},
-		Display:   DisplayPrimary,
+		Renderer:         RendererAuto,
+		FrameRate:        FrameRate{Mode: FrameRateAuto},
+		Display:          DisplayPrimary,
+		ShowUpdateNotice: true,
 	}
 }
 
@@ -453,6 +460,7 @@ func settingsDocumentOnlyChange(draft, saved Settings) bool {
 	documentOnly := func(s Settings) Settings {
 		s.DiscordRichPresence, s.DiscordJoinButton = false, false
 		s.StartFullscreen = false
+		s.ShowUpdateNotice = false
 		s.AntiLag = false
 		return s
 	}
@@ -667,6 +675,8 @@ func (s *Service) applyDocumentOnlyLocked(ctx context.Context, wanted Settings) 
 		applyNote = noteForDisplay(wanted.Display)
 	case oldDoc.StartFullscreen != wanted.StartFullscreen:
 		applyNote = noteForStartFullscreen(wanted.StartFullscreen)
+	case oldDoc.ShowUpdateNotice != wanted.ShowUpdateNotice:
+		applyNote = "Update notice preference saved. The next Roblox launch uses it."
 	case oldDoc.DiscordRichPresence != wanted.DiscordRichPresence || oldDoc.DiscordJoinButton != wanted.DiscordJoinButton:
 		applyNote = noteForDiscord(wanted)
 	}
@@ -980,6 +990,7 @@ type persistedWire struct {
 	LowTextureMode      bool       `json:"lowTextureMode"`
 	Display             string     `json:"display,omitempty"`
 	StartFullscreen     bool       `json:"startFullscreen"`
+	ShowUpdateNotice    *bool      `json:"showUpdateNotice"`
 	DiscordRichPresence *bool      `json:"discordRichPresence"`
 	DiscordJoinButton   bool       `json:"discordJoinButton"`
 	AntiLag             bool       `json:"antiLag"`
@@ -996,6 +1007,7 @@ type persistedWriteWire struct {
 	LowTextureMode      bool       `json:"lowTextureMode"`
 	Display             string     `json:"display,omitempty"`
 	StartFullscreen     bool       `json:"startFullscreen"`
+	ShowUpdateNotice    bool       `json:"showUpdateNotice"`
 	DiscordRichPresence bool       `json:"discordRichPresence"`
 	DiscordJoinButton   bool       `json:"discordJoinButton"`
 	AntiLag             bool       `json:"antiLag"`
@@ -1007,7 +1019,7 @@ type persistedWriteWire struct {
 
 var persistedSettingKeys = map[string]struct{}{
 	"renderer": {}, "frameRate": {}, "vsync": {}, "lowTextureMode": {},
-	"display": {}, "startFullscreen": {}, "discordRichPresence": {},
+	"display": {}, "startFullscreen": {}, "showUpdateNotice": {}, "discordRichPresence": {},
 	"discordJoinButton": {}, "antiLag": {},
 	// Retired experimental keys stay known so a document written by an older
 	// version loads without error and the next save drops them instead of
@@ -1042,6 +1054,10 @@ func decodePersisted(data []byte, got *persistedSettings) error {
 	if wire.DiscordRichPresence != nil {
 		presence = *wire.DiscordRichPresence
 	}
+	updateNotice := true
+	if wire.ShowUpdateNotice != nil {
+		updateNotice = *wire.ShowUpdateNotice
+	}
 	*got = persistedSettings{
 		Settings: Settings{
 			Renderer:            wire.Renderer,
@@ -1050,6 +1066,7 @@ func decodePersisted(data []byte, got *persistedSettings) error {
 			LowTextureMode:      wire.LowTextureMode,
 			Display:             wire.Display,
 			StartFullscreen:     wire.StartFullscreen,
+			ShowUpdateNotice:    updateNotice,
 			DiscordRichPresence: presence,
 			DiscordJoinButton:   wire.DiscordJoinButton,
 			AntiLag:             wire.AntiLag,
@@ -1073,6 +1090,7 @@ func (doc persistedSettings) MarshalJSON() ([]byte, error) {
 		LowTextureMode:      doc.LowTextureMode,
 		Display:             doc.Display,
 		StartFullscreen:     doc.StartFullscreen,
+		ShowUpdateNotice:    doc.ShowUpdateNotice,
 		DiscordRichPresence: doc.DiscordRichPresence,
 		DiscordJoinButton:   doc.DiscordJoinButton,
 		AntiLag:             doc.AntiLag,

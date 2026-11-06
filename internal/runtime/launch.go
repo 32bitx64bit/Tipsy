@@ -21,6 +21,8 @@ import (
 	"github.com/tipsy-linux/tipsy/internal/jni"
 	"github.com/tipsy-linux/tipsy/internal/loader"
 	"github.com/tipsy-linux/tipsy/internal/logging"
+	"github.com/tipsy-linux/tipsy/internal/updatecheck"
+	"github.com/tipsy-linux/tipsy/internal/version"
 	"github.com/tipsy-linux/tipsy/internal/x11"
 )
 
@@ -196,6 +198,13 @@ func Launch(ctx context.Context, opt LaunchOptions) error {
 	settings, err := settingsService.Load(ctx)
 	if err != nil {
 		return fmt.Errorf("load client settings: %w", err)
+	}
+	var updateNoticeResults <-chan updateNoticeResult
+	if !opt.Probe {
+		checkCtx, cancelUpdateCheck := context.WithCancel(ctx)
+		defer cancelUpdateCheck()
+		client := updatecheck.Client{Timeout: launchUpdateCheckTimeout, UserAgent: "Tipsy-Linux"}
+		updateNoticeResults = startLaunchUpdateCheck(checkCtx, version.Version, client.Latest)
 	}
 	testOpenGL, err := testOpenGLRequested(os.Getenv)
 	if err != nil {
@@ -414,6 +423,26 @@ func Launch(ctx context.Context, opt LaunchOptions) error {
 		textOverlayWake.sync(focusedTextSync.active)
 	}
 	refreshFocusedText(time.Now())
+	var updateNotice updateNoticeAnimation
+	var updateNoticeTicker updateNoticeWake
+	defer updateNoticeTicker.stop()
+	updateNoticeErrorLogged := false
+	refreshUpdateNotice := func(now time.Time) {
+		width, _ := win.Size()
+		frame := updateNotice.frame(now, width)
+		if err := focusedTextOverlay.UpdateNotice(frame); err != nil && !updateNoticeErrorLogged {
+			logging.Logger(logging.CatX11).Warn("in-game update notice unavailable", "err", err)
+			updateNoticeErrorLogged = true
+		} else if err == nil {
+			updateNoticeErrorLogged = false
+		}
+		updateNoticeTicker.sync(&updateNotice, now)
+	}
+	startUpdateNotice := func(tag string, loopStartedAt time.Time) {
+		now := time.Now()
+		updateNotice.start(tag, now, loopStartedAt)
+		refreshUpdateNotice(now)
+	}
 	defer jni.ClearRobloxDirectInputTarget()
 	defer jni.ClearRobloxDirectKeyTarget()
 	defer jni.ClearRobloxTextInputTarget()
@@ -483,14 +512,19 @@ func Launch(ctx context.Context, opt LaunchOptions) error {
 		}
 	}
 	return runLaunchLoop(launchLoopSources{
-		ctx:                ctx,
-		inputReady:         win.InputReady(),
-		refreshReady:       win.RefreshReady(),
-		textOverlayWake:    textOverlayWake.C,
-		resizeSettle:       func() <-chan time.Time { return resizeSettleC },
-		pump:               win.Pump,
-		refreshFocusedText: refreshFocusedText,
-		flushResize:        flushSurfaceResize,
+		ctx:                 ctx,
+		inputReady:          win.InputReady(),
+		refreshReady:        win.RefreshReady(),
+		textOverlayWake:     textOverlayWake.C,
+		updateNoticeWake:    updateNoticeTicker.C,
+		updateNoticeResults: updateNoticeResults,
+		updateNoticeEnabled: settings.ShowUpdateNotice,
+		resizeSettle:        func() <-chan time.Time { return resizeSettleC },
+		pump:                win.Pump,
+		refreshFocusedText:  refreshFocusedText,
+		startUpdateNotice:   startUpdateNotice,
+		refreshUpdateNotice: refreshUpdateNotice,
+		flushResize:         flushSurfaceResize,
 		publishRefresh: func() {
 			if err := refreshPublication.update(win.RefreshVersion(), presenter.refreshRates, func(current float32, supported []float32) error {
 				return publishDisplayRefreshRates(mod, vm.Env(), current, supported)
@@ -514,16 +548,21 @@ const (
 
 // launchLoopSources is the live client loop's event and callback surface.
 type launchLoopSources struct {
-	ctx                context.Context
-	inputReady         <-chan struct{}
-	refreshReady       <-chan struct{}
-	textOverlayWake    func() <-chan time.Time
-	resizeSettle       func() <-chan time.Time
-	pump               func() error
-	refreshFocusedText func(time.Time)
-	flushResize        func()
-	publishRefresh     func()
-	diagnostics        func()
+	ctx                 context.Context
+	inputReady          <-chan struct{}
+	refreshReady        <-chan struct{}
+	textOverlayWake     func() <-chan time.Time
+	updateNoticeWake    func() <-chan time.Time
+	updateNoticeResults <-chan updateNoticeResult
+	updateNoticeEnabled bool
+	resizeSettle        func() <-chan time.Time
+	pump                func() error
+	refreshFocusedText  func(time.Time)
+	startUpdateNotice   func(string, time.Time)
+	refreshUpdateNotice func(time.Time)
+	flushResize         func()
+	publishRefresh      func()
+	diagnostics         func()
 	// diagnosticsTick is a test-only clock seam. Production leaves it nil and
 	// uses diagnosticsPeriod's ticker; injecting a channel pins cadence without
 	// adding another launch-loop event source.
@@ -534,6 +573,7 @@ type launchLoopSources struct {
 // rates on refresh-generation change or the fallback period, logs diagnostics
 // when enabled, and runs the focused-text, resize-settle, and input paths.
 func runLaunchLoop(src launchLoopSources, shutdownClient func(reason string), refreshFallback, diagnosticsPeriod time.Duration) error {
+	loopStartedAt := time.Now()
 	var refreshFallbackC <-chan time.Time
 	if refreshFallback > 0 {
 		fallback := time.NewTicker(refreshFallback)
@@ -550,6 +590,11 @@ func runLaunchLoop(src launchLoopSources, shutdownClient func(reason string), re
 			diagnosticsC = diagnostics.C
 		}
 	}
+	updateNoticeWake := func() <-chan time.Time { return nil }
+	if src.updateNoticeWake != nil {
+		updateNoticeWake = src.updateNoticeWake
+	}
+	updateNoticeResults := src.updateNoticeResults
 	for {
 		select {
 		case <-src.ctx.Done():
@@ -563,6 +608,16 @@ func runLaunchLoop(src launchLoopSources, shutdownClient func(reason string), re
 			src.publishRefresh()
 		case now := <-src.textOverlayWake():
 			src.refreshFocusedText(now)
+		case result, ok := <-updateNoticeResults:
+			if !ok {
+				updateNoticeResults = nil
+			} else if src.updateNoticeEnabled && src.startUpdateNotice != nil {
+				src.startUpdateNotice(result.tag, loopStartedAt)
+			}
+		case now := <-updateNoticeWake():
+			if src.refreshUpdateNotice != nil {
+				src.refreshUpdateNotice(now)
+			}
 		case <-src.resizeSettle():
 			src.flushResize()
 		case <-src.inputReady:

@@ -143,6 +143,7 @@ func (o *FocusedTextOverlay) Close() error {
 		if o.native != 0 {
 			C.tipsy_focused_overlay_free(C.uintptr_t(o.native))
 		}
+		C.tipsy_update_notice_free()
 		o.window.mu.Unlock()
 	}
 	o.native = 0
@@ -225,6 +226,7 @@ type focusedTextForegroundLeaseForTest struct {
 	x, y, width, height, stride int
 	generation                  uint64
 	lease                       uintptr
+	pixels                      unsafe.Pointer
 }
 
 func acquireFocusedTextForegroundForTest() (focusedTextForegroundLeaseForTest, bool) {
@@ -240,6 +242,7 @@ func acquireFocusedTextForegroundForTest() (focusedTextForegroundLeaseForTest, b
 		stride:     int(frame.stride),
 		generation: uint64(frame.generation),
 		lease:      uintptr(frame.lease),
+		pixels:     unsafe.Pointer(frame.rgba),
 	}, true
 }
 
@@ -247,6 +250,14 @@ func (f focusedTextForegroundLeaseForTest) release() {
 	if f.lease != 0 {
 		C.tipsy_focused_text_frame_release(C.uintptr_t(f.lease))
 	}
+}
+
+func (f focusedTextForegroundLeaseForTest) alphaAt(x, y int) (uint8, bool) {
+	if f.pixels == nil || x < f.x || y < f.y || x >= f.x+f.width || y >= f.y+f.height {
+		return 0, false
+	}
+	offset := (y-f.y)*f.stride + (x-f.x)*4 + 3
+	return *(*uint8)(unsafe.Add(f.pixels, offset)), true
 }
 
 func focusedTextOverlayLiveForTest() bool {
