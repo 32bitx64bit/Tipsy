@@ -251,6 +251,21 @@ func Launch(ctx context.Context, opt LaunchOptions) error {
 		return fmt.Errorf("website sign-in: %w", err)
 	}
 
+	ver := runtimeFiles.VersionName
+	// The Android app-settings GET is the one measured 2.0-2.6 s startup cost and
+	// needs only the launch context and client version. Start it before the X11
+	// window maps so window creation, JNI wiring and the cursor scan overlap it;
+	// startRobloxApp joins it just before nativeInitClientSettings. Probe launches
+	// return before that join, so they skip the download entirely.
+	var settingsFetch *androidAppSettingsFetch
+	if !opt.Probe {
+		fetchCtx, cancelFetch := context.WithCancel(ctx)
+		// An early return (window or renderer failure) aborts the in-flight GET
+		// instead of leaving it to the 20 s bound.
+		defer cancelFetch()
+		settingsFetch = startAndroidAppSettingsFetch(fetchCtx, ver)
+	}
+
 	goruntime.LockOSThread()
 	win, err := x11.OpenOnDisplay("Roblox", opt.Width, opt.Height, settings.Display)
 	if err != nil {
@@ -290,7 +305,6 @@ func Launch(ctx context.Context, opt LaunchOptions) error {
 		return fmt.Errorf("jni: %w", err)
 	}
 	vm.SetDirs(files, cache, obb, assets)
-	ver := runtimeFiles.VersionName
 	vm.SetAppVersion(ver)
 	logging.Logger(logging.CatRuntime).Info("installed client", "version", ver)
 	vm.SetDisplaySize(opt.Width, opt.Height)
@@ -338,7 +352,7 @@ func Launch(ctx context.Context, opt LaunchOptions) error {
 	refreshVersion := win.RefreshVersion()
 	currentRefreshHz, supportedRefreshHz := presenter.refreshRates()
 	session, err := startGameActivity(ctx, vm, mod, aw, files, cache, preferences, obb, assets, ver,
-		opt.Width, opt.Height, currentRefreshHz, supportedRefreshHz, opt.Request, testOpenGL, rendererCaps)
+		opt.Width, opt.Height, currentRefreshHz, supportedRefreshHz, opt.Request, testOpenGL, rendererCaps, settingsFetch)
 	if err != nil {
 		return err
 	}

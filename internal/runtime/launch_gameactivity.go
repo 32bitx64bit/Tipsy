@@ -497,7 +497,7 @@ func (s *gameActivitySession) shutdown(reason string) time.Duration {
 	return s.shutdownDuration
 }
 
-func startGameActivity(ctx context.Context, vm *jni.VM, mod *loader.Module, aw *android.Window, files, cache, preferences, obb, assets, version string, width, height int, currentRefreshHz float32, supportedRefreshHz []float32, req rbxuri.Request, testOpenGL bool, rendererCaps graphics.RendererCapabilities) (*gameActivitySession, error) {
+func startGameActivity(ctx context.Context, vm *jni.VM, mod *loader.Module, aw *android.Window, files, cache, preferences, obb, assets, version string, width, height int, currentRefreshHz float32, supportedRefreshHz []float32, req rbxuri.Request, testOpenGL bool, rendererCaps graphics.RendererCapabilities, settingsFetch *androidAppSettingsFetch) (*gameActivitySession, error) {
 	env := vm.Env()
 	activity := env.AllocObject(env.FindClass("com/roblox/client/startup/MainGameActivity"))
 	if activity == 0 {
@@ -549,7 +549,7 @@ func startGameActivity(ctx context.Context, vm *jni.VM, mod *loader.Module, aw *
 	x11.SetWebViewAssetsDir(assets)
 	wireRobloxWebViewProtocol(mod, env)
 	return dispatchGameActivityLifecycle(ctx, vm, mod, env, activity, uintptr(handle), commands, files, cache, preferences, assets, version,
-		width, height, currentRefreshHz, supportedRefreshHz, aw, req, overrides, overrideErr), nil
+		width, height, currentRefreshHz, supportedRefreshHz, aw, req, overrides, overrideErr, settingsFetch), nil
 }
 
 // deliverTextInputConnection delivers the Tipsy-owned InputConnection (a real
@@ -714,7 +714,7 @@ func wireRobloxTextInput(mod *loader.Module, env *jni.Env) {
 	jni.SetRobloxTextInputTarget(env, class, passFn, returnFn, syncFn, getInfoFn, loader.CallP8)
 }
 
-func dispatchGameActivityLifecycle(ctx context.Context, vm *jni.VM, mod *loader.Module, env *jni.Env, activity, handle uintptr, commands appCommandWriter, files, cache, preferences, assets, version string, width, height int, currentRefreshHz float32, supportedRefreshHz []float32, aw *android.Window, req rbxuri.Request, overrides androidAppOverrides, overrideErr error) *gameActivitySession {
+func dispatchGameActivityLifecycle(ctx context.Context, vm *jni.VM, mod *loader.Module, env *jni.Env, activity, handle uintptr, commands appCommandWriter, files, cache, preferences, assets, version string, width, height int, currentRefreshHz float32, supportedRefreshHz []float32, aw *android.Window, req rbxuri.Request, overrides androidAppOverrides, overrideErr error, settingsFetch *androidAppSettingsFetch) *gameActivitySession {
 	call := func(name, sig string, extra ...uintptr) {
 		callGameActivityNative(vm, env, activity, handle, name, sig, extra...)
 	}
@@ -723,7 +723,7 @@ func dispatchGameActivityLifecycle(ctx context.Context, vm *jni.VM, mod *loader.
 	content := assetContentDir(assets)
 	setRobloxAssetPath(mod, env, activity, content)
 	handleColdStartProtocolLaunch(mod, env, activity, req)
-	startRobloxApp(ctx, mod, env, activity, files, version, overrides, overrideErr)
+	startRobloxApp(ctx, mod, env, activity, files, version, overrides, overrideErr, settingsFetch)
 	// Publish Display's current and supported refresh rates after client-settings
 	// init and before resume/surface/V2Start, matching the named JNI boundary,
 	// using the XRandR modes of this window's active output.
@@ -882,12 +882,12 @@ func runMainGameActivityOnCreateBoundary(externalOverrides string, preload func(
 	superCreate()
 }
 
-func startRobloxApp(ctx context.Context, mod *loader.Module, env *jni.Env, activity uintptr, files, version string, overrides androidAppOverrides, overrideErr error) {
+func startRobloxApp(ctx context.Context, mod *loader.Module, env *jni.Env, activity uintptr, files, version string, overrides androidAppOverrides, overrideErr error, settingsFetch *androidAppSettingsFetch) {
 	if overrideErr != nil {
 		logging.Logger(logging.CatGameActivity).Info("client settings unavailable", "err", overrideErr)
 		return
 	}
-	flags, _, err := loadAndroidAppSettings(ctx, filepath.Join(files, "ClientAppSettings.json"), version, overrides)
+	flags, _, err := settingsFetch.join(ctx, filepath.Join(files, "ClientAppSettings.json"), version, overrides)
 	if err != nil || flags == "" {
 		logging.Logger(logging.CatGameActivity).Info("client settings unavailable", "err", err)
 		return

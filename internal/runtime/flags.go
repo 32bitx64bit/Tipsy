@@ -334,27 +334,92 @@ func loadAndroidAppOverrides(ctx context.Context, cachePath string, testOpenGL b
 	return androidAppOverrides{values: overrides, external: external}, nil
 }
 
+// androidAppSettingsFetch is one ClientAppSettings download started before the
+// lifecycle phase that consumes it. The blocking HTTP GET is the measured
+// 2.0-2.6 s startup cost; window creation, JNI wiring and the cursor scan run
+// while it is in flight. Only the cheap parse, override merge and cache write
+// stay at the join point, so the guest still receives freshly fetched JSON.
+type androidAppSettingsFetch struct {
+	done chan struct{}
+	body []byte
+	err  error
+}
+
+// startAndroidAppSettingsFetch launches the download on its own goroutine. It
+// needs only the launch context and client version, so callers start it as soon
+// as both exist, before the window is mapped.
+func startAndroidAppSettingsFetch(ctx context.Context, version string) *androidAppSettingsFetch {
+	return startAndroidAppSettingsFetchWith(func() ([]byte, error) {
+		return fetchAndroidAppSettings(ctx, version)
+	})
+}
+
+func startAndroidAppSettingsFetchWith(fetch func() ([]byte, error)) *androidAppSettingsFetch {
+	f := &androidAppSettingsFetch{done: make(chan struct{})}
+	go func() {
+		defer close(f.done)
+		f.body, f.err = fetch()
+	}()
+	return f
+}
+
+// join blocks until the early fetch finishes and applies the exact synchronous
+// semantics: a fresh response is merged and cached, a fetch or parse failure
+// falls back to the last good cached file. A nil fetch keeps the old blocking
+// path for callers that have no early start.
+func (f *androidAppSettingsFetch) join(ctx context.Context, cachePath, version string, overrides androidAppOverrides) (string, int, error) {
+	if f == nil {
+		return loadAndroidAppSettings(ctx, cachePath, version, overrides)
+	}
+	<-f.done
+	return androidAppSettingsResult(f.body, f.err, cachePath, overrides)
+}
+
 func loadAndroidAppSettings(ctx context.Context, cachePath, version string, overrides androidAppOverrides) (string, int, error) {
 	if ctx == nil {
 		ctx = context.Background()
 	}
 	body, err := fetchAndroidAppSettings(ctx, version)
-	if err != nil {
-		if cachePath != "" {
-			if cached, rerr := os.ReadFile(cachePath); rerr == nil && len(cached) > 2 {
-				return applicationSettingsFromResponseWithOverrides(cached, overrides.values)
-			}
+	return androidAppSettingsResult(body, err, cachePath, overrides)
+}
+
+func androidAppSettingsResult(body []byte, fetchErr error, cachePath string, overrides androidAppOverrides) (string, int, error) {
+	if fetchErr != nil {
+		if js, n, ok := cachedAndroidAppSettings(cachePath, overrides); ok {
+			return js, n, nil
 		}
-		return "", 0, err
+		return "", 0, fetchErr
 	}
 	js, n, err := applicationSettingsFromResponseWithOverrides(body, overrides.values)
 	if err != nil {
+		// A malformed response is as unusable as a failed fetch: keep the last
+		// good cache rather than dropping client settings for the launch.
+		if cjs, cn, ok := cachedAndroidAppSettings(cachePath, overrides); ok {
+			return cjs, cn, nil
+		}
 		return "", 0, err
 	}
 	if cachePath != "" && n > 0 {
 		_ = os.WriteFile(cachePath, body, 0o600)
 	}
 	return js, n, nil
+}
+
+// cachedAndroidAppSettings reads and merges the last successful response. It
+// reports false when there is no usable cache, including a malformed one.
+func cachedAndroidAppSettings(cachePath string, overrides androidAppOverrides) (string, int, bool) {
+	if cachePath == "" {
+		return "", 0, false
+	}
+	cached, err := os.ReadFile(cachePath)
+	if err != nil || len(cached) <= 2 {
+		return "", 0, false
+	}
+	js, n, err := applicationSettingsFromResponseWithOverrides(cached, overrides.values)
+	if err != nil {
+		return "", 0, false
+	}
+	return js, n, true
 }
 
 func withDesktopAppPolicyOverride(cachePath string, overrides map[string]any) (map[string]any, bool, error) {
