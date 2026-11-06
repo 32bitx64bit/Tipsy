@@ -21,9 +21,12 @@ package jni
 
 import (
 	"bytes"
+	"crypto/sha256"
 	"encoding/binary"
+	"encoding/json"
 	"fmt"
 	"os"
+	"path/filepath"
 	"sync"
 
 	"github.com/tipsy-linux/tipsy/internal/logging"
@@ -39,7 +42,10 @@ type cursorHiddenCandidate struct {
 
 // cursorScanOverlap keeps an instruction sequence that straddles two scan
 // chunks whole in at least one of them.
-const cursorScanOverlap = 87
+const (
+	cursorScanOverlap = 87
+	cursorScanChunk   = 1 << 20
+)
 
 func cursorRelative(code []byte, addr uintptr, off int) uintptr {
 	return uintptr(int64(addr) + int64(off+7) + int64(int32(binary.LittleEndian.Uint32(code[off+3:]))))
@@ -113,15 +119,19 @@ func cursorRegistrationAddresses(p []byte, a uintptr) (descriptor, name, getter 
 	return 0, 0, 0, false
 }
 
+func cursorPropertyName(prop []string) string {
+	if len(prop) > 0 && prop[0] != "" {
+		return prop[0]
+	}
+	return "MouseIconEnabled"
+}
+
 // cursorCandidates scans one mapped chunk for the reflection registration of
 // prop (default "MouseIconEnabled"). The whole instruction sequence must
 // match, not just a reference to the name. Addresses must fall inside
 // [base, end).
 func cursorCandidates(code []byte, addr, base, end uintptr, prop ...string) []cursorHiddenCandidate {
-	propName := "MouseIconEnabled"
-	if len(prop) > 0 && prop[0] != "" {
-		propName = prop[0]
-	}
+	propName := cursorPropertyName(prop)
 	want := propName + "\x00"
 	wantLen := uintptr(len(want))
 	word := propName != "MouseIconEnabled"
@@ -168,11 +178,13 @@ next:
 	return out
 }
 
-// locateCursorGetter scans the readable parts of [base, end) in chunks for
-// prop (default "MouseIconEnabled").
-func locateCursorGetter(ranges []engineAddrRange, base, end uintptr, prop ...string) []cursorHiddenCandidate {
-	var found []cursorHiddenCandidate
-	const chunk = uintptr(1 << 20)
+// scanCursorChunks visits readable image chunks through one reusable buffer.
+// overlap keeps strings or instructions split by a chunk boundary visible.
+func scanCursorChunks(ranges []engineAddrRange, base, end uintptr, buf []byte, overlap uintptr, visit func([]byte, uintptr)) {
+	chunk := uintptr(len(buf))
+	if chunk == 0 || overlap >= chunk {
+		return
+	}
 	for _, r := range ranges {
 		lo, hi := r.lo, r.hi
 		if lo < base {
@@ -186,15 +198,81 @@ func locateCursorGetter(ranges []engineAddrRange, base, end uintptr, prop ...str
 			if n > chunk {
 				n = chunk
 			}
-			if b, ok := engineMem.bytes(lo, int(n)); ok {
-				found = append(found, cursorCandidates(b, lo, base, end, prop...)...)
+			if engineMem.read(lo, buf[:int(n)]) {
+				visit(buf[:int(n)], lo)
 			}
 			if n == hi-lo {
 				break
 			}
-			lo += n - cursorScanOverlap
+			lo += n - overlap
 		}
 	}
+}
+
+// locateCursorGetter finds the property-name strings first, then decodes only
+// registration-shaped code whose RIP-relative name references target one of
+// those strings. This avoids running the full instruction decoder at every
+// byte while retaining the complete registration and getter validation.
+func locateCursorGetter(ranges []engineAddrRange, base, end uintptr, prop ...string) []cursorHiddenCandidate {
+	propName := cursorPropertyName(prop)
+	want := []byte(propName + "\x00")
+	buf := make([]byte, cursorScanChunk)
+
+	var names []uintptr
+	scanCursorChunks(ranges, base, end, buf, uintptr(len(want)-1), func(code []byte, addr uintptr) {
+		for off := 0; off < len(code); {
+			i := bytes.Index(code[off:], want)
+			if i < 0 {
+				break
+			}
+			names = append(names, addr+uintptr(off+i))
+			off += i + len(want)
+		}
+	})
+	if len(names) == 0 {
+		return nil
+	}
+
+	nameTarget := func(addr uintptr) bool {
+		for _, name := range names {
+			if addr == name {
+				return true
+			}
+		}
+		return false
+	}
+	leaPrefix := []byte{0x48, 0x8d}
+	var found []cursorHiddenCandidate
+	scanCursorChunks(ranges, base, end, buf, cursorScanOverlap, func(code []byte, addr uintptr) {
+		for i := 0; i+7 <= len(code); {
+			next := bytes.Index(code[i:], leaPrefix)
+			if next < 0 {
+				break
+			}
+			i += next
+			if i+7 > len(code) {
+				break
+			}
+			back := 0
+			switch code[i+2] {
+			case 0x35: // name argument in the four-lea registration
+				back = 7
+			case 0x0d: // name argument in the inlined registration
+				back = 7
+			case 0x15: // second name reference in the four-lea registration
+				back = 14
+			}
+			if back != 0 && nameTarget(cursorRelative(code, addr, i)) && i >= back {
+				start := i - back
+				stop := start + cursorScanOverlap
+				if stop > len(code) {
+					stop = len(code)
+				}
+				found = append(found, cursorCandidates(code[start:stop], addr+uintptr(start), base, end, prop...)...)
+			}
+			i += 2
+		}
+	})
 	return uniqueCursorCandidates(found)
 }
 
@@ -433,6 +511,7 @@ type cursorHiddenReader struct {
 	disabled          bool
 	candidate         cursorHiddenCandidate
 	behaviorCandidate cursorHiddenCandidate
+	bridgeCandidate   cursorBridgeCandidate
 	enumOffset        uint32
 	// resolve returns the object the getter reads its byte from, or false when
 	// there is none yet (before a game loads, or in Home). nil means no
@@ -482,7 +561,7 @@ func (r *cursorHiddenReader) transition(to cursorTrace, raw int) {
 
 // proveMouseServiceChain decodes and cross-checks every hop in the
 // UserInputService reflection resolver's path to MouseService.
-func (r *cursorHiddenReader) proveMouseServiceChain(ranges []engineAddrRange, base, end uintptr, layout mouseBehaviorLayout) (cursorMouseServiceChain, bool) {
+func (r *cursorHiddenReader) proveMouseServiceChain(ranges []engineAddrRange, base, end uintptr, layout mouseBehaviorLayout, cachedBridge uintptr) (cursorMouseServiceChain, bool) {
 	var chain cursorMouseServiceChain
 	fail := func(stage string) {
 		r.note("getter found, reader off: MouseService identity proof failed at %s resolver_rva=%#x cursor_offset=%#x behavior_offset=%#x",
@@ -541,7 +620,16 @@ func (r *cursorHiddenReader) proveMouseServiceChain(ranges []engineAddrRange, ba
 		return chain, false
 	}
 
-	bridges := locateCursorBridge(ranges, base, end, layout, create)
+	var bridges []cursorBridgeCandidate
+	if cachedBridge != 0 {
+		if code, ok := engineMem.bytes(cachedBridge, 50); ok {
+			if bridge, ok := cursorDecodeBridge(code, cachedBridge, layout, create); ok && inImage(bridge.getGame) {
+				bridges = append(bridges, bridge)
+			}
+		}
+	} else {
+		bridges = locateCursorBridge(ranges, base, end, layout, create)
+	}
 	if len(bridges) != 1 {
 		fail(fmt.Sprintf("bridge lookup found %d candidates", len(bridges)))
 		return chain, false
@@ -576,6 +664,7 @@ func (r *cursorHiddenReader) proveMouseServiceChain(ranges []engineAddrRange, ba
 		serviceIndex:   serviceIndex,
 		vectorOffset:   vectorOffset,
 	}
+	r.bridgeCandidate = bridge
 	return chain, true
 }
 
@@ -653,8 +742,13 @@ func (r *cursorHiddenReader) resolveMouseService(chain cursorMouseServiceChain) 
 // proveResolver verifies the shared reflection resolver. The old direct
 // MainWindow shape remains valid when its MouseBehavior displacement agrees;
 // otherwise the full MouseService identity proof must succeed.
-func (r *cursorHiddenReader) proveResolver(ranges []engineAddrRange, base, end uintptr) {
-	behavior := locateCursorGetter(ranges, base, end, "MouseBehavior")
+func (r *cursorHiddenReader) proveResolver(ranges []engineAddrRange, base, end uintptr, cachedBehavior *cursorHiddenCandidate, cachedBridge uintptr) {
+	var behavior []cursorHiddenCandidate
+	if cachedBehavior != nil {
+		behavior = []cursorHiddenCandidate{*cachedBehavior}
+	} else {
+		behavior = locateCursorGetter(ranges, base, end, "MouseBehavior")
+	}
 	if len(behavior) != 1 {
 		r.note("getter found, reader off: MouseBehavior getter lookup found %d candidates getter_rva=%#x resolver_rva=%#x offset=%#x",
 			len(behavior), r.candidate.getter-base, r.candidate.resolver-base, r.candidate.offset)
@@ -679,6 +773,9 @@ func (r *cursorHiddenReader) proveResolver(ranges []engineAddrRange, base, end u
 		return
 	}
 	if r.behaviorCandidate.offset == layout.enumOffset {
+		if cachedBehavior != nil && cachedBridge != 0 {
+			return
+		}
 		slot := layout.singleton + uintptr(layout.objOffset)
 		r.enumOffset = layout.enumOffset
 		r.resolve = func() (uintptr, bool) {
@@ -694,7 +791,10 @@ func (r *cursorHiddenReader) proveResolver(ranges []engineAddrRange, base, end u
 			return uintptr(obj), obj != 0
 		}
 	} else {
-		chain, ok := r.proveMouseServiceChain(ranges, base, end, layout)
+		if cachedBehavior != nil && cachedBridge == 0 {
+			return
+		}
+		chain, ok := r.proveMouseServiceChain(ranges, base, end, layout, cachedBridge)
 		if !ok {
 			return
 		}
@@ -705,8 +805,119 @@ func (r *cursorHiddenReader) proveResolver(ranges []engineAddrRange, base, end u
 		r.candidate.getter-base, r.candidate.resolver-base, r.candidate.offset, r.enumOffset)
 }
 
+// Cache entries identify the scanned instructions, not executable pointers.
+// Digests detect changes even in instruction bytes ignored by the decoders.
+type cursorCacheItem struct {
+	RVA    uint64   `json:"rva"`
+	Digest [32]byte `json:"digest"`
+}
+
+type cursorGetterCacheRecord struct {
+	Version  int              `json:"version"`
+	Build    string           `json:"build"`
+	Icon     cursorCacheItem  `json:"icon"`
+	Behavior cursorCacheItem  `json:"behavior"`
+	Bridge   *cursorCacheItem `json:"bridge,omitempty"`
+}
+
+const cursorGetterCacheVersion = 2
+
+func cursorCacheRead(item cursorCacheItem, base, end uintptr, size uintptr) (uintptr, []byte, bool) {
+	if item.RVA > uint64(end-base) || uint64(end-base)-item.RVA < uint64(size) || uint64(uintptr(item.RVA)) != item.RVA {
+		return 0, nil, false
+	}
+	addr := base + uintptr(item.RVA)
+	code, ok := engineMem.bytes(addr, int(size))
+	return addr, code, ok && sha256.Sum256(code) == item.Digest
+}
+
+func loadCursorGetterCache(path, build string, base, end uintptr) (cursorHiddenCandidate, cursorHiddenCandidate, uintptr, bool) {
+	var empty cursorHiddenCandidate
+	if path == "" || build == "" {
+		return empty, empty, 0, false
+	}
+	raw, err := os.ReadFile(path)
+	if err != nil || len(raw) > 4096 {
+		return empty, empty, 0, false
+	}
+	var cached cursorGetterCacheRecord
+	if json.Unmarshal(raw, &cached) != nil || cached.Version != cursorGetterCacheVersion || cached.Build != build {
+		return empty, empty, 0, false
+	}
+	decode := func(item cursorCacheItem, word bool) (cursorHiddenCandidate, bool) {
+		getter, body, ok := cursorCacheRead(item, base, end, 33)
+		if !ok {
+			return empty, false
+		}
+		resolver, offset, ok := cursorGetterDecode(body, getter, word)
+		return cursorHiddenCandidate{getter: getter, resolver: resolver, offset: offset}, ok && resolver >= base && resolver < end
+	}
+	icon, ok := decode(cached.Icon, false)
+	if !ok {
+		return empty, empty, 0, false
+	}
+	behavior, ok := decode(cached.Behavior, true)
+	if !ok {
+		return empty, empty, 0, false
+	}
+	var bridge uintptr
+	if cached.Bridge != nil {
+		bridge, _, ok = cursorCacheRead(*cached.Bridge, base, end, 50)
+		if !ok || bridge == 0 {
+			return empty, empty, 0, false
+		}
+	}
+	return icon, behavior, bridge, true
+}
+
+func writeCursorGetterCache(path, build string, r *cursorHiddenReader, base uintptr) {
+	if path == "" || build == "" {
+		return
+	}
+	item := func(addr uintptr, size int) (cursorCacheItem, bool) {
+		code, ok := engineMem.bytes(addr, size)
+		return cursorCacheItem{RVA: uint64(addr - base), Digest: sha256.Sum256(code)}, ok
+	}
+	icon, ok := item(r.candidate.getter, 33)
+	if !ok {
+		return
+	}
+	behavior, ok := item(r.behaviorCandidate.getter, 33)
+	if !ok {
+		return
+	}
+	record := cursorGetterCacheRecord{Version: cursorGetterCacheVersion, Build: build, Icon: icon, Behavior: behavior}
+	if r.bridgeCandidate.bridge != 0 {
+		bridge, ok := item(r.bridgeCandidate.bridge, 50)
+		if !ok {
+			return
+		}
+		record.Bridge = &bridge
+	}
+	raw, err := json.Marshal(record)
+	if err != nil {
+		return
+	}
+	f, err := os.CreateTemp(filepath.Dir(path), ".cursor-cache-*")
+	if err != nil {
+		return
+	}
+	defer os.Remove(f.Name())
+	_, err = f.Write(raw)
+	if closeErr := f.Close(); err == nil {
+		err = closeErr
+	}
+	if err == nil {
+		_ = os.Rename(f.Name(), path)
+	}
+}
+
 // init runs the locator once over the readable mappings of [base, end).
 func (r *cursorHiddenReader) init(ranges []engineAddrRange, base uintptr, size uint64) {
+	r.initCached(ranges, base, size, "", "")
+}
+
+func (r *cursorHiddenReader) initCached(ranges []engineAddrRange, base uintptr, size uint64, cachePath, build string) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if r.attempted {
@@ -719,6 +930,19 @@ func (r *cursorHiddenReader) init(ranges []engineAddrRange, base uintptr, size u
 		return
 	}
 	end := base + uintptr(size)
+	icon, behavior, bridge, hit := loadCursorGetterCache(cachePath, build, base, end)
+	if hit && r.resolve == nil {
+		r.candidate = icon
+		r.proveResolver(ranges, base, end, &behavior, bridge)
+		if r.resolve != nil {
+			return
+		}
+		// A stale chain must be rediscovered, not merely rejected.
+		r.candidate = cursorHiddenCandidate{}
+		r.behaviorCandidate = cursorHiddenCandidate{}
+		r.bridgeCandidate = cursorBridgeCandidate{}
+		r.enumOffset = 0
+	}
 	found := locateCursorGetter(ranges, base, end, "MouseIconEnabled")
 	if len(found) != 1 {
 		r.latchOff(fmt.Sprintf("getter lookup found %d candidates", len(found)))
@@ -726,7 +950,10 @@ func (r *cursorHiddenReader) init(ranges []engineAddrRange, base uintptr, size u
 	}
 	r.candidate = found[0]
 	if r.resolve == nil {
-		r.proveResolver(ranges, base, end)
+		r.proveResolver(ranges, base, end, nil, 0)
+		if r.resolve != nil {
+			writeCursorGetterCache(cachePath, build, r, base)
+		}
 		return
 	}
 	r.note("getter found getter_rva=%#x resolver_rva=%#x offset=%#x",
@@ -787,6 +1014,7 @@ func resetEngineCursorHidden() {
 	cursorHiddenAuthority.disabled = false
 	cursorHiddenAuthority.candidate = cursorHiddenCandidate{}
 	cursorHiddenAuthority.behaviorCandidate = cursorHiddenCandidate{}
+	cursorHiddenAuthority.bridgeCandidate = cursorBridgeCandidate{}
 	cursorHiddenAuthority.enumOffset = 0
 	cursorHiddenAuthority.resolve = nil
 	cursorHiddenAuthority.trace = false
@@ -796,14 +1024,19 @@ func resetEngineCursorHidden() {
 }
 
 // InitEngineCursorHidden locates the MouseIconEnabled getter in the loaded
-// libroblox.so and runs the load-time shared-resolver proof. It never calls
-// engine code and is idempotent.
-func InitEngineCursorHidden(base uintptr, size uint64) {
+// libroblox.so and runs the load-time shared-resolver proof. The cache is keyed
+// by the authenticated build identity and validated against live instruction bytes.
+// It never calls engine code and is idempotent.
+func InitEngineCursorHidden(base uintptr, size uint64, cacheDir, build string) {
 	ranges, err := readProcSelfMaps()
 	if err != nil {
 		ranges = nil // the locator then finds nothing and latches the reader off
 	}
-	cursorHiddenAuthority.init(ranges, base, size)
+	cachePath := ""
+	if cacheDir != "" && build != "" {
+		cachePath = filepath.Join(cacheDir, "cursor-getter-v1.json")
+	}
+	cursorHiddenAuthority.initCached(ranges, base, size, cachePath, build)
 }
 
 // EngineCursorHidden reports whether the engine currently hides the mouse

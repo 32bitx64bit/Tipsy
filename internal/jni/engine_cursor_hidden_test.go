@@ -10,6 +10,7 @@ import (
 	"encoding/binary"
 	"io"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"unsafe"
@@ -50,6 +51,16 @@ func cursorFixture(t *testing.T) (*fakeEngineImage, []engineAddrRange) {
 	copy(img.mem[cursorGetterOff:], cursorGetterBody)
 	writeCursorRegistration(img, cursorCodeOff, cursorGetterOff, false)
 	return img, []engineAddrRange{{img.addr(0), img.addr(fakeImageSize)}}
+}
+
+// read lets scanCursorChunks reuse its buffer with the fake engine arena too.
+func (img *fakeEngineImage) read(addr uintptr, out []byte) bool {
+	off, ok := img.offset(addr)
+	if !ok || len(out) == 0 || off+len(out) > len(img.mem) {
+		return false
+	}
+	copy(out, img.mem[off:off+len(out)])
+	return true
 }
 
 func TestCursorHiddenLocator(t *testing.T) {
@@ -101,6 +112,168 @@ func TestCursorHiddenLocatorNotFound(t *testing.T) {
 	}
 	copy(img.mem[cursorCodeOff:], make([]byte, 64))
 	check("no registration")
+}
+
+type cursorReadCounter struct {
+	img        *fakeEngineImage
+	fullChunks int
+}
+
+func (c *cursorReadCounter) bytes(addr uintptr, n int) ([]byte, bool) {
+	if n > mouseBehaviorGetterWindow {
+		c.fullChunks++
+	}
+	return c.img.bytes(addr, n)
+}
+
+func (c *cursorReadCounter) read(addr uintptr, out []byte) bool {
+	if len(out) > mouseBehaviorGetterWindow {
+		c.fullChunks++
+	}
+	return c.img.read(addr, out)
+}
+
+func (c *cursorReadCounter) u64(addr uintptr) (uint64, bool) { return c.img.u64(addr) }
+func (c *cursorReadCounter) u32(addr uintptr) (uint32, bool) { return c.img.u32(addr) }
+
+func TestCursorGetterCacheHitSkipsFullScan(t *testing.T) {
+	img, ranges := cursorMouseServiceChainFixture(t)
+	counter := &cursorReadCounter{img: img}
+	engineMem = counter
+	cachePath := filepath.Join(t.TempDir(), "cursor-getter.json")
+	base := img.addr(0)
+
+	first := &cursorHiddenReader{}
+	first.initCached(ranges, base, fakeImageSize, cachePath, "build-a")
+	if first.disabled || first.resolve == nil || first.bridgeCandidate.bridge != img.addr(chainBridgeOff) || counter.fullChunks == 0 {
+		t.Fatalf("initial scan: disabled=%v candidate=%+v full chunks=%d", first.disabled, first.candidate, counter.fullChunks)
+	}
+	counter.fullChunks = 0
+	second := &cursorHiddenReader{}
+	second.initCached(ranges, base, fakeImageSize, cachePath, "build-a")
+	if second.disabled || second.resolve == nil || second.candidate != first.candidate || second.behaviorCandidate != first.behaviorCandidate || second.bridgeCandidate != first.bridgeCandidate {
+		t.Fatalf("cache hit candidate=%+v, want %+v (disabled=%v)", second.candidate, first.candidate, second.disabled)
+	}
+	if counter.fullChunks != 0 {
+		t.Fatalf("cache hit performed %d full-chunk reads", counter.fullChunks)
+	}
+	if hidden, ok := second.read(); !hidden || !ok {
+		t.Fatalf("cached MouseService read: hidden=%v ok=%v", hidden, ok)
+	}
+}
+
+func TestCursorGetterCacheMismatchFallsBackToFullScan(t *testing.T) {
+	tests := []string{"stale build", "corrupt json", "icon", "behavior", "bridge", "chain"}
+	for _, name := range tests {
+		t.Run(name, func(t *testing.T) {
+			img, ranges := cursorMouseServiceChainFixture(t)
+			counter := &cursorReadCounter{img: img}
+			engineMem = counter
+			path := filepath.Join(t.TempDir(), "cursor-getter.json")
+			base := img.addr(0)
+			first := &cursorHiddenReader{}
+			first.initCached(ranges, base, fakeImageSize, path, "build-a")
+			if first.resolve == nil {
+				t.Fatal("initial proof failed")
+			}
+			build := "build-a"
+			switch name {
+			case "stale build":
+				build = "build-b"
+			case "corrupt json":
+				if err := os.WriteFile(path, []byte("{"), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			case "icon":
+				img.mem[proofCursorGetOff+7] ^= 1
+			case "behavior":
+				img.mem[proofBehaviorGetOff+7] ^= 1
+			case "bridge":
+				// A valid changed bridge is still rejected and rediscovered.
+				binary.LittleEndian.PutUint32(img.mem[chainBridgeOff+29:], chainProviderOffset+8)
+			case "chain":
+				// A damaged proof must scan rather than accept cached addresses.
+				img.mem[proofResolverOff+22] ^= 1
+			}
+			counter.fullChunks = 0
+			got := &cursorHiddenReader{}
+			got.initCached(ranges, base, fakeImageSize, path, build)
+			if counter.fullChunks == 0 {
+				t.Fatal("cache mismatch did not scan")
+			}
+			if name == "chain" {
+				if got.resolve != nil {
+					t.Fatal("invalid chain accepted")
+				}
+				return
+			}
+			if got.resolve == nil || got.candidate != first.candidate || got.behaviorCandidate != first.behaviorCandidate || got.bridgeCandidate.bridge != first.bridgeCandidate.bridge {
+				t.Fatalf("fallback differs: %+v", got)
+			}
+			counter.fullChunks = 0
+			again := &cursorHiddenReader{}
+			again.initCached(ranges, base, fakeImageSize, path, build)
+			if again.resolve == nil || counter.fullChunks != 0 {
+				t.Fatalf("refreshed cache: resolve=%v full reads=%d", again.resolve != nil, counter.fullChunks)
+			}
+		})
+	}
+}
+
+// locateCursorGetterPerChunkCopy is the superseded locator, retained here to
+// measure the allocation regression prevented by the reusable-buffer scan.
+func locateCursorGetterPerChunkCopy(ranges []engineAddrRange, base, end uintptr) []cursorHiddenCandidate {
+	var found []cursorHiddenCandidate
+	const chunk = uintptr(1 << 20)
+	for _, r := range ranges {
+		lo, hi := r.lo, r.hi
+		if lo < base {
+			lo = base
+		}
+		if hi > end {
+			hi = end
+		}
+		for lo < hi {
+			n := hi - lo
+			if n > chunk {
+				n = chunk
+			}
+			if b, ok := engineMem.bytes(lo, int(n)); ok {
+				found = append(found, cursorCandidates(b, lo, base, end)...)
+			}
+			if n == hi-lo {
+				break
+			}
+			lo += n - cursorScanOverlap
+		}
+	}
+	return uniqueCursorCandidates(found)
+}
+
+func TestCursorGetterScanUsesFewerAllocations(t *testing.T) {
+	mem := make([]byte, 8<<20)
+	img := &fakeEngineImage{base: unsafe.Pointer(&mem[0]), mem: mem}
+	useFakeEngineMemory(t, img)
+	copy(img.mem[cursorNameOff:], "MouseIconEnabled\x00")
+	copy(img.mem[cursorGetterOff:], cursorGetterBody)
+	writeCursorRegistration(img, cursorCodeOff, cursorGetterOff, false)
+	ranges := []engineAddrRange{{img.addr(0), img.addr(len(mem))}}
+	base, end := img.addr(0), img.addr(len(mem))
+
+	oldAllocs := testing.AllocsPerRun(3, func() {
+		if got := locateCursorGetterPerChunkCopy(ranges, base, end); len(got) != 1 {
+			t.Fatalf("per-chunk copy found %d candidates", len(got))
+		}
+	})
+	newAllocs := testing.AllocsPerRun(3, func() {
+		if got := locateCursorGetter(ranges, base, end); len(got) != 1 {
+			t.Fatalf("reused-buffer scan found %d candidates", len(got))
+		}
+	})
+	if newAllocs >= oldAllocs {
+		t.Fatalf("reused-buffer allocations %.1f, want fewer than per-chunk copies %.1f", newAllocs, oldAllocs)
+	}
+	t.Logf("full scan allocations: reused buffer %.1f, per-chunk copies %.1f", newAllocs, oldAllocs)
 }
 
 // Optional offline check against a copied, untrusted library. It is read as
@@ -390,6 +563,159 @@ func TestCursorHiddenSharedResolverProofPass(t *testing.T) {
 		if r.enumOffset != 0x88 || r.candidate.offset != cursorByteOff {
 			t.Fatalf("enumReg=%v: offsets cursor=%#x behavior=%#x", enumReg, r.candidate.offset, r.enumOffset)
 		}
+	}
+}
+
+// writeCursorBuildID adds a mapped ELF GNU build-id note to a fake image.
+func writeCursorBuildID(img *fakeEngineImage, id []byte) {
+	header := img.mem[:64]
+	copy(header, []byte{0x7f, 'E', 'L', 'F', 2, 1})
+	binary.LittleEndian.PutUint64(header[32:], 64)
+	binary.LittleEndian.PutUint16(header[54:], 56)
+	binary.LittleEndian.PutUint16(header[56:], 1)
+	ph := img.mem[64:120]
+	binary.LittleEndian.PutUint32(ph, 4) // PT_NOTE
+	binary.LittleEndian.PutUint64(ph[16:], 0x80)
+	noteSize := 16 + (len(id)+3)&^3
+	binary.LittleEndian.PutUint64(ph[40:], uint64(noteSize))
+	note := img.mem[0x80 : 0x80+noteSize]
+	binary.LittleEndian.PutUint32(note, 4)
+	binary.LittleEndian.PutUint32(note[4:], uint32(len(id)))
+	binary.LittleEndian.PutUint32(note[8:], 3) // NT_GNU_BUILD_ID
+	copy(note[12:], "GNU\x00")
+	copy(note[16:], id)
+}
+
+type cursorChunkCountingMemory struct {
+	img    *fakeEngineImage
+	chunks int
+}
+
+func (m *cursorChunkCountingMemory) bytes(addr uintptr, n int) ([]byte, bool) {
+	return m.img.bytes(addr, n)
+}
+func (m *cursorChunkCountingMemory) u64(addr uintptr) (uint64, bool) {
+	return m.img.u64(addr)
+}
+func (m *cursorChunkCountingMemory) u32(addr uintptr) (uint32, bool) {
+	return m.img.u32(addr)
+}
+func (m *cursorChunkCountingMemory) read(addr uintptr, out []byte) bool {
+	off, ok := m.img.offset(addr)
+	if !ok || len(out) == 0 || off+len(out) > len(m.img.mem) {
+		return false
+	}
+	m.chunks++
+	copy(out, m.img.mem[off:off+len(out)])
+	return true
+}
+
+func useCursorChunkCounter(t *testing.T, img *fakeEngineImage) *cursorChunkCountingMemory {
+	t.Helper()
+	m := &cursorChunkCountingMemory{img: img}
+	old := engineMem
+	engineMem = m
+	t.Cleanup(func() { engineMem = old })
+	return m
+}
+
+func TestCursorGetterCacheHitSkipsFullScan(t *testing.T) {
+	img, ranges := cursorProofFixture(t, proofResolverOff, 0x88, true)
+	writeCursorBuildID(img, []byte{0x10, 0x20, 0x30, 0x40})
+	t.Setenv("XDG_CACHE_HOME", t.TempDir())
+	memory := useCursorChunkCounter(t, img)
+
+	first := &cursorHiddenReader{}
+	first.init(ranges, img.addr(0), fakeImageSize)
+	if first.disabled || first.resolve == nil {
+		t.Fatalf("cache priming failed: disabled=%v resolve=%v", first.disabled, first.resolve != nil)
+	}
+	buildID := cursorEngineBuildID(img.addr(0), fakeImageSize)
+	if _, err := os.Stat(cursorGetterCachePath(buildID)); err != nil {
+		t.Fatalf("cache was not written: %v", err)
+	}
+
+	// No resolver is injected: init must load both entries and call the real
+	// proveResolver path without scanning either property over the image.
+	memory.chunks = 0
+	second := &cursorHiddenReader{}
+	second.init(ranges, img.addr(0), fakeImageSize)
+	if second.disabled || second.resolve == nil {
+		t.Fatalf("cache hit was not proven: disabled=%v resolve=%v", second.disabled, second.resolve != nil)
+	}
+	if second.candidate != first.candidate || second.behaviorCandidate != first.behaviorCandidate {
+		t.Fatalf("cache hit candidates = %+v / %+v, want %+v / %+v", second.candidate, second.behaviorCandidate, first.candidate, first.behaviorCandidate)
+	}
+	if memory.chunks != 0 {
+		t.Fatalf("cache hit performed %d full-chunk reads", memory.chunks)
+	}
+}
+
+func TestCursorGetterCacheMismatchFallsBackToFullScan(t *testing.T) {
+	for _, name := range []string{"stale build key", "corrupt cache", "MouseIconEnabled live bytes", "MouseBehavior live bytes"} {
+		t.Run(name, func(t *testing.T) {
+			img, ranges := cursorProofFixture(t, proofResolverOff, 0x88, true)
+			writeCursorBuildID(img, []byte{0x50, 0x60, 0x70, 0x80})
+			cacheRoot := t.TempDir()
+			t.Setenv("XDG_CACHE_HOME", cacheRoot)
+			memory := useCursorChunkCounter(t, img)
+			prime := &cursorHiddenReader{}
+			prime.init(ranges, img.addr(0), fakeImageSize)
+			if prime.resolve == nil {
+				t.Fatal("cache priming did not prove resolver")
+			}
+			buildID := cursorEngineBuildID(img.addr(0), fakeImageSize)
+			path := cursorGetterCachePath(buildID)
+
+			switch name {
+			case "stale build key":
+				disk, ok := readCursorGetterCache(path, buildID)
+				if !ok {
+					t.Fatal("cannot read primed cache")
+				}
+				disk.BuildID = "stale"
+				data, err := json.Marshal(disk)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(path, data, 0o600); err != nil {
+					t.Fatalf("cannot make stale cache: %v", err)
+				}
+			case "corrupt cache":
+				if err := os.WriteFile(path, []byte("{"), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			case "MouseIconEnabled live bytes":
+				binary.LittleEndian.PutUint32(img.mem[proofCursorGetOff+23:], cursorByteOff+8)
+			case "MouseBehavior live bytes":
+				binary.LittleEndian.PutUint32(img.mem[proofBehaviorGetOff+23:], 0x90)
+				binary.LittleEndian.PutUint32(img.mem[fakeGetterOff+19:], 0x90)
+			}
+
+			// The same live image with an empty cache supplies the expected result.
+			t.Setenv("XDG_CACHE_HOME", t.TempDir())
+			uncached := &cursorHiddenReader{}
+			uncached.init(ranges, img.addr(0), fakeImageSize)
+			t.Setenv("XDG_CACHE_HOME", cacheRoot)
+			memory.chunks = 0
+			got := &cursorHiddenReader{}
+			got.init(ranges, img.addr(0), fakeImageSize)
+			if memory.chunks == 0 {
+				t.Fatal("cache mismatch did not fall back to full-chunk reads")
+			}
+			if got.candidate != uncached.candidate || got.behaviorCandidate != uncached.behaviorCandidate ||
+				got.enumOffset != uncached.enumOffset || got.disabled != uncached.disabled || (got.resolve == nil) != (uncached.resolve == nil) {
+				t.Fatalf("fallback = %+v, uncached = %+v", got, uncached)
+			}
+
+			// The refreshed entries must make the next production-path init a hit.
+			memory.chunks = 0
+			refreshed := &cursorHiddenReader{}
+			refreshed.init(ranges, img.addr(0), fakeImageSize)
+			if memory.chunks != 0 || refreshed.candidate != got.candidate || refreshed.behaviorCandidate != got.behaviorCandidate {
+				t.Fatalf("refreshed cache did not hit: chunks=%d candidate=%+v behavior=%+v", memory.chunks, refreshed.candidate, refreshed.behaviorCandidate)
+			}
+		})
 	}
 }
 

@@ -237,6 +237,7 @@ func decodeSingletonAccessor(code []byte, addr uintptr, index uint32) (singleton
 // without a live client.
 type engineMemory interface {
 	bytes(addr uintptr, n int) ([]byte, bool)
+	read(addr uintptr, out []byte) bool
 	u64(addr uintptr) (uint64, bool)
 	u32(addr uintptr) (uint32, bool)
 }
@@ -249,13 +250,24 @@ var engineMem engineMemory = liveEngineMemory{}
 // every access is guarded by engineReadable so a mis-decode fails closed.
 type liveEngineMemory struct{}
 
-func (liveEngineMemory) bytes(addr uintptr, n int) ([]byte, bool) {
-	if addr == 0 || n <= 0 || !engineReadable(addr, uintptr(n)) {
+func (m liveEngineMemory) bytes(addr uintptr, n int) ([]byte, bool) {
+	if n <= 0 {
 		return nil, false
 	}
 	out := make([]byte, n)
-	copy(out, unsafe.Slice((*byte)(unsafe.Pointer(addr)), n)) //nolint:govet // validated engine mapping, read-only
+	if !m.read(addr, out) {
+		return nil, false
+	}
 	return out, true
+}
+
+// read fills a caller-owned buffer without retaining or modifying engine memory.
+func (liveEngineMemory) read(addr uintptr, out []byte) bool {
+	if addr == 0 || len(out) == 0 || !engineReadable(addr, uintptr(len(out))) {
+		return false
+	}
+	copy(out, unsafe.Slice((*byte)(unsafe.Pointer(addr)), len(out))) //nolint:govet // validated engine mapping, read-only
+	return true
 }
 
 func (liveEngineMemory) u64(addr uintptr) (uint64, bool) {

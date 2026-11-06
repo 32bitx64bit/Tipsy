@@ -352,7 +352,8 @@ func Launch(ctx context.Context, opt LaunchOptions) error {
 	refreshVersion := win.RefreshVersion()
 	currentRefreshHz, supportedRefreshHz := presenter.refreshRates()
 	session, err := startGameActivity(ctx, vm, mod, aw, files, cache, preferences, obb, assets, ver,
-		opt.Width, opt.Height, currentRefreshHz, supportedRefreshHz, opt.Request, testOpenGL, rendererCaps, settingsFetch)
+		opt.Width, opt.Height, currentRefreshHz, supportedRefreshHz, opt.Request, testOpenGL, rendererCaps, settingsFetch,
+		nativeDescriptorSet.InventorySHA256())
 	if err != nil {
 		return err
 	}

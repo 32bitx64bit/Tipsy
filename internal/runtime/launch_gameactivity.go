@@ -497,7 +497,7 @@ func (s *gameActivitySession) shutdown(reason string) time.Duration {
 	return s.shutdownDuration
 }
 
-func startGameActivity(ctx context.Context, vm *jni.VM, mod *loader.Module, aw *android.Window, files, cache, preferences, obb, assets, version string, width, height int, currentRefreshHz float32, supportedRefreshHz []float32, req rbxuri.Request, testOpenGL bool, rendererCaps graphics.RendererCapabilities, settingsFetch *androidAppSettingsFetch) (*gameActivitySession, error) {
+func startGameActivity(ctx context.Context, vm *jni.VM, mod *loader.Module, aw *android.Window, files, cache, preferences, obb, assets, version string, width, height int, currentRefreshHz float32, supportedRefreshHz []float32, req rbxuri.Request, testOpenGL bool, rendererCaps graphics.RendererCapabilities, settingsFetch *androidAppSettingsFetch, librobloxBuild string) (*gameActivitySession, error) {
 	env := vm.Env()
 	activity := env.AllocObject(env.FindClass("com/roblox/client/startup/MainGameActivity"))
 	if activity == 0 {
@@ -537,7 +537,7 @@ func startGameActivity(ctx context.Context, vm *jni.VM, mod *loader.Module, aw *
 	// target, on the same Main-pthread stack. It is engine→Java state priming;
 	// typed text uses the separate nativePassText path wired below.
 	deliverTextInputConnection(vm, env, activity, uintptr(handle))
-	wireRobloxDirectInput(mod, env)
+	wireRobloxDirectInput(mod, env, cache, librobloxBuild)
 	wireRobloxDirectKey(mod, env)
 	wireRobloxDirectGamepad(mod, env)
 	// The evdev pad pump runs its own goroutine into the JNI gamepad handler,
@@ -575,7 +575,7 @@ func deliverTextInputConnection(vm *jni.VM, env *jni.Env, activity, handle uintp
 // wireRobloxDirectInput resolves only the public static native mouse methods.
 // `nativePassMouse` is absent and must not be guessed; the ()Z getter is the
 // authority for host pointer capture.
-func wireRobloxDirectInput(mod *loader.Module, env *jni.Env) {
+func wireRobloxDirectInput(mod *loader.Module, env *jni.Env, cacheDir, librobloxBuild string) {
 	buttonFn, buttonErr := mod.Lookup(directMouseButtonSym)
 	moveFn, moveErr := mod.Lookup(directMouseMoveSym)
 	wheelFn, wheelErr := mod.Lookup(directMouseWheelSym)
@@ -594,7 +594,7 @@ func wireRobloxDirectInput(mod *loader.Module, env *jni.Env) {
 	}
 	class := env.FindClass("com/roblox/engine/jni/NativeInputInterface")
 	jni.SetRobloxDirectInputTarget(env.Raw(), class, buttonFn, moveFn, wheelFn, lockedFn)
-	jni.InitEngineCursorHidden(mod.Base, mod.Size)
+	jni.InitEngineCursorHidden(mod.Base, mod.Size, cacheDir, librobloxBuild)
 }
 
 // wireRobloxDirectKey resolves the separate key route. NativeGLInterface owns
