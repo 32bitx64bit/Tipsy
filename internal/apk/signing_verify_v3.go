@@ -6,6 +6,7 @@ package apk
 import (
 	"bytes"
 	"context"
+	"crypto"
 	"crypto/x509"
 	"encoding/binary"
 	"fmt"
@@ -38,6 +39,13 @@ type verifiedV3Signer struct {
 	rotationMinSDK *uint32
 }
 
+// verificationReader shares computed content digests only among signers in a
+// single verification. A new instance is created for every verification.
+type verificationReader struct {
+	io.ReaderAt
+	digests map[crypto.Hash][]byte
+}
+
 // VerifyReaderAt verifies the strongest APK signature scheme present without
 // reopening a pathname. A malformed stronger scheme never falls back to a
 // weaker one.
@@ -48,6 +56,7 @@ func VerifyReaderAt(ctx context.Context, ra io.ReaderAt, size int64) (SigningVer
 	if ra == nil || size <= 0 {
 		return SigningVerification{}, fmt.Errorf("apk: invalid signature input")
 	}
+	ra = &verificationReader{ReaderAt: ra, digests: make(map[crypto.Hash][]byte)}
 	pairs, _, err := readAPKSigningBlock(ra, size)
 	if err != nil {
 		return SigningVerification{}, err

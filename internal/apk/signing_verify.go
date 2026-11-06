@@ -19,7 +19,9 @@ import (
 	"hash"
 	"io"
 	"math/big"
+	"runtime"
 	"sort"
+	"sync"
 )
 
 const (
@@ -365,6 +367,19 @@ func verifySignedData(publicKey any, sig signatureRecord, signedData []byte) err
 }
 
 func apkContentDigest(ctx context.Context, ra io.ReaderAt, size int64, hashID crypto.Hash) ([]byte, error) {
+	if reader, ok := ra.(*verificationReader); ok {
+		if digest, found := reader.digests[hashID]; found {
+			if err := ctx.Err(); err != nil {
+				return nil, err
+			}
+			return digest, nil
+		}
+		digest, err := apkContentDigest(ctx, reader.ReaderAt, size, hashID)
+		if err == nil {
+			reader.digests[hashID] = digest
+		}
+		return digest, err
+	}
 	cdOff, err := findCentralDirectoryOffset(ra, size)
 	if err != nil {
 		return nil, err
@@ -443,22 +458,41 @@ func readEOCD(ra io.ReaderAt, size int64) (int64, []byte, error) {
 }
 
 func hashReaderChunks(ctx context.Context, ra io.ReaderAt, off, size int64, hashID crypto.Hash, out *[][]byte) error {
-	for size > 0 {
-		if err := ctx.Err(); err != nil {
-			return err
-		}
-		n := int64(apkChunkSize)
-		if n > size {
-			n = size
-		}
-		buf := make([]byte, n)
-		if _, err := ra.ReadAt(buf, off); err != nil {
-			return err
-		}
-		*out = append(*out, digestChunk(buf, hashID))
-		off += n
-		size -= n
+	if size <= 0 {
+		return nil
 	}
+	count := int((size-1)/apkChunkSize + 1)
+	workers := min(count, runtime.GOMAXPROCS(0), 4)
+	chunks := make([][]byte, count)
+	errs := make([]error, count)
+	var wg sync.WaitGroup
+	for worker := 0; worker < workers; worker++ {
+		wg.Add(1)
+		go func(worker int) {
+			defer wg.Done()
+			buf := make([]byte, min(int64(apkChunkSize), size))
+			for i := worker; i < count; i += workers {
+				if err := ctx.Err(); err != nil {
+					errs[i] = err
+					return
+				}
+				chunkOff := int64(i) * apkChunkSize
+				n := min(int64(apkChunkSize), size-chunkOff)
+				if _, err := ra.ReadAt(buf[:n], off+chunkOff); err != nil {
+					errs[i] = err
+					return
+				}
+				chunks[i] = digestChunk(buf[:n], hashID)
+			}
+		}(worker)
+	}
+	wg.Wait()
+	for _, err := range errs {
+		if err != nil {
+			return err
+		}
+	}
+	*out = append(*out, chunks...)
 	return nil
 }
 
