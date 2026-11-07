@@ -1001,6 +1001,28 @@ func engineAnchorPoint(preferX, preferY float32, havePrefer bool) (float32, floa
 	return engineAnchorOrigin()
 }
 
+// engineFirstPersonSignal names why a fresh LockCurrentPosition is first
+// person, or "" when it is an RMB camera look that must stay where it is.
+//
+// The camera detector cannot decide this alone: Project 12 reads Scriptable(6)
+// at distance 6.00 in first person and the detector only accepts Custom(5)
+// within 0.75. What that game does hold is MouseBehavior=LockCurrentPosition
+// without RMB for the whole of first person (mouse-behavior-enum-measurement:
+// camera-driven, RMB and ADS have no effect). Held RMB, the held-RMB fallback
+// grab and the RMB edges themselves are the gesture's own lock: the engine
+// reports LockCurrentPosition for ordinary RMB look and may still report it on
+// the release edge, so none of those may center.
+func engineFirstPersonSignal(edge string) string {
+	if secondaryButtonHeld() || rmbPointerFallback.Load() ||
+		edge == "secondary down" || edge == "secondary up" {
+		return ""
+	}
+	if engineCameraFirstPersonSource() {
+		return "camera"
+	}
+	return "engine-lock"
+}
+
 // engageEngineAnchorLock mirrors the engine's LockCurrentPosition on the host.
 // A first-person camera selects the centered lock; otherwise the grab stays at
 // the cursor's frozen origin. The
@@ -1019,13 +1041,16 @@ func adoptEngineAnchorLock(edge string) bool {
 }
 
 func takeEngineAnchorLock(edge string, preferX, preferY float32, havePrefer, reacquire bool) bool {
-	// The lock's shape is decided when it starts: a camera first-person lock
-	// stays centered for its whole life, whatever the cursor reader says later.
-	// Held RMB keeps its long-standing lock-in-place shape.
-	cameraFirstPerson := engineCameraFirstPersonSource() && !secondaryButtonHeld() && !rmbPointerFallback.Load()
-	zoomIn := engineAnchorZoomCentered() || (!engineAnchorActive() && cameraFirstPerson)
-	if zoomIn {
-		return takeCenteredEngineAnchorLock(edge, reacquire)
+	// The lock's shape is decided when it starts and stays for its whole life.
+	// A fresh LockCurrentPosition with no RMB gesture behind it is the game's
+	// own first-person lock, centered; held RMB (and either RMB edge, where the
+	// engine may still report the gesture's lock) keeps the long-standing
+	// lock-in-place shape. The camera detector is the second signal: it only
+	// reads Custom cameras, and Project 12's first person is Scriptable.
+	signal := engineFirstPersonSignal(edge)
+	centered := engineAnchorZoomCentered() || (!engineAnchorActive() && signal != "")
+	if centered {
+		return takeCenteredEngineAnchorLock(edge, reacquire, signal)
 	}
 	// LockCurrentPosition freezes the engine cursor where it is.
 	x, y, ok := engineAnchorPoint(preferX, preferY, havePrefer)
@@ -1057,19 +1082,19 @@ func takeEngineAnchorLock(edge string, preferX, preferY float32, havePrefer, rea
 	}
 	pointerCursorSetter(false)
 	if engaged {
-		noteEngineAnchorEngaged(edge, converted)
+		noteEngineAnchorEngaged(edge, converted, "in-place", "")
 	}
 	return true
 }
 
 // takeCenteredEngineAnchorLock is the centered LockCurrentPosition shape, taken
-// only for camera first person (Project 12). The
+// for first person (Project 12; see engineFirstPersonSignal). The
 // X11 grab warps the host pointer to the window center and only then confines
 // it; the entry announcement seeds both direct dispatch and the anchor-style
 // fallback integrator there. Relative samples continue through
 // DispatchRobloxDirectPointerFallbackDelta; only the lock and release geometry
 // differ from a lock-in-place anchor.
-func takeCenteredEngineAnchorLock(edge string, reacquire bool) bool {
+func takeCenteredEngineAnchorLock(edge string, reacquire bool, signal string) bool {
 	if engineAnchorCentered() && !reacquire {
 		return true
 	}
@@ -1083,7 +1108,7 @@ func takeCenteredEngineAnchorLock(edge string, reacquire bool) bool {
 			storeEngineAnchorLockMode(true, cx, cy, true)
 			rememberEngineAnchorOrigin(cx, cy)
 			pointerCursorSetter(false)
-			noteEngineAnchorEngaged(edge, true)
+			noteEngineAnchorEngaged(edge, true, "centered", signal)
 			return true
 		}
 	}
@@ -1103,7 +1128,7 @@ func takeCenteredEngineAnchorLock(edge string, reacquire bool) bool {
 	}
 	pointerCursorSetter(false)
 	if engaged {
-		noteEngineAnchorEngaged(edge, converted)
+		noteEngineAnchorEngaged(edge, converted, "centered", signal)
 	}
 	return true
 }
@@ -1112,10 +1137,14 @@ func takeCenteredEngineAnchorLock(edge string, reacquire bool) bool {
 // authority took the anchored grab. It is the sibling of
 // noteEngineStickyEngaged and exists for the same reason: the value the
 // exported boolean reports as "not locked" otherwise leaves no trace at all.
-func noteEngineAnchorEngaged(edge string, converted bool) {
+//
+// shape is "centered" (first person: the host pointer is warped to the client
+// center) or "in-place"; signal says why a lock was centered.
+func noteEngineAnchorEngaged(edge string, converted bool, shape, signal string) {
 	logging.Logger(logging.CatJNI).Info("[jni] engine lock: anchored sticky grab engaged",
 		"edge", edge, "converted", converted,
-		"behavior", MouseBehaviorLockCurrentPosition.String())
+		"behavior", MouseBehaviorLockCurrentPosition.String(),
+		"shape", shape, "signal", signal)
 }
 
 // releaseEngineLockAtCenter frees an engine-authoritative grab when

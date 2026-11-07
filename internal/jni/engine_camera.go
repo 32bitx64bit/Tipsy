@@ -495,10 +495,14 @@ type engineCameraReader struct {
 const (
 	engineCameraMaxServices = 4096
 	// The latest detector result is a roughly 100ms cache for input events.
-	engineCameraInterval            = 100 * time.Millisecond
-	engineCameraHeartbeat           = 5 * time.Second
-	engineCameraFirstPersonEnter    = 0.75
-	engineCameraFirstPersonExit     = 1.25
+	engineCameraInterval         = 100 * time.Millisecond
+	engineCameraHeartbeat        = 5 * time.Second
+	engineCameraFirstPersonEnter = 0.75
+	engineCameraFirstPersonExit  = 1.25
+	// Only a Custom camera can be first person here. Project 12 reads Scriptable(6)
+	// at distance 6.00 in first person (Custom 2.30 -> Scriptable 6.00 on
+	// wheel-in), so this detector never fires there; its lock is recognised by
+	// the engine's LockCurrentPosition instead (engineFirstPersonSignal).
 	engineCameraFirstPersonType     = 5 // Enum.CameraType.Custom
 	engineCameraFirstPersonDebounce = 2
 )

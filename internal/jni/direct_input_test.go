@@ -2110,7 +2110,10 @@ func TestEngineLockCurrentPositionEngagesAnAnchoredGrabAndMovesNoCursor(t *testi
 		t.Fatalf("free motion=(%v,%v), want absolute (900,220)", x, y)
 	}
 
-	// First person. The exported getter still says false and the enum says 2.
+	// An RMB camera look. The exported getter still says false and the enum
+	// says 2. (A bare LockCurrentPosition with no RMB is first person and
+	// centers; see TestScriptableFirstPersonCentersTheEngineLock.)
+	holdRMBLookForTest(t)
 	script.next()
 	if locked, _ := RobloxMainWindowMouseLocked(); locked {
 		t.Fatal("setup: the exported getter must stay false for LockCurrentPosition")
@@ -2168,6 +2171,7 @@ func TestEngineLockCurrentPositionReleaseRestoresFrozenOrigin(t *testing.T) {
 	testDirectRecSetMouseLocked(false)
 
 	moveAbsolute(900, 220)
+	holdRMBLookForTest(t)
 	script.next()
 	lookRelative(5, 3)
 	if !engineAnchorActive() {
@@ -2373,6 +2377,7 @@ func TestEngineAnchorLockSurvivesAltToggleAndFocusFlap(t *testing.T) {
 	stubEngineMouseBehavior(t, MouseBehaviorLockCurrentPosition)
 	testDirectRecSetMouseLocked(false)
 
+	holdRMBLookForTest(t)
 	moveAbsolute(900, 220)
 	lookRelative(5, 3)
 	if !engineAnchorActive() || len(calls.cursor) != 1 {
@@ -2582,6 +2587,7 @@ func TestEngineAnchorLockKeepsTheSecondaryPressAnchor(t *testing.T) {
 
 	// The engine freezes the cursor where it is; the anchored grab is taken
 	// on the absolute transition sample.
+	holdRMBLookForTest(t)
 	moveAbsolute(400, 300)
 	if !engineAnchorActive() || persistentPointerCapture.Load() {
 		t.Fatalf("setup: anchor=%t persistent=%t", engineAnchorActive(), persistentPointerCapture.Load())
@@ -2799,6 +2805,7 @@ func TestEngineAnchorLockReacquiresAtTheGrabAnchorNotTheDrift(t *testing.T) {
 	stubEngineMouseBehavior(t, MouseBehaviorLockCurrentPosition)
 	testDirectRecSetMouseLocked(false)
 
+	holdRMBLookForTest(t)
 	moveAbsolute(900, 220)
 	if !engineAnchorActive() || len(calls.cursor) != 1 {
 		t.Fatalf("setup: anchor=%t calls=%+v", engineAnchorActive(), calls)

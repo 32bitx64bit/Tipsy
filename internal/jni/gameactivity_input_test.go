@@ -615,9 +615,9 @@ func TestEngineLockOutranksCameraFirstPerson(t *testing.T) {
 	}
 }
 
-// LockCurrentPosition without camera first person freezes the cursor where it
-// is and releases it there. Games with a custom cursor (a gun crosshair) draw
-// it at that point, so nothing may center the lock or the release.
+// LockCurrentPosition during an RMB camera look freezes the cursor where it is
+// and releases it there. Games with a custom cursor (a gun crosshair) draw it
+// at that point, so nothing may center the lock or the release.
 func TestEngineAnchorLocksInPlaceAndReleasesAtOrigin(t *testing.T) {
 	selectPointerPath(t, "direct")
 	selectMouseCapture(t, "auto")
@@ -633,6 +633,7 @@ func TestEngineAnchorLocksInPlaceAndReleasesAtOrigin(t *testing.T) {
 	if currentCaptureState() != captureFree || len(calls.center)+len(calls.cursor)+len(calls.zoom) != 0 {
 		t.Fatalf("Default captured: state=%v calls=%+v", currentCaptureState(), calls)
 	}
+	holdRMBLookForTest(t)
 	script.next()
 	moveAbsolute(901, 221)
 	if currentCaptureState() != captureEngineAnchor || engineAnchorCentered() {
@@ -678,6 +679,7 @@ func TestEngineAnchorReleaseGates(t *testing.T) {
 			enterExperienceForTest(t, vm, 79966250354565)
 			stubEngineMouseBehavior(t, MouseBehaviorLockCurrentPosition)
 			testDirectRecSetMouseLocked(false)
+			holdRMBLookForTest(t)
 			moveAbsolute(900, 220)
 			if currentCaptureState() != captureEngineAnchor || engineAnchorCentered() {
 				t.Fatal("setup: EngineAnchor did not lock in place")
@@ -885,6 +887,7 @@ func TestAutoAnchorWheelReleaseRestoresTheFrozenOrigin(t *testing.T) {
 	testDirectRecSetMouseLocked(false)
 
 	moveAbsolute(900, 220)
+	holdRMBLookForTest(t)
 	script.next()
 	lookRelative(5, 3)
 	lookRelative(400, 100)
@@ -1040,6 +1043,158 @@ func TestDirectPathHeldRMBKeepsEngineAnchorAtClick(t *testing.T) {
 	if currentCaptureState() != captureEngineAnchor || engineAnchorCentered() {
 		t.Fatalf("look state=%v centered=%t, want lock-in-place", currentCaptureState(), engineAnchorCentered())
 	}
+}
+
+// holdRMBLookForTest marks the secondary button held on the direct arm for the
+// rest of the test: the state a LockCurrentPosition has when an RMB camera look
+// causes it, which keeps the lock-in-place shape.
+func holdRMBLookForTest(t *testing.T) {
+	t.Helper()
+	directSecondaryHeld.Store(true)
+	t.Cleanup(func() { directSecondaryHeld.Store(false) })
+}
+
+// stubProject12Camera replays Project 12's measured wheel-in through the real
+// camera detector (Custom 30.00, Custom 2.30, then Scriptable 6.00 for good)
+// and makes its decision the first-person source. The detector only accepts a
+// Custom camera within 0.75, so it stays false for the whole first person.
+func stubProject12Camera(t *testing.T) {
+	t.Helper()
+	var det engineCameraFirstPersonDetector
+	for _, s := range []engineCameraSample{
+		{cameraType: 5, distance: 30}, {cameraType: 5, distance: 2.30},
+		{cameraType: 6, distance: 6}, {cameraType: 6, distance: 6},
+		{cameraType: 6, distance: 6}, {cameraType: 6, distance: 6},
+	} {
+		if det.update(s, true) {
+			t.Fatalf("camera detector reported first person for %+v; Project 12 reads Scriptable 6.00", s)
+		}
+	}
+	old := engineCameraFirstPersonSource
+	engineCameraFirstPersonSource = func() bool {
+		det.mu.Lock()
+		defer det.mu.Unlock()
+		return det.firstPerson
+	}
+	t.Cleanup(func() { engineCameraFirstPersonSource = old })
+}
+
+// Project 12's measured first person: MouseBehavior 2 (LockCurrentPosition),
+// a Scriptable 6.00 camera the detector cannot see, and no RMB. The game's own
+// lock is the first-person signal, so the host pointer is warped to the client
+// center and the logical pointer is seeded there, on every edge that can see
+// the engine lock first.
+func TestScriptableFirstPersonCentersTheEngineLock(t *testing.T) {
+	edges := []struct {
+		name string
+		fire func()
+		want [2]float32 // logical pointer after the edge
+	}{
+		{"wheel detent", func() {
+			handleX11InputEvent(x11.InputEvent{Kind: x11.InputScroll, X: 100, Y: 200, ScrollY: 1})
+		}, [2]float32{640, 360}},
+		{"absolute move", func() { moveAbsolute(905, 223) }, [2]float32{640, 360}},
+		{"captured motion", func() { lookRelative(4, 2) }, [2]float32{644, 362}},
+	}
+	for _, edge := range edges {
+		t.Run(edge.name, func(t *testing.T) {
+			calls, script, _ := cameraAnchorLockSetup(t)
+			stubProject12Camera(t)
+
+			moveAbsolute(900, 220)
+			if calls.grabs() != 0 || currentCaptureState() != captureFree {
+				t.Fatalf("third person grabbed: state=%v calls=%+v", currentCaptureState(), calls)
+			}
+			script.next() // the game enters first person: MouseBehavior 0 -> 2
+			edge.fire()
+
+			if currentCaptureState() != captureEngineAnchor || !engineAnchorCentered() {
+				t.Fatalf("state=%v centered=%t, want the centered engine anchor", currentCaptureState(), engineAnchorCentered())
+			}
+			if len(calls.center) != 1 || !calls.center[0] || len(calls.cursor) != 0 {
+				t.Fatalf("lock calls=%+v, want one centered SetPointerLock(true) and no lock-in-place grab", calls)
+			}
+			if fx, fy, ok := RobloxDirectFallbackPosition(); !ok || fx != edge.want[0] || fy != edge.want[1] {
+				t.Fatalf("logical pointer=(%v,%v,%v), want %v", fx, fy, ok, edge.want)
+			}
+			if x, y, ok := engineAnchorFrozenOrigin(); !ok || x != 640 || y != 360 {
+				t.Fatalf("frozen origin=(%v,%v,%v), want the center (640,360)", x, y, ok)
+			}
+
+			// The game leaves first person: the pointer comes back at the center.
+			script.next()
+			lookRelative(1, 1)
+			if currentCaptureState() != captureFree || engineAnchorActive() {
+				t.Fatalf("release state=%v anchor=%t, want Free", currentCaptureState(), engineAnchorActive())
+			}
+			if len(calls.zoom) != 2 || !calls.zoom[0] || calls.zoom[1] {
+				t.Fatalf("release calls=%+v, want center re-anchor then ungrab", calls)
+			}
+		})
+	}
+}
+
+// An RMB hold into the engine's lock is a camera look, not first person. The
+// engine reports LockCurrentPosition for it too, and may still report it on the
+// release edge, so neither the held gesture nor either button edge may warp the
+// pointer to the center.
+func TestHeldRMBIntoEngineLockStaysClickAnchored(t *testing.T) {
+	press := func() {
+		handleX11InputEvent(x11.InputEvent{Kind: x11.InputPointer, PointerAction: x11.PointerDown, Button: 3, X: 900, Y: 220})
+	}
+	release := func() {
+		handleX11InputEvent(x11.InputEvent{Kind: x11.InputPointer, PointerAction: x11.PointerUp, Button: 3, X: 900, Y: 220})
+	}
+	assertClickAnchored := func(t *testing.T, calls *captureCalls) {
+		t.Helper()
+		if currentCaptureState() != captureEngineAnchor || engineAnchorCentered() {
+			t.Fatalf("state=%v centered=%t, want lock-in-place", currentCaptureState(), engineAnchorCentered())
+		}
+		if len(calls.center) != 0 {
+			t.Fatalf("RMB look centered the pointer: %+v", calls)
+		}
+		if x, y, ok := engineAnchorFrozenOrigin(); !ok || x != 900 || y != 220 {
+			t.Fatalf("frozen origin=(%v,%v,%v), want the click (900,220)", x, y, ok)
+		}
+	}
+
+	t.Run("held fallback converts", func(t *testing.T) {
+		calls, script, _ := cameraAnchorLockSetup(t)
+		stubProject12Camera(t)
+		moveAbsolute(900, 220)
+		press() // the engine has not locked yet: held-RMB click-anchored fallback
+		t.Cleanup(release)
+		if len(calls.cursor) != 1 || !calls.cursor[0] || len(calls.center) != 0 {
+			t.Fatalf("RMB press calls=%+v, want one cursor-anchored grab", calls)
+		}
+		script.next() // the engine ties LockCurrentPosition to the held button
+		lookRelative(4, 2)
+		assertClickAnchored(t, calls)
+		lookRelative(1, 1)
+		assertClickAnchored(t, calls)
+	})
+
+	t.Run("engine already locked at the press", func(t *testing.T) {
+		calls, script, _ := cameraAnchorLockSetup(t)
+		stubProject12Camera(t)
+		moveAbsolute(900, 220)
+		script.next()
+		press()
+		t.Cleanup(release)
+		assertClickAnchored(t, calls)
+	})
+
+	t.Run("engine still locked on the release edge", func(t *testing.T) {
+		calls, script, _ := cameraAnchorLockSetup(t)
+		stubProject12Camera(t)
+		moveAbsolute(900, 220)
+		press()
+		script.next() // lock lands after the press and is still reported at the release
+		release()
+		assertClickAnchored(t, calls)
+		lookRelative(1, 1)
+		assertClickAnchored(t, calls)
+	})
 }
 
 // The tests drive the production dispatch and delivery paths directly;
