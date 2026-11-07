@@ -12,6 +12,7 @@ import (
 	"net/url"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -40,6 +41,8 @@ func (c Catalog) client() *http.Client {
 // Lookup returns a public place name and icon. It uses unauthenticated catalog
 // APIs only: never cookies, tickets, or .ROBLOSECURITY.
 // Failures are honest: the caller keeps the fallback display name "Roblox".
+// The name and icon chains are independent requests, so they run concurrently
+// and one failure never discards the other's result.
 func (c Catalog) Lookup(ctx context.Context, placeID int64) (Place, error) {
 	if placeID <= 0 {
 		return Place{}, nil
@@ -48,11 +51,24 @@ func (c Catalog) Lookup(ctx context.Context, placeID int64) (Place, error) {
 		ctx = context.Background()
 	}
 	place := Place{ID: placeID}
-	name, nameErr := c.placeName(ctx, placeID)
+	var (
+		name, icon       string
+		nameErr, iconErr error
+		wg               sync.WaitGroup
+	)
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		name, nameErr = c.placeName(ctx, placeID)
+	}()
+	go func() {
+		defer wg.Done()
+		icon, iconErr = c.placeIcon(ctx, placeID)
+	}()
+	wg.Wait()
 	if nameErr == nil {
 		place.Name = name
 	}
-	icon, iconErr := c.placeIcon(ctx, placeID)
 	if iconErr == nil {
 		place.IconURL = icon
 	}

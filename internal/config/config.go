@@ -9,6 +9,8 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
+	"strings"
 	"syscall"
 )
 
@@ -120,24 +122,78 @@ func Load() (*Config, error) {
 
 // Update applies fn to the current config and saves the result while holding
 // the cross-process config lock. Callers that need a read-modify-write cycle
-// must use Update instead of a bare Load followed by Save.
+// must use Update instead of a bare Load followed by Save. It routes through
+// UpdateJSON so top-level keys that Config does not model survive the cycle.
 func Update(fn func(*Config) error) error {
 	if fn == nil {
 		return errors.New("config update function is nil")
 	}
-	release, err := acquireConfigLock()
+	return UpdateJSON(func(data []byte) ([]byte, error) {
+		return mergeConfigUpdate(data, fn)
+	})
+}
+
+// mergeConfigUpdate decodes the raw document into Config, applies fn, and
+// writes the modeled keys back over the untouched document so unknown
+// top-level keys and forward-compatible sections keep their bytes.
+func mergeConfigUpdate(data []byte, fn func(*Config) error) ([]byte, error) {
+	var c Config
+	if data != nil {
+		if err := json.Unmarshal(data, &c); err != nil {
+			return nil, err
+		}
+	}
+	if err := fn(&c); err != nil {
+		return nil, err
+	}
+	modeledJSON, err := json.Marshal(&c)
 	if err != nil {
-		return err
+		return nil, err
 	}
-	defer release()
-	c, err := Load()
+	modeled := make(map[string]json.RawMessage)
+	if err := json.Unmarshal(modeledJSON, &modeled); err != nil {
+		return nil, err
+	}
+	document := make(map[string]json.RawMessage)
+	if data != nil {
+		if err := json.Unmarshal(data, &document); err != nil {
+			return nil, err
+		}
+	}
+	// Drop modeled keys (including case variants, which encoding/json folds
+	// onto the same field) before writing the fresh values, so clearing a
+	// field removes it instead of leaving the stale bytes behind.
+	modeledKeys := make(map[string]struct{})
+	for _, key := range configJSONKeys() {
+		modeledKeys[strings.ToLower(key)] = struct{}{}
+	}
+	for key := range document {
+		if _, ok := modeledKeys[strings.ToLower(key)]; ok {
+			delete(document, key)
+		}
+	}
+	for key, raw := range modeled {
+		document[key] = raw
+	}
+	merged, err := json.MarshalIndent(document, "", "  ")
 	if err != nil {
-		return err
+		return nil, err
 	}
-	if err := fn(c); err != nil {
-		return err
+	return append(merged, '\n'), nil
+}
+
+// configJSONKeys lists the top-level JSON names Config models, read from its
+// struct tags so new fields cannot drift out of the merge.
+func configJSONKeys() []string {
+	t := reflect.TypeOf(Config{})
+	keys := make([]string, 0, t.NumField())
+	for i := 0; i < t.NumField(); i++ {
+		name, _, _ := strings.Cut(t.Field(i).Tag.Get("json"), ",")
+		if name != "" && name != "-" {
+			keys = append(keys, name)
+		}
 	}
-	return saveLocked(c)
+	return keys
 }
 
 // UpdateJSON applies fn to the complete config JSON document while holding

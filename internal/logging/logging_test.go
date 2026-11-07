@@ -273,6 +273,21 @@ func TestRedactPrefilterDoesNotSkipProtectedForms(t *testing.T) {
 	}
 }
 
+func TestRedactRegexesCompileOnceOnFirstUse(t *testing.T) {
+	t.Parallel()
+	first := compileRedactRules()
+	second := compileRedactRules()
+	if len(first) != len(redactPatterns) {
+		t.Fatalf("compiled %d rules, want %d", len(first), len(redactPatterns))
+	}
+	if &first[0] != &second[0] {
+		t.Fatal("redaction rules were compiled more than once")
+	}
+	if got := Redact("password=hunter2"); strings.Contains(got, "hunter2") {
+		t.Fatalf("lazily compiled rules did not redact: %q", got)
+	}
+}
+
 func TestParseLevel(t *testing.T) {
 	t.Parallel()
 	if parseLevel("debug") != slog.LevelDebug {

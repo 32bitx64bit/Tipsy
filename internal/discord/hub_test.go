@@ -19,9 +19,15 @@ import (
 	"time"
 )
 
+// discordTestSocket keeps the unix socket path within the 107-byte sun_path
+// limit even when TMPDIR has a long prefix and the test name is long.
+func discordTestSocket(t *testing.T) string {
+	t.Helper()
+	return filepath.Join(t.TempDir(), "d0")
+}
+
 func TestHubPublishesSeededPlaceAndClearsOnClose(t *testing.T) {
-	dir := t.TempDir()
-	sock := filepath.Join(dir, "discord-ipc-0")
+	sock := discordTestSocket(t)
 	ln, err := net.Listen("unix", sock)
 	if err != nil {
 		t.Fatal(err)
@@ -87,8 +93,7 @@ func TestHubPublishesSeededPlaceAndClearsOnClose(t *testing.T) {
 }
 
 func TestHubSkipsZeroJNIPlaceAndHonorsDisable(t *testing.T) {
-	dir := t.TempDir()
-	sock := filepath.Join(dir, "discord-ipc-0")
+	sock := discordTestSocket(t)
 	ln, err := net.Listen("unix", sock)
 	if err != nil {
 		t.Fatal(err)
@@ -149,8 +154,7 @@ func TestHubSkipsZeroJNIPlaceAndHonorsDisable(t *testing.T) {
 }
 
 func TestHubLoadedPlaceReturnsHome(t *testing.T) {
-	dir := t.TempDir()
-	sock := filepath.Join(dir, "discord-ipc-0")
+	sock := discordTestSocket(t)
 	ln, err := net.Listen("unix", sock)
 	if err != nil {
 		t.Fatal(err)
@@ -244,6 +248,59 @@ func TestCatalogLookupUsesPublicAPIs(t *testing.T) {
 	}
 }
 
+func TestCatalogLookupRunsNameAndIconConcurrently(t *testing.T) {
+	t.Parallel()
+	started := make(chan struct{}, 2)
+	release := make(chan struct{})
+	var timedOut atomic.Bool
+	waitForPeer := func() {
+		started <- struct{}{}
+		select {
+		case <-release:
+		case <-time.After(2 * time.Second):
+			timedOut.Store(true)
+		}
+	}
+	mux := http.NewServeMux()
+	mux.HandleFunc("/universes/v1/places/1818/universe", func(w http.ResponseWriter, r *http.Request) {
+		waitForPeer()
+		_, _ = io.WriteString(w, `{"universeId":99}`)
+	})
+	mux.HandleFunc("/v1/games", func(w http.ResponseWriter, r *http.Request) {
+		waitForPeer()
+		_, _ = io.WriteString(w, `{"data":[{"id":99,"name":"Crossroads"}]}`)
+	})
+	mux.HandleFunc("/v1/places/gameicons", func(w http.ResponseWriter, r *http.Request) {
+		waitForPeer()
+		_, _ = io.WriteString(w, `{"data":[{"targetId":1818,"state":"Completed","imageUrl":"https://tr.rbxcdn.com/icon.png"}]}`)
+	})
+	srv := httptest.NewServer(mux)
+	t.Cleanup(srv.Close)
+	go func() {
+		// Release both chains only once each has a request in flight.
+		<-started
+		<-started
+		close(release)
+	}()
+
+	c := Catalog{
+		Client:      srv.Client(),
+		UniverseURL: srv.URL + "/universes/v1/places/%d/universe",
+		GamesURL:    srv.URL + "/v1/games",
+		ThumbsURL:   srv.URL + "/v1/places/gameicons",
+	}
+	got, err := c.Lookup(context.Background(), 1818)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if timedOut.Load() {
+		t.Fatal("name and icon chains ran sequentially")
+	}
+	if got.Name != "Crossroads" || got.IconURL != "https://tr.rbxcdn.com/icon.png" || got.ID != 1818 {
+		t.Fatalf("lookup=%+v", got)
+	}
+}
+
 func TestCatalogLookupKeepsIconWhenNameFails(t *testing.T) {
 	t.Parallel()
 	mux := http.NewServeMux()
@@ -273,8 +330,7 @@ func TestCatalogLookupKeepsIconWhenNameFails(t *testing.T) {
 }
 
 func TestHubRetriesFailedCatalogLookup(t *testing.T) {
-	dir := t.TempDir()
-	sock := filepath.Join(dir, "discord-ipc-0")
+	sock := discordTestSocket(t)
 	ln, err := net.Listen("unix", sock)
 	if err != nil {
 		t.Fatal(err)

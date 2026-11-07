@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 )
@@ -160,6 +161,54 @@ func TestUpdateSerializesConcurrentWriters(t *testing.T) {
 	}
 	if len(c.LogCategories) != writers*rounds {
 		t.Fatalf("lost updates: %d categories, want %d", len(c.LogCategories), writers*rounds)
+	}
+}
+
+func TestUpdatePreservesUnmodeledTopLevelFields(t *testing.T) {
+	tmp := t.TempDir()
+	t.Setenv("XDG_CONFIG_HOME", tmp)
+	p := Paths()
+	if err := os.MkdirAll(p.ConfigDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	initial := []byte(`{"future":{"keep":true},"logLevel":"debug","gamepad":{"enabled":false},"microphone":{"enabled":false}}`)
+	if err := os.WriteFile(p.ConfigFile, initial, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := Update(func(c *Config) error {
+		c.LogLevel = "warn"
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	raw, err := os.ReadFile(p.ConfigFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var top map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &top); err != nil {
+		t.Fatal(err)
+	}
+	var future struct {
+		Keep bool `json:"keep"`
+	}
+	if err := json.Unmarshal(top["future"], &future); err != nil || !future.Keep {
+		t.Fatalf("unmodeled field was lost: %s", raw)
+	}
+	if string(top["logLevel"]) != `"warn"` {
+		t.Fatalf("modeled field not updated: %s", raw)
+	}
+	for _, key := range []string{"gamepad", "microphone"} {
+		if string(top[key]) == "" || !strings.Contains(string(top[key]), `"enabled": false`) {
+			t.Fatalf("%s section bytes changed: %s", key, raw)
+		}
+	}
+	out, err := Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if out.LogLevel != "warn" {
+		t.Fatalf("Load after Update = %+v", out)
 	}
 }
 
