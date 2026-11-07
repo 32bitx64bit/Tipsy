@@ -49,7 +49,6 @@ Omit the subsystem to print all of them.
 Controller environment (headless parity; env wins per key over the
 persisted "gamepad" section in the config file, missing JSON = defaults):
   TIPSY_GAMEPAD=0|off               whole subsystem off (engine sees zero pads)
-  TIPSY_GAMEPAD_PATH=direct         pad feed-in arm (direct-only; others deliver nothing)
   TIPSY_GAMEPAD_DEADZONE=0.0-0.5    global stick deadzone floor (default: device flat)
   TIPSY_GAMEPAD_DEADZONE_LEFT/RIGHT=…
                                     per-stick override (default: follow global)

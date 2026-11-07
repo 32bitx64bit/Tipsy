@@ -123,16 +123,6 @@ func (m *Manager) Current() *Device {
 	return m.slot.dev
 }
 
-// Mapping returns the pad's mapping (zero when no pad).
-func (m *Manager) Mapping() Mapping {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	if m.slot == nil {
-		return Mapping{}
-	}
-	return m.slot.mapping
-}
-
 // DeviceID returns the stable nonzero id (0 = none).
 func (m *Manager) DeviceID() int {
 	m.mu.Lock()
@@ -141,16 +131,6 @@ func (m *Manager) DeviceID() int {
 		return 0
 	}
 	return singlePadID
-}
-
-// Reader returns the pad's stream reader (nil when no pad).
-func (m *Manager) Reader() *Reader {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	if m.slot == nil {
-		return nil
-	}
-	return m.slot.reader
 }
 
 // Slot returns the snapshot for one stable device id, or false when the pad
@@ -330,12 +310,13 @@ func (m *Manager) DisconnectSnapshotFor(devID int) *AndroidFrame {
 }
 
 func disconnectSnapshotFor(r *Reader, devID int, mapping Mapping) *AndroidFrame {
-	held := r.Held()
 	var axes []uint16
 	for c := range r.raw {
 		axes = append(axes, c)
 	}
-	raw := DisconnectFrame(held, axes)
+	// DisconnectFrame releases every held button unconditionally, so the
+	// held-state copy is not needed here.
+	raw := DisconnectFrame(nil, axes)
 	af := MapFrame(raw, devID, mapping, r.Abs)
 	af.Disconnect = true
 	return &af

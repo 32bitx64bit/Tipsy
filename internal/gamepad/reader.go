@@ -257,17 +257,6 @@ func (r *Reader) Feed(ev InputEvent) *Frame {
 	return nil
 }
 
-// FeedAll consumes a decoded stream and returns one Frame per SYN_REPORT.
-func (r *Reader) FeedAll(evs []InputEvent) []*Frame {
-	var out []*Frame
-	for _, ev := range evs {
-		if f := r.Feed(ev); f != nil {
-			out = append(out, f)
-		}
-	}
-	return out
-}
-
 func (r *Reader) snapshot() *Frame {
 	r.updateAimRest()
 	f := &Frame{

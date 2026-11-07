@@ -70,6 +70,29 @@ func TestPrepareFocusedTextPaintPreservesAPKGeometryStyleAndMasking(t *testing.T
 	}
 }
 
+func runeIndexFromUTF16(text string, units int) int {
+	if units <= 0 {
+		return 0
+	}
+	used := 0
+	count := 0
+	for _, r := range text {
+		step := 1
+		if r > 0xffff {
+			step = 2
+		}
+		if used+step > units {
+			return count
+		}
+		used += step
+		if used == units {
+			return count + 1
+		}
+		count++
+	}
+	return count
+}
+
 func TestRuneAndByteIndexFromUTF16DoNotSplitSurrogatePair(t *testing.T) {
 	const text = "a\U0001f642b"
 	for units, want := range map[int]int{-1: 0, 0: 0, 1: 1, 2: 1, 3: 2, 4: 3, 99: 3} {

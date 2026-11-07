@@ -175,6 +175,11 @@ type AndroidFrame struct {
 	// owned.
 	Ranges     []MotionRange
 	Disconnect bool
+
+	// rangeMeta caches the stable range metadata for the mapping and device
+	// ranges last used through this destination. MapFrameInto fills it
+	// lazily; independent MapFrame results leave it nil.
+	rangeMeta *rangeMeta
 }
 
 // MapFrame translates a normalized reader Frame to Android vocabulary.
@@ -189,7 +194,8 @@ func MapFrame(f *Frame, deviceID int, m Mapping, infos map[uint16]AbsInfo) Andro
 // aliases the next call; nil dst allocates like MapFrame.
 func MapFrameInto(dst *AndroidFrame, f *Frame, deviceID int, m Mapping, infos map[uint16]AbsInfo) AndroidFrame {
 	var fresh AndroidFrame
-	if dst == nil {
+	reuse := dst != nil
+	if !reuse {
 		dst = &fresh
 	}
 	prepareAndroidFrame(dst, f, deviceID)
@@ -197,6 +203,16 @@ func MapFrameInto(dst *AndroidFrame, f *Frame, deviceID int, m Mapping, infos ma
 		return *dst
 	}
 	dst.Disconnect = f.Disconnect
+
+	var meta *rangeMeta
+	if reuse {
+		meta = dst.rangeMeta
+		if meta == nil {
+			meta = new(rangeMeta)
+			dst.rangeMeta = meta
+		}
+		meta.refresh(m, infos)
+	}
 
 	for code := range f.Buttons {
 		if key, ok := MapEvdevButtonWithFaceButtonLayout(code, m.HIDLinearButtons, f.FaceButtonLayout); ok {
@@ -207,38 +223,38 @@ func MapFrameInto(dst *AndroidFrame, f *Frame, deviceID int, m Mapping, infos ma
 	axes := f.Axes
 	if v, ok := axes[AbsX]; ok {
 		dst.Axes[AndroidAxisX] = float32(v)
-		dst.Ranges = setRange(dst.Ranges, AndroidAxisX, infos, AbsX, -1, 1)
+		dst.Ranges = appendFrameRange(dst.Ranges, meta, AndroidAxisX, rangeSlotX, AbsX, infos, -1, 1)
 	}
 	if v, ok := axes[AbsY]; ok {
 		dst.Axes[AndroidAxisY] = float32(v)
-		dst.Ranges = setRange(dst.Ranges, AndroidAxisY, infos, AbsY, -1, 1)
+		dst.Ranges = appendFrameRange(dst.Ranges, meta, AndroidAxisY, rangeSlotY, AbsY, infos, -1, 1)
 	}
 
 	if m.RightX != NoAxis && m.RightY != NoAxis {
 		if vx, ok := axes[m.RightX]; ok {
 			dst.Axes[AndroidAxisZ] = float32(vx)
 			dst.Axes[AndroidAxisRX] = float32(vx)
-			dst.Ranges = setRange(dst.Ranges, AndroidAxisZ, infos, m.RightX, -1, 1)
-			dst.Ranges = setRange(dst.Ranges, AndroidAxisRX, infos, m.RightX, -1, 1)
+			dst.Ranges = appendFrameRange(dst.Ranges, meta, AndroidAxisZ, rangeSlotRightX, m.RightX, infos, -1, 1)
+			dst.Ranges = appendFrameRange(dst.Ranges, meta, AndroidAxisRX, rangeSlotRightX, m.RightX, infos, -1, 1)
 		}
 		if vy, ok := axes[m.RightY]; ok {
 			dst.Axes[AndroidAxisRZ] = float32(vy)
 			dst.Axes[AndroidAxisRY] = float32(vy)
-			dst.Ranges = setRange(dst.Ranges, AndroidAxisRZ, infos, m.RightY, -1, 1)
-			dst.Ranges = setRange(dst.Ranges, AndroidAxisRY, infos, m.RightY, -1, 1)
+			dst.Ranges = appendFrameRange(dst.Ranges, meta, AndroidAxisRZ, rangeSlotRightY, m.RightY, infos, -1, 1)
+			dst.Ranges = appendFrameRange(dst.Ranges, meta, AndroidAxisRY, rangeSlotRightY, m.RightY, infos, -1, 1)
 		}
 	}
 
 	if m.TriggerL != NoAxis {
 		if v, ok := axes[m.TriggerL]; ok {
 			dst.Axes[AndroidAxisLTrigger] = float32(v)
-			dst.Ranges = setRange(dst.Ranges, AndroidAxisLTrigger, infos, m.TriggerL, 0, 1)
+			dst.Ranges = appendFrameRange(dst.Ranges, meta, AndroidAxisLTrigger, rangeSlotTriggerL, m.TriggerL, infos, 0, 1)
 		}
 	}
 	if m.TriggerR != NoAxis {
 		if v, ok := axes[m.TriggerR]; ok {
 			dst.Axes[AndroidAxisRTrigger] = float32(v)
-			dst.Ranges = setRange(dst.Ranges, AndroidAxisRTrigger, infos, m.TriggerR, 0, 1)
+			dst.Ranges = appendFrameRange(dst.Ranges, meta, AndroidAxisRTrigger, rangeSlotTriggerR, m.TriggerR, infos, 0, 1)
 		}
 	}
 
@@ -248,11 +264,11 @@ func MapFrameInto(dst *AndroidFrame, f *Frame, deviceID int, m Mapping, infos ma
 	hatY, hasHatY := axes[AbsHat0Y]
 	if hasHatX {
 		dst.Axes[AndroidAxisHatX] = float32(hatX)
-		dst.Ranges = setRange(dst.Ranges, AndroidAxisHatX, infos, AbsHat0X, -1, 1)
+		dst.Ranges = appendFrameRange(dst.Ranges, meta, AndroidAxisHatX, rangeSlotHatX, AbsHat0X, infos, -1, 1)
 	}
 	if hasHatY {
 		dst.Axes[AndroidAxisHatY] = float32(hatY)
-		dst.Ranges = setRange(dst.Ranges, AndroidAxisHatY, infos, AbsHat0Y, -1, 1)
+		dst.Ranges = appendFrameRange(dst.Ranges, meta, AndroidAxisHatY, rangeSlotHatY, AbsHat0Y, infos, -1, 1)
 	}
 	if hasHatX || hasHatY {
 		if hatX < -HatDpadThreshold {
@@ -330,6 +346,105 @@ func (f AndroidFrame) Range(androidAxis int) (MotionRange, bool) {
 	return MotionRange{}, false
 }
 
+// Range metadata slots mirror the physical axes MapFrameInto reads. Ranges
+// depend only on the mapping and the connect-time device ranges, so a reused
+// destination keeps them across frames.
+const (
+	rangeSlotX = iota
+	rangeSlotY
+	rangeSlotRightX
+	rangeSlotRightY
+	rangeSlotTriggerL
+	rangeSlotTriggerR
+	rangeSlotHatX
+	rangeSlotHatY
+	rangeSlotCount
+)
+
+type rangeMeta struct {
+	ready   bool
+	mapping Mapping
+	codes   [rangeSlotCount]uint16
+	infos   [rangeSlotCount]AbsInfo
+	flat    [rangeSlotCount]float32
+	valid   [rangeSlotCount]bool
+}
+
+// refresh rebuilds the cached flat values when the mapping or any source
+// AbsInfo changes; otherwise the cached metadata is reused as-is.
+func (rm *rangeMeta) refresh(m Mapping, infos map[uint16]AbsInfo) {
+	if rm.ready && rm.mapping == m {
+		matches := true
+		for i := 0; i < rangeSlotCount; i++ {
+			info, ok := infos[rm.codes[i]]
+			if ok != rm.valid[i] || (ok && info != rm.infos[i]) {
+				matches = false
+				break
+			}
+		}
+		if matches {
+			return
+		}
+	}
+	rm.mapping = m
+	rm.codes = [rangeSlotCount]uint16{
+		AbsX, AbsY, m.RightX, m.RightY,
+		m.TriggerL, m.TriggerR, AbsHat0X, AbsHat0Y,
+	}
+	for i, code := range rm.codes {
+		info, ok := infos[code]
+		if !ok || info.Maximum <= info.Minimum {
+			rm.infos[i] = AbsInfo{}
+			rm.flat[i] = 0
+			rm.valid[i] = false
+			continue
+		}
+		rm.infos[i] = info
+		rm.flat[i] = rangeFlat(info)
+		rm.valid[i] = true
+	}
+	rm.ready = true
+}
+
+// rangeFlat normalizes the device flat to the axis scale because evdev reports
+// raw units. Stick flats are capped at DefaultDeadzone so an oversized device
+// flat cannot swallow small deflections.
+func rangeFlat(info AbsInfo) float32 {
+	if info.Flat <= 0 {
+		return 0
+	}
+	span := float64(info.Maximum - info.Minimum)
+	if IsTriggerAxis(info) {
+		return float32(float64(info.Flat) / span)
+	}
+	return StickFlatNormalized(info.Minimum, info.Maximum, info.Flat)
+}
+
+// appendRangeMeta records the cached device range for an Android axis,
+// replacing an existing entry for the same axis.
+func appendRangeMeta(ranges []MotionRange, androidAxis int, meta *rangeMeta, slot int, lo, hi float32) []MotionRange {
+	if !meta.valid[slot] {
+		return ranges
+	}
+	r := MotionRange{Axis: int32(androidAxis), Min: lo, Max: hi, Flat: meta.flat[slot]}
+	for i := range ranges {
+		if int(ranges[i].Axis) == androidAxis {
+			ranges[i] = r
+			return ranges
+		}
+	}
+	return append(ranges, r)
+}
+
+// appendFrameRange uses cached metadata when the destination is reused, and
+// falls back to direct computation for an independent MapFrame result.
+func appendFrameRange(ranges []MotionRange, meta *rangeMeta, androidAxis, slot int, evdevCode uint16, infos map[uint16]AbsInfo, lo, hi float32) []MotionRange {
+	if meta != nil {
+		return appendRangeMeta(ranges, androidAxis, meta, slot, lo, hi)
+	}
+	return setRange(ranges, androidAxis, infos, evdevCode, lo, hi)
+}
+
 // setRange records the device range for an Android axis. Flat is normalized
 // to the axis scale because evdev reports raw units. Stick flats are capped
 // at DefaultDeadzone so an oversized device flat cannot swallow small
@@ -339,16 +454,7 @@ func setRange(ranges []MotionRange, androidAxis int, infos map[uint16]AbsInfo, e
 	if !ok || info.Maximum <= info.Minimum {
 		return ranges
 	}
-	var flat float32
-	span := float64(info.Maximum - info.Minimum)
-	if span > 0 && info.Flat > 0 {
-		if IsTriggerAxis(info) {
-			flat = float32(float64(info.Flat) / span)
-		} else {
-			flat = StickFlatNormalized(info.Minimum, info.Maximum, info.Flat)
-		}
-	}
-	r := MotionRange{Axis: int32(androidAxis), Min: lo, Max: hi, Flat: flat}
+	r := MotionRange{Axis: int32(androidAxis), Min: lo, Max: hi, Flat: rangeFlat(info)}
 	for i := range ranges {
 		if int(ranges[i].Axis) == androidAxis {
 			ranges[i] = r

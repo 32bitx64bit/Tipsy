@@ -237,6 +237,11 @@ type ReadyPump struct {
 	// Zero selects one second; a negative value disables timed recovery
 	// (shutdown still wakes immediately).
 	RecoveryRescan time.Duration
+
+	// readBuf and readEvents are reused across device reads so steady-state
+	// readiness work does not allocate per poll.
+	readBuf    []byte
+	readEvents []InputEvent
 }
 
 // NewReadyPump returns the readiness owner for manager. Callers configure the
@@ -301,7 +306,9 @@ func (p *ReadyPump) Run(stop <-chan struct{}) error {
 	}
 	rescan(readinessInitial)
 
+	pollFDs := make([]unix.PollFd, 0, 3)
 	for {
+		pollFDs = pollFDs[:0]
 		now := time.Now()
 		if watch == nil && watchRetryPending && !watchRetry.After(now) {
 			retryingWatch := !watchRetry.IsZero()
@@ -323,7 +330,6 @@ func (p *ReadyPump) Run(stop <-chan struct{}) error {
 			}
 		}
 
-		pollFDs := make([]unix.PollFd, 0, 3)
 		pollFDs = append(pollFDs, unix.PollFd{Fd: int32(wakeFD), Events: unix.POLLIN})
 		watchIndex := -1
 		if watch != nil {
@@ -448,7 +454,11 @@ func (p *ReadyPump) consumeReadyDevice(dev *Device, revents int16) (rescanned bo
 	if !ok || current != dev || reader == nil {
 		return false, nil
 	}
-	events, err := dev.ReadAvailable()
+	if cap(p.readBuf) < EventSize*64 {
+		p.readBuf = make([]byte, EventSize*64)
+	}
+	events, err := dev.readAvailable(p.readBuf, p.readEvents[:0])
+	p.readEvents = events
 	if err == nil {
 		for _, event := range events {
 			if frame := reader.Feed(event); frame != nil {

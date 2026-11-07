@@ -60,10 +60,6 @@ func ProbeAntiLagSupportContext(ctx context.Context) AntiLagSupport {
 	return antiLagProbeResult
 }
 
-func runAntiLagProbeProcess() AntiLagSupport {
-	return runAntiLagProbeProcessContext(context.Background())
-}
-
 func runAntiLagProbeProcessContext(ctx context.Context) AntiLagSupport {
 	exe, err := os.Executable()
 	if err != nil {

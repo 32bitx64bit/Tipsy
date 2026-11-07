@@ -3,6 +3,11 @@
 
 package x11
 
+import (
+	"cmp"
+	"slices"
+)
+
 // StartupMeasurementEdges contains the only two X11 callbacks admitted to
 // the default-off startup recorder. Callbacks receive no event payload: they
 // cannot observe text, input identity, coordinates, titles, XIDs, or raw
@@ -187,7 +192,7 @@ func (w *Window) collectStartupMeasurementEdgesLocked() []func() {
 	}
 	var callbacks []func()
 	if w.startupMeasurementMapEnabled && w.startupMeasurementMapPendingLocked() && startupMeasurementMapObserved(w) {
-		for _, observer := range w.startupMeasurementObservers {
+		for _, observer := range w.startupMeasurementObserversInOrderLocked() {
 			if observer.edges.MapNotify != nil && !observer.mapDelivered {
 				observer.mapDelivered = true
 				callbacks = append(callbacks, observer.edges.MapNotify)
@@ -197,13 +202,26 @@ func (w *Window) collectStartupMeasurementEdgesLocked() []func() {
 	}
 	if w.startupMeasurementDrawableArmed && startupMeasurementTakeDrawableObservation(w) {
 		w.startupMeasurementDrawableArmed = false
-		for _, observer := range w.startupMeasurementObservers {
+		for _, observer := range w.startupMeasurementObserversInOrderLocked() {
 			if observer.edges.PostScrollDrawableUpdate != nil {
 				callbacks = append(callbacks, observer.edges.PostScrollDrawableUpdate)
 			}
 		}
 	}
 	return callbacks
+}
+
+// startupMeasurementObserversInOrderLocked returns observers in registration
+// order so edge callbacks are delivered deterministically, not in map order.
+func (w *Window) startupMeasurementObserversInOrderLocked() []*startupMeasurementObserver {
+	observers := make([]*startupMeasurementObserver, 0, len(w.startupMeasurementObservers))
+	for _, observer := range w.startupMeasurementObservers {
+		observers = append(observers, observer)
+	}
+	slices.SortFunc(observers, func(a, b *startupMeasurementObserver) int {
+		return cmp.Compare(a.id, b.id)
+	})
+	return observers
 }
 
 func (w *Window) startupMeasurementMapPendingLocked() bool {

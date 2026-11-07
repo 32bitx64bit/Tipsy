@@ -207,27 +207,24 @@ func EnabledControl(fileJSON []byte, lookup func(string) (string, bool)) string 
 			}
 		}
 	}
-	if _, err := ParseMicSection(fileJSON); err != nil {
-		return MicrophoneControlDefault
-	}
-	if micSectionPresent(fileJSON) {
-		return MicrophoneControlFile
-	}
-	return MicrophoneControlDefault
-}
-
-func micSectionPresent(fileJSON []byte) bool {
 	if len(strings.TrimSpace(string(fileJSON))) == 0 {
-		return false
+		return MicrophoneControlDefault
 	}
 	var top map[string]json.RawMessage
 	if err := json.Unmarshal(fileJSON, &top); err != nil {
-		return false
+		return MicrophoneControlDefault
 	}
 	raw, ok := top[MicrophoneConfigSectionKey]
 	if !ok {
-		return false
+		return MicrophoneControlDefault
 	}
 	s := strings.TrimSpace(string(raw))
-	return s != "" && s != "null"
+	if s == "" || s == "null" {
+		return MicrophoneControlDefault
+	}
+	var merged MicrophoneConfig
+	if err := json.Unmarshal(raw, &merged); err != nil {
+		return MicrophoneControlDefault
+	}
+	return MicrophoneControlFile
 }

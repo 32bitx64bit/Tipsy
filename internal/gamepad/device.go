@@ -75,11 +75,19 @@ func (d *Device) Close() error {
 // ReadAvailable reads all pending input_event records without blocking.
 // It returns (nil, nil) when no input is pending (EAGAIN).
 func (d *Device) ReadAvailable() ([]InputEvent, error) {
+	return d.readAvailable(make([]byte, EventSize*64), nil)
+}
+
+// readAvailable is ReadAvailable with reusable read and decode buffers.
+func (d *Device) readAvailable(buf []byte, out []InputEvent) ([]InputEvent, error) {
 	if d == nil || d.fd < 0 {
-		return nil, errors.New("gamepad: device closed")
+		return out, errors.New("gamepad: device closed")
 	}
-	var out []InputEvent
-	buf := make([]byte, EventSize*64)
+	if cap(buf) < EventSize*64 {
+		buf = make([]byte, EventSize*64)
+	} else {
+		buf = buf[:EventSize*64]
+	}
 	for {
 		n, err := unix.Read(d.fd, buf)
 		if err != nil {
@@ -93,7 +101,7 @@ func (d *Device) ReadAvailable() ([]InputEvent, error) {
 		}
 		// Keep only whole records; a short read tail is dropped
 		// (input_event reads are record-atomic in practice).
-		out = append(out, ParseInputEvents(buf[:n])...)
+		out = parseInputEvents(buf[:n], out)
 		if n < len(buf) {
 			return out, nil
 		}

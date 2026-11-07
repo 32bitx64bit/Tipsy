@@ -206,12 +206,21 @@ func ApplyCalibration(f *Frame, m Mapping, cfg GamepadConfig) {
 	if len(f.Axes) == 0 || floor <= 0 {
 		return
 	}
-	seen := make(map[uint16]bool, 4)
-	for _, code := range []uint16{AbsX, AbsY, m.RightX, m.RightY} {
-		if code == NoAxis || seen[code] {
+	codes := [4]uint16{AbsX, AbsY, m.RightX, m.RightY}
+	for i, code := range codes {
+		if code == NoAxis {
 			continue
 		}
-		seen[code] = true
+		duplicate := false
+		for j := 0; j < i; j++ {
+			if codes[j] == code {
+				duplicate = true
+				break
+			}
+		}
+		if duplicate {
+			continue
+		}
 		if v, ok := f.Axes[code]; ok && absF(v) <= floor {
 			f.Axes[code] = 0
 		}

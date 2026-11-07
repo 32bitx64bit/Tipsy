@@ -82,16 +82,20 @@ type InputEvent struct {
 // ParseInputEvents decodes a raw byte stream of input_event records.
 // Trailing partial records are dropped.
 func ParseInputEvents(buf []byte) []InputEvent {
+	return parseInputEvents(buf, nil)
+}
+
+// parseInputEvents decodes into dst, appending when it has spare capacity.
+func parseInputEvents(buf []byte, dst []InputEvent) []InputEvent {
 	n := len(buf) / EventSize
-	out := make([]InputEvent, 0, n)
 	for i := 0; i < n; i++ {
 		rec := buf[i*EventSize : (i+1)*EventSize]
 		typ := binary.LittleEndian.Uint16(rec[16:18])
 		code := binary.LittleEndian.Uint16(rec[18:20])
 		val := int32(binary.LittleEndian.Uint32(rec[20:24]))
-		out = append(out, InputEvent{Type: typ, Code: code, Value: val})
+		dst = append(dst, InputEvent{Type: typ, Code: code, Value: val})
 	}
-	return out
+	return dst
 }
 
 // EncodeInputEvent builds one 24-byte input_event record (zero timestamp)

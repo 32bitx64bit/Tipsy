@@ -223,6 +223,34 @@ func TestMapFrameIntoWarmAllocations(t *testing.T) {
 	}
 }
 
+func TestMapFrameIntoRefreshesChangedRangeMetadata(t *testing.T) {
+	info, m := xboxDevice()
+	f := xpadTranslateFrame()
+	var dst AndroidFrame
+	initial := MapFrameInto(&dst, f, 1, m, info.Abs)
+	before, ok := initial.Range(AndroidAxisX)
+	if !ok {
+		t.Fatal("initial AXIS_X range missing")
+	}
+
+	changed := make(map[uint16]AbsInfo, len(info.Abs))
+	for code, abs := range info.Abs {
+		changed[code] = abs
+	}
+	x := changed[AbsX]
+	x.Flat *= 2
+	changed[AbsX] = x
+
+	got := MapFrameInto(&dst, f, 1, m, changed)
+	after, ok := got.Range(AndroidAxisX)
+	if !ok {
+		t.Fatal("refreshed AXIS_X range missing")
+	}
+	if after.Flat == before.Flat {
+		t.Fatalf("cached range did not refresh: before=%v after=%v", before.Flat, after.Flat)
+	}
+}
+
 // TestPositionalDiamondMapping pins BTN compass → BUTTON letters.
 func TestPositionalDiamondMapping(t *testing.T) {
 	cases := []struct {

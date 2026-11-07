@@ -124,28 +124,38 @@ func prepareFocusedTextPaint(s FocusedTextSnapshot, clientWidth, clientHeight in
 	}
 
 	text := s.Text
-	cursorByte := byteIndexFromUTF16(text, s.CursorUTF16)
+	var cursorByte int
 	if passwordTextInputType(s.TextInputType) {
-		cursorRunes := runeIndexFromUTF16(text, s.CursorUTF16)
+		// Mask and map the UTF-16 cursor in the same pass. A bullet is at
+		// most three UTF-8 bytes, so len(text)*3 is a safe capacity bound
+		// without an extra rune-count scan.
 		var masked strings.Builder
-		masked.Grow(utf8.RuneCountInString(text) * 3)
-		at := 0
-		cursorByte = 0
+		masked.Grow(len(text) * 3)
+		units := s.CursorUTF16
+		used := 0
+		cursorSet := false
 		for _, r := range text {
-			if at == cursorRunes {
+			step := 1
+			if r > 0xffff {
+				step = 2
+			}
+			if !cursorSet && units < used+step {
 				cursorByte = masked.Len()
+				cursorSet = true
 			}
 			if r == '\n' || r == '\r' {
 				masked.WriteRune(r)
 			} else {
 				masked.WriteRune('\u2022')
 			}
-			at++
+			used += step
 		}
-		if cursorRunes >= at {
+		if !cursorSet {
 			cursorByte = masked.Len()
 		}
 		text = masked.String()
+	} else {
+		cursorByte = byteIndexFromUTF16(text, s.CursorUTF16)
 	}
 	fontSize := float64(s.FontSize)
 	if fontSize <= 0 {
@@ -197,29 +207,6 @@ func passwordTextInputType(inputType int32) bool {
 	// Exact RbxKeyboard mapping: Password (5), NewPassword (9), and the
 	// new-password autofill type (10). Visible-password (6) stays visible.
 	return inputType == 5 || inputType == 9 || inputType == 10
-}
-
-func runeIndexFromUTF16(text string, units int) int {
-	if units <= 0 {
-		return 0
-	}
-	used := 0
-	count := 0
-	for _, r := range text {
-		step := 1
-		if r > 0xffff {
-			step = 2
-		}
-		if used+step > units {
-			return count
-		}
-		used += step
-		if used == units {
-			return count + 1
-		}
-		count++
-	}
-	return count
 }
 
 func byteIndexFromUTF16(text string, units int) int {
