@@ -4,12 +4,23 @@
 #
 # Full package vet, test suite, and CLI/GUI build. Starts a private Xvfb so
 # X11 tests that only skip when DISPLAY is unset actually run.
+#
+# mode: "full" (default) runs vet, the complete test suite with the race
+# passes, and builds both mains. "smoke" only builds both mains, for the
+# secondary CI legs that must still prove a CGO install works.
 set -euo pipefail
+
+mode="${1:-full}"
 
 fail() {
 	printf 'ci-test-build: %s\n' "$*" >&2
 	exit 1
 }
+
+case "$mode" in
+full | smoke) ;;
+*) fail "unknown mode '$mode': expected full or smoke" ;;
+esac
 
 command -v go >/dev/null 2>&1 || fail 'go is not on PATH'
 command -v gcc >/dev/null 2>&1 || fail 'gcc is not on PATH'
@@ -41,17 +52,34 @@ done
 [ -S "$socket" ] || fail 'Xvfb did not create a display socket'
 
 mkdir -p bin
-# unsafeptr is disabled because the JNI bindings deliberately pack integers
-# into C pointer types (unsafe.Pointer(uintptr(x))); checkptr/UB coverage of
-# those conversions remains in the race passes below.
-go vet -unsafeptr=false ./...
-go test -count=1 -timeout 20m ./...
-# Race pass for the packages that own shared concurrency state.
-# internal/jni and internal/runtime are the deliberate integer-packed-pointer
-# packages: checkptr's instrumentation aborts on those conversions, so their
-# race pass disables only checkptr diagnostics (not the race detector).
-go test -race -count=1 -timeout 10m ./internal/android ./internal/config ./internal/loader ./internal/x11
-go test -race -gcflags=all=-d=checkptr=0 -count=1 -timeout 10m ./internal/jni ./internal/runtime
+if [ "$mode" = full ]; then
+	# unsafeptr is disabled because the JNI bindings deliberately pack integers
+	# into C pointer types (unsafe.Pointer(uintptr(x))); checkptr/UB coverage of
+	# those conversions remains in the race passes below.
+	go vet -unsafeptr=false ./...
+	# Plain pass: every package except those exercised by the race passes
+	# below, so no package is compiled and run twice in the same job.
+	mod="$(go list -m)"
+	plain_pkgs=()
+	while IFS= read -r pkg; do
+		case "${pkg#"$mod"/}" in
+		internal/android | internal/config | internal/loader | internal/x11 | internal/jni | internal/runtime) ;;
+		*) plain_pkgs+=("$pkg") ;;
+		esac
+	done < <(go list ./...)
+	[ "${#plain_pkgs[@]}" -gt 0 ] || fail 'plain test pass has no packages'
+	go test -count=1 -timeout 20m "${plain_pkgs[@]}"
+	# Race pass for the packages that own shared concurrency state.
+	# internal/jni and internal/runtime are the deliberate integer-packed-pointer
+	# packages: checkptr's instrumentation aborts on those conversions, so their
+	# race pass disables only checkptr diagnostics (not the race detector), and
+	# only for those two packages so no dependency loses checkptr coverage.
+	go test -race -count=1 -timeout 10m ./internal/android ./internal/config ./internal/loader ./internal/x11
+	go test -race -count=1 -timeout 10m \
+		-gcflags="${mod}/internal/jni=-d=checkptr=0" \
+		-gcflags="${mod}/internal/runtime=-d=checkptr=0" \
+		./internal/jni ./internal/runtime
+fi
 go build -o bin/tipsy ./cmd/tipsy
 go build -o bin/tipsy-gui ./cmd/tipsy-gui
 test -x bin/tipsy || fail 'CLI binary was not built'
