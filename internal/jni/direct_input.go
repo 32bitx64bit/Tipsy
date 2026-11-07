@@ -644,42 +644,11 @@ func RobloxDirectFallbackPosition() (x, y float32, ok bool) {
 	return directInputTarget.fallbackX, directInputTarget.fallbackY, true
 }
 
-// RobloxDirectFallbackOffView reports whether the captured logical pair has
-// drifted outside the live viewport. ok is false when no capture holds the
-// integrator.
-func RobloxDirectFallbackOffView() (off, ok bool) {
-	directInputTarget.mu.RLock()
-	defer directInputTarget.mu.RUnlock()
-	if !directInputTarget.fallbackCaptured {
-		return false, false
-	}
-	cx, cy := clampPointerLogical(directInputTarget.fallbackX, directInputTarget.fallbackY)
-	return cx != directInputTarget.fallbackX || cy != directInputTarget.fallbackY, true
-}
-
-// SnapRobloxDirectPointerFallbackToCenter re-seeds the captured logical pair
-// to the live viewport center and reports that point; the pair is never
-// pinned. ok is false when no capture holds the integrator. Only the opt-in
-// TIPSY_MOUSE_CAPTURE=zoomlock wheel heuristic calls it; the default capture
-// state machine never snaps a pointer or a wheel detent to the center.
-func SnapRobloxDirectPointerFallbackToCenter() (x, y float32, ok bool) {
-	directInputTarget.mu.Lock()
-	defer directInputTarget.mu.Unlock()
-	if !directInputTarget.fallbackCaptured {
-		return 0, 0, false
-	}
-	x, y = pointerViewportCenter()
-	directInputTarget.fallbackX, directInputTarget.fallbackY = x, y
-	directInputTarget.havePointer = true
-	directInputTarget.lastX, directInputTarget.lastY = x, y
-	return x, y, true
-}
-
 // SeedRobloxDirectPointerAtCenter re-seeds the direct dispatcher's origin
 // and the captured integrator to the live viewport center and reports that
 // point. It is the entry seed for the engine-centered LockCenter stream (which
 // holds no fallback integrator) and for the state machine's centered persistent
-// entries (CursorHidden, AlwaysOptIn).
+// entries (camera first person, AlwaysOptIn).
 func SeedRobloxDirectPointerAtCenter() (x, y float32) {
 	directInputTarget.mu.Lock()
 	defer directInputTarget.mu.Unlock()

@@ -29,6 +29,18 @@ func stubCursorHidden(t *testing.T, hidden, ok bool) *cursorHiddenReading {
 	return r
 }
 
+// cameraFirstPersonReading is a mutable substitute for the debounced detector.
+type cameraFirstPersonReading struct{ firstPerson bool }
+
+func stubCameraFirstPerson(t *testing.T, firstPerson bool) *cameraFirstPersonReading {
+	t.Helper()
+	r := &cameraFirstPersonReading{firstPerson: firstPerson}
+	old := engineCameraFirstPersonSource
+	engineCameraFirstPersonSource = func() bool { return r.firstPerson }
+	t.Cleanup(func() { engineCameraFirstPersonSource = old })
+	return r
+}
+
 func lastVisible(t *testing.T, calls *captureCalls) bool {
 	t.Helper()
 	if len(calls.visible) == 0 {
@@ -38,8 +50,8 @@ func lastVisible(t *testing.T, calls *captureCalls) bool {
 }
 
 // TestSelectCaptureStatePriorityEdges names every priority edge: the gates
-// (Unfocused, Home, LeftAlt) beat everything, then Center, Anchor, CursorHidden
-// (only a known reading), RMB, Always, Free.
+// (Unfocused, Home, LeftAlt) beat everything, then Center, Anchor,
+// CameraFirstPerson, RMB, Always, Free.
 func TestSelectCaptureStatePriorityEdges(t *testing.T) {
 	open := captureInputs{focused: true, experience: true}
 	with := func(f func(*captureInputs)) captureInputs {
@@ -48,7 +60,7 @@ func TestSelectCaptureStatePriorityEdges(t *testing.T) {
 		return in
 	}
 	every := with(func(in *captureInputs) {
-		in.center, in.anchor, in.hidden, in.hiddenOK, in.rmb, in.always = true, true, true, true, true, true
+		in.center, in.anchor, in.cameraFirstPerson, in.rmb, in.always = true, true, true, true, true
 	})
 	cases := []struct {
 		name string
@@ -58,33 +70,26 @@ func TestSelectCaptureStatePriorityEdges(t *testing.T) {
 		{"nothing is Free", open, captureFree},
 		{"center", with(func(in *captureInputs) { in.center = true }), captureEngineCenter},
 		{"anchor", with(func(in *captureInputs) { in.anchor = true }), captureEngineAnchor},
-		{"hidden", with(func(in *captureInputs) { in.hidden, in.hiddenOK = true, true }), captureCursorHidden},
+		{"camera first person", with(func(in *captureInputs) { in.cameraFirstPerson = true }), captureCameraFirstPerson},
 		{"rmb", with(func(in *captureInputs) { in.rmb = true }), captureRMBFallback},
 		{"always", with(func(in *captureInputs) { in.always = true }), captureAlwaysOptIn},
-		{"center outranks anchor hidden rmb always", every, captureEngineCenter},
-		{"anchor outranks hidden rmb always", with(func(in *captureInputs) {
+		{"center outranks anchor camera rmb always", every, captureEngineCenter},
+		{"anchor outranks camera rmb always", with(func(in *captureInputs) {
 			*in = every
 			in.center = false
 		}), captureEngineAnchor},
-		{"hidden outranks rmb always", with(func(in *captureInputs) {
+		{"camera outranks rmb always", with(func(in *captureInputs) {
 			*in = every
 			in.center, in.anchor = false, false
-		}), captureCursorHidden},
+		}), captureCameraFirstPerson},
 		{"rmb outranks always", with(func(in *captureInputs) {
 			*in = every
-			in.center, in.anchor, in.hidden = false, false, false
+			in.center, in.anchor, in.cameraFirstPerson = false, false, false
 		}), captureRMBFallback},
 		{"always is the last capture", with(func(in *captureInputs) {
 			*in = every
-			in.center, in.anchor, in.hidden, in.rmb = false, false, false, false
+			in.center, in.anchor, in.cameraFirstPerson, in.rmb = false, false, false, false
 		}), captureAlwaysOptIn},
-		{"an unknown hidden reading never captures", with(func(in *captureInputs) {
-			*in = every
-			in.center, in.anchor, in.hiddenOK = false, false, false
-		}), captureRMBFallback},
-		{"a visible reading never captures", with(func(in *captureInputs) {
-			in.hidden, in.hiddenOK = false, true
-		}), captureFree},
 		{"unfocused is Free", with(func(in *captureInputs) { *in = every; in.focused = false }), captureFree},
 		{"Home is Free", with(func(in *captureInputs) { *in = every; in.experience = false }), captureFree},
 		{"LeftAlt is Free", with(func(in *captureInputs) { *in = every; in.released = true }), captureFree},
@@ -96,14 +101,14 @@ func TestSelectCaptureStatePriorityEdges(t *testing.T) {
 	}
 }
 
-// TestSelectCaptureStateExhaustive checks all 512 input combinations against
+// TestSelectCaptureStateExhaustive checks all 256 input combinations against
 // an independent statement of the priority order.
 func TestSelectCaptureStateExhaustive(t *testing.T) {
-	for bits := 0; bits < 512; bits++ {
+	for bits := 0; bits < 256; bits++ {
 		in := captureInputs{
 			focused: bits&1 != 0, experience: bits&2 != 0, released: bits&4 != 0,
-			center: bits&8 != 0, anchor: bits&16 != 0, hidden: bits&32 != 0,
-			hiddenOK: bits&64 != 0, rmb: bits&128 != 0, always: bits&256 != 0,
+			center: bits&8 != 0, anchor: bits&16 != 0, rmb: bits&32 != 0,
+			always: bits&64 != 0, cameraFirstPerson: bits&128 != 0,
 		}
 		want := captureFree
 		if in.focused && in.experience && !in.released {
@@ -112,8 +117,8 @@ func TestSelectCaptureStateExhaustive(t *testing.T) {
 				want = captureEngineCenter
 			case in.anchor:
 				want = captureEngineAnchor
-			case in.hidden && in.hiddenOK:
-				want = captureCursorHidden
+			case in.cameraFirstPerson:
+				want = captureCameraFirstPerson
 			case in.rmb:
 				want = captureRMBFallback
 			case in.always:
@@ -128,26 +133,27 @@ func TestSelectCaptureStateExhaustive(t *testing.T) {
 
 func TestCapturePolicyValues(t *testing.T) {
 	cases := []struct {
-		value                 string
-		enabled, always, zoom bool
-		name                  string
+		value           string
+		enabled, always bool
+		name            string
 	}{
-		{"", true, false, false, "auto"},
-		{"auto", true, false, false, "auto"},
-		{"AUTO", true, false, false, "auto"},
-		{"nonsense", true, false, false, "auto"},
-		{"always", true, true, false, "always"},
-		{"zoomlock", true, false, true, "zoomlock"},
-		{" ZoomLock ", true, false, true, "zoomlock"},
-		{"off", false, false, false, "auto"},
-		{"0", false, false, false, "auto"},
+		{"", true, false, "auto"},
+		{"auto", true, false, "auto"},
+		{"AUTO", true, false, "auto"},
+		{"nonsense", true, false, "auto"},
+		{"always", true, true, "always"},
+		// The retired zoomlock value is just an unrecognised value: auto.
+		{"zoomlock", true, false, "auto"},
+		{" ZoomLock ", true, false, "auto"},
+		{"off", false, false, "auto"},
+		{"0", false, false, "auto"},
 	}
 	for _, tc := range cases {
 		selectMouseCapture(t, tc.value)
 		if pointerCapturePolicyEnabled() != tc.enabled || pointerCaptureAlways() != tc.always ||
-			pointerCaptureZoomLock() != tc.zoom || pointerCapturePolicyName() != tc.name {
-			t.Errorf("TIPSY_MOUSE_CAPTURE=%q: enabled=%t always=%t zoomlock=%t name=%s", tc.value,
-				pointerCapturePolicyEnabled(), pointerCaptureAlways(), pointerCaptureZoomLock(), pointerCapturePolicyName())
+			pointerCapturePolicyName() != tc.name {
+			t.Errorf("TIPSY_MOUSE_CAPTURE=%q: enabled=%t always=%t name=%s", tc.value,
+				pointerCapturePolicyEnabled(), pointerCaptureAlways(), pointerCapturePolicyName())
 		}
 	}
 }
@@ -166,14 +172,11 @@ func TestAutoCaptureStaysFreeWithoutEngineSignals(t *testing.T) {
 	stubCursorHidden(t, false, false)
 
 	moveAbsolute(111, 193)
-	for i := 0; i < zoomLockArmDetents+1; i++ {
+	for i := 0; i < 4; i++ {
 		handleX11InputEvent(x11.InputEvent{Kind: x11.InputScroll, X: 111, Y: 193, ScrollY: 1})
 		if x, y := testDirectRecWheelFloat(0), testDirectRecWheelFloat(1); x != 111 || y != 193 {
 			t.Fatalf("detent %d wheel=(%v,%v), want the pointer (111,193)", i, x, y)
 		}
-	}
-	if zoomLockArmed() {
-		t.Fatal("auto armed the legacy zoom lock")
 	}
 	// The real pointer is passed through untouched, even outside the viewport.
 	handleX11InputEvent(x11.InputEvent{Kind: x11.InputScroll, X: -7, Y: 900, ScrollY: -1})
@@ -199,10 +202,10 @@ func TestAutoCaptureStaysFreeWithoutEngineSignals(t *testing.T) {
 	}
 }
 
-// CursorHidden follows the engine reading: capture while it reads hidden, free
-// the moment it reads visible or unknown, wheel at the clamped logical point
-// while captured and at the real pointer once Free.
-func TestAutoCaptureCursorHiddenTransitions(t *testing.T) {
+// CameraFirstPerson follows only the camera detector: capture in first person,
+// free in third person, with wheel at the clamped logical point while captured
+// and at the real pointer once Free.
+func TestAutoCaptureCameraFirstPersonTransitions(t *testing.T) {
 	selectPointerPath(t, "direct")
 	selectMouseCapture(t, "auto")
 	wireRecordingDirectTarget(t, 0x1234, 0x5678)
@@ -210,14 +213,15 @@ func TestAutoCaptureCursorHiddenTransitions(t *testing.T) {
 	vm := newCaptureVM(t)
 	enterExperienceForTest(t, vm, 79966250354565)
 	testDirectRecSetMouseLocked(false)
-	reading := stubCursorHidden(t, false, true)
+	stubCursorHidden(t, true, true)
+	camera := stubCameraFirstPerson(t, false)
 
 	moveAbsolute(100, 200)
 	if calls.grabs() != 0 || currentCaptureState() != captureFree {
-		t.Fatalf("a visible cursor captured: state=%v calls=%+v", currentCaptureState(), calls)
+		t.Fatalf("third-person camera captured: state=%v calls=%+v", currentCaptureState(), calls)
 	}
 
-	reading.hidden = true
+	camera.firstPerson = true
 	movesBefore := RobloxDirectInputStats().MoveDelivered
 	moveAbsolute(111, 193)
 	if len(calls.center) != 1 || !calls.center[0] || len(calls.cursor) != 0 {
@@ -226,7 +230,7 @@ func TestAutoCaptureCursorHiddenTransitions(t *testing.T) {
 	if fx, fy, ok := RobloxDirectFallbackPosition(); !ok || fx != 640 || fy != 360 {
 		t.Fatalf("hidden cursor entry seeded logical=(%v,%v,%v), want center (640,360,true)", fx, fy, ok)
 	}
-	if currentCaptureState() != captureCursorHidden || !persistentPointerCapture.Load() || lastVisible(t, calls) {
+	if currentCaptureState() != captureCameraFirstPerson || !persistentPointerCapture.Load() || lastVisible(t, calls) {
 		t.Fatalf("state=%v persistent=%t, want cursor-hidden with the host cursor hidden",
 			currentCaptureState(), persistentPointerCapture.Load())
 	}
@@ -237,16 +241,13 @@ func TestAutoCaptureCursorHiddenTransitions(t *testing.T) {
 		t.Fatalf("center announcement=(%v,%v,%v,%v), want (640,360,0,0)", x, y, dx, dy)
 	}
 	lookRelative(1000, -1000)
-	zoomDetent(1)
+	handleX11InputEvent(x11.InputEvent{Kind: x11.InputScroll, X: 100, Y: 200, ScrollY: 1})
 	if x, y := testDirectRecWheelFloat(0), testDirectRecWheelFloat(1); x != 1279 || y != 0 {
 		t.Fatalf("captured wheel=(%v,%v), want the clamped logical point (1279,0), never the center", x, y)
 	}
-	if zoomLockArmed() {
-		t.Fatal("auto armed the legacy zoom lock")
-	}
 
-	// The engine shows its cursor again: the next sample frees the pointer.
-	reading.hidden = false
+	// The camera returns to third person: the next sample frees the pointer.
+	camera.firstPerson = false
 	movesBefore = RobloxDirectInputStats().MoveDelivered
 	lookRelative(1, 1)
 	if currentCaptureState() != captureFree || persistentPointerCapture.Load() {
@@ -263,18 +264,59 @@ func TestAutoCaptureCursorHiddenTransitions(t *testing.T) {
 		t.Fatalf("free wheel=(%v,%v), want the real pointer (-7,900)", x, y)
 	}
 
-	// A click while hidden captures on the edge; the reader turning itself off
-	// frees the pointer on the next sample (the cursor stays free when unsure).
-	reading.hidden = true
+	// A click in first person captures on the edge; returning to third person
+	// frees the pointer on the next sample.
+	camera.firstPerson = true
 	handleX11InputEvent(x11.InputEvent{Kind: x11.InputPointer, PointerAction: x11.PointerDown, Button: 1, X: 50, Y: 60})
 	handleX11InputEvent(x11.InputEvent{Kind: x11.InputPointer, PointerAction: x11.PointerUp, Button: 1, X: 50, Y: 60})
-	if currentCaptureState() != captureCursorHidden {
+	if currentCaptureState() != captureCameraFirstPerson {
 		t.Fatalf("a click while hidden did not capture: state=%v", currentCaptureState())
 	}
-	reading.ok = false
+	camera.firstPerson = false
 	lookRelative(2, 2)
 	if currentCaptureState() != captureFree || persistentPointerCapture.Load() {
 		t.Fatalf("an unavailable reading kept the grab: state=%v", currentCaptureState())
+	}
+}
+
+// A hidden engine cursor and a wheel zoom-in are not first-person evidence. The
+// Red Lake with a weapon out stays Free until the camera detector says first
+// person.
+func TestHiddenCursorAndWheelDoNotCaptureThirdPersonCamera(t *testing.T) {
+	selectPointerPath(t, "direct")
+	selectMouseCapture(t, "auto")
+	wireRecordingDirectTarget(t, 0x1234, 0x5678)
+	calls := stubCaptureSeams(t)
+	vm := newCaptureVM(t)
+	enterExperienceForTest(t, vm, 79966250354565)
+	stubEngineMouseBehavior(t, MouseBehaviorDefault)
+	testDirectRecSetMouseLocked(false)
+	stubCursorHidden(t, true, true)
+	camera := stubCameraFirstPerson(t, false)
+
+	moveAbsolute(900, 220)
+	if state := currentCaptureState(); state != captureFree {
+		t.Fatalf("hidden without a wheel detent state=%v, want Free", state)
+	}
+	if want := wantedCaptureState(observeEngineLock()); want != captureFree {
+		t.Fatalf("hidden without a wheel detent wanted=%v, want Free", want)
+	}
+	if calls.grabs() != 0 || persistentPointerCapture.Load() {
+		t.Fatalf("hidden without a wheel detent grabbed: calls=%+v persistent=%t",
+			calls, persistentPointerCapture.Load())
+	}
+
+	handleX11InputEvent(x11.InputEvent{Kind: x11.InputScroll, X: 100, Y: 200, ScrollY: 1})
+	moveAbsolute(901, 221)
+	if state := currentCaptureState(); state != captureFree || persistentPointerCapture.Load() {
+		t.Fatalf("hidden third-person camera after a wheel zoom-in state=%v persistent=%t, want Free",
+			state, persistentPointerCapture.Load())
+	}
+	camera.firstPerson = true
+	moveAbsolute(902, 222)
+	if state := currentCaptureState(); state != captureCameraFirstPerson || !persistentPointerCapture.Load() {
+		t.Fatalf("first-person camera state=%v persistent=%t, want camera capture",
+			state, persistentPointerCapture.Load())
 	}
 }
 
@@ -305,7 +347,7 @@ func TestAlwaysOptInEntryCentersPointer(t *testing.T) {
 	// Drift off-view, then scroll: the detent lands on the clamped logical
 	// point, not the center, and the entry does not run again.
 	lookRelative(1000, -1000)
-	zoomDetent(1)
+	handleX11InputEvent(x11.InputEvent{Kind: x11.InputScroll, X: 100, Y: 200, ScrollY: 1})
 	if x, y := testDirectRecWheelFloat(0), testDirectRecWheelFloat(1); x != 1279 || y != 0 {
 		t.Fatalf("captured wheel=(%v,%v), want the clamped logical point (1279,0)", x, y)
 	}
@@ -324,7 +366,7 @@ func TestTipsyCapturePinsEngineMotion(t *testing.T) {
 		hidden bool
 		state  captureState
 	}{
-		{"cursor-hidden", "auto", true, captureCursorHidden},
+		{"cursor-hidden", "auto", true, captureCameraFirstPerson},
 		{"always", "always", false, captureAlwaysOptIn},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -336,6 +378,9 @@ func TestTipsyCapturePinsEngineMotion(t *testing.T) {
 			enterExperienceForTest(t, newCaptureVM(t), 79966250354565)
 			testDirectRecSetMouseLocked(false)
 			stubCursorHidden(t, tc.hidden, true)
+			if tc.state == captureCameraFirstPerson {
+				stubCameraFirstPerson(t, true)
+			}
 			logs := captureLogs(t)
 			moveAbsolute(100, 200)
 			if got := currentCaptureState(); got != tc.state {
@@ -405,6 +450,8 @@ func TestHeldRMBEntryKeepsPointerInPlace(t *testing.T) {
 	testDirectRecSetMouseLocked(false)
 
 	moveAbsolute(20, 22)
+	// Camera first person appears on the button edge; RMB must still win here.
+	stubCameraFirstPerson(t, true)
 	handleX11InputEvent(x11.InputEvent{Kind: x11.InputPointer, PointerAction: x11.PointerDown, Button: 3, X: 20, Y: 22})
 	if len(calls.cursor) != 1 || !calls.cursor[0] || len(calls.center) != 0 {
 		t.Fatalf("RMB entry calls=%+v, want one cursor-anchored grab and no centering", calls)
@@ -425,17 +472,18 @@ func TestFreeKeepsHostCursorHidden(t *testing.T) {
 	vm := newCaptureVM(t)
 	enterExperienceForTest(t, vm, 79966250354565)
 	testDirectRecSetMouseLocked(false)
-	reading := stubCursorHidden(t, true, true)
+	stubCursorHidden(t, true, true)
+	camera := stubCameraFirstPerson(t, true)
 
 	moveAbsolute(100, 200)
-	if currentCaptureState() != captureCursorHidden || !persistentPointerCapture.Load() {
+	if currentCaptureState() != captureCameraFirstPerson || !persistentPointerCapture.Load() {
 		t.Fatalf("setup: state=%v persistent=%t, want cursor-hidden",
 			currentCaptureState(), persistentPointerCapture.Load())
 	}
 
-	// The engine cursor becomes visible: releasePersistentCapture frees the
-	// grab, but the host cursor must stay hidden.
-	reading.hidden = false
+	// The camera leaves first person: releasePersistentCapture frees the grab,
+	// but the host cursor must stay hidden.
+	camera.firstPerson = false
 	lookRelative(1, 1)
 	if currentCaptureState() != captureFree || persistentPointerCapture.Load() {
 		t.Fatalf("release: state=%v persistent=%t, want free",
@@ -470,10 +518,11 @@ func TestAutoCaptureLeftAltFocusAndHomeRelease(t *testing.T) {
 	vm := newCaptureVM(t)
 	enterExperienceForTest(t, vm, 79966250354565)
 	testDirectRecSetMouseLocked(false)
-	reading := stubCursorHidden(t, true, true)
+	stubCursorHidden(t, true, true)
+	camera := stubCameraFirstPerson(t, true)
 
 	moveAbsolute(100, 200)
-	if currentCaptureState() != captureCursorHidden {
+	if currentCaptureState() != captureCameraFirstPerson {
 		t.Fatalf("setup: state=%v, want cursor-hidden", currentCaptureState())
 	}
 
@@ -497,7 +546,7 @@ func TestAutoCaptureLeftAltFocusAndHomeRelease(t *testing.T) {
 			pointerCaptureReleased.Load(), calls.visible)
 	}
 	moveAbsolute(130, 220)
-	if currentCaptureState() != captureCursorHidden {
+	if currentCaptureState() != captureCameraFirstPerson {
 		t.Fatalf("re-arm did not re-evaluate to cursor-hidden: state=%v", currentCaptureState())
 	}
 
@@ -517,21 +566,21 @@ func TestAutoCaptureLeftAltFocusAndHomeRelease(t *testing.T) {
 		t.Fatalf("FocusIn with a hidden engine cursor left the host cursor visible: %v", calls.visible)
 	}
 	moveAbsolute(140, 230)
-	if currentCaptureState() != captureCursorHidden {
+	if currentCaptureState() != captureCameraFirstPerson {
 		t.Fatalf("motion after FocusIn did not re-acquire: state=%v", currentCaptureState())
 	}
 	handleX11InputEvent(x11.InputEvent{Kind: x11.InputFocus, FocusGained: false})
-	reading.hidden = false
+	camera.firstPerson = false
 	handleX11InputEvent(x11.InputEvent{Kind: x11.InputFocus, FocusGained: true})
 	if currentCaptureState() != captureFree || lastVisible(t, calls) {
-		t.Fatalf("FocusIn with a visible engine cursor: state=%v visible=%v, want free and hidden",
+		t.Fatalf("FocusIn with a third-person camera: state=%v visible=%v, want free and hidden",
 			currentCaptureState(), calls.visible)
 	}
 
 	// Home: leaving the experience frees a held grab on the next sample.
-	reading.hidden = true
+	camera.firstPerson = true
 	moveAbsolute(150, 240)
-	if currentCaptureState() != captureCursorHidden {
+	if currentCaptureState() != captureCameraFirstPerson {
 		t.Fatalf("setup: state=%v, want cursor-hidden", currentCaptureState())
 	}
 	if _, handled := vm.dispatch(jnull(), nativeHelperClass, "gameActivity_onGameLoaded", "(J)V", packJlong(0)); !handled {
@@ -556,9 +605,10 @@ func TestEngineLockOutranksCursorHidden(t *testing.T) {
 		MouseBehaviorDefault, MouseBehaviorLockCurrentPosition, MouseBehaviorDefault)
 	testDirectRecSetMouseLocked(false)
 	stubCursorHidden(t, true, true)
+	stubCameraFirstPerson(t, true)
 
 	moveAbsolute(900, 220)
-	if currentCaptureState() != captureCursorHidden {
+	if currentCaptureState() != captureCameraFirstPerson {
 		t.Fatalf("setup: state=%v, want cursor-hidden", currentCaptureState())
 	}
 	script.next()
@@ -568,14 +618,17 @@ func TestEngineLockOutranksCursorHidden(t *testing.T) {
 	}
 	script.next()
 	lookRelative(1, 1)
-	if currentCaptureState() != captureCursorHidden {
+	if currentCaptureState() != captureCameraFirstPerson {
 		t.Fatalf("the engine lock ended but cursor-hidden did not take the pointer back: state=%v", currentCaptureState())
 	}
 	if fx, fy, ok := RobloxDirectFallbackPosition(); !ok || fx != 640 || fy != 360 {
 		t.Fatalf("anchor handoff logical=(%v,%v,%v), want center", fx, fy, ok)
 	}
-	if len(calls.center) != 3 || !calls.center[1] || !calls.center[2] {
-		t.Fatalf("hidden anchor entry/handoff did not re-center host: %+v", calls)
+	// The zoom-in lock adopts the cursor-hidden grab in place, and the handoff
+	// back reuses it: one centered SetPointerLock(true) for the hidden entry and
+	// one for the handoff, with no free/regrab in between.
+	if len(calls.center) != 2 || !calls.center[0] || !calls.center[1] {
+		t.Fatalf("hidden anchor entry/handoff did not center the host: %+v", calls)
 	}
 	if x, y, dx, dy := testDirectRecMoveFloat(0), testDirectRecMoveFloat(1), testDirectRecMoveFloat(2), testDirectRecMoveFloat(3); x != 640 || y != 360 || dx != 0 || dy != 0 {
 		t.Fatalf("handoff announcement=(%v,%v,%v,%v), want center and zero delta", x, y, dx, dy)
@@ -736,7 +789,7 @@ func TestHiddenEngineAnchorReleaseGates(t *testing.T) {
 	}
 }
 
-func TestCursorHiddenOutranksHeldRMBAndCenters(t *testing.T) {
+func TestCameraFirstPersonOutranksHeldRMBAfterEntry(t *testing.T) {
 	selectPointerPath(t, "direct")
 	selectMouseCapture(t, "auto")
 	wireRecordingDirectTarget(t, 0x1234, 0x5678)
@@ -749,16 +802,17 @@ func TestCursorHiddenOutranksHeldRMBAndCenters(t *testing.T) {
 	vm := newCaptureVM(t)
 	enterExperienceForTest(t, vm, 79966250354565)
 	testDirectRecSetMouseLocked(false)
-	reading := stubCursorHidden(t, false, true)
+	stubCursorHidden(t, false, true)
+	camera := stubCameraFirstPerson(t, false)
 	moveAbsolute(900, 220)
 	handleX11InputEvent(x11.InputEvent{Kind: x11.InputPointer, PointerAction: x11.PointerDown, Button: 3, X: 900, Y: 220})
 	if currentCaptureState() != captureRMBFallback {
 		t.Fatal("RMB did not acquire")
 	}
-	reading.hidden = true
+	camera.firstPerson = true
 	before := RobloxDirectInputStats().MoveDelivered
 	lookRelative(5, 3)
-	if currentCaptureState() != captureCursorHidden || len(calls.center) != 1 || !calls.center[0] {
+	if currentCaptureState() != captureCameraFirstPerson || len(calls.center) != 1 || !calls.center[0] {
 		t.Fatalf("hidden did not take centered grab: state=%v calls=%+v", currentCaptureState(), calls)
 	}
 	if rmbPointerFallback.Load() || !persistentPointerCapture.Load() {
@@ -773,7 +827,7 @@ func TestCursorHiddenOutranksHeldRMBAndCenters(t *testing.T) {
 	}
 }
 
-func TestHiddenToAlwaysRecentersHeldGrab(t *testing.T) {
+func TestCameraFirstPersonToAlwaysRecentersHeldGrab(t *testing.T) {
 	selectPointerPath(t, "direct")
 	selectMouseCapture(t, "always")
 	wireRecordingDirectTarget(t, 0x1234, 0x5678)
@@ -781,10 +835,11 @@ func TestHiddenToAlwaysRecentersHeldGrab(t *testing.T) {
 	vm := newCaptureVM(t)
 	enterExperienceForTest(t, vm, 79966250354565)
 	testDirectRecSetMouseLocked(false)
-	reading := stubCursorHidden(t, true, true)
+	stubCursorHidden(t, true, true)
+	camera := stubCameraFirstPerson(t, true)
 	moveAbsolute(900, 220)
 	lookRelative(50, 30)
-	reading.hidden = false
+	camera.firstPerson = false
 	lookRelative(2, 3)
 	if currentCaptureState() != captureAlwaysOptIn || len(calls.center) != 2 {
 		t.Fatalf("hidden-to-always state=%v calls=%+v", currentCaptureState(), calls)
@@ -820,6 +875,7 @@ func TestGameActivityOnlyPathNeverGrabs(t *testing.T) {
 			SetPointerClampViewport(1280, 720)
 			t.Cleanup(ResetPointerClampViewportForTest)
 			stubCursorHidden(t, tc.hidden, true)
+			stubCameraFirstPerson(t, tc.hidden)
 			testDirectRecSetMouseLocked(false)
 			if tc.anchor {
 				stubEngineMouseBehavior(t, MouseBehaviorLockCurrentPosition)
@@ -904,7 +960,7 @@ func TestGameActivityOnlyPathDeliversRealAbsolutePosition(t *testing.T) {
 }
 
 // The default policy releases LockCurrentPosition at the frozen origin on a
-// wheel detent and never re-centers; only zoomlock marks a zoom-out exit.
+// wheel detent and never re-centers.
 func TestAutoAnchorWheelReleaseRestoresTheFrozenOrigin(t *testing.T) {
 	selectPointerPath(t, "direct")
 	selectMouseCapture(t, "auto")
@@ -937,41 +993,10 @@ func TestAutoAnchorWheelReleaseRestoresTheFrozenOrigin(t *testing.T) {
 	}
 }
 
-// Zoom-lock is reachable only through TIPSY_MOUSE_CAPTURE=zoomlock.
-func TestZoomLockRunsOnlyUnderTheExplicitPolicy(t *testing.T) {
-	for _, tc := range []struct {
-		value string
-		armed bool
-	}{{"auto", false}, {"always", false}, {"zoomlock", true}} {
-		t.Run(tc.value, func(t *testing.T) {
-			selectPointerPath(t, "direct")
-			selectMouseCapture(t, tc.value)
-			wireRecordingDirectTarget(t, 0x1234, 0x5678)
-			stubCaptureSeams(t)
-			vm := newCaptureVM(t)
-			enterExperienceForTest(t, vm, 79966250354565)
-			testDirectRecSetMouseLocked(false)
-			fakeZoomClock(t)
-
-			moveAbsolute(111, 193)
-			for i := 0; i < zoomLockArmDetents; i++ {
-				handleX11InputEvent(x11.InputEvent{Kind: x11.InputScroll, X: 111, Y: 193, ScrollY: 1})
-			}
-			if zoomLockArmed() != tc.armed {
-				t.Fatalf("zoomLockArmed=%t, want %t", zoomLockArmed(), tc.armed)
-			}
-			if tc.armed && !persistentPointerCapture.Load() {
-				t.Fatal("zoomlock did not take its centered grab")
-			}
-		})
-	}
-}
-
-// zoomInLockSetup joins Project 12 under the default policy with the enum
-// authority scripted Default -> LockCurrentPosition -> Default and the
-// cursor-hidden reader reporting a visible cursor: the case that used to lock
-// the pointer wherever it was.
-func zoomInLockSetup(t *testing.T) (*captureCalls, *scriptedEngineMouseBehavior, *cursorHiddenReading) {
+// cameraAnchorLockSetup joins Project 12 under the default policy with the enum
+// authority scripted Default -> LockCurrentPosition -> Default, a visible cursor
+// and a third-person camera.
+func cameraAnchorLockSetup(t *testing.T) (*captureCalls, *scriptedEngineMouseBehavior, *cursorHiddenReading, *cameraFirstPersonReading) {
 	t.Helper()
 	selectPointerPath(t, "direct")
 	selectMouseCapture(t, "auto")
@@ -982,24 +1007,26 @@ func zoomInLockSetup(t *testing.T) (*captureCalls, *scriptedEngineMouseBehavior,
 		MouseBehaviorDefault, MouseBehaviorLockCurrentPosition, MouseBehaviorDefault)
 	testDirectRecSetMouseLocked(false)
 	reading := stubCursorHidden(t, false, true)
+	camera := stubCameraFirstPerson(t, false)
 	pointerButtons.mu.Lock()
 	pointerButtons.state = 0
 	pointerButtons.mu.Unlock()
-	return calls, script, reading
+	return calls, script, reading, camera
 }
 
-// Zooming into first person in a game without LockCenter centers the pointer
-// and then locks it there, whatever the cursor-hidden reader says.
-func TestZoomInLockCentersThenLocks(t *testing.T) {
-	calls, script, reading := zoomInLockSetup(t)
+// Camera first person in a game without LockCenter centers the pointer and then
+// locks it there, whatever the legacy cursor-hidden reader says.
+func TestCameraFirstPersonLockCentersThenLocks(t *testing.T) {
+	calls, script, reading, camera := cameraAnchorLockSetup(t)
 
 	moveAbsolute(900, 220)
 	for i := 0; i < 3; i++ {
-		zoomDetent(1)
+		handleX11InputEvent(x11.InputEvent{Kind: x11.InputScroll, X: 100, Y: 200, ScrollY: 1})
 	}
 	if calls.grabs() != 0 {
-		t.Fatalf("zoom detents grabbed before the engine locked: %+v", calls)
+		t.Fatalf("wheel detents grabbed before the engine locked: %+v", calls)
 	}
+	camera.firstPerson = true
 	script.next()
 	movesBefore := RobloxDirectInputStats().MoveDelivered
 	moveAbsolute(905, 223)
@@ -1029,8 +1056,9 @@ func TestZoomInLockCentersThenLocks(t *testing.T) {
 		t.Fatalf("visibility edges touched the grab: %+v", calls)
 	}
 
-	// Zooming out ends the lock at the center.
-	zoomDetent(-1)
+	// Leaving camera first person lets MouseBehavior Default end the lock at the center.
+	handleX11InputEvent(x11.InputEvent{Kind: x11.InputScroll, X: 100, Y: 200, ScrollY: -1})
+	camera.firstPerson = false
 	script.next()
 	lookRelative(1, 1)
 	if currentCaptureState() != captureFree || engineAnchorActive() {
@@ -1044,12 +1072,13 @@ func TestZoomInLockCentersThenLocks(t *testing.T) {
 	}
 }
 
-// RMB camera-look still locks where the cursor is, even after a zoom-in.
-func TestZoomInLockLeavesHeldRMBLookInPlace(t *testing.T) {
-	calls, script, _ := zoomInLockSetup(t)
+// RMB camera-look still locks where the cursor is, even in camera first person.
+func TestCameraFirstPersonLeavesHeldRMBLookInPlace(t *testing.T) {
+	calls, script, _, camera := cameraAnchorLockSetup(t)
 
 	moveAbsolute(900, 220)
-	zoomDetent(1)
+	handleX11InputEvent(x11.InputEvent{Kind: x11.InputScroll, X: 100, Y: 200, ScrollY: 1})
+	camera.firstPerson = true
 	handleX11InputEvent(x11.InputEvent{Kind: x11.InputPointer, PointerAction: x11.PointerDown, Button: 3, X: 900, Y: 220})
 	t.Cleanup(func() {
 		pointerButtons.mu.Lock()
@@ -1069,26 +1098,39 @@ func TestZoomInLockLeavesHeldRMBLookInPlace(t *testing.T) {
 	}
 }
 
-// A zoom-out after the zoom-in, or a zoom-in in another experience, is not a
-// zoom-in lock.
-func TestZoomInLockNeedsTheLastDetentToZoomIn(t *testing.T) {
-	for _, tc := range []string{"zoom-out", "rejoin"} {
-		t.Run(tc, func(t *testing.T) {
-			calls, script, _ := zoomInLockSetup(t)
-			moveAbsolute(900, 220)
-			zoomDetent(1)
-			switch tc {
-			case "zoom-out":
-				zoomDetent(-1)
-			case "rejoin":
-				enterExperienceForTest(t, newCaptureVM(t), 79966250354565)
-			}
-			script.next()
-			moveAbsolute(900, 220)
-			if currentCaptureState() != captureEngineAnchor || engineAnchorCentered() || len(calls.center) != 0 {
-				t.Fatalf("state=%v centered=%t calls=%+v, want lock-in-place", currentCaptureState(), engineAnchorCentered(), calls)
-			}
-		})
+// A LockCurrentPosition lock that is already active when RMB goes down is a
+// held-RMB camera look on the direct arm too. Even with camera first person and
+// a visible cursor, the press must anchor at the click rather than center:
+// pointerButtons never sees direct-arm edges, so the guard reads the mirrored
+// secondary state.
+func TestDirectPathHeldRMBKeepsEngineAnchorAtClick(t *testing.T) {
+	calls, script, _, camera := cameraAnchorLockSetup(t)
+
+	moveAbsolute(900, 220)
+	// The engine is already in LockCurrentPosition before the press, so the
+	// down edge itself selects the engine-anchor shape.
+	script.next()
+	camera.firstPerson = true
+	handleX11InputEvent(x11.InputEvent{Kind: x11.InputPointer, PointerAction: x11.PointerDown, Button: 3, X: 900, Y: 220})
+	t.Cleanup(func() {
+		handleX11InputEvent(x11.InputEvent{Kind: x11.InputPointer, PointerAction: x11.PointerUp, Button: 3, X: 900, Y: 220})
+	})
+
+	if currentCaptureState() != captureEngineAnchor || engineAnchorCentered() || engineAnchorZoomCentered() {
+		t.Fatalf("state=%v centered=%t zoomCentered=%t, want lock-in-place",
+			currentCaptureState(), engineAnchorCentered(), engineAnchorZoomCentered())
+	}
+	if len(calls.center) != 0 || len(calls.cursor) != 1 || !calls.cursor[0] {
+		t.Fatalf("lock calls=%+v, want one cursor-anchored grab and no centering", calls)
+	}
+	if x, y, ok := engineAnchorFrozenOrigin(); !ok || x != 900 || y != 220 {
+		t.Fatalf("frozen origin=(%v,%v,%v), want the click (900,220)", x, y, ok)
+	}
+
+	// The held gesture keeps looking from the click for its whole life.
+	lookRelative(4, 2)
+	if currentCaptureState() != captureEngineAnchor || engineAnchorCentered() {
+		t.Fatalf("look state=%v centered=%t, want lock-in-place", currentCaptureState(), engineAnchorCentered())
 	}
 }
 

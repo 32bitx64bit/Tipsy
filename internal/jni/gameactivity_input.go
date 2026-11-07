@@ -905,12 +905,12 @@ var engineAnchorLock struct {
 	active           bool
 	x, y             float32
 	originX, originY float32
-	// centered distinguishes the centered (zoom-in or hidden-cursor) lock from
-	// the lock-in-place one. It must survive the hidden->visible edge so that
-	// edge still releases the grab at the window center.
+	// centered distinguishes the centered (camera first-person or hidden-cursor)
+	// lock from the lock-in-place one. It must survive the hidden->visible edge
+	// so that edge still releases the grab at the window center.
 	centered bool
-	// zoomIn marks a centered lock taken because the operator zoomed in
-	// (zoomInLockWanted). Cursor visibility never reshapes it.
+	// zoomIn is the retained name for a camera first-person centered lock.
+	// Cursor visibility never reshapes it.
 	zoomIn bool
 }
 
@@ -944,7 +944,7 @@ func engineAnchorCentered() bool {
 	return engineAnchorLock.active && engineAnchorLock.centered
 }
 
-// engineAnchorZoomCentered reports a centered lock taken for a zoom-in.
+// engineAnchorZoomCentered reports a centered lock taken for camera first person.
 func engineAnchorZoomCentered() bool {
 	engineAnchorLock.mu.Lock()
 	defer engineAnchorLock.mu.Unlock()
@@ -957,34 +957,6 @@ func engineAnchorHiddenCentered() bool {
 	engineAnchorLock.mu.Lock()
 	defer engineAnchorLock.mu.Unlock()
 	return engineAnchorLock.active && engineAnchorLock.centered && !engineAnchorLock.zoomIn
-}
-
-// zoomIntent is the onGameLoaded count of the experience whose last wheel
-// detent zoomed in; 0 means the last detent zoomed out or none was seen.
-var zoomIntent atomic.Uint64
-
-// noteZoomDetent records the direction of one wheel detent.
-func noteZoomDetent(scrollY float32) {
-	switch {
-	case scrollY > 0:
-		if count, placeID := NativeHelperGameLoaded(); placeID != 0 {
-			zoomIntent.Store(count)
-		}
-	case scrollY < 0:
-		zoomIntent.Store(0)
-	}
-}
-
-// zoomInLockWanted reports whether a LockCurrentPosition that starts now is
-// a first-person zoom-in lock: the last wheel detent in this experience zoomed
-// in and no RMB camera-look is held. Such a lock is centered before it grabs,
-// like the Windows client; an RMB look still locks where the cursor is.
-func zoomInLockWanted() bool {
-	count, placeID := NativeHelperGameLoaded()
-	if placeID == 0 || zoomIntent.Load() != count {
-		return false
-	}
-	return pointerButtonsHeld()&2 == 0 && !rmbPointerFallback.Load()
 }
 
 // rememberEngineAnchorOrigin records the engage-time frozen origin. Only a
@@ -1043,8 +1015,8 @@ func engineAnchorPoint(preferX, preferY float32, havePrefer bool) (float32, floa
 }
 
 // engageEngineAnchorLock mirrors the engine's LockCurrentPosition on the host.
-// A zoom-in (zoomInLockWanted) or a known-hidden engine cursor selects the
-// centered lock; otherwise the grab stays at the cursor's frozen origin. The integrator keeps running in
+// A first-person camera or a known-hidden engine cursor selects the centered
+// lock; otherwise the grab stays at the cursor's frozen origin. The integrator keeps running in
 // either shape, so look, buttons and wheel retain anchor-style delivery.
 // Returns false when no honest anchor point exists yet, or when the host
 // refused the grab.
@@ -1061,9 +1033,11 @@ func adoptEngineAnchorLock(edge string) bool {
 
 func takeEngineAnchorLock(edge string, preferX, preferY float32, havePrefer, reacquire bool) bool {
 	hidden, hiddenOK := engineCursorHiddenSource()
-	// The lock's shape is decided when it starts: a zoom-in lock stays centered
-	// for its whole life, whatever the cursor-hidden reader says later.
-	zoomIn := engineAnchorZoomCentered() || (!engineAnchorActive() && zoomInLockWanted())
+	// The lock's shape is decided when it starts: a camera first-person lock
+	// stays centered for its whole life, whatever the cursor reader says later.
+	// Held RMB keeps its long-standing lock-in-place shape.
+	cameraFirstPerson := engineCameraFirstPersonSource() && !secondaryButtonHeld() && !rmbPointerFallback.Load()
+	zoomIn := engineAnchorZoomCentered() || (!engineAnchorActive() && cameraFirstPerson)
 	if zoomIn {
 		return takeHiddenEngineAnchorLock(edge, reacquire, true)
 	}
@@ -1087,8 +1061,6 @@ func takeEngineAnchorLock(edge string, preferX, preferY float32, havePrefer, rea
 	// A held-RMB fallback grab is already anchored at the cursor, so the engine
 	// takes it over; a centered persistent grab is re-taken at the cursor.
 	converted := persistentPointerCapture.Swap(false) || rmbPointerFallback.Swap(false)
-	// The engine owns the lock from here; the wheel guess is retired.
-	resetZoomLock()
 	// LockCenter and LockCurrentPosition are mutually exclusive engine
 	// states, so the centered request never stays armed underneath.
 	pointerLockSticky.Store(false)
@@ -1117,7 +1089,7 @@ func takeEngineAnchorLock(edge string, preferX, preferY float32, havePrefer, rea
 }
 
 // takeHiddenEngineAnchorLock is the centered LockCurrentPosition shape, taken
-// for a zoom-in (zoomIn) or a hidden engine cursor (Project 12 does both). The
+// for camera first person or a hidden engine cursor (Project 12 does both). The
 // X11 grab warps the host pointer to the window center and only then confines
 // it; the entry announcement seeds both direct dispatch and the anchor-style
 // fallback integrator there. Relative samples continue through
@@ -1132,7 +1104,6 @@ func takeHiddenEngineAnchorLock(edge string, reacquire, zoomIn bool) bool {
 			// The persistent grab was centered on entry; the engine takes it over
 			// in place so look keeps integrating without a second jump.
 			persistentPointerCapture.Store(false)
-			resetZoomLock()
 			pointerLockSticky.Store(false)
 			cx, cy := pointerViewportCenter()
 			storeEngineAnchorLockMode(true, cx, cy, true, true)
@@ -1149,7 +1120,6 @@ func takeHiddenEngineAnchorLock(edge string, reacquire, zoomIn bool) bool {
 		return false
 	}
 	converted := persistentPointerCapture.Swap(false) || rmbPointerFallback.Swap(false)
-	resetZoomLock()
 	pointerLockSticky.Store(false)
 	engaged := !engineAnchorActive()
 	cx, cy := announceCenteredCapture(true)
@@ -1225,7 +1195,7 @@ func releaseEngineLockAtCenter(edge string) {
 func releaseEngineLockAtOrigin(edge string) {
 	x, y, ok := engineAnchorFrozenOrigin()
 	if persistentAcquireWanted() && inExperience() {
-		if want := persistentWantedState(); want == captureCursorHidden || want == captureAlwaysOptIn {
+		if want := persistentWantedState(); want == captureCameraFirstPerson || want == captureAlwaysOptIn {
 			if acquirePersistentCaptureAtCenter(want) {
 				storeEngineAnchorLock(false, 0, 0)
 				pointerLockSticky.Store(false)
@@ -1273,7 +1243,7 @@ func releaseHiddenEngineAnchorAtCenter(edge string) {
 	// centered host grab instead of briefly freeing it. This is a state handoff,
 	// not a release to Free, so it needs no additional absolute center move.
 	if persistentAcquireWanted() && inExperience() {
-		if want := persistentWantedState(); want == captureCursorHidden || want == captureAlwaysOptIn {
+		if want := persistentWantedState(); want == captureCameraFirstPerson || want == captureAlwaysOptIn {
 			if acquirePersistentCaptureAtCenter(want) {
 				storeEngineAnchorLock(false, 0, 0)
 				pointerLockSticky.Store(false)
@@ -1290,138 +1260,24 @@ func releaseHiddenEngineAnchorAtCenter(edge string) {
 	}
 }
 
-// zoomLock is the legacy wheel-driven first-person heuristic. It runs only
-// under the opt-in TIPSY_MOUSE_CAPTURE=zoomlock policy, and only while the
-// MouseBehavior enum authority is unavailable (engineBehaviorAuthoritative);
-// once the engine answers, its own LockCurrentPosition/LockCenter edges and
-// zoomInLockWanted take over and any armed guess is retired.
-//
-// A run of zoomLockArmDetents zoom-in detents within zoomLockRunWindow arms
-// it: the arming detent takes the centered grab and seeds the logical pair at
-// the center. One or two notches never arm. The zoom-out detents that end it
-// re-seed the logical cursor to the center, and the next motion disarms and
-// frees the grab there (releasePersistentCaptureAtCenter).
-const (
-	zoomLockArmDetents = 3
-	zoomLockRunWindow  = 2 * time.Second
-)
-
-var zoomLock struct {
-	mu         sync.Mutex
-	run        int
-	lastDetent time.Time
-	armed      bool
-	unlocking  bool
-}
-
-// zoomLockNow is the heuristic's clock; tests substitute it.
-var zoomLockNow = time.Now
-
-func resetZoomLock() {
-	zoomLock.mu.Lock()
-	zoomLock.run, zoomLock.armed, zoomLock.unlocking = 0, false, false
-	zoomLock.lastDetent = time.Time{}
-	zoomLock.mu.Unlock()
-}
-
-// zoomLockArmed reports the heuristic state for tests and diagnostics.
-func zoomLockArmed() bool {
-	zoomLock.mu.Lock()
-	defer zoomLock.mu.Unlock()
-	return zoomLock.armed
-}
-
-// zoomLockNoteMotion disarms after the zoom-out detents that ended a lock:
-// the engine cursor is visible again and now tracks from the center. It
-// reports true on the motion sample that completed the disarm.
-func zoomLockNoteMotion() bool {
-	zoomLock.mu.Lock()
-	defer zoomLock.mu.Unlock()
-	if !zoomLock.unlocking {
-		return false
-	}
-	zoomLock.armed, zoomLock.unlocking, zoomLock.run = false, false, 0
-	return true
-}
-
-// zoomLockDetent records one wheel detent and reports whether the logical
-// cursor must be re-seeded to the center for it (center; the zoom-out detents
-// that end a lock, where the engine cursor becomes visible again) and whether
-// this detent must take the centered host grab (acquire; zoom-in only, and
-// only once the run has armed).
-func zoomLockDetent(zoomIn bool, now time.Time) (center, acquire bool) {
-	zoomLock.mu.Lock()
-	defer zoomLock.mu.Unlock()
-	if !zoomLock.lastDetent.IsZero() && now.Sub(zoomLock.lastDetent) > zoomLockRunWindow {
-		zoomLock.run = 0
-	}
-	zoomLock.lastDetent = now
-	if zoomIn {
-		zoomLock.run++
-		zoomLock.unlocking = false
-		if zoomLock.run >= zoomLockArmDetents {
-			zoomLock.armed = true
-		}
-		// A successful armed acquisition centers in zoomLockWheel. Detents
-		// after that keep following the accumulated logical position.
-		return false, zoomLock.armed
-	}
-	zoomLock.run = 0
-	if zoomLock.armed {
-		zoomLock.unlocking = true
-		return true, false
-	}
-	return false, false
-}
-
-// zoomLockWheel applies the heuristic to one wheel detent in a joined
-// experience. When it re-seeds the logical pair it returns the center and
-// ok=true, and the detent is delivered there; otherwise the caller delivers it
-// where it was. The arming detent takes the centered grab; a refused grab
-// (unfocused window) leaves the lock armed and the next absolute motion
-// retries. An unarmed zoom-out whose logical cursor drifted off-view re-seeds
-// too.
-func zoomLockWheel(scrollY float32) (cx, cy float32, ok bool) {
-	if scrollY == 0 {
-		return 0, 0, false
-	}
-	center, acquire := zoomLockDetent(scrollY > 0, zoomLockNow())
-	if !center && scrollY < 0 {
-		if off, has := RobloxDirectFallbackOffView(); has && off {
-			center = true
-		}
-	}
-	if acquire && !persistentPointerCapture.Load() && !rmbPointerFallback.Load() &&
-		!pointerLockSticky.Load() {
-		if acquirePersistentCaptureAtCenter(persistentWantedState()) {
-			center = true
-		}
-	}
-	if !center {
-		return 0, 0, false
-	}
-	return SnapRobloxDirectPointerFallbackToCenter()
-}
-
 // persistentAcquireWanted reports whether the centered persistent grab is
-// wanted right now: the state machine selects CursorHidden or AlwaysOptIn, or
-// the opt-in zoomlock policy has its heuristic armed (re-acquire after a focus
-// flap or an Alt re-arm). Engine locks and a held RMB have their own grabs and
-// are never reported here.
+// wanted right now: the state machine selects camera first person or
+// AlwaysOptIn. Engine locks and a held RMB have their own grabs and are never
+// reported here.
 func persistentAcquireWanted() bool {
 	if !persistentEngageAllowed() {
 		return false
 	}
 	switch persistentWantedState() {
-	case captureCursorHidden, captureAlwaysOptIn:
+	case captureCameraFirstPerson, captureAlwaysOptIn:
 		return true
 	}
-	return pointerCaptureZoomLock() && zoomLockArmed()
+	return false
 }
 
 // acquirePersistentCaptureAtCenter takes the persistent host grab at the
 // window center and seeds the logical integrator there too, once, on entry to
-// CursorHidden, AlwaysOptIn or an armed zoomlock. Every persistent grab is
+// camera first person or AlwaysOptIn. Every persistent grab is
 // centered, so the engine can take one over in place. Later wheel detents
 // still use the clamped logical position.
 func acquirePersistentCaptureAtCenter(cause captureState) bool {
@@ -1481,7 +1337,6 @@ func acquireWantedPersistentCapture() bool {
 func releasePersistentCapture(edge string) {
 	persistentPointerCapture.Store(false)
 	ClearRobloxDirectPointerFallback()
-	resetZoomLock()
 	_, _ = pointerLockSetter(false)
 	logging.Logger(logging.CatJNI).Info("[jni] persistent pointer capture released; pointer free",
 		"edge", edge, "policy", pointerCapturePolicyName())
@@ -1490,8 +1345,8 @@ func releasePersistentCapture(edge string) {
 // reconcilePersistentCapture re-evaluates the persistent grab after a button,
 // wheel or motion edge. It releases a grab the state machine no longer wants,
 // re-centers a held grab whose state changed to CursorHidden or AlwaysOptIn,
-// and takes a new one only for CursorHidden; AlwaysOptIn and the zoomlock
-// heuristic acquire on their own edges.
+// and takes a new one only for camera first person; AlwaysOptIn acquires on its
+// own edges.
 func reconcilePersistentCapture() {
 	want := persistentWantedState()
 	if want == captureAlwaysOptIn && rmbPointerFallback.Load() {
@@ -1504,7 +1359,7 @@ func reconcilePersistentCapture() {
 			} else {
 				releasePersistentCapture("reconcile")
 			}
-		} else if (want == captureCursorHidden || want == captureAlwaysOptIn) && captureState(persistentCause.Load()) != want {
+		} else if (want == captureCameraFirstPerson || want == captureAlwaysOptIn) && captureState(persistentCause.Load()) != want {
 			acquirePersistentCaptureAtCenter(want)
 		}
 		return
@@ -1513,35 +1368,14 @@ func reconcilePersistentCapture() {
 		!persistentEngageAllowed() {
 		return
 	}
-	if want == captureCursorHidden {
+	if want == captureCameraFirstPerson {
 		acquirePersistentCaptureAtCenter(want)
 	}
 }
 
-// releasePersistentCaptureAtCenter frees the zoom-lock grab once its unlock
-// completed, leaving both cursors at the viewport center where the engine
-// cursor reappears after first person. The zoom-out detent already re-seeded
-// the logical pair there and the ordinary dispatcher keeps it as its last
-// origin; the host pointer needs the matching move because a focus/Alt
-// re-acquire may have anchored the grab away from the center, and the X11
-// unlock leaves the pointer at the grab anchor. Re-anchoring a live grab at
-// the center warps it there without disturbing its non-sticky kind, so the
-// first absolute sample after the release is continuous.
-func releasePersistentCaptureAtCenter() {
-	persistentPointerCapture.Store(false)
-	ClearRobloxDirectPointerFallbackKeepLast()
-	captureWarpTarget = "center"
-	_, _ = pointerLockAtCenterSetter(true)
-	_, _ = pointerLockAtCenterSetter(false)
-	logging.Logger(logging.CatJNI).Info("[jni] zoom lock released; pointer free")
-}
-
 func pointerCapturePolicyName() string {
-	switch {
-	case pointerCaptureAlways():
+	if pointerCaptureAlways() {
 		return "always"
-	case pointerCaptureZoomLock():
-		return "zoomlock"
 	}
 	return "auto"
 }
@@ -1585,18 +1419,16 @@ func loadPointerCaptureAltSnapshot() (released, sticky bool) {
 
 // pointerCapturePolicy is the TIPSY_MOUSE_CAPTURE switch.
 //
-// Unset, "auto" or any unrecognised value selects the capture state machine
-// (selectCaptureState): engine locks, the engine's cursor-hidden signal and a
-// held RMB capture; everything else leaves the pointer free. "always" opts
-// into confinement for the whole experience, "zoomlock" opts into the legacy
-// wheel-driven first-person heuristic (zoomLock) and its center re-seeds, and
-// 0/false/off/no (case-insensitive) restores the unmodified Android listener
-// behavior with no desktop policy at all.
+// Unset, "auto" or any unrecognised value (including the retired "zoomlock")
+// selects the capture state machine (selectCaptureState): engine locks, the
+// camera first-person detector and a held RMB capture; everything else leaves
+// the pointer free. "always" opts into confinement for the whole experience,
+// and 0/false/off/no (case-insensitive) restores the unmodified Android
+// listener behavior with no desktop policy at all.
 var pointerCapturePolicy struct {
 	sync.Once
-	enabled  bool
-	always   bool
-	zoomlock bool
+	enabled bool
+	always  bool
 }
 
 func pointerCapturePolicyEnabled() bool {
@@ -1607,9 +1439,6 @@ func pointerCapturePolicyEnabled() bool {
 		case "always":
 			pointerCapturePolicy.enabled = true
 			pointerCapturePolicy.always = true
-		case "zoomlock":
-			pointerCapturePolicy.enabled = true
-			pointerCapturePolicy.zoomlock = true
 		default:
 			pointerCapturePolicy.enabled = true
 		}
@@ -1622,13 +1451,6 @@ func pointerCaptureAlways() bool {
 	return pointerCapturePolicyEnabled() && pointerCapturePolicy.always
 }
 
-// pointerCaptureZoomLock reports the opt-in legacy zoom-lock policy. Only this
-// policy runs zoomLockWheel and its wheel center re-seed
-// (SnapRobloxDirectPointerFallbackToCenter).
-func pointerCaptureZoomLock() bool {
-	return pointerCapturePolicyEnabled() && pointerCapturePolicy.zoomlock
-}
-
 // ResetPointerCapturePolicy makes the next policy lookup re-read
 // TIPSY_MOUSE_CAPTURE and clears all capture toggle state. Test seam;
 // production never changes policy within a process.
@@ -1636,7 +1458,6 @@ func ResetPointerCapturePolicy() {
 	pointerCapturePolicy.Once = sync.Once{}
 	pointerCapturePolicy.enabled = true
 	pointerCapturePolicy.always = false
-	pointerCapturePolicy.zoomlock = false
 	resetPointerCaptureState()
 }
 
@@ -1647,7 +1468,6 @@ func SetPointerCapturePolicyForTest(enabled, always bool) {
 	pointerCapturePolicy.Do(func() {})
 	pointerCapturePolicy.enabled = enabled
 	pointerCapturePolicy.always = always
-	pointerCapturePolicy.zoomlock = false
 	resetPointerCaptureState()
 }
 
@@ -1667,8 +1487,7 @@ func resetPointerCaptureState() {
 	windowUnfocused.Store(false)
 	persistentCause.Store(0)
 	lastCaptureState.Store(0)
-	resetZoomLock()
-	zoomIntent.Store(0)
+	directSecondaryHeld.Store(false)
 }
 
 // pointerCaptureAvailable reports whether the desktop persistent capture
@@ -1722,8 +1541,8 @@ const (
 	captureEngineCenter
 	// captureEngineAnchor mirrors the engine's LockCurrentPosition (anchored grab).
 	captureEngineAnchor
-	// captureCursorHidden follows the engine's MouseIconEnabled=false signal.
-	captureCursorHidden
+	// captureCameraFirstPerson follows the validated first-person camera detector.
+	captureCameraFirstPerson
 	// captureRMBFallback is the held-RMB camera-look grab.
 	captureRMBFallback
 	// captureAlwaysOptIn is TIPSY_MOUSE_CAPTURE=always confinement.
@@ -1738,8 +1557,8 @@ func (s captureState) String() string {
 		return "engine-center"
 	case captureEngineAnchor:
 		return "engine-anchor"
-	case captureCursorHidden:
-		return "cursor-hidden"
+	case captureCameraFirstPerson:
+		return "camera-first-person"
 	case captureRMBFallback:
 		return "rmb"
 	case captureAlwaysOptIn:
@@ -1754,13 +1573,14 @@ func (s captureState) String() string {
 type captureInputs struct {
 	focused, experience, released bool
 	center, anchor                bool // engine MouseBehavior
-	hidden, hiddenOK              bool // engine cursor-hidden reading; !hiddenOK = unknown
+	cameraFirstPerson             bool // debounced Custom camera within first-person distance
 	rmb, always                   bool
 }
 
 // selectCaptureState is the priority decision: Unfocused/Home/LeftAlt, then
-// Center, Anchor, CursorHidden, RMB, Always, then Free. An unknown cursor-hidden
-// reading never captures.
+// Center, Anchor, CameraFirstPerson, RMB, Always, then Free. Cursor visibility
+// and wheel intent are deliberately not first-person capture signals: the
+// camera detector alone selects first person.
 func selectCaptureState(in captureInputs) captureState {
 	switch {
 	case !in.focused || !in.experience || in.released:
@@ -1769,8 +1589,8 @@ func selectCaptureState(in captureInputs) captureState {
 		return captureEngineCenter
 	case in.anchor:
 		return captureEngineAnchor
-	case in.hiddenOK && in.hidden:
-		return captureCursorHidden
+	case in.cameraFirstPerson:
+		return captureCameraFirstPerson
 	case in.rmb:
 		return captureRMBFallback
 	case in.always:
@@ -1779,25 +1599,27 @@ func selectCaptureState(in captureInputs) captureState {
 	return captureFree
 }
 
-// engineCursorHiddenSource is the cursor-hidden reader; tests substitute it.
+// engineCursorHiddenSource is the legacy cursor-hidden reader; tests substitute it.
 var engineCursorHiddenSource = EngineCursorHidden
+
+// engineCameraFirstPersonSource is the camera detector; tests substitute it.
+var engineCameraFirstPersonSource = EngineCameraFirstPerson
 
 // windowUnfocused is set between an X11 FocusOut and the next FocusIn. The zero
 // value is "focused" so a stream that never saw a focus edge is not gated.
 var windowUnfocused atomic.Bool
 
 // persistentCause remembers which state took the persistent grab so the
-// transition trace names it. Zero (captureFree) is the zoomlock grab, which
-// the trace reports as AlwaysOptIn.
+// transition trace names it. Zero (captureFree) is reported as AlwaysOptIn.
 var persistentCause atomic.Uint32
 
 // lastCaptureState is the previously traced state.
 var lastCaptureState atomic.Uint32
 var captureWarpTarget string
 
-// liveCaptureInputs gathers the inputs for one evaluation. The cursor-hidden
-// reader is consulted only where desktop capture can engage at all, so the
-// off policy and touch streams never act on it.
+// liveCaptureInputs gathers the inputs for one evaluation. Engine readers are
+// consulted only where desktop capture can engage at all, so the off policy and
+// touch streams never act on them.
 func liveCaptureInputs(obs engineLockObservation) captureInputs {
 	in := captureInputs{
 		focused:    !windowUnfocused.Load(),
@@ -1809,7 +1631,7 @@ func liveCaptureInputs(obs engineLockObservation) captureInputs {
 	}
 	if pointerCaptureAvailable() {
 		in.always = pointerCaptureAlways()
-		in.hidden, in.hiddenOK = engineCursorHiddenSource()
+		in.cameraFirstPerson = engineCameraFirstPersonSource()
 	}
 	return in
 }
@@ -1838,8 +1660,8 @@ func currentCaptureState() captureState {
 	case engineAnchorActive():
 		return captureEngineAnchor
 	case persistentPointerCapture.Load():
-		if captureState(persistentCause.Load()) == captureCursorHidden {
-			return captureCursorHidden
+		if captureState(persistentCause.Load()) == captureCameraFirstPerson {
+			return captureCameraFirstPerson
 		}
 		return captureAlwaysOptIn
 	case rmbPointerFallback.Load():
@@ -1900,6 +1722,19 @@ func pointerButtonsHeld() int32 {
 	pointerButtons.mu.Lock()
 	defer pointerButtons.mu.Unlock()
 	return pointerButtons.state
+}
+
+// directSecondaryHeld is the direct arm's held secondary-button state. That arm
+// never calls dispatchGameActivityX11Pointer, so pointerButtons alone would
+// always report RMB released there. resetPointerCaptureState clears it so a
+// reconfigured stream never inherits a press whose release was lost.
+var directSecondaryHeld atomic.Bool
+
+// secondaryButtonHeld reports a held secondary button on either input arm. The
+// lock-shape guards must see an RMB press on the direct arm too, not only on
+// the GameActivity arm that maintains pointerButtons.
+func secondaryButtonHeld() bool {
+	return pointerButtonsHeld()&2 != 0 || directSecondaryHeld.Load()
 }
 
 // bindX11InputBridge subscribes the GameActivity input dispatcher to the
@@ -2244,6 +2079,13 @@ func handleX11InputEvent(ev x11.InputEvent) {
 			dispatchGameActivityX11Pointer(ev)
 		}
 		if path == PointerPathDirect || path == PointerPathBoth {
+			// The direct arm bypasses the GameActivity dispatcher, so
+			// pointerButtons would never see this secondary edge. Mirror it
+			// here for the lock-shape guards that run on both arms.
+			if ev.Button == 3 &&
+				(ev.PointerAction == x11.PointerDown || ev.PointerAction == x11.PointerUp) {
+				directSecondaryHeld.Store(ev.PointerAction == x11.PointerDown)
+			}
 			switch {
 			case ev.PointerAction == x11.PointerMove || ev.Relative:
 				// Captured relative motion is always a MOVE for the APK
@@ -2353,7 +2195,7 @@ func handleX11InputEvent(ev x11.InputEvent) {
 					}
 				}
 				if pointerLockSticky.Load() && obs.available && want != captureEngineCenter {
-					if want == captureCursorHidden || want == captureAlwaysOptIn {
+					if want == captureCameraFirstPerson || want == captureAlwaysOptIn {
 						if acquirePersistentCaptureAtCenter(want) {
 							pointerLockSticky.Store(false)
 						}
@@ -2363,7 +2205,7 @@ func handleX11InputEvent(ev x11.InputEvent) {
 					}
 				}
 				hadPersistentCapture := persistentPointerCapture.Load()
-				if want == captureCursorHidden || (hadPersistentCapture && !obs.wantsCenter() && !obs.wantsAnchor()) {
+				if want == captureCameraFirstPerson || (hadPersistentCapture && !obs.wantsCenter() && !obs.wantsAnchor()) {
 					reconcilePersistentCapture()
 				}
 				if !ev.Relative && !hadPersistentCapture && persistentPointerCapture.Load() {
@@ -2393,15 +2235,6 @@ func handleX11InputEvent(ev x11.InputEvent) {
 					if pointerCaptureReleased.Load() || !inExperience() {
 						persistentPointerCapture.Store(false)
 						ClearRobloxDirectPointerFallback()
-						resetZoomLock()
-						return
-					}
-					if zoomLockNoteMotion() && !pointerCaptureAlways() {
-						// The unlock completed: under the zoomlock policy the pointer
-						// goes free again, sitting at the center where the engine
-						// cursor reappeared. This relative sample is the
-						// transition and is consumed like the acquire sample.
-						releasePersistentCaptureAtCenter()
 						return
 					}
 					if !persistentAcquireWanted() {
@@ -2412,7 +2245,7 @@ func handleX11InputEvent(ev x11.InputEvent) {
 						return
 					}
 					cause := captureState(persistentCause.Load())
-					pinned := cause == captureCursorHidden || cause == captureAlwaysOptIn
+					pinned := cause == captureCameraFirstPerson || cause == captureAlwaysOptIn
 					if dispatchRobloxDirectPointerFallbackDelta(ev.DeltaX, ev.DeltaY, pinned) && pinned && os.Getenv("TIPSY_TRACE_CURSOR_STATE") == "1" {
 						x, y, _ := robloxDirectLastPosition()
 						logging.Logger(logging.CatJNI).Info("[jni] capture pinned motion", "state", cause.String(), "x", x, "y", y, "dx", ev.DeltaX, "dy", ev.DeltaY)
@@ -2430,8 +2263,8 @@ func handleX11InputEvent(ev x11.InputEvent) {
 					return
 				}
 				// Absolute move with no centered lock: acquire the persistent
-				// grab in a joined experience when the policy wants it (always,
-				// cursor-hidden, or zoom lock armed after a focus flap / Alt
+				// grab in a joined experience when the policy wants it (always, or
+				// camera first person, including after a focus flap / Alt
 				// re-arm). Every entry centers. The transition sample is
 				// consumed exactly like the official capture request.
 				if persistentAcquireWanted() && !rmbPointerFallback.Load() &&
@@ -2488,6 +2321,8 @@ func handleX11InputEvent(ev x11.InputEvent) {
 				// the held RMB itself is the capture reason (RMBFallback).
 				rmbIn := liveCaptureInputs(obs)
 				rmbIn.rmb = obs.available && !obs.locked
+				// A first-person camera must not turn the RMB edge into a centered grab.
+				rmbIn.cameraFirstPerson = false
 				switch selectCaptureState(rmbIn) {
 				case captureEngineCenter:
 					rmbPointerFallback.Store(false)
@@ -2521,7 +2356,7 @@ func handleX11InputEvent(ev x11.InputEvent) {
 						pointerCursorSetter(false)
 						logging.Logger(logging.CatJNI).Info("[jni] held-RMB pointer-lock fallback acquired")
 					}
-				case captureCursorHidden:
+				case captureCameraFirstPerson:
 					// The engine hides its cursor but no grab is held yet: the
 					// edge is already delivered, so take the persistent grab here.
 					reconcilePersistentCapture()
@@ -2597,7 +2432,7 @@ func handleX11InputEvent(ev x11.InputEvent) {
 					// Its cursor reappears at the frozen origin, so both cursors are
 					// restored there, not at the viewport center.
 					releaseEngineAnchor("secondary up")
-				case want == captureCursorHidden || want == captureAlwaysOptIn:
+				case want == captureCameraFirstPerson || want == captureAlwaysOptIn:
 					// The existing RMB grab is still held; convert it in place.
 					rmbPointerFallback.Store(true)
 					if acquirePersistentCaptureAtCenter(want) {
@@ -2657,7 +2492,6 @@ func handleX11InputEvent(ev x11.InputEvent) {
 		if path != PointerPathDirect && path != PointerPathBoth {
 			break
 		}
-		noteZoomDetent(ev.ScrollY)
 		// A wheel detent is a point, never a move. Free delivers it at the real
 		// pointer (ev.X, ev.Y), untouched: the pointer may be anywhere the
 		// window reports it. A captured state delivers it at the clamped logical
@@ -2665,8 +2499,7 @@ func handleX11InputEvent(ev x11.InputEvent) {
 		// so zoomed-out UI hover/scroll agrees with the software cursor and a
 		// look run that drifted the logical pair off-view still hits the
 		// surface. LockCenter detents report the look origin. Nothing here ever
-		// moves a detent to the viewport center; only the opt-in zoomlock policy
-		// may re-seed the logical cursor (zoomLockWheel).
+		// moves a detent to the viewport center.
 		wx, wy := ev.X, ev.Y
 		captured := false
 		switch {
@@ -2683,16 +2516,7 @@ func handleX11InputEvent(ev x11.InputEvent) {
 		case engineAnchorActive():
 			captured = true
 		}
-		if pointerCaptureZoomLock() && !pointerLockSticky.Load() && !engineAnchorActive() &&
-			!engineBehaviorAuthoritative() && persistentEngageAllowed() {
-			// Opt-in legacy heuristic: the enum authority must be unavailable.
-			// While the engine is answering for real, Tipsy never guesses.
-			if cx, cy, ok := zoomLockWheel(ev.ScrollY); ok {
-				wx, wy = cx, cy
-				captured = true
-			}
-		}
-		if captured || pointerCaptureZoomLock() {
+		if captured {
 			wx, wy = clampCapturedWheelPosition(wx, wy)
 		}
 		DispatchRobloxDirectScroll(wx, wy, ev.ScrollX, ev.ScrollY)
@@ -2723,8 +2547,6 @@ func handleX11InputEvent(ev x11.InputEvent) {
 				}
 				if persistentPointerCapture.Swap(false) {
 					ClearRobloxDirectPointerFallbackKeepLast()
-					// The engine owns centering from here (LockCenter reported).
-					resetZoomLock()
 				}
 				if rmbPointerFallback.Swap(false) {
 					ClearRobloxDirectPointerFallback()
@@ -2743,18 +2565,14 @@ func handleX11InputEvent(ev x11.InputEvent) {
 					}
 					break
 				}
-				if persistentPointerCapture.Swap(false) {
-					// The engine owns the lock from here; the wheel guess is
-					// retired.
-					resetZoomLock()
-				}
+				persistentPointerCapture.Store(false)
 				rmbPointerFallback.Store(false)
 				engageEngineAnchorLock("wheel detent", wx, wy, true)
 			case engineAnchorActive():
 				// The engine left LockCurrentPosition for Default on this detent:
 				// release with the geometry of the lock that was held.
 				releaseEngineAnchor("wheel detent")
-			case pointerLockSticky.Load() && (want == captureCursorHidden || want == captureAlwaysOptIn):
+			case pointerLockSticky.Load() && (want == captureCameraFirstPerson || want == captureAlwaysOptIn):
 				if acquirePersistentCaptureAtCenter(want) {
 					pointerLockSticky.Store(false)
 				}

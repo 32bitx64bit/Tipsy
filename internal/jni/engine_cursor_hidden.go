@@ -80,11 +80,17 @@ func cursorRegistrationAddresses(p []byte, a uintptr) (descriptor, name, getter 
 	if len(p) >= 42 &&
 		bytes.Equal(p[:3], []byte{0x48, 0x8d, 0x3d}) &&
 		bytes.Equal(p[7:10], []byte{0x48, 0x8d, 0x35}) &&
-		bytes.Equal(p[14:17], []byte{0x48, 0x8d, 0x15}) &&
 		bytes.Equal(p[21:24], []byte{0x48, 0x8d, 0x0d}) {
-		direct := bytes.Equal(p[28:31], []byte{0x4c, 0x8d, 0x05}) && bytes.Equal(p[35:38], []byte{0x45, 0x31, 0xc9}) && p[38] == 0xe8
-		stack := len(p) >= 46 && bytes.Equal(p[28:31], []byte{0x48, 0x8d, 0x9d}) && bytes.Equal(p[35:42], []byte{0x49, 0x89, 0xd8, 0x45, 0x31, 0xc9, 0xe8})
-		if direct || stack {
+		direct := bytes.Equal(p[14:17], []byte{0x48, 0x8d, 0x15}) &&
+			bytes.Equal(p[28:31], []byte{0x4c, 0x8d, 0x05}) && bytes.Equal(p[35:38], []byte{0x45, 0x31, 0xc9}) && p[38] == 0xe8
+		stack := len(p) >= 46 && bytes.Equal(p[14:17], []byte{0x48, 0x8d, 0x15}) &&
+			bytes.Equal(p[28:31], []byte{0x48, 0x8d, 0x9d}) && bytes.Equal(p[35:42], []byte{0x49, 0x89, 0xd8, 0x45, 0x31, 0xc9, 0xe8})
+		// 2.742 passes the category in rbx: lea rbx(category), then after the
+		// getter lea it copies mov rbx,rdx and mov r15,r8 before xor r9d,r9d; call.
+		bypass := bytes.Equal(p[14:17], []byte{0x48, 0x8d, 0x1d}) &&
+			bytes.Equal(p[28:31], []byte{0x48, 0x89, 0xda}) &&
+			bytes.Equal(p[34:38], []byte{0x45, 0x31, 0xc9, 0xe8})
+		if direct || stack || bypass {
 			return cursorRelative(p, a, 0), cursorRelative(p, a, 7), cursorRelative(p, a, 21), true
 		}
 	}

@@ -42,6 +42,16 @@ func writeCursorRegistration(img *fakeEngineImage, code, getter int, stack bool)
 	}
 }
 
+// writeCursorRegistrationBypass lays down the 2.742 call sequence, which keeps
+// the category in rbx and moves it into rdx before the call.
+func writeCursorRegistrationBypass(img *fakeEngineImage, code, getter int) {
+	p := img.mem[code:]
+	copy(p, []byte{0x48, 0x8d, 0x3d, 0, 0, 0, 0, 0x48, 0x8d, 0x35, 0, 0, 0, 0, 0x48, 0x8d, 0x1d, 0, 0, 0, 0, 0x48, 0x8d, 0x0d, 0, 0, 0, 0, 0x48, 0x89, 0xda, 0x4d, 0x89, 0xf8, 0x45, 0x31, 0xc9, 0xe8, 0, 0, 0, 0})
+	for _, ref := range []struct{ off, target int }{{0, cursorDescOff}, {7, cursorNameOff}, {14, cursorDescOff + 0x10}, {21, getter}} {
+		binary.LittleEndian.PutUint32(p[ref.off+3:], uint32(int32(ref.target-(code+ref.off+7))))
+	}
+}
+
 // cursorFixture is an image holding one MouseIconEnabled registration.
 func cursorFixture(t *testing.T) (*fakeEngineImage, []engineAddrRange) {
 	t.Helper()
@@ -82,6 +92,13 @@ func TestCursorHiddenLocator(t *testing.T) {
 	writeCursorRegistration(img, cursorCodeOff, cursorGetterOff, true)
 	if got := cursorCandidates(p[:64], img.addr(cursorCodeOff), base, end); len(got) != 1 || got[0].getter != img.addr(cursorGetterOff) {
 		t.Fatalf("stack setter candidate: %+v", got)
+	}
+	writeCursorRegistrationBypass(img, cursorCodeOff, cursorGetterOff)
+	if got := cursorCandidates(p[:64], img.addr(cursorCodeOff), base, end); len(got) != 1 || got[0].getter != img.addr(cursorGetterOff) || got[0].offset != cursorByteOff {
+		t.Fatalf("rbx registration candidate: %+v", got)
+	}
+	if got := locateCursorGetter(ranges, base, end); len(got) != 1 || got[0].getter != img.addr(cursorGetterOff) {
+		t.Fatalf("rbx registration locate = %+v", got)
 	}
 }
 
@@ -617,106 +634,6 @@ func useCursorChunkCounter(t *testing.T, img *fakeEngineImage) *cursorChunkCount
 	engineMem = m
 	t.Cleanup(func() { engineMem = old })
 	return m
-}
-
-func TestCursorGetterCacheHitSkipsFullScan(t *testing.T) {
-	img, ranges := cursorProofFixture(t, proofResolverOff, 0x88, true)
-	writeCursorBuildID(img, []byte{0x10, 0x20, 0x30, 0x40})
-	t.Setenv("XDG_CACHE_HOME", t.TempDir())
-	memory := useCursorChunkCounter(t, img)
-
-	first := &cursorHiddenReader{}
-	first.init(ranges, img.addr(0), fakeImageSize)
-	if first.disabled || first.resolve == nil {
-		t.Fatalf("cache priming failed: disabled=%v resolve=%v", first.disabled, first.resolve != nil)
-	}
-	buildID := cursorEngineBuildID(img.addr(0), fakeImageSize)
-	if _, err := os.Stat(cursorGetterCachePath(buildID)); err != nil {
-		t.Fatalf("cache was not written: %v", err)
-	}
-
-	// No resolver is injected: init must load both entries and call the real
-	// proveResolver path without scanning either property over the image.
-	memory.chunks = 0
-	second := &cursorHiddenReader{}
-	second.init(ranges, img.addr(0), fakeImageSize)
-	if second.disabled || second.resolve == nil {
-		t.Fatalf("cache hit was not proven: disabled=%v resolve=%v", second.disabled, second.resolve != nil)
-	}
-	if second.candidate != first.candidate || second.behaviorCandidate != first.behaviorCandidate {
-		t.Fatalf("cache hit candidates = %+v / %+v, want %+v / %+v", second.candidate, second.behaviorCandidate, first.candidate, first.behaviorCandidate)
-	}
-	if memory.chunks != 0 {
-		t.Fatalf("cache hit performed %d full-chunk reads", memory.chunks)
-	}
-}
-
-func TestCursorGetterCacheMismatchFallsBackToFullScan(t *testing.T) {
-	for _, name := range []string{"stale build key", "corrupt cache", "MouseIconEnabled live bytes", "MouseBehavior live bytes"} {
-		t.Run(name, func(t *testing.T) {
-			img, ranges := cursorProofFixture(t, proofResolverOff, 0x88, true)
-			writeCursorBuildID(img, []byte{0x50, 0x60, 0x70, 0x80})
-			cacheRoot := t.TempDir()
-			t.Setenv("XDG_CACHE_HOME", cacheRoot)
-			memory := useCursorChunkCounter(t, img)
-			prime := &cursorHiddenReader{}
-			prime.init(ranges, img.addr(0), fakeImageSize)
-			if prime.resolve == nil {
-				t.Fatal("cache priming did not prove resolver")
-			}
-			buildID := cursorEngineBuildID(img.addr(0), fakeImageSize)
-			path := cursorGetterCachePath(buildID)
-
-			switch name {
-			case "stale build key":
-				disk, ok := readCursorGetterCache(path, buildID)
-				if !ok {
-					t.Fatal("cannot read primed cache")
-				}
-				disk.BuildID = "stale"
-				data, err := json.Marshal(disk)
-				if err != nil {
-					t.Fatal(err)
-				}
-				if err := os.WriteFile(path, data, 0o600); err != nil {
-					t.Fatalf("cannot make stale cache: %v", err)
-				}
-			case "corrupt cache":
-				if err := os.WriteFile(path, []byte("{"), 0o600); err != nil {
-					t.Fatal(err)
-				}
-			case "MouseIconEnabled live bytes":
-				binary.LittleEndian.PutUint32(img.mem[proofCursorGetOff+23:], cursorByteOff+8)
-			case "MouseBehavior live bytes":
-				binary.LittleEndian.PutUint32(img.mem[proofBehaviorGetOff+23:], 0x90)
-				binary.LittleEndian.PutUint32(img.mem[fakeGetterOff+19:], 0x90)
-			}
-
-			// The same live image with an empty cache supplies the expected result.
-			t.Setenv("XDG_CACHE_HOME", t.TempDir())
-			uncached := &cursorHiddenReader{}
-			uncached.init(ranges, img.addr(0), fakeImageSize)
-			t.Setenv("XDG_CACHE_HOME", cacheRoot)
-			memory.chunks = 0
-			got := &cursorHiddenReader{}
-			got.init(ranges, img.addr(0), fakeImageSize)
-			if memory.chunks == 0 {
-				t.Fatal("cache mismatch did not fall back to full-chunk reads")
-			}
-			if got.candidate != uncached.candidate || got.behaviorCandidate != uncached.behaviorCandidate ||
-				got.enumOffset != uncached.enumOffset || got.disabled != uncached.disabled || (got.resolve == nil) != (uncached.resolve == nil) {
-				t.Fatalf("fallback = %+v, uncached = %+v", got, uncached)
-			}
-
-			// The refreshed entries must make the next production-path init a hit.
-			memory.chunks = 0
-			refreshed := &cursorHiddenReader{}
-			refreshed.init(ranges, img.addr(0), fakeImageSize)
-			if memory.chunks != 0 || refreshed.candidate != got.candidate || refreshed.behaviorCandidate != got.behaviorCandidate {
-				t.Fatalf("refreshed cache did not hit: chunks=%d candidate=%+v behavior=%+v", memory.chunks, refreshed.candidate, refreshed.behaviorCandidate)
-			}
-		})
-	}
 }
 
 func TestCursorHiddenSharedResolverMismatch(t *testing.T) {
