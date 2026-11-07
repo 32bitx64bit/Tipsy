@@ -116,11 +116,6 @@ void tipsy_stutter_wait_set_enabled(int enabled)
 	atomic_store_explicit(&g_stutter_wait_enabled, enabled != 0, memory_order_relaxed);
 }
 
-int tipsy_stutter_wait_enabled(void)
-{
-	return atomic_load_explicit(&g_stutter_wait_enabled, memory_order_relaxed);
-}
-
 uint64_t tipsy_stutter_wait_begin(int path)
 {
 	struct timespec ts;
@@ -290,15 +285,6 @@ void *tipsy_ANativeWindow_new(int32_t width, int32_t height, uintptr_t native_ha
 	w->refs = 1;
 	w->native_handle = native_handle;
 	return w;
-}
-
-void tipsy_ANativeWindow_set_handle(void *win, uintptr_t native_handle)
-{
-	TipsyNativeWindow *w = (TipsyNativeWindow *)win;
-	if (!tipsy_is_anative_window(w)) {
-		return;
-	}
-	w->native_handle = native_handle;
 }
 
 uintptr_t tipsy_ANativeWindow_get_handle(void *win)
@@ -1601,8 +1587,8 @@ static int test_futex_wake(int *word)
 		0x7fffffff, NULL, NULL, 0xffffffffu);
 }
 
-/* Mirrors native/call.c park_poll_futex with a 2s liveness bound so tests
- * fail closed instead of hanging the suite. */
+/* Test-only futex park loop with a 2s liveness bound so tests fail closed
+ * instead of hanging the suite. */
 static int test_park_poll_futex(int *uaddr, unsigned val, int *looper_retries)
 {
 	struct timespec deadline;
@@ -1739,11 +1725,6 @@ int tipsy_test_futex_real_wake_vs_looper_wake(void)
 		return -8;
 	}
 	return 1;
-}
-
-AAssetManager *tipsy_AAssetManager_singleton(void)
-{
-	return &g_amgr;
 }
 
 AAssetManager *tipsy_AAssetManager_fromJava(void *env, void *assetManager)

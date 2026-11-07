@@ -281,7 +281,6 @@ int tipsy_vk_host_has_xcb_surface(void);
 int tipsy_vk_host_has_xlib_surface(void);
 
 void *tipsy_ANativeWindow_new(int32_t width, int32_t height, uintptr_t native_handle);
-void tipsy_ANativeWindow_set_handle(void *win, uintptr_t native_handle);
 void tipsy_set_default_window(void *win);
 uintptr_t tipsy_ANativeWindow_get_handle(void *win);
 int tipsy_is_anative_window(const void *win);
@@ -317,7 +316,6 @@ int tipsy_test_looper_watcher_shutdown(void);
 int tipsy_test_idle_unblocks_on_wake(void);
 int tipsy_test_futex_real_wake_vs_looper_wake(void);
 void tipsy_stutter_wait_set_enabled(int enabled);
-int tipsy_stutter_wait_enabled(void);
 uint64_t tipsy_stutter_wait_begin(int path);
 void tipsy_stutter_wait_slice(int path);
 void tipsy_stutter_wait_end(int path, uint64_t started_ns);
@@ -374,7 +372,6 @@ int tipsy_test_getaddrinfo_eai_noname(void);
 int tipsy_test_getnameinfo_numeric(void);
 int tipsy_test_glibc_bionic_ai_addr_null(void);
 
-AAssetManager *tipsy_AAssetManager_singleton(void);
 AAsset *tipsy_AAsset_from_buffer(void *buf, int64_t len, int owned, int fd);
 AAsset *tipsy_AAsset_from_buffer_with_release(void *buf, int64_t len, int owned,
 	int fd, uintptr_t release_token);
@@ -404,12 +401,9 @@ int tipsy_dl_iterate_count(void);
 void tipsy_audio_set_capture_muted(int muted);
 int tipsy_audio_capture_muted(void);
 int tipsy_audio_microphone_disabled(void);
-/* -1: env decides nothing; 0: env closes the door; 1: env opens it. */
-int tipsy_audio_microphone_env_decision(void);
 /* Persisted-switch half of the door: 1 allowed (default), 0 closed. The setter
  * returns 1 when the value changed; a change to closed asks every recorder to
  * close its host stream. */
-int tipsy_audio_microphone_file_door(void);
 int tipsy_audio_set_microphone_file_door(int allowed);
 /* Registered OpenSL recorders (Go uses this to run its door watcher only while
  * a recorder exists). */
@@ -456,7 +450,6 @@ typedef struct {
 } tipsy_audio_door_stats;
 int tipsy_audio_test_door_start(uint32_t bytes);
 int tipsy_audio_test_door_enqueue(void);
-int tipsy_audio_test_door_set_recording(int recording);
 void tipsy_audio_test_door_stats(tipsy_audio_door_stats *out);
 void tipsy_audio_test_door_arm_close_after_read(void);
 void tipsy_audio_test_door_stop(void);

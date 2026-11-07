@@ -38,17 +38,6 @@ func doorFixtureEnqueue() error {
 	return nil
 }
 
-func doorFixtureSetRecording(recording bool) error {
-	v := C.int(0)
-	if recording {
-		v = 1
-	}
-	if C.tipsy_audio_test_door_set_recording(v) != 0 {
-		return errors.New("door fixture state change failed")
-	}
-	return nil
-}
-
 func doorFixtureStats() doorStats {
 	var s C.tipsy_audio_door_stats
 	C.tipsy_audio_test_door_stats(&s)
@@ -78,12 +67,4 @@ func doorFixtureStop() {
 // (allowed) so one test's file state cannot leak into the next.
 func resetMicrophoneFileDoor() {
 	C.tipsy_audio_set_microphone_file_door(1)
-}
-
-func microphoneEnvDecision() int {
-	return int(C.tipsy_audio_microphone_env_decision())
-}
-
-func microphoneFileDoor() bool {
-	return C.tipsy_audio_microphone_file_door() != 0
 }

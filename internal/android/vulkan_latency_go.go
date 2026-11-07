@@ -43,12 +43,6 @@ func ArmVulkanAntiLag(driver string, proved bool) bool {
 // VulkanAntiLagArmed reports whether anti-lag calls may happen.
 func VulkanAntiLagArmed() bool { return C.tipsy_vk_antilag_armed() != 0 }
 
-// ConfigureVulkanLatency reads the TIPSY_ANTILAG switch. Call it once before
-// presentation starts; it defaults off.
-func ConfigureVulkanLatency() {
-	C.tipsy_vk_latency_log_shader_cache()
-}
-
 func tipsyTestLatencyReset() { C.tipsy_test_vk_latency_reset() }
 
 func tipsyTestLatencyInstallProcs() { C.tipsy_test_vk_latency_install_test_procs() }

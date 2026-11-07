@@ -111,23 +111,6 @@ func NewResolver(cfg Config) loader.Resolver {
 	return p
 }
 
-// SetAssetsDir sets the directory (extracted APK assets/) used by AAssetManager.
-func SetAssetsDir(dir string) {
-	defaultProvider.mu.Lock()
-	defaultProvider.assetsDir = dir
-	defaultProvider.mu.Unlock()
-	setAssetsLocked(dir, defaultProvider.apkPath)
-}
-
-// SetAPKPath sets a base.apk zip path for assets/ lookup when the file is not
-// already extracted under AssetsDir.
-func SetAPKPath(apk string) {
-	defaultProvider.mu.Lock()
-	defaultProvider.apkPath = apk
-	defaultProvider.mu.Unlock()
-	setAssetsLocked(defaultProvider.assetsDir, apk)
-}
-
 func init() {
 	C.tipsy_bionic_compat_init()
 }

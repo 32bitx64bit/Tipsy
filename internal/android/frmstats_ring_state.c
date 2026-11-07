@@ -261,28 +261,9 @@ uint64_t tipsy_frmstats_attempts(void)
 }
 
 #ifdef TIPSY_FRMSTATS_TEST_HOOKS
-uint64_t tipsy_frmstats_test_claims(void)
-{
-	return atomic_load_explicit(&frm_claims, memory_order_acquire);
-}
-
 uint64_t tipsy_frmstats_test_dropped(void)
 {
 	return atomic_load_explicit(&frm_dropped, memory_order_acquire);
-}
-
-int tipsy_frmstats_test_hold_published(void)
-{
-	if (atomic_load_explicit(&frm_claims, memory_order_acquire) != 0) {
-		return 1;
-	}
-	atomic_store_explicit(&frmctl_gate, 1, memory_order_release);
-	return 0;
-}
-
-void tipsy_frmstats_test_unhold_published(void)
-{
-	atomic_store_explicit(&frmctl_gate, 0, memory_order_release);
 }
 
 #endif /* TIPSY_FRMSTATS_TEST_HOOKS */

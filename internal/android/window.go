@@ -53,22 +53,6 @@ func (w *Window) NativeHandle() uintptr {
 	return uintptr(C.tipsy_ANativeWindow_get_handle(w.ptr))
 }
 
-// SetNativeHandle stores an X11 Window (or other EGLNativeWindowType) on this ANativeWindow.
-func (w *Window) SetNativeHandle(h uintptr) {
-	if w == nil || w.ptr == nil {
-		return
-	}
-	C.tipsy_ANativeWindow_set_handle(w.ptr, C.uintptr_t(h))
-}
-
-// Ptr returns the ANativeWindow* for NDK callers.
-func (w *Window) Ptr() uintptr {
-	if w == nil {
-		return 0
-	}
-	return uintptr(w.ptr)
-}
-
 // Size returns the current ANativeWindow buffer dimensions in pixels.
 func (w *Window) Size() (int, int) {
 	if w == nil || w.ptr == nil {
@@ -110,13 +94,6 @@ func BindDefaultWindow(w *Window) {
 		return
 	}
 	C.tipsy_set_default_window(w.ptr)
-}
-
-func CMalloc(n int) unsafe.Pointer {
-	if n <= 0 {
-		return C.malloc(1)
-	}
-	return C.malloc(C.size_t(n))
 }
 
 func newAsset(buf unsafe.Pointer, len int64, owned int, fd int) unsafe.Pointer {

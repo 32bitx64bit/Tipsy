@@ -151,7 +151,8 @@ func testAndroidLogBufWrite(bufID, prio int, tag, text string) int {
 //export GoAndroid_LogWrite
 func GoAndroid_LogWrite(prio C.int, tag, text *C.char) {
 	logWriteCalls.Add(1)
-	observeLogText(C.GoString(text))
+	textStr := C.GoString(text)
+	observeLogText(textStr)
 	p := int(prio)
 	log := androidLog()
 	if p != 2 && p != 3 {
@@ -162,7 +163,7 @@ func GoAndroid_LogWrite(prio C.int, tag, text *C.char) {
 		if tagStr != "rbx.JNIRobloxSettings" && !log.Enabled(context.Background(), slog.LevelDebug) {
 			return
 		}
-		msg := "[" + tagStr + "] " + C.GoString(text)
+		msg := "[" + tagStr + "] " + textStr
 		if tagStr == "rbx.JNIRobloxSettings" {
 			log.Info(msg)
 			return
@@ -170,7 +171,7 @@ func GoAndroid_LogWrite(prio C.int, tag, text *C.char) {
 		log.Debug(msg)
 		return
 	}
-	msg := "[" + C.GoString(tag) + "] " + C.GoString(text)
+	msg := "[" + C.GoString(tag) + "] " + textStr
 	switch p {
 	case 5: // WARN
 		log.Warn(msg)

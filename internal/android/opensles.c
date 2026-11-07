@@ -659,16 +659,6 @@ int tipsy_audio_microphone_disabled(void)
 	return microphone_disabled();
 }
 
-int tipsy_audio_microphone_env_decision(void)
-{
-	return microphone_env_decision();
-}
-
-int tipsy_audio_microphone_file_door(void)
-{
-	return atomic_load_explicit(&microphone_file_allowed, memory_order_acquire);
-}
-
 /* A closing door must not wait for the client's next buffer: a recorder that
  * is RECORDING with an empty queue would otherwise keep the host source open
  * indefinitely. Ask every recorder worker to close its host stream (the same
@@ -3155,14 +3145,6 @@ int tipsy_audio_test_door_enqueue(void)
 		return -1;
 	memset(door_fx.buffer, 0, door_fx.bytes);
 	return (*door_fx.queue)->Enqueue(door_fx.queue, door_fx.buffer, door_fx.bytes) == 0 ? 0 : -1;
-}
-
-int tipsy_audio_test_door_set_recording(int recording)
-{
-	if (!door_fx.active || door_fx.record == NULL)
-		return -1;
-	return (*door_fx.record)->SetRecordState(door_fx.record,
-	           recording ? SL_RECORDSTATE_RECORDING : SL_RECORDSTATE_STOPPED) == 0 ? 0 : -1;
 }
 
 void tipsy_audio_test_door_stats(tipsy_audio_door_stats *out)

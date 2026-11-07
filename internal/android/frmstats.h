@@ -92,21 +92,11 @@ uint64_t *tipsy_frmstats_test_stamp_for(uint64_t sequence, uint64_t now_ns);
 // tipsy_frmstats_test_stamp_for suspended. Tests only.
 void tipsy_frmstats_test_publish_stamp(uint64_t sequence);
 
-// tipsy_frmstats_test_claims returns the number of sequences handed out to
-// presenters, published or not. Tests only.
-uint64_t tipsy_frmstats_test_claims(void);
-
 // tipsy_frmstats_test_present_numbered records one present whose stamp is the
 // sequence it claims, so a reader can assert the exact value a sequence must
 // hold. Tests only.
 void tipsy_frmstats_test_present_numbered(void);
 
-// tipsy_frmstats_test_hold_published holds the publication cursor still while
-// a test drives presenters, so a reader can mark unpublished frames as lost.
-// It returns 0 when it took hold (only possible before any present) and 1 when
-// it refused because the ring had already published. Tests only.
-int tipsy_frmstats_test_hold_published(void);
-void tipsy_frmstats_test_unhold_published(void);
 #endif /* TIPSY_FRMSTATS_TEST_HOOKS */
 
 // tipsy_frmstats_reset disarms recording and clears the ring. Tests only.

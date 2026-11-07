@@ -29,12 +29,6 @@ func publishFrameTimeStamp(sequence uint64) {
 	C.tipsy_frmstats_test_publish_stamp(C.uint64_t(sequence))
 }
 
-// frameTimeClaims returns the number of sequences handed out to presenters,
-// published or not. Tests only.
-func frameTimeClaims() uint64 {
-	return uint64(C.tipsy_frmstats_test_claims())
-}
-
 // recordFrameTimePresentNumbered records one present whose stamp is the sequence
 // it claims. Tests only.
 func recordFrameTimePresentNumbered() {
@@ -45,19 +39,6 @@ func recordFrameTimePresentNumbered() {
 // sample already held their slot. Tests only.
 func frameTimeDropped() uint64 {
 	return uint64(C.tipsy_frmstats_test_dropped())
-}
-
-// holdFrameTimePublished holds the publication cursor still so a test can drive
-// presenters past it. It reports false when the ring had already published.
-// Tests only.
-func holdFrameTimePublished() bool {
-	return C.tipsy_frmstats_test_hold_published() == 0
-}
-
-// releaseFrameTimePublished lets the publication cursor advance again after
-// holdFrameTimePublished. Tests only.
-func releaseFrameTimePublished() {
-	C.tipsy_frmstats_test_unhold_published()
 }
 
 // stampFrameTimeWithoutPublishing stores nowNS as sample sequence and leaves it
