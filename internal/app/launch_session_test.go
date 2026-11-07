@@ -131,6 +131,15 @@ func TestAuthorizedLaunchSessionMissingConsentFailsBeforeGeneration(t *testing.T
 	}
 }
 
+// ResolveLaunchAuthority exposes the app's single authority decision without
+// opening a generation. OpenLaunchSession always repeats this verification at
+// the security-sensitive launch boundary. Tests only: production reaches the
+// same decision through openAuthorizedLaunchSession.
+func ResolveLaunchAuthority(ctx context.Context, approveDevelopment bool) (LaunchAuthorityState, error) {
+	state, _, err := resolveLaunchAuthorityState(ctx, approveDevelopment, defaultAuthorityDependencies())
+	return state, err
+}
+
 func TestResolveLaunchAuthorityPersistsExplicitDevelopmentState(t *testing.T) {
 	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
 	t.Setenv("XDG_DATA_HOME", t.TempDir())

@@ -36,9 +36,6 @@ const (
 	Source        Method = "source"
 )
 
-// InstallMethod is an alias for Method.
-type InstallMethod = Method
-
 // DetectDeps overrides the environment probes DetectInstallWith uses. Nil
 // fields fall back to the real desktop, executable and package-manager checks.
 type DetectDeps struct {

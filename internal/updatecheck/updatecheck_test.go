@@ -163,9 +163,6 @@ func TestCompare(t *testing.T) {
 			if got := Compare(tt.local, tt.tag); got != tt.want {
 				t.Fatalf("Compare(%q, %q) = %q, want %q", tt.local, tt.tag, got, tt.want)
 			}
-			if got := CompareVersions(tt.local, tt.tag); got != tt.want {
-				t.Fatalf("CompareVersions(%q, %q) = %q, want %q", tt.local, tt.tag, got, tt.want)
-			}
 		})
 	}
 }

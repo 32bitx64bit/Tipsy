@@ -13,25 +13,6 @@ type Source interface {
 	Acquire(context.Context, string, ProgressFunc) ([]string, error)
 }
 
-type UnavailableSource struct {
-	Name     string
-	Reason   string
-	LegalURL string
-}
-
-func (s UnavailableSource) Availability(context.Context) SourceAvailability {
-	reason := s.Reason
-	if reason == "" {
-		reason = "No official public direct APK source is available; choose APK files obtained through your own authorized account."
-	}
-	return SourceAvailability{Available: false, Name: s.Name, Reason: reason, LegalURL: s.LegalURL}
-}
-
-func (s UnavailableSource) Acquire(context.Context, string, ProgressFunc) ([]string, error) {
-	a := s.Availability(context.Background())
-	return nil, setupError(ErrSourceUnavailable, "automatic setup", a.Reason, nil)
-}
-
 type progressReader struct {
 	ctx    context.Context
 	r      io.Reader

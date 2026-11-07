@@ -57,14 +57,6 @@ type AuthorizedLaunchSession struct {
 	closed     bool
 }
 
-// ResolveLaunchAuthority exposes the app's single authority decision without
-// opening a generation. OpenLaunchSession always repeats this verification at
-// the security-sensitive launch boundary.
-func ResolveLaunchAuthority(ctx context.Context, approveDevelopment bool) (LaunchAuthorityState, error) {
-	state, _, err := resolveLaunchAuthorityState(ctx, approveDevelopment, defaultAuthorityDependencies())
-	return state, err
-}
-
 // OpenLaunchSession resolves the selected authority, repairs or opens its
 // generation, and returns the only app-level launch capability.
 func OpenLaunchSession(ctx context.Context, approveDevelopment bool) (*AuthorizedLaunchSession, error) {

@@ -53,8 +53,8 @@ const (
 
 var (
 	errUnsupported  = errors.New("unsupported Roblox URI")
-	errStudio       = errors.New("Roblox Studio URIs are not supported")
-	errMissingPlace = errors.New("Roblox URI does not name an experience")
+	errStudio       = errors.New("URI for Roblox Studio is not supported")
+	errMissingPlace = errors.New("URI does not name an experience")
 )
 
 // LooksLike reports whether s is a Roblox website or protocol URI Tipsy may own.
@@ -135,15 +135,6 @@ func (r Request) WebLoginURI() string {
 		return r.Original
 	}
 	return r.AndroidDeepLink
-}
-
-// PlacePageURL is the public Roblox website page for a place. It never includes
-// job ids, access codes, tickets, or user identities.
-func PlacePageURL(placeID int64) string {
-	if placeID <= 0 {
-		return ""
-	}
-	return "https://www.roblox.com/games/" + strconv.FormatInt(placeID, 10)
 }
 
 // Summary is safe for logs: identities only, never ticket or cookie values.
@@ -332,7 +323,7 @@ func parseWebURL(u *url.URL) (Request, error) {
 func privateServerShareRequest(scheme string, q url.Values) (Request, error) {
 	code := firstQuery(q, "code")
 	if code == "" || !strings.EqualFold(firstQuery(q, "type"), "Server") {
-		return Request{}, errors.New("Roblox private server share link is incomplete or unsupported")
+		return Request{}, errors.New("private server share link is incomplete or unsupported")
 	}
 	req := Request{
 		Scheme:           scheme,

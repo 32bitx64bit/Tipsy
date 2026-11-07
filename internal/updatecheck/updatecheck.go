@@ -14,8 +14,6 @@ import (
 	"strconv"
 	"strings"
 	"time"
-
-	"github.com/tipsy-linux/tipsy/internal/version"
 )
 
 const (
@@ -72,12 +70,6 @@ type Client struct {
 	UserAgent string
 }
 
-// NewClient returns a Client for baseURL using httpClient. Empty values fall
-// back to the official API and default transport.
-func NewClient(baseURL string, httpClient *http.Client) *Client {
-	return &Client{BaseURL: baseURL, HTTP: httpClient}
-}
-
 // Latest fetches the latest published release. It sets a context timeout and
 // the GitHub-recommended Accept and User-Agent headers. A non-200 response or
 // malformed body is an error; the caller keeps its previous quiet state.
@@ -123,11 +115,6 @@ func (c Client) Latest(ctx context.Context) (Release, error) {
 	return release, nil
 }
 
-// FetchLatest is a convenience wrapper around Client.Latest.
-func FetchLatest(ctx context.Context) (Release, error) {
-	return Client{}.Latest(ctx)
-}
-
 func (c Client) latestEndpoint() string {
 	base := strings.TrimRight(strings.TrimSpace(c.BaseURL), "/")
 	if base == "" {
@@ -168,16 +155,6 @@ func Compare(localVersion, releaseTag string) Status {
 		return UpdateAvailable
 	}
 	return UpToDate
-}
-
-// CompareVersions is an explicit alias for Compare.
-func CompareVersions(localVersion, releaseTag string) Status {
-	return Compare(localVersion, releaseTag)
-}
-
-// CompareCurrent compares releaseTag with the running build's version.
-func CompareCurrent(releaseTag string) Status {
-	return Compare(version.Version, releaseTag)
 }
 
 func isDevVersion(v string) bool {

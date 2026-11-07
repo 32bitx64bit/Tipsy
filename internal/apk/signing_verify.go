@@ -7,6 +7,7 @@ import (
 	"bytes"
 	"context"
 	"crypto"
+	//lint:ignore SA1019 APK v2/v3 signatures may carry DSA; verifying them must keep working.
 	"crypto/dsa"
 	"crypto/ecdsa"
 	"crypto/rsa"
