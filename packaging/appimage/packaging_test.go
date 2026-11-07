@@ -931,6 +931,23 @@ func TestReleaseWorkflowSecurityIfPresent(t *testing.T) {
 		t.Fatal(err)
 	}
 	text := string(data)
+	lockRaw, err := os.ReadFile(filepath.Join(repoRoot(t), "scripts", "release-inputs.lock.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var lock struct {
+		Actions map[string]struct {
+			Commit string `json:"commit"`
+		} `json:"actions"`
+	}
+	if err := json.Unmarshal(lockRaw, &lock); err != nil {
+		t.Fatal(err)
+	}
+	for _, action := range []string{"upload-artifact", "download-artifact", "cosign-installer"} {
+		if !regexp.MustCompile(`^[0-9a-f]{40}$`).MatchString(lock.Actions[action].Commit) {
+			t.Fatalf("lock does not pin a full commit for %s: %q", action, lock.Actions[action].Commit)
+		}
+	}
 	if !strings.Contains(text, "push:") || !strings.Contains(text, "workflow_dispatch:") || !strings.Contains(text, "version:") || !strings.Contains(text, "tags:") || !strings.Contains(text, "v*") {
 		t.Fatal("release workflow must support automatic tags and manual versioned releases")
 	}
@@ -971,9 +988,9 @@ func TestReleaseWorkflowSecurityIfPresent(t *testing.T) {
 		"xdamage",
 		"webkit2gtk-4.1",
 		"vulkan/vulkan.h",
-		"actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02",
-		"actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093",
-		"sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6",
+		"actions/upload-artifact@" + lock.Actions["upload-artifact"].Commit,
+		"actions/download-artifact@" + lock.Actions["download-artifact"].Commit,
+		"sigstore/cosign-installer@" + lock.Actions["cosign-installer"].Commit,
 		"cosign sign-blob --yes --bundle",
 		"cosign verify-blob",
 		"--certificate-oidc-issuer",
