@@ -12,11 +12,9 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
-	"time"
 
 	"github.com/tipsy-linux/tipsy/internal/apk"
 	"github.com/tipsy-linux/tipsy/internal/integrity"
-	"github.com/tipsy-linux/tipsy/internal/securitypolicy"
 )
 
 func validReport(cert string) *apk.Report {
@@ -123,82 +121,6 @@ func TestValidateReportRejectsUptodownInstaller(t *testing.T) {
 	}
 }
 
-func TestAuthenticatedPolicyAuthorizesRotationWithoutSelfAuthorizingCandidate(t *testing.T) {
-	const (
-		compiled = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
-		rotated  = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
-	)
-	policy := securitypolicy.RobloxPolicy{
-		Schema: "tipsy.roblox-policy.v1",
-		Validity: securitypolicy.Validity{
-			Sequence: 7, NotBefore: time.Unix(1, 0).UTC().Format(time.RFC3339), Expires: time.Unix(1<<30, 0).UTC().Format(time.RFC3339),
-		},
-		PackageName: "com.roblox.client", Platform: "android", Architecture: "x86_64",
-		MinVersionCode: 2908, MaxVersionCode: 4000, AllowedSplits: []string{"base", "config.x86_64"},
-		SignerLineages: []securitypolicy.SignerLineage{{ID: "official-rotation", SHA256: []string{compiled, rotated}, MinVersionCode: 2908, MaxVersionCode: 4000}},
-	}
-	rep := validReport(rotated)
-	rep.Packages[0].Signing.HasV2 = false
-	rep.Packages[0].Signing.HasV3 = true
-	rep.Packages[0].Signing.VerifiedScheme = "v3"
-	rep.Packages[0].Signing.VerifiedLineageSHA256 = []string{compiled, rotated}
-	trust := TrustPolicy{
-		PackageName: "com.roblox.client", AllowedCertificateSHA256: []string{compiled}, SupportedSplits: []string{"", "config.x86_64"},
-		MinimumVersionCode: CompiledMinimumRobloxVersionCode, RobloxPolicy: &policy, MinimumPolicySequence: 7,
-	}
-	authorization, err := AuthorizeReport(rep, trust)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if authorization.SignerLineageID != "official-rotation" || authorization.PolicySequence != 7 || strings.Join(authorization.SignerLineage, ",") != compiled+","+rotated {
-		t.Fatalf("authorization=%+v", authorization)
-	}
-
-	t.Run("candidate cannot teach compiled root", func(t *testing.T) {
-		self := validReport(rotated)
-		self.Packages[0].Signing.HasV2 = false
-		self.Packages[0].Signing.HasV3 = true
-		self.Packages[0].Signing.VerifiedScheme = "v3"
-		self.Packages[0].Signing.VerifiedLineageSHA256 = []string{rotated}
-		if _, err := AuthorizeReport(self, trust); ErrorKindOf(err) != ErrUntrustedSigner {
-			t.Fatalf("self-authorized signer err=%v", err)
-		}
-	})
-	t.Run("policy omits authenticated predecessor", func(t *testing.T) {
-		missing := policy
-		missing.SignerLineages = []securitypolicy.SignerLineage{{ID: "incomplete", SHA256: []string{rotated}, MinVersionCode: 2908, MaxVersionCode: 4000}}
-		badTrust := trust
-		badTrust.RobloxPolicy = &missing
-		if _, err := AuthorizeReport(rep, badTrust); ErrorKindOf(err) != ErrUntrustedSigner {
-			t.Fatalf("incomplete lineage err=%v", err)
-		}
-	})
-	t.Run("stale policy", func(t *testing.T) {
-		stale := trust
-		stale.MinimumPolicySequence = 8
-		if _, err := AuthorizeReport(rep, stale); ErrorKindOf(err) != ErrPolicy {
-			t.Fatalf("stale policy err=%v", err)
-		}
-	})
-	t.Run("installed downgrade", func(t *testing.T) {
-		downgrade := trust
-		downgrade.InstalledVersionCode = rep.Merged.VersionCode + 1
-		if _, err := AuthorizeReport(rep, downgrade); ErrorKindOf(err) != ErrDowngrade {
-			t.Fatalf("downgrade err=%v", err)
-		}
-	})
-	t.Run("duplicate split", func(t *testing.T) {
-		duplicated := *rep
-		duplicated.Packages = append([]apk.Package(nil), rep.Packages...)
-		split := duplicated.Packages[0]
-		split.SplitName, split.IsSplit = "config.x86_64", true
-		duplicated.Packages = append(duplicated.Packages, split, split)
-		if _, err := AuthorizeReport(&duplicated, trust); ErrorKindOf(err) != ErrUnsupportedSplit {
-			t.Fatalf("duplicate split err=%v", err)
-		}
-	})
-}
-
 func TestAuthorizationModesKeepDevelopmentDistinctAndCandidateCannotSelfAuthorize(t *testing.T) {
 	const (
 		compiled = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
@@ -213,7 +135,7 @@ func TestAuthorizationModesKeepDevelopmentDistinctAndCandidateCannotSelfAuthoriz
 
 	official := TrustPolicy{Mode: OfficialVerified, PackageName: "com.roblox.client", AllowedCertificateSHA256: []string{compiled, rotated}, SupportedSplits: []string{"", "config.x86_64"}}
 	if _, err := AuthorizeReport(report, official); ErrorKindOf(err) != ErrPolicy {
-		t.Fatalf("official mode without authenticated policy err=%v", err)
+		t.Fatalf("official mode without authenticated release err=%v", err)
 	}
 	keyless := official
 	keyless.ReleaseAuthenticated = true
@@ -239,6 +161,24 @@ func TestAuthorizationModesKeepDevelopmentDistinctAndCandidateCannotSelfAuthoriz
 	if _, err := AuthorizeReport(self, development); ErrorKindOf(err) != ErrUntrustedSigner {
 		t.Fatalf("candidate taught development mode a new terminus: %v", err)
 	}
+
+	t.Run("installed downgrade", func(t *testing.T) {
+		downgrade := development
+		downgrade.InstalledVersionCode = report.Merged.VersionCode + 1
+		if _, err := AuthorizeReport(report, downgrade); ErrorKindOf(err) != ErrDowngrade {
+			t.Fatalf("downgrade err=%v", err)
+		}
+	})
+	t.Run("duplicate split", func(t *testing.T) {
+		duplicated := *report
+		duplicated.Packages = append([]apk.Package(nil), report.Packages...)
+		split := duplicated.Packages[0]
+		split.SplitName, split.IsSplit = "config.x86_64", true
+		duplicated.Packages = append(duplicated.Packages, split, split)
+		if _, err := AuthorizeReport(&duplicated, development); ErrorKindOf(err) != ErrUnsupportedSplit {
+			t.Fatalf("duplicate split err=%v", err)
+		}
+	})
 }
 
 func TestCopyLocalRejectsSymlinkLimitAndCancellation(t *testing.T) {
@@ -312,7 +252,7 @@ func TestZIPStructureRejectsTraversalAndDuplicates(t *testing.T) {
 }
 
 func TestDefaultAutomaticSourceIsHonestlyUnavailable(t *testing.T) {
-	s := NewWithSource(UnavailableSource{Reason: "No lawful source configured."})
+	s := NewWithSource(UnavailableSource{Reason: "No lawful source configured."}, testHooks())
 	a := s.AutomaticAvailability(context.Background())
 	if a.Available || !strings.Contains(a.Reason, "lawful") {
 		t.Fatalf("availability=%+v", a)
@@ -344,7 +284,7 @@ func TestInstallStagesThenAtomicallyActivatesGeneration(t *testing.T) {
 	}
 	const cert = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 	nativeBody := []byte("verified")
-	s := New()
+	s := New(testHooks())
 	s.RuntimeDir = runtimeDir
 	s.GenerationStoreRoot = filepath.Join(root, "data", "runtime-generations")
 	t.Cleanup(func() { makeGenerationTreeWritable(s.GenerationStoreRoot) })
@@ -484,7 +424,7 @@ func TestInstallFailureAndCancellationLeaveRuntimeUntouched(t *testing.T) {
 	}
 	const cert = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 	for _, testErr := range []error{errors.New("extract failed"), context.Canceled} {
-		s := New()
+		s := New(testHooks())
 		s.RuntimeDir = runtimeDir
 		s.Trust = testTrust(cert)
 		s.inspect = func(context.Context, []string) (*apk.Report, error) { return validReport(cert), nil }

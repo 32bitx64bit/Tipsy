@@ -9,6 +9,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/tipsy-linux/tipsy/internal/app"
 	guimodel "github.com/tipsy-linux/tipsy/internal/gui"
 	"github.com/tipsy-linux/tipsy/internal/setupsvc"
 )
@@ -207,15 +208,15 @@ func TestProductionInstallBindsDevelopmentPackageTrustBeforeBackendInstall(t *te
 	if backend.installCalls != 1 {
 		t.Fatalf("install calls=%d", backend.installCalls)
 	}
-	if backend.trust.Mode != setupsvc.DevelopmentUnrestricted || backend.trust.ReleaseAuthenticated || backend.trust.RobloxPolicy != nil {
+	if backend.trust.Mode != setupsvc.DevelopmentUnrestricted || backend.trust.ReleaseAuthenticated {
 		t.Fatalf("bound trust=%+v", backend.trust)
 	}
 }
 
 func TestProductionInstallAppliesDevelopmentTrustToLiveSetupService(t *testing.T) {
 	t.Parallel()
-	inner := setupsvc.New()
-	if inner.Trust.Mode != setupsvc.OfficialVerified || inner.Trust.ReleaseAuthenticated || inner.Trust.RobloxPolicy != nil {
+	inner := setupsvc.New(app.SetupHooks())
+	if inner.Trust.Mode != setupsvc.OfficialVerified || inner.Trust.ReleaseAuthenticated {
 		t.Fatalf("default live trust=%+v", inner.Trust)
 	}
 	service := &productionService{
@@ -228,7 +229,7 @@ func TestProductionInstallAppliesDevelopmentTrustToLiveSetupService(t *testing.T
 	if err == nil {
 		t.Fatal("empty local install unexpectedly succeeded")
 	}
-	if inner.Trust.Mode != setupsvc.DevelopmentUnrestricted || inner.Trust.ReleaseAuthenticated || inner.Trust.RobloxPolicy != nil {
+	if inner.Trust.Mode != setupsvc.DevelopmentUnrestricted || inner.Trust.ReleaseAuthenticated {
 		t.Fatalf("live setup trust=%+v", inner.Trust)
 	}
 }

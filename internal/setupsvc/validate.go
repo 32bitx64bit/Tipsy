@@ -17,7 +17,6 @@ import (
 	"strings"
 
 	"github.com/tipsy-linux/tipsy/internal/apk"
-	"github.com/tipsy-linux/tipsy/internal/securitypolicy"
 )
 
 const CompiledMinimumRobloxVersionCode int64 = 2908
@@ -57,8 +56,6 @@ type TrustPolicy struct {
 	SupportedSplits          []string
 	MinimumVersionCode       int64
 	InstalledVersionCode     int64
-	MinimumPolicySequence    uint64
-	RobloxPolicy             *securitypolicy.RobloxPolicy
 }
 
 type AuthorizationMode string
@@ -89,17 +86,6 @@ func OfficialTrustPolicy() TrustPolicy {
 	}
 }
 
-// WithAuthenticatedRobloxPolicy returns the conservative compiled trust floor
-// intersected with an already decoded roblox-policy document. The APK
-// candidate itself is never a policy source.
-func WithAuthenticatedRobloxPolicy(policy securitypolicy.RobloxPolicy, installedVersionCode int64, minimumPolicySequence uint64) TrustPolicy {
-	trust := OfficialTrustPolicy()
-	trust.RobloxPolicy = &policy
-	trust.InstalledVersionCode = installedVersionCode
-	trust.MinimumPolicySequence = minimumPolicySequence
-	return trust
-}
-
 // KeylessReleaseTrustPolicy keeps the conservative compiled Roblox signer,
 // split, and minimum-version floor after AppRun has identified a GitHub
 // AppImage payload. It does not re-verify the running binary.
@@ -110,13 +96,12 @@ func KeylessReleaseTrustPolicy() TrustPolicy {
 }
 
 // DevelopmentTrustPolicy is an explicit non-official boundary for source
-// builds when authenticated P2 policy is absent. It never yields official
-// status and still requires APK signatures plus a full rotation lineage whose
-// oldest and current certificates are in the compiled signer floor.
+// builds. It never yields official status and still requires APK signatures
+// plus a full rotation lineage whose oldest and current certificates are in
+// the compiled signer floor.
 func DevelopmentTrustPolicy() TrustPolicy {
 	trust := OfficialTrustPolicy()
 	trust.Mode = DevelopmentUnrestricted
-	trust.RobloxPolicy = nil
 	return trust
 }
 
@@ -367,11 +352,8 @@ func AuthorizeReport(rep *apk.Report, policy TrustPolicy) (Authorization, error)
 	if mode != OfficialVerified && mode != DevelopmentUnrestricted {
 		return Authorization{}, setupError(ErrPolicy, "validate package", "package authorization mode is invalid", nil)
 	}
-	if mode == OfficialVerified && policy.RobloxPolicy == nil && !policy.ReleaseAuthenticated {
-		return Authorization{}, setupError(ErrPolicy, "validate package", "official verification requires an authenticated release or Roblox policy", nil)
-	}
-	if mode == DevelopmentUnrestricted && policy.RobloxPolicy != nil {
-		return Authorization{}, setupError(ErrPolicy, "validate package", "development authorization cannot claim authenticated policy status", nil)
+	if mode == OfficialVerified && !policy.ReleaseAuthenticated {
+		return Authorization{}, setupError(ErrPolicy, "validate package", "official verification requires an authenticated release", nil)
 	}
 	if rep == nil || rep.Merged == nil || len(rep.Packages) == 0 {
 		return Authorization{}, setupError(ErrInvalidArchive, "validate package", "package metadata is incomplete", nil)
@@ -387,12 +369,6 @@ func AuthorizeReport(rep *apk.Report, policy TrustPolicy) (Authorization, error)
 	}
 	if policy.InstalledVersionCode > 0 && rep.Merged.VersionCode < policy.InstalledVersionCode {
 		return Authorization{}, setupError(ErrDowngrade, "validate package", "the selected package would downgrade the active runtime", nil)
-	}
-	if signed := policy.RobloxPolicy; signed != nil {
-		if !validConsumedRobloxPolicy(signed, policy.MinimumPolicySequence) || signed.PackageName != policy.PackageName || signed.Platform != "android" || signed.Architecture != "x86_64" ||
-			rep.Merged.VersionCode <= 0 || uint64(rep.Merged.VersionCode) < signed.MinVersionCode || uint64(rep.Merged.VersionCode) > signed.MaxVersionCode {
-			return Authorization{}, setupError(ErrPolicy, "validate package", "the authenticated Roblox policy does not authorize this package version", nil)
-		}
 	}
 	allowedSplits := make(map[string]bool, len(policy.SupportedSplits))
 	for _, split := range policy.SupportedSplits {
@@ -435,9 +411,6 @@ func AuthorizeReport(rep *apk.Report, policy TrustPolicy) (Authorization, error)
 		if !allowedSplits[p.SplitName] {
 			return Authorization{}, setupError(ErrUnsupportedSplit, "validate package", "the selected bundle contains an unsupported split", nil)
 		}
-		if signed := policy.RobloxPolicy; signed != nil && !policyAllowsSplit(signed, p.SplitName) {
-			return Authorization{}, setupError(ErrUnsupportedSplit, "validate package", "the authenticated Roblox policy does not authorize this split", nil)
-		}
 		if version == 0 {
 			version = p.VersionCode
 		}
@@ -463,11 +436,8 @@ func AuthorizeReport(rep *apk.Report, policy TrustPolicy) (Authorization, error)
 		policyAuthorized := false
 		if mode == DevelopmentUnrestricted {
 			ok = allowedCerts[lineage[len(lineage)-1]]
-		} else if policy.RobloxPolicy == nil && policy.ReleaseAuthenticated {
-			lineageID, policySequence, ok = "compiled-keyless-release", 0, allowedCerts[lineage[len(lineage)-1]]
-			policyAuthorized = ok
 		} else {
-			lineageID, policySequence, ok = authorizeSignerLineage(policy.RobloxPolicy, uint64(p.VersionCode), lineage)
+			lineageID, policySequence, ok = "compiled-keyless-release", 0, allowedCerts[lineage[len(lineage)-1]]
 			policyAuthorized = ok
 		}
 		if !ok {
@@ -551,71 +521,4 @@ func validUniqueDigests(digests []string) bool {
 		seen[digest] = struct{}{}
 	}
 	return true
-}
-
-func validConsumedRobloxPolicy(policy *securitypolicy.RobloxPolicy, minimumSequence uint64) bool {
-	if policy == nil || policy.Schema != "tipsy.roblox-policy.v1" || policy.Validity.Sequence == 0 || policy.Validity.Sequence < minimumSequence ||
-		policy.MinVersionCode == 0 || policy.MaxVersionCode < policy.MinVersionCode || len(policy.AllowedSplits) == 0 || len(policy.AllowedSplits) > 32 ||
-		len(policy.SignerLineages) == 0 || len(policy.SignerLineages) > 16 {
-		return false
-	}
-	seenSplits := make(map[string]struct{}, len(policy.AllowedSplits))
-	for _, split := range policy.AllowedSplits {
-		if split == "" {
-			return false
-		}
-		if _, duplicate := seenSplits[split]; duplicate {
-			return false
-		}
-		seenSplits[split] = struct{}{}
-	}
-	seenLineages := make(map[string]struct{}, len(policy.SignerLineages))
-	for _, lineage := range policy.SignerLineages {
-		if lineage.ID == "" || lineage.MinVersionCode == 0 || lineage.MaxVersionCode < lineage.MinVersionCode || !validUniqueDigests(lineage.SHA256) {
-			return false
-		}
-		if _, duplicate := seenLineages[lineage.ID]; duplicate {
-			return false
-		}
-		seenLineages[lineage.ID] = struct{}{}
-	}
-	return true
-}
-
-func policyAllowsSplit(policy *securitypolicy.RobloxPolicy, split string) bool {
-	if split == "" {
-		split = "base"
-	}
-	for _, allowed := range policy.AllowedSplits {
-		if allowed == split {
-			return true
-		}
-	}
-	return false
-}
-
-func authorizeSignerLineage(policy *securitypolicy.RobloxPolicy, version uint64, verified []string) (string, uint64, bool) {
-	if policy == nil {
-		return "compiled", 0, len(verified) == 1
-	}
-	for _, lineage := range policy.SignerLineages {
-		if version < lineage.MinVersionCode || version > lineage.MaxVersionCode {
-			continue
-		}
-		allowed := make(map[string]struct{}, len(lineage.SHA256))
-		for _, digest := range lineage.SHA256 {
-			allowed[strings.ToLower(digest)] = struct{}{}
-		}
-		all := true
-		for _, digest := range verified {
-			if _, ok := allowed[digest]; !ok {
-				all = false
-				break
-			}
-		}
-		if all {
-			return lineage.ID, policy.Validity.Sequence, true
-		}
-	}
-	return "", 0, false
 }

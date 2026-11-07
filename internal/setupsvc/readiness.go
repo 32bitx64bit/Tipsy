@@ -106,10 +106,7 @@ func readinessTrust(inventory integrity.Inventory, configured TrustPolicy) (Trus
 			// never be used as app release authority.
 			return KeylessReleaseTrustPolicy(), nil
 		}
-		if configured.Mode == OfficialVerified && configured.RobloxPolicy != nil {
-			return configured, nil
-		}
-		return TrustPolicy{}, setupError(ErrPolicy, "installation readiness", "the active official generation requires its authenticated Roblox policy", nil)
+		return TrustPolicy{}, setupError(ErrPolicy, "installation readiness", "the active official generation requires an authenticated release", nil)
 	default:
 		return TrustPolicy{}, setupError(ErrIntegrity, "installation readiness", "the active generation has an unknown authorization mode", nil)
 	}

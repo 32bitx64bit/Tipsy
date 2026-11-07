@@ -26,7 +26,7 @@ func TestResolveAuthorityNeverInfersOfficialWithoutAppImage(t *testing.T) {
 	cfg := &config.Config{}
 	cfg.ApproveDevelopment()
 	got, err := resolveAuthority(context.Background(), cfg, defaultAuthorityDependencies())
-	if err != nil || got.Mode != setupsvc.DevelopmentUnrestricted || got.Trust.Mode != setupsvc.DevelopmentUnrestricted || got.Trust.RobloxPolicy != nil {
+	if err != nil || got.Mode != setupsvc.DevelopmentUnrestricted || got.Trust.Mode != setupsvc.DevelopmentUnrestricted {
 		t.Fatalf("explicit development resolution = %+v, %v", got, err)
 	}
 }
@@ -37,7 +37,7 @@ func TestResolveAuthorityPrefersOfficialAppImageOverDevelopmentConsent(t *testin
 	deps := defaultAuthorityDependencies()
 	deps.identifyOfficialRelease = func(context.Context) error { return nil }
 	got, err := resolveAuthority(context.Background(), cfg, deps)
-	if err != nil || got.Mode != setupsvc.OfficialVerified || got.Trust.Mode != setupsvc.OfficialVerified || !got.Trust.ReleaseAuthenticated || got.Trust.RobloxPolicy != nil {
+	if err != nil || got.Mode != setupsvc.OfficialVerified || got.Trust.Mode != setupsvc.OfficialVerified || !got.Trust.ReleaseAuthenticated {
 		t.Fatalf("authority=%+v err=%v", got, err)
 	}
 }
@@ -73,7 +73,7 @@ func TestPackageAuthorizationTrustUsesDevelopmentWhenOfficialReleaseIsUnavailabl
 	deps.identifyOfficialRelease = func(context.Context) error { return errOfficialReleaseUnavailable }
 
 	trust, err := packageAuthorizationTrust(context.Background(), false, deps)
-	if err != nil || trust.Mode != setupsvc.DevelopmentUnrestricted || trust.ReleaseAuthenticated || trust.RobloxPolicy != nil || trust.PackageName != "com.roblox.client" {
+	if err != nil || trust.Mode != setupsvc.DevelopmentUnrestricted || trust.ReleaseAuthenticated || trust.PackageName != "com.roblox.client" {
 		t.Fatalf("unavailable official authority without consent = %+v, %v", trust, err)
 	}
 
@@ -90,7 +90,7 @@ func TestPackageAuthorizationTrustKeepsOfficialAppImageOfficial(t *testing.T) {
 	deps := defaultAuthorityDependencies()
 	deps.identifyOfficialRelease = func(context.Context) error { return nil }
 	trust, err := packageAuthorizationTrust(context.Background(), true, deps)
-	if err != nil || trust.Mode != setupsvc.OfficialVerified || !trust.ReleaseAuthenticated || trust.RobloxPolicy != nil {
+	if err != nil || trust.Mode != setupsvc.OfficialVerified || !trust.ReleaseAuthenticated {
 		t.Fatalf("verified AppImage package trust = %+v, %v", trust, err)
 	}
 }
