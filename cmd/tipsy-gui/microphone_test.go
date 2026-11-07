@@ -251,7 +251,6 @@ func TestMicrophoneStatusTextNeverListsSourceNames(t *testing.T) {
 	t.Parallel()
 	n := 2
 	got := microphoneStatusText(guimodel.MicrophoneState{
-		Enabled:        true,
 		Control:        "config file",
 		CaptureSources: &n,
 		SourcePinned:   true,

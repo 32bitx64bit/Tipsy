@@ -259,7 +259,6 @@ type ControllerPad struct {
 	Vendor  string
 	Product string
 	Mapping string
-	Detail  string
 	Caps    string
 }
 
@@ -268,7 +267,6 @@ type ControllerPad struct {
 // nothing about devices itself.
 type ControllerState struct {
 	Enabled        bool
-	PathSelector   string
 	Pads           []ControllerPad
 	Denied         []string
 	PermissionHint string
@@ -293,11 +291,18 @@ func DefaultMicrophoneSettings() MicrophoneSettings {
 // stays distinct from zero; SourcePinned is a boolean only. Never a
 // Pulse source name, never PCM.
 type MicrophoneState struct {
-	Enabled        bool
 	Control        string // which control set the door
 	CaptureSources *int
 	SourcePinned   bool
 	Note           string
+}
+
+// InputState is the pair of read-only Settings-card binds produced by one
+// diagnose run. The GUI fetches them together so entering Settings probes the
+// host once instead of once per card.
+type InputState struct {
+	Controller ControllerState
+	Microphone MicrophoneState
 }
 
 type CheckStatus string
@@ -321,11 +326,10 @@ type DoctorSummary struct {
 }
 
 type InstallSnapshot struct {
-	Installed       bool
-	Readiness       setupsvc.ReadinessState
-	Version         string
-	UpdateAvailable bool
-	Status          string
+	Installed bool
+	Readiness setupsvc.ReadinessState
+	Version   string
+	Status    string
 }
 
 // LaunchReady is deliberately narrower than playability. It means only that
@@ -348,7 +352,6 @@ func normalizeInstallSnapshot(snapshot InstallSnapshot) InstallSnapshot {
 		snapshot.Installed = false
 		snapshot.Readiness = setupsvc.ReadinessRejected
 		snapshot.Version = ""
-		snapshot.UpdateAvailable = false
 		snapshot.Status = ""
 		return snapshot
 	}
@@ -424,6 +427,10 @@ type Service interface {
 	// door for the Settings card. It never opens capture and never
 	// includes Pulse source names.
 	MicrophoneStatus(context.Context) (MicrophoneState, error)
+	// InputDiagnostics returns both Settings-card binds from one diagnose
+	// run. Entering Settings calls it once instead of probing the host for
+	// each card.
+	InputDiagnostics(context.Context) (InputState, error)
 }
 
 // LaunchAuthority is presentation-safe authority state returned by a secure
@@ -624,37 +631,6 @@ func clampPercent(percent int) int {
 	return percent
 }
 
-type WizardStep int
-
-const (
-	WizardWelcome WizardStep = iota
-	WizardDoctor
-	WizardSource
-	WizardInstall
-	WizardReady
-)
-
-func AdvanceWizard(step WizardStep, setup SetupView) (WizardStep, error) {
-	switch step {
-	case WizardWelcome:
-		return WizardDoctor, nil
-	case WizardDoctor:
-		return WizardSource, nil
-	case WizardSource:
-		if err := setup.Request.Validate(setup.Automatic); err != nil {
-			return step, err
-		}
-		return WizardInstall, nil
-	case WizardInstall:
-		if setup.State != SetupComplete || !setup.Snapshot.LaunchReady() {
-			return step, errors.New("finish installation before continuing")
-		}
-		return WizardReady, nil
-	default:
-		return step, errors.New("setup is already complete")
-	}
-}
-
 type SettingsView struct {
 	Saved           Settings
 	Draft           Settings
@@ -811,7 +787,7 @@ func (m *LaunchModel) StartRequest(ctx context.Context, req LaunchRequest) error
 	}
 	if m.view.State == LaunchStarting || m.view.State == LaunchRunning {
 		m.mu.Unlock()
-		return errors.New("Roblox is already running")
+		return errors.New("the Roblox client is already running")
 	}
 	done := make(chan struct{})
 	m.done = done

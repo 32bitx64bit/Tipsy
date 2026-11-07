@@ -86,11 +86,3 @@ func (w *mainWindow) setWidgetEnabled(widget *qt.QWidget, enabled bool) bool {
 	w.metrics.widgetWrites.Add(1)
 	return true
 }
-
-func (w *mainWindow) setObjectName(object *qt.QObject, name string) bool {
-	if object == nil || object.ObjectName() == name {
-		return false
-	}
-	setObjectName(object, name)
-	return true
-}

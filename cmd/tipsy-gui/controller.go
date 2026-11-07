@@ -214,17 +214,3 @@ func controllerPadDetail(pad guimodel.ControllerPad) string {
 	}
 	return detail
 }
-
-// controllerProbe is a stub: the card never opens a pad, so it stays nil and
-// stopControllerTest is a no-op.
-type controllerProbe struct {
-	dev *gamepad.Device
-}
-
-func (p *controllerProbe) close() {
-	if p == nil || p.dev == nil {
-		return
-	}
-	_ = p.dev.Close()
-	p.dev = nil
-}

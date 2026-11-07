@@ -23,9 +23,8 @@ type controllerOffService struct{ visualService }
 
 func (controllerOffService) ControllerPads(context.Context) (guimodel.ControllerState, error) {
 	return guimodel.ControllerState{
-		Enabled:      false,
-		PathSelector: "direct",
-		Note:         "disabled by Settings > Controller (gamepad.enabled=false); no pads are opened",
+		Enabled: false,
+		Note:    "disabled by Settings > Controller (gamepad.enabled=false); no pads are opened",
 	}, nil
 }
 

@@ -70,19 +70,8 @@ type mainWindow struct {
 	controllerPadRows                                *qt.QVBoxLayout
 	controllerPadNote                                *qt.QLabel
 	controllerDeadL                                  *qt.QSlider
-	controllerDeadR                                  *qt.QSlider
 	controllerDeadLValue                             *qt.QLabel
-	controllerDeadRValue                             *qt.QLabel
-	controllerInvL                                   *qt.QCheckBox
-	controllerInvR                                   *qt.QCheckBox
-	controllerRumble                                 *qt.QCheckBox
 	controllerHint                                   *qt.QLabel
-	controllerTestButton                             *qt.QPushButton
-	controllerTestState                              *qt.QLabel
-	controllerBars                                   map[string]*qt.QProgressBar
-	controllerButtonLamps                            map[int]*qt.QLabel
-	controllerProbe                                  *controllerProbe
-	controllerTimer                                  *qt.QTimer
 	controllerLookup                                 optionalLookup
 	microphoneSettings                               guimodel.MicrophoneSettings
 	microphoneLoadErr                                error
@@ -359,24 +348,16 @@ func (w *mainWindow) selectPage(index int) {
 		// window opened; re-read the desktop before showing the row.
 		w.refreshIntegration()
 	}
-	if index == 2 && w.controllerPadRows != nil {
-		// Fresh pad enumeration each time Settings opens; observation only,
-		// no pad is opened for input.
-		w.refreshControllerPadsAutomatically()
-	}
-	if index == 2 && w.microphoneEnable != nil {
-		// Fresh diagnose audio bind each time Settings opens; observation
-		// only, no capture is opened.
-		w.refreshMicrophoneStatusAutomatically()
+	if index == 2 && (w.controllerPadRows != nil || w.microphoneEnable != nil) {
+		// One diagnose run covers both Settings cards: fresh pad enumeration
+		// and a fresh audio door bind, observation only, no pad or capture is
+		// opened.
+		w.refreshInputDiagnosticsAutomatically()
 	}
 	if index == settingsPageIndex {
 		// The first Settings open starts the one release check. Later opens
 		// reuse its result; nothing here waits for the network.
 		w.startUpdateCheck()
-	}
-	if index != 2 && w.controllerProbe != nil {
-		// Never hold a pad handle outside the Controller card.
-		w.stopControllerTest("Test is stopped.")
 	}
 	if index < len(w.pageEntry) && w.pageEntry[index] != nil {
 		w.pageEntry[index].SetFocusWithReason(qt.OtherFocusReason)

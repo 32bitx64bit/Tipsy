@@ -118,36 +118,8 @@ func (f *fakeService) ControllerPads(context.Context) (ControllerState, error) {
 func (f *fakeService) MicrophoneStatus(context.Context) (MicrophoneState, error) {
 	return f.microphone, nil
 }
-
-func TestWizardTransitionsAndSourceValidation(t *testing.T) {
-	view := SetupView{
-		Automatic: AutomaticAvailability{Available: true},
-		Request:   InstallRequest{Mode: InstallAutomatic},
-	}
-	step := WizardWelcome
-	for _, want := range []WizardStep{WizardDoctor, WizardSource, WizardInstall} {
-		var err error
-		step, err = AdvanceWizard(step, view)
-		if err != nil || step != want {
-			t.Fatalf("advance: step=%v err=%v, want %v", step, err, want)
-		}
-	}
-	if _, err := AdvanceWizard(step, view); err == nil {
-		t.Fatal("installation page advanced before success")
-	}
-	view.State = SetupComplete
-	if _, err := AdvanceWizard(step, view); err == nil {
-		t.Fatal("untyped complete snapshot advanced to the final page")
-	}
-	view.Snapshot = InstallSnapshot{Installed: true, Readiness: setupsvc.ReadinessLaunchInputs}
-	if got, err := AdvanceWizard(step, view); err != nil || got != WizardReady {
-		t.Fatalf("complete advance: step=%v err=%v", got, err)
-	}
-
-	view.Request = InstallRequest{Mode: InstallLocal}
-	if _, err := AdvanceWizard(WizardSource, view); err == nil {
-		t.Fatal("empty local selection accepted")
-	}
+func (f *fakeService) InputDiagnostics(context.Context) (InputState, error) {
+	return InputState{Controller: f.controller, Microphone: f.microphone}, nil
 }
 
 func TestInstallSnapshotLaunchReadyRequiresExactTypedPositive(t *testing.T) {
@@ -834,11 +806,10 @@ func nanDeadzone() float64 {
 func TestControllerPadsSurfacesDiagnoseState(t *testing.T) {
 	t.Parallel()
 	want := ControllerState{
-		Enabled:      true,
-		PathSelector: "direct",
+		Enabled: true,
 		Pads: []ControllerPad{{
 			Path: "/dev/input/event5", Name: "Xbox pad", Vendor: "045e",
-			Product: "028e", Mapping: "xpad", Detail: "right=RX/RY triggers=Z/RZ dpad=btn+hat",
+			Product: "028e", Mapping: "xpad",
 			Caps: "abs=X,Y,Z,RZ buttons=15 androidKeys=[96,97] androidAxes=[0,1]",
 		}},
 		Note: "1 gamepad(s) accessible",
@@ -865,7 +836,6 @@ func TestMicrophoneStatusSurfacesDiagnoseState(t *testing.T) {
 	t.Parallel()
 	n := 2
 	want := MicrophoneState{
-		Enabled:        true,
 		Control:        "config file",
 		CaptureSources: &n,
 		SourcePinned:   true,
@@ -876,7 +846,26 @@ func TestMicrophoneStatusSurfacesDiagnoseState(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !got.Enabled || got.Control != "config file" || got.CaptureSources == nil || *got.CaptureSources != 2 || !got.SourcePinned {
+	if got.Control != "config file" || got.CaptureSources == nil || *got.CaptureSources != 2 || !got.SourcePinned {
 		t.Fatalf("microphone=%+v", got)
+	}
+}
+
+func TestInputDiagnosticsReturnsBothCardBinds(t *testing.T) {
+	t.Parallel()
+	want := MicrophoneState{Control: "config file", Note: "synthetic diagnose bind"}
+	fake := &fakeService{
+		controller: ControllerState{Enabled: true, Note: "1 gamepad(s) accessible"},
+		microphone: want,
+	}
+	got, err := fake.InputDiagnostics(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !got.Controller.Enabled || got.Controller.Note != "1 gamepad(s) accessible" {
+		t.Fatalf("controller=%+v", got.Controller)
+	}
+	if got.Microphone.Control != "config file" || got.Microphone.Note != "synthetic diagnose bind" {
+		t.Fatalf("microphone=%+v", got.Microphone)
 	}
 }
