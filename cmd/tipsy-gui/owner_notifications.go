@@ -47,7 +47,7 @@ func newOwnerThreadNotifier(parent *qt.QObject, dispatch func(), metrics *guiRun
 		_ = unix.Close(n.readFD)
 		_ = unix.Close(n.writeFD)
 		n.notifier.Delete()
-		return nil, errors.New("Qt could not watch the owner-thread notification pipe")
+		return nil, errors.New("the owner-thread notification pipe could not be watched by Qt")
 	}
 	n.notifier.OnActivated(func(qt.QSocketDescriptor, qt.QSocketNotifier__Type) { n.drain() })
 	return n, nil
