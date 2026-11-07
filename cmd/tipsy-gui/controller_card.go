@@ -326,6 +326,12 @@ func (w *mainWindow) refreshControllerPadsWithPolicy(explicit bool) {
 		return
 	}
 	w.controllerLookup.succeeded()
+	w.renderControllerPads(state)
+}
+
+// renderControllerPads draws one diagnose pad enumeration and its status
+// note. The caller owns clearing rows and recording lookup success.
+func (w *mainWindow) renderControllerPads(state guimodel.ControllerState) {
 	for _, pad := range state.Pads {
 		row, rowLayout := newVerticalCard("subtleCard")
 		title := qt.NewQLabel3(controllerPadTitle(pad))
@@ -358,29 +364,34 @@ func (w *mainWindow) refreshControllerPadsWithPolicy(explicit bool) {
 	w.setLabelText(w.controllerPadNote, strings.Join(lines, "\n"))
 }
 
-// stopControllerTest only resets button text/state; the card never opens a
-// pad.
-func (w *mainWindow) stopControllerTest(message string) {
-	if w.controllerProbe != nil {
-		w.controllerProbe.close()
-		w.controllerProbe = nil
-	}
-	if w.controllerTimer != nil {
-		w.controllerTimer.Stop()
-	}
-	if w.controllerTestButton != nil {
-		w.controllerTestButton.SetText("Start test")
-	}
-	if w.controllerTestState != nil {
-		w.controllerTestState.SetText(message)
-	}
-	w.resetControllerTestWidgets()
-}
-
-func (w *mainWindow) resetControllerTestWidgets() {
-	for _, bar := range w.controllerBars {
-		if bar != nil {
-			bar.SetValue(0)
+// refreshInputDiagnosticsAutomatically refreshes both Settings cards from one
+// diagnose run when both lookups are due, so entering Settings probes the host
+// once instead of once per card. A card whose lookup is backing off falls back
+// to its own path and defers independently.
+func (w *mainWindow) refreshInputDiagnosticsAutomatically() {
+	now := w.now()
+	if w.controllerPadRows != nil && w.microphoneStatusNote != nil &&
+		w.controllerLookup.allow(now, false) && w.microphoneLookup.allow(now, false) {
+		w.metrics.optionalCalls.Add(1)
+		clearControllerRows(w.controllerPadRows)
+		state, err := w.service.InputDiagnostics(context.Background())
+		if err != nil {
+			w.controllerLookup.failed(now)
+			w.microphoneLookup.failed(now)
+			w.setLabelText(w.controllerPadNote, "Pad list is unavailable: "+err.Error())
+			w.setLabelText(w.microphoneStatusNote, "Microphone status is unavailable: "+err.Error())
+			return
 		}
+		w.controllerLookup.succeeded()
+		w.microphoneLookup.succeeded()
+		w.renderControllerPads(state.Controller)
+		w.renderMicrophoneStatus(state.Microphone)
+		return
+	}
+	if w.controllerPadRows != nil {
+		w.refreshControllerPadsAutomatically()
+	}
+	if w.microphoneStatusNote != nil {
+		w.refreshMicrophoneStatusAutomatically()
 	}
 }

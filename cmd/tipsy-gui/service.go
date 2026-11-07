@@ -53,7 +53,7 @@ type authorizedLaunchBackend struct {
 }
 
 func newProductionService() guimodel.Service {
-	installer := setupsvc.New()
+	installer := setupsvc.New(app.SetupHooks())
 	return &productionService{
 		installer: installer,
 		packageTrust: func(ctx context.Context) (setupsvc.TrustPolicy, error) {
@@ -230,7 +230,7 @@ func (s *productionService) PrepareLaunch(ctx context.Context, approveDevelopmen
 	if s.launchActive {
 		s.launchMu.Unlock()
 		_ = session.Close()
-		return state, fmt.Errorf("Roblox is already running")
+		return state, fmt.Errorf("the Roblox client is already running")
 	}
 	previous := s.preparedLaunch
 	s.preparedLaunch = session
@@ -326,22 +326,7 @@ func (s *productionService) ControllerPads(ctx context.Context) (guimodel.Contro
 	if report == nil {
 		return guimodel.ControllerState{}, fmt.Errorf("diagnostics returned no report")
 	}
-	info := report.Gamepad
-	state := guimodel.ControllerState{
-		Enabled:        info.Enabled,
-		PathSelector:   info.PathSelector,
-		Denied:         append([]string(nil), info.Denied...),
-		PermissionHint: info.PermissionHint,
-		Note:           info.Note,
-	}
-	for _, pad := range info.Pads {
-		state.Pads = append(state.Pads, guimodel.ControllerPad{
-			Path: pad.Path, Name: pad.Name, Vendor: pad.Vendor,
-			Product: pad.Product, Mapping: pad.Mapping,
-			Detail: pad.Detail, Caps: pad.Caps,
-		})
-	}
-	return state, nil
+	return controllerState(report), nil
 }
 
 // MicrophoneStatus binds the microphone card to the existing diagnose audio
@@ -351,13 +336,45 @@ func (s *productionService) MicrophoneStatus(ctx context.Context) (guimodel.Micr
 	if report == nil {
 		return guimodel.MicrophoneState{}, fmt.Errorf("diagnostics returned no report")
 	}
+	return microphoneState(report), nil
+}
+
+// InputDiagnostics returns both Settings-card binds from a single diagnose
+// run so entering Settings does not probe the host once per card.
+func (s *productionService) InputDiagnostics(ctx context.Context) (guimodel.InputState, error) {
+	report := diagnostics.Doctor(ctx)
+	if report == nil {
+		return guimodel.InputState{}, fmt.Errorf("diagnostics returned no report")
+	}
+	return guimodel.InputState{
+		Controller: controllerState(report),
+		Microphone: microphoneState(report),
+	}, nil
+}
+
+func controllerState(report *diagnostics.DoctorReport) guimodel.ControllerState {
+	info := report.Gamepad
+	state := guimodel.ControllerState{
+		Enabled:        info.Enabled,
+		Denied:         append([]string(nil), info.Denied...),
+		PermissionHint: info.PermissionHint,
+		Note:           info.Note,
+	}
+	for _, pad := range info.Pads {
+		state.Pads = append(state.Pads, guimodel.ControllerPad{
+			Path: pad.Path, Name: pad.Name, Vendor: pad.Vendor,
+			Product: pad.Product, Mapping: pad.Mapping,
+			Caps: pad.Caps,
+		})
+	}
+	return state
+}
+
+func microphoneState(report *diagnostics.DoctorReport) guimodel.MicrophoneState {
 	info := report.Audio
 	state := guimodel.MicrophoneState{
 		Control: info.MicrophoneControl,
 		Note:    info.MicrophoneNote,
-	}
-	if info.MicrophoneEnabled != nil {
-		state.Enabled = *info.MicrophoneEnabled
 	}
 	if info.CaptureSources != nil {
 		n := *info.CaptureSources
@@ -366,7 +383,7 @@ func (s *productionService) MicrophoneStatus(ctx context.Context) (guimodel.Micr
 	if info.CaptureSourcePinned != nil {
 		state.SourcePinned = *info.CaptureSourcePinned
 	}
-	return state, nil
+	return state
 }
 
 func (s *productionService) Doctor(ctx context.Context) (guimodel.DoctorSummary, error) {

@@ -534,18 +534,28 @@ func (visualService) ResetSettings(context.Context) (guimodel.Settings, error) {
 
 func (visualService) ControllerPads(context.Context) (guimodel.ControllerState, error) {
 	return guimodel.ControllerState{
-		Enabled:      true,
-		PathSelector: "direct",
-		Note:         "synthetic visual-test state: no gamepad",
+		Enabled: true,
+		Note:    "synthetic visual-test state: no gamepad",
 	}, nil
 }
 
 func (visualService) MicrophoneStatus(context.Context) (guimodel.MicrophoneState, error) {
 	return guimodel.MicrophoneState{
-		Enabled: true,
 		Control: "default",
 		Note:    "synthetic visual-test state: microphone not probed",
 	}, nil
+}
+
+func (v visualService) InputDiagnostics(ctx context.Context) (guimodel.InputState, error) {
+	controller, err := v.ControllerPads(ctx)
+	if err != nil {
+		return guimodel.InputState{}, err
+	}
+	microphone, err := v.MicrophoneStatus(ctx)
+	if err != nil {
+		return guimodel.InputState{}, err
+	}
+	return guimodel.InputState{Controller: controller, Microphone: microphone}, nil
 }
 
 func waitGUI(t *testing.T, ready func() bool) {

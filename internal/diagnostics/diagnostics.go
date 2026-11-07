@@ -9,6 +9,7 @@ import (
 	"runtime"
 	"strconv"
 	"strings"
+	"sync"
 
 	"github.com/tipsy-linux/tipsy/internal/config"
 	"github.com/tipsy-linux/tipsy/internal/logging"
@@ -94,6 +95,11 @@ type DoctorReport struct {
 	Issues  []string          `json:"issues"`
 	Summary string            `json:"summary"`
 	Env     map[string]string `json:"env,omitempty"`
+
+	// cancelled records that the caller's context stopped the probe set
+	// early. The remaining fields are partial and must not be reported as
+	// issues.
+	cancelled bool
 }
 
 type SubsystemReport struct {
@@ -122,26 +128,89 @@ func DoctorForTrust(ctx context.Context, trust setupsvc.TrustPolicy) *DoctorRepo
 		Version: version.String(),
 		Paths:   config.Paths(),
 	}
-	r.System = probeSystem()
-	r.Display = probeDisplay()
-	r.GPU = probeGPU(ctx)
-	r.Audio = probeAudio(ctx)
-	r.Qt = probeQt(ctx)
-	r.Gamepad = probeGamepad()
-	r.Roblox = probeRoblox(ctx, trust)
+	cache := &probeCache{}
+	// A cancelled report must not start any probe: a partial run would turn
+	// "not measured" into a false issue, such as a missing data directory.
+	if ctx.Err() != nil {
+		r.cancelled = true
+	} else {
+		// The probes are independent: lspci, pkg-config, pactl and the generation
+		// inspection overlap instead of paying each latency in turn. Each goroutine
+		// writes its own field of r.
+		var wg sync.WaitGroup
+		wg.Add(7)
+		go func() {
+			defer wg.Done()
+			if ctx.Err() != nil {
+				return
+			}
+			r.System = probeSystem()
+		}()
+		go func() {
+			defer wg.Done()
+			if ctx.Err() != nil {
+				return
+			}
+			r.Display = probeDisplay(ctx)
+		}()
+		go func() {
+			defer wg.Done()
+			if ctx.Err() != nil {
+				return
+			}
+			r.GPU = probeGPU(ctx)
+		}()
+		go func() {
+			defer wg.Done()
+			if ctx.Err() != nil {
+				return
+			}
+			r.Audio = probeAudio(ctx)
+		}()
+		go func() {
+			defer wg.Done()
+			if ctx.Err() != nil {
+				return
+			}
+			r.Qt = probeQt(ctx)
+		}()
+		go func() {
+			defer wg.Done()
+			if ctx.Err() != nil {
+				return
+			}
+			r.Gamepad = probeGamepad()
+		}()
+		go func() {
+			defer wg.Done()
+			if ctx.Err() != nil {
+				return
+			}
+			r.Roblox = cache.robloxInfo(ctx, trust)
+		}()
+		wg.Wait()
+		if ctx.Err() != nil {
+			r.cancelled = true
+		}
+	}
 	r.Runtime = RuntimeInfo{
 		NativeSymbols: "official x86_64 client maps and runs (JNI_OnLoad and initializeNativeCode complete)",
 		JNIMethods:    "Android/JNI compatibility surface is active",
 		Note:          "The official logged-out login UI renders on X11 with EGL/GLES presentation. This diagnostic does not verify login, join, or gameplay.",
 	}
-	r.Issues = collectIssues(r)
-	switch n := len(r.Issues); {
-	case n == 0:
-		r.Summary = "No host issues found. Run `tipsy diagnose <subsystem>` for component status."
-	case n == 1:
-		r.Summary = "1 issue found."
-	default:
-		r.Summary = strconv.Itoa(n) + " issues found."
+	if r.cancelled {
+		r.Issues = nil
+		r.Summary = "Diagnostics were cancelled before every check completed."
+	} else {
+		r.Issues = collectIssues(r)
+		switch n := len(r.Issues); {
+		case n == 0:
+			r.Summary = "No host issues found. Run `tipsy diagnose <subsystem>` for component status."
+		case n == 1:
+			r.Summary = "1 issue found."
+		default:
+			r.Summary = strconv.Itoa(n) + " issues found."
+		}
 	}
 	r.Env = reportEnv()
 	return r
@@ -176,17 +245,26 @@ func DiagnoseForTrust(ctx context.Context, subsystem string, trust setupsvc.Trus
 	if ctx == nil {
 		ctx = context.Background()
 	}
+	return diagnoseForTrust(ctx, subsystem, trust, &probeCache{})
+}
+
+// diagnoseForTrust carries the report's probe cache so the "all" listing runs
+// one shared Roblox inspection for its loader and roblox entries.
+func diagnoseForTrust(ctx context.Context, subsystem string, trust setupsvc.TrustPolicy, cache *probeCache) *SubsystemReport {
+	if cache == nil {
+		cache = &probeCache{}
+	}
 	sub := strings.ToLower(strings.TrimSpace(subsystem))
 	switch sub {
 	case "", "all":
 		return &SubsystemReport{
 			Subsystem: "all",
 			Status:    "ok",
-			Facts:     diagnoseAllFacts(ctx, trust),
+			Facts:     diagnoseAllFacts(ctx, trust, cache),
 			Message:   "Specify a subsystem: " + strings.Join(DiagnoseSubsystems, ", "),
 		}
 	case "x11":
-		d := probeDisplay()
+		d := probeDisplay(ctx)
 		return &SubsystemReport{
 			Subsystem: "x11",
 			Status:    "active",
@@ -239,9 +317,9 @@ func DiagnoseForTrust(ctx context.Context, subsystem string, trust setupsvc.Trus
 			},
 			Message: "The Android x86-64 ELF loader maps the official libroblox.so and applies its relocations. This diagnostic does not start Roblox or verify a rendered frame.",
 		}
-		return withActiveImportStatus(rep, probeRoblox(ctx, trust))
+		return withActiveImportStatus(rep, cache.robloxInfo(ctx, trust))
 	case "roblox":
-		rb := probeRoblox(ctx, trust)
+		rb := cache.robloxInfo(ctx, trust)
 		rep := &SubsystemReport{
 			Subsystem: "roblox",
 			Status:    "active",
@@ -302,6 +380,9 @@ func withActiveImportStatus(rep *SubsystemReport, roblox RobloxInfo) *SubsystemR
 }
 
 func collectIssues(r *DoctorReport) []string {
+	if r.cancelled {
+		return nil
+	}
 	var issues []string
 	if r.System.Architecture != "x86_64" && r.System.Architecture != "amd64" {
 		issues = append(issues, "Architecture is "+r.System.Architecture+" (Tipsy requires x86_64)")
@@ -333,10 +414,10 @@ func collectIssues(r *DoctorReport) []string {
 	return issues
 }
 
-func diagnoseAllFacts(ctx context.Context, trust setupsvc.TrustPolicy) []string {
+func diagnoseAllFacts(ctx context.Context, trust setupsvc.TrustPolicy, cache *probeCache) []string {
 	var facts []string
 	for _, s := range DiagnoseSubsystems {
-		rep := DiagnoseForTrust(ctx, s, trust)
+		rep := diagnoseForTrust(ctx, s, trust, cache)
 		facts = append(facts, s+": "+rep.Status)
 	}
 	return facts

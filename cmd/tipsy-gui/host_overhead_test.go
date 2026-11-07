@@ -141,6 +141,7 @@ type optionalLookupService struct {
 	visualService
 	controllerErr, microphoneErr     atomic.Bool
 	controllerCalls, microphoneCalls atomic.Int32
+	inputCalls                       atomic.Int32
 }
 
 func (s *optionalLookupService) ControllerPads(context.Context) (guimodel.ControllerState, error) {
@@ -159,6 +160,14 @@ func (s *optionalLookupService) MicrophoneStatus(context.Context) (guimodel.Micr
 	return s.visualService.MicrophoneStatus(context.Background())
 }
 
+func (s *optionalLookupService) InputDiagnostics(context.Context) (guimodel.InputState, error) {
+	s.inputCalls.Add(1)
+	if s.controllerErr.Load() || s.microphoneErr.Load() {
+		return guimodel.InputState{}, errors.New("synthetic diagnose service unavailable")
+	}
+	return s.visualService.InputDiagnostics(context.Background())
+}
+
 func TestOptionalDiagnosticLookupsBackOffAndRecover(t *testing.T) {
 	app := newHostOverheadApp(t)
 	defer app.Delete()
@@ -171,11 +180,11 @@ func TestOptionalDiagnosticLookupsBackOffAndRecover(t *testing.T) {
 	win.now = func() time.Time { return now }
 
 	win.selectPage(2)
-	if service.controllerCalls.Load() != 1 || service.microphoneCalls.Load() != 1 {
-		t.Fatalf("initial optional lookups controller=%d microphone=%d", service.controllerCalls.Load(), service.microphoneCalls.Load())
+	if service.inputCalls.Load() != 1 || service.controllerCalls.Load() != 0 || service.microphoneCalls.Load() != 0 {
+		t.Fatalf("initial Settings entry diagnose runs=%d controller=%d microphone=%d", service.inputCalls.Load(), service.controllerCalls.Load(), service.microphoneCalls.Load())
 	}
 	win.selectPage(2)
-	if service.controllerCalls.Load() != 1 || service.microphoneCalls.Load() != 1 {
+	if service.inputCalls.Load() != 1 || service.controllerCalls.Load() != 0 || service.microphoneCalls.Load() != 0 {
 		t.Fatal("failed automatic lookups ignored their retry backoff")
 	}
 	if got := win.metrics.snapshot(); got.OptionalDeferred != 2 {
@@ -186,14 +195,33 @@ func TestOptionalDiagnosticLookupsBackOffAndRecover(t *testing.T) {
 	service.microphoneErr.Store(false)
 	win.refreshControllerPads()   // explicit Refresh bypasses automatic backoff
 	win.refreshMicrophoneStatus() // a consent change is an explicit status refresh
-	if service.controllerCalls.Load() != 2 || service.microphoneCalls.Load() != 2 {
+	if service.controllerCalls.Load() != 1 || service.microphoneCalls.Load() != 1 {
 		t.Fatalf("explicit recovery lookup controller=%d microphone=%d", service.controllerCalls.Load(), service.microphoneCalls.Load())
 	}
 	win.selectPage(2)
-	if service.controllerCalls.Load() != 3 || service.microphoneCalls.Load() != 3 {
+	if service.inputCalls.Load() != 2 || service.controllerCalls.Load() != 1 || service.microphoneCalls.Load() != 1 {
 		t.Fatal("successful recovery did not reset automatic lookup backoff")
 	}
-	t.Logf("optional lookup metrics: %+v controllerCalls=%d microphoneCalls=%d", win.metrics.snapshot(), service.controllerCalls.Load(), service.microphoneCalls.Load())
+	t.Logf("optional lookup metrics: %+v diagnoseRuns=%d controllerCalls=%d microphoneCalls=%d", win.metrics.snapshot(), service.inputCalls.Load(), service.controllerCalls.Load(), service.microphoneCalls.Load())
+}
+
+// Entering Settings must probe the host once for both cards, not once per
+// card. The service fake counts the combined call and the per-card fallbacks.
+func TestSettingsEntryRunsOneInputDiagnosticsPass(t *testing.T) {
+	app := newHostOverheadApp(t)
+	defer app.Delete()
+
+	service := &optionalLookupService{}
+	win := newMainWindow(service, brandIcon())
+	defer win.win.Delete()
+
+	win.selectPage(settingsPageIndex)
+	if got := service.inputCalls.Load(); got != 1 {
+		t.Fatalf("Settings entry diagnose runs=%d, want 1", got)
+	}
+	if service.controllerCalls.Load() != 0 || service.microphoneCalls.Load() != 0 {
+		t.Fatalf("Settings entry also ran per-card lookups: controller=%d microphone=%d", service.controllerCalls.Load(), service.microphoneCalls.Load())
+	}
 }
 
 type persistedSettingsService struct {

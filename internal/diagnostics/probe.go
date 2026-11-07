@@ -12,9 +12,11 @@ import (
 	"runtime"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
+	"github.com/tipsy-linux/tipsy/internal/android"
 	"github.com/tipsy-linux/tipsy/internal/config"
 	"github.com/tipsy-linux/tipsy/internal/setupsvc"
 )
@@ -86,7 +88,10 @@ func utsString(v []int8) string {
 	return string(b)
 }
 
-func probeDisplay() DisplayInfo {
+func probeDisplay(ctx context.Context) DisplayInfo {
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	display := os.Getenv("DISPLAY")
 	if display == "" {
 		display = "unset"
@@ -106,7 +111,7 @@ func probeDisplay() DisplayInfo {
 	xinput := "not found"
 	if _, err := exec.LookPath("xinput"); err == nil {
 		xinput = "OK"
-	} else if pkgConfigExists(context.Background(), "xi") {
+	} else if pkgConfigExists(ctx, "xi") {
 		xinput = "OK (libXi)"
 	}
 	return DisplayInfo{
@@ -292,11 +297,39 @@ func probeQt(ctx context.Context) QtInfo {
 	return QtInfo{Widgets: "not found (CLI still builds; GUI needs Qt 6)"}
 }
 
+// inspectActiveImports is a seam for tests to count probes; production reads
+// the active generation through setupsvc.
+var inspectActiveImports = func(ctx context.Context, storeRoot string, trust setupsvc.TrustPolicy) (setupsvc.ActiveClientImportReport, error) {
+	return setupsvc.InspectActiveClientImports(ctx, storeRoot, trust, android.SupportsImport)
+}
+
+// probeCache shares one Roblox generation probe across the subsystems of a
+// single report: loader and roblox both report the same active generation, so
+// they must not inspect it twice.
+type probeCache struct {
+	once   sync.Once
+	roblox RobloxInfo
+}
+
+func (c *probeCache) robloxInfo(ctx context.Context, trust setupsvc.TrustPolicy) RobloxInfo {
+	c.once.Do(func() {
+		c.roblox = probeRoblox(ctx, trust)
+	})
+	return c.roblox
+}
+
 func probeRoblox(ctx context.Context, trust setupsvc.TrustPolicy) RobloxInfo {
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	paths := config.Paths()
 	info := RobloxInfo{
 		DataDir: paths.DataDir,
 		Note:    "Package cookies and tokens are not read.",
+	}
+	// A cancelled report must not stat, read, or inspect anything further.
+	if ctx.Err() != nil {
+		return info
 	}
 	fi, err := os.Stat(paths.DataDir)
 	if err != nil || !fi.IsDir() {
@@ -309,7 +342,10 @@ func probeRoblox(ctx context.Context, trust setupsvc.TrustPolicy) RobloxInfo {
 	}
 
 	storeRoot := setupsvc.GenerationStoreDir(filepath.Join(paths.DataDir, "runtime"))
-	active, err := setupsvc.InspectActiveClientImports(ctx, storeRoot, trust)
+	if ctx.Err() != nil {
+		return info
+	}
+	active, err := inspectActiveImports(ctx, storeRoot, trust)
 	if err != nil {
 		// No active generation (or one that cannot be read) retains the
 		// historical data-directory-only diagnostic.

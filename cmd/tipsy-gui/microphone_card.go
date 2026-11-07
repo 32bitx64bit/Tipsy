@@ -169,5 +169,11 @@ func (w *mainWindow) refreshMicrophoneStatusWithPolicy(explicit bool) {
 		return
 	}
 	w.microphoneLookup.succeeded()
+	w.renderMicrophoneStatus(state)
+}
+
+// renderMicrophoneStatus draws one diagnose microphone bind. The caller owns
+// recording lookup success.
+func (w *mainWindow) renderMicrophoneStatus(state guimodel.MicrophoneState) {
 	w.setLabelText(w.microphoneStatusNote, microphoneStatusText(state))
 }

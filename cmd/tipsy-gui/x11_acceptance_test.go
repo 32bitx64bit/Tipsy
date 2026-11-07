@@ -643,18 +643,28 @@ func (s *acceptanceService) ResetSettings(context.Context) (guimodel.Settings, e
 
 func (s *acceptanceService) ControllerPads(context.Context) (guimodel.ControllerState, error) {
 	return guimodel.ControllerState{
-		Enabled:      true,
-		PathSelector: "direct",
-		Note:         "synthetic acceptance-test state: no gamepad",
+		Enabled: true,
+		Note:    "synthetic acceptance-test state: no gamepad",
 	}, nil
 }
 
 func (s *acceptanceService) MicrophoneStatus(context.Context) (guimodel.MicrophoneState, error) {
 	return guimodel.MicrophoneState{
-		Enabled: true,
 		Control: "default",
 		Note:    "synthetic acceptance-test state: microphone not probed",
 	}, nil
+}
+
+func (s *acceptanceService) InputDiagnostics(ctx context.Context) (guimodel.InputState, error) {
+	controller, err := s.ControllerPads(ctx)
+	if err != nil {
+		return guimodel.InputState{}, err
+	}
+	microphone, err := s.MicrophoneStatus(ctx)
+	if err != nil {
+		return guimodel.InputState{}, err
+	}
+	return guimodel.InputState{Controller: controller, Microphone: microphone}, nil
 }
 
 func (s *acceptanceService) setInstallBehavior(behavior installBehavior) {
@@ -673,18 +683,6 @@ func (s *acceptanceService) waitForInstallStart(t *testing.T) {
 	case <-started:
 	case <-time.After(time.Second):
 		t.Fatal("synthetic install did not start")
-	}
-}
-
-func (s *acceptanceService) waitForLaunchStart(t *testing.T) {
-	t.Helper()
-	s.mu.Lock()
-	started := s.launchStarted
-	s.mu.Unlock()
-	select {
-	case <-started:
-	case <-time.After(time.Second):
-		t.Fatal("synthetic launch did not start")
 	}
 }
 
