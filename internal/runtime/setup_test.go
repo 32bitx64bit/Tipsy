@@ -170,7 +170,7 @@ func writeZip(t *testing.T, path string, files map[string][]byte) string {
 
 func TestApplicationSettingsFromResponse(t *testing.T) {
 	raw := []byte(`{"applicationSettings":{"FFlagFoo":"True","FIntBar":"1"}}`)
-	got, n, err := applicationSettingsFromResponse(raw)
+	got, n, err := applicationSettingsFromResponseWithOverrides(raw, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -189,7 +189,7 @@ func TestApplicationSettingsFromResponse(t *testing.T) {
 	if !strings.Contains(got, `"FFlagFoo":"True"`) || !strings.Contains(got, `"FIntBar":"1"`) {
 		t.Fatalf("json=%s", got)
 	}
-	empty, n, err := applicationSettingsFromResponse([]byte(`{}`))
+	empty, n, err := applicationSettingsFromResponseWithOverrides([]byte(`{}`), nil)
 	if err != nil {
 		t.Fatal(err)
 	}

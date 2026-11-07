@@ -1,52 +1,9 @@
 package elfinspect
 
 import (
-	"slices"
 	"strconv"
 	"testing"
 )
-
-func TestDiffNeededAndImports(t *testing.T) {
-	t.Parallel()
-	old := &Report{
-		DTNeeded: []string{"libc.so", "liblog.so"},
-		Imports: []Symbol{
-			{Name: "ALooper_pollOnce"},
-			{Name: "__libc_init"},
-		},
-	}
-	new := &Report{
-		DTNeeded: []string{"libc.so", "libandroid.so"},
-		Imports: []Symbol{
-			{Name: "ALooper_pollOnce"},
-			{Name: "ANativeWindow_fromSurface"},
-		},
-	}
-	d := Diff(old, new)
-	if !slices.Equal(d.AddedNeeded, []string{"libandroid.so"}) {
-		t.Fatalf("AddedNeeded=%v", d.AddedNeeded)
-	}
-	if !slices.Equal(d.RemovedNeeded, []string{"liblog.so"}) {
-		t.Fatalf("RemovedNeeded=%v", d.RemovedNeeded)
-	}
-	if !slices.Equal(d.AddedImports, []string{"ANativeWindow_fromSurface"}) {
-		t.Fatalf("AddedImports=%v", d.AddedImports)
-	}
-	if !slices.Equal(d.RemovedImports, []string{"__libc_init"}) {
-		t.Fatalf("RemovedImports=%v", d.RemovedImports)
-	}
-}
-
-func TestDiffNil(t *testing.T) {
-	t.Parallel()
-	d := Diff(nil, &Report{DTNeeded: []string{"libc.so"}})
-	if !slices.Equal(d.AddedNeeded, []string{"libc.so"}) {
-		t.Fatalf("AddedNeeded=%v", d.AddedNeeded)
-	}
-	if d.RemovedNeeded == nil {
-		t.Fatal("RemovedNeeded nil")
-	}
-}
 
 func TestFormatTextNil(t *testing.T) {
 	t.Parallel()
@@ -78,4 +35,14 @@ func TestSelectExportsKeepsJNI(t *testing.T) {
 	if len(listed) != 2+maxListedNonJNIExports {
 		t.Fatalf("listed=%d", len(listed))
 	}
+}
+
+func symbolNames(syms []Symbol) []string {
+	out := make([]string, 0, len(syms))
+	for _, s := range syms {
+		if s.Name != "" {
+			out = append(out, s.Name)
+		}
+	}
+	return out
 }

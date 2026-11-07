@@ -47,14 +47,6 @@ type RelocationSummary struct {
 	AndroidPacked bool           `json:"androidPacked,omitempty"`
 }
 
-// ReportDiff is the delta between two ELF reports (new versus old).
-type ReportDiff struct {
-	AddedNeeded    []string `json:"addedNeeded"`
-	RemovedNeeded  []string `json:"removedNeeded"`
-	AddedImports   []string `json:"addedImports"`
-	RemovedImports []string `json:"removedImports"`
-}
-
 // IsX86_64 reports whether this object is the architecture Tipsy runs.
 func (r *Report) IsX86_64() bool {
 	return r != nil && r.Class == "ELF64" && r.Machine == "EM_X86_64"

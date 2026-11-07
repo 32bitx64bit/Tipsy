@@ -367,3 +367,55 @@ func BenchmarkAPS2PackedRelocApply(b *testing.B) {
 		}
 	})
 }
+
+func makeRelInfo(sym uint32, typ uint32) uint64 {
+	return uint64(sym)<<32 | uint64(typ)
+}
+
+// decodeAPS2 is a collecting walker for APS2 unit tests that inspect the slice.
+func decodeAPS2(data []byte) ([]Reloc, error) {
+	var out []Reloc
+	err := walkAPS2(data, func(r Reloc) error {
+		out = append(out, r)
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func encodeAPS2(relocs []Reloc) []byte {
+	b := append([]byte(nil), "APS2"...)
+	b = appendSLEB128(b, int64(len(relocs)))
+	b = appendSLEB128(b, 0) // initial r_offset; first reloc encodes absolute offset as delta
+	var off uint64
+	var addend int64
+	for _, r := range relocs {
+		// One reloc per group: HAS_ADDEND, unique offset/info/addend deltas.
+		b = appendSLEB128(b, 1)
+		b = appendSLEB128(b, int64(relocGroupHasAddend))
+		b = appendSLEB128(b, int64(r.Off-off))
+		off = r.Off
+		b = appendSLEB128(b, int64(r.Info))
+		b = appendSLEB128(b, r.Addend-addend)
+		addend = r.Addend
+	}
+	return b
+}
+
+func appendSLEB128(b []byte, v int64) []byte {
+	for {
+		c := byte(v) & 0x7f
+		v >>= 7
+		sign := c&0x40 != 0
+		done := (v == 0 && !sign) || (v == -1 && sign)
+		if !done {
+			c |= 0x80
+		}
+		b = append(b, c)
+		if done {
+			return b
+		}
+	}
+}

@@ -34,12 +34,8 @@ const (
 	flagDisableVulkan11 = "FFlagDebugGraphicsDisableVulkan11"
 )
 
-// applicationSettingsFromResponse extracts the flag map as a JSON object
-// without logging flag names or values.
-func applicationSettingsFromResponse(body []byte) (string, int, error) {
-	return applicationSettingsFromResponseWithOverrides(body, nil)
-}
-
+// applicationSettingsFromResponseWithOverrides extracts the flag map as a JSON
+// object without logging flag names or values.
 func applicationSettingsFromResponseWithOverrides(body []byte, overrides map[string]any) (string, int, error) {
 	var wrap struct {
 		ApplicationSettings map[string]any `json:"applicationSettings"`

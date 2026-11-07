@@ -8,7 +8,6 @@ package loader
 import (
 	"bytes"
 	"encoding/binary"
-	"fmt"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -151,6 +150,6 @@ func TestOpenLeavesNoWritableExecutableMapping(t *testing.T) {
 		}
 	}
 	if !seen {
-		t.Fatal(fmt.Sprintf("no /proc/self/maps entries for module [%#x,%#x)", lo, hi))
+		t.Fatalf("no /proc/self/maps entries for module [%#x,%#x)", lo, hi)
 	}
 }

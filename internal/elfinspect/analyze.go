@@ -16,13 +16,21 @@ import (
 // JNI_OnLoad, JNI_OnUnload, and Java_* exports are always kept.
 const maxListedNonJNIExports = 256
 
-// Analyze opens path and returns a static ELF report.
+// Analyze opens path and returns a static ELF report. It reads through the
+// file's ReaderAt so only the sections it inspects are loaded, not the whole
+// object.
 func Analyze(path string) (*Report, error) {
-	data, err := os.ReadFile(path)
+	f, err := os.Open(path)
 	if err != nil {
 		return nil, err
 	}
-	return AnalyzeBytes(path, data)
+	defer f.Close()
+	ef, err := elf.NewFile(f)
+	if err != nil {
+		return nil, fmt.Errorf("elfinspect: parse %s: %w", path, err)
+	}
+	defer ef.Close()
+	return analyzeFile(path, ef)
 }
 
 // AnalyzeBytes parses an in-memory ELF object. name is a display path (file or zip member).
