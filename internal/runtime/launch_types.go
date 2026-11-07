@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/tipsy-linux/tipsy/internal/authfiles"
 	"github.com/tipsy-linux/tipsy/internal/integrity"
 	"github.com/tipsy-linux/tipsy/internal/rbxuri"
 )
@@ -30,13 +31,7 @@ type LaunchOptions struct {
 // AuthorizedRuntimeFiles is the same-generation, authenticated file view for
 // Android assets and launch metadata. Paths are usable only while the
 // AuthorizedGeneration owner remains open.
-type AuthorizedRuntimeFiles struct {
-	GenerationID string
-	RootDir      string
-	AssetsDir    string
-	BaseAPKPath  string
-	VersionName  string
-}
+type AuthorizedRuntimeFiles = authfiles.Files
 
 // AuthorizedGeneration is the narrow launch-side view implemented by
 // setupsvc.AuthorizedGeneration. Official callers must keep the generation open

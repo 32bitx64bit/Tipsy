@@ -71,7 +71,11 @@ func TestBuildAndPrepareGenerationAuthenticatesEveryNativeAndOmitsOrigins(t *tes
 		t.Fatal(err)
 	}
 	defer generation.Close()
-	natives, err := generation.NativeDescriptors()
+	set, err := generation.NativeDescriptorSet()
+	if err != nil {
+		t.Fatal(err)
+	}
+	natives, err := set.Descriptors()
 	if err != nil || len(natives) != 1 || natives[0].SONAME != "libroblox.so" {
 		t.Fatalf("native handoff=%+v err=%v", natives, err)
 	}
@@ -131,7 +135,7 @@ func TestOpenAuthorizedDevelopmentGenerationWhenProvided(t *testing.T) {
 	if authorization := generation.Authorization(); authorization.Mode != DevelopmentUnrestricted || authorization.PolicyAuthorized {
 		t.Fatalf("development generation claimed official status: %+v", authorization)
 	}
-	if _, err := generation.NativeDescriptors(context.Background()); err != nil {
+	if _, err := generation.NativeDescriptorSet(context.Background()); err != nil {
 		t.Fatal(err)
 	}
 	files, err := generation.AuthorizedRuntimeFiles(context.Background())
@@ -142,7 +146,7 @@ func TestOpenAuthorizedDevelopmentGenerationWhenProvided(t *testing.T) {
 		files.AssetsDir != filepath.Join(files.RootDir, "assets") || files.BaseAPKPath != filepath.Join(files.RootDir, "apk", "base.apk") || files.VersionName == "" {
 		t.Fatalf("authorized runtime files are not bound to the active generation: %+v", files)
 	}
-	service := New()
+	service := New(testHooks())
 	service.GenerationStoreRoot = storeRoot
 	service.Trust = trust
 	snapshot, err := service.Snapshot(context.Background())

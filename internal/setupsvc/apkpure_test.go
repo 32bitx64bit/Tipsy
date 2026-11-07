@@ -132,7 +132,7 @@ func TestAPKPureRejectsOffsiteRedirect(t *testing.T) {
 
 func TestNewUsesAPKPure(t *testing.T) {
 	t.Parallel()
-	s := New()
+	s := New(testHooks())
 	a := s.AutomaticAvailability(context.Background())
 	if !a.Available || a.Name != "APKPure" || !strings.Contains(a.Explanation, "x86-64") {
 		t.Fatalf("availability=%+v", a)

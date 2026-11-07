@@ -222,14 +222,3 @@ func neededBase(s string) string {
 	}
 	return s
 }
-
-// Bionic / NDK system libraries are Resolver-only even if a file exists next
-// to the module (never mmap a host or APK copy of libc.so as the Android DSO).
-var systemSonames = map[string]struct{}{
-	"libc.so": {}, "libm.so": {}, "libdl.so": {}, "liblog.so": {},
-	"libz.so": {}, "libandroid.so": {}, "libEGL.so": {}, "libGLESv1_CM.so": {},
-	"libGLESv2.so": {}, "libGLESv3.so": {}, "libvulkan.so": {},
-	"libjnigraphics.so": {}, "libmediandk.so": {}, "libOpenMAXAL.so": {},
-	"libOpenSLES.so": {}, "libaaudio.so": {}, "libnativewindow.so": {},
-	"libc++.so": {}, "libstdc++.so": {},
-}

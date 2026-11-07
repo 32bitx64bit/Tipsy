@@ -9,17 +9,27 @@ import (
 	"debug/elf"
 	"encoding/binary"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
 	"slices"
 	"strings"
 
-	"github.com/tipsy-linux/tipsy/internal/android"
 	"github.com/tipsy-linux/tipsy/internal/integrity"
-	"github.com/tipsy-linux/tipsy/internal/loader"
 	"github.com/tipsy-linux/tipsy/internal/logging"
+	"github.com/tipsy-linux/tipsy/internal/syssoname"
 )
+
+// ImportSupport reports whether the in-process Android provider can bind an
+// import (library "" and version "" for an unversioned one). It is injected
+// by the composition root so setupsvc does not import the cgo android package.
+type ImportSupport func(library, symbol, version string) bool
+
+// errNoImportSupport is returned when a preflight runs without an
+// ImportSupport hook. Treating every import as bound or as unbound would
+// misreport the client, so the check fails instead.
+var errNoImportSupport = errors.New("setup: native import support check is not configured")
 
 // ImportKind says what a missing import is, from its ELF symbol type. A
 // caller that can bind a stand-in for an absent function but never for absent
@@ -62,8 +72,8 @@ type ActiveClientImportReport struct {
 
 // InspectExtractedClientImports applies the same fatal/fallback partition used
 // by setup without logging or converting the result into a setup error.
-func InspectExtractedClientImports(ctx context.Context, runtimeDir string) (ClientImportReport, error) {
-	missing, absent, err := findClientImports(ctx, runtimeDir)
+func InspectExtractedClientImports(ctx context.Context, runtimeDir string, supports ImportSupport) (ClientImportReport, error) {
+	missing, absent, err := findClientImports(ctx, runtimeDir, supports)
 	if err != nil {
 		return ClientImportReport{}, err
 	}
@@ -79,19 +89,22 @@ func InspectExtractedClientImports(ctx context.Context, runtimeDir string) (Clie
 // InspectActiveClientImports reads the active record for trust's slot and
 // inspects that generation's libroblox.so. Unlike integrity.Store.Active, this
 // diagnostic path never creates the store or migrates an active record.
-func InspectActiveClientImports(ctx context.Context, storeRoot string, trust TrustPolicy) (ActiveClientImportReport, error) {
+func InspectActiveClientImports(ctx context.Context, storeRoot string, trust TrustPolicy, supports ImportSupport) (ActiveClientImportReport, error) {
 	if ctx == nil {
 		ctx = context.Background()
 	}
 	if err := ctx.Err(); err != nil {
 		return ActiveClientImportReport{}, err
 	}
+	if supports == nil {
+		return ActiveClientImportReport{}, errNoImportSupport
+	}
 	store := StoreForTrust(storeRoot, trust)
 	active, err := readActiveClient(store.Root, store.ActiveSlot)
 	if err != nil {
 		return ActiveClientImportReport{}, err
 	}
-	imports, err := InspectExtractedClientImports(ctx, filepath.Join(store.Root, "generations", active.record.Generation))
+	imports, err := InspectExtractedClientImports(ctx, filepath.Join(store.Root, "generations", active.record.Generation), supports)
 	if err != nil {
 		return ActiveClientImportReport{}, err
 	}
@@ -169,8 +182,8 @@ func readActiveClientRecord(storeRoot, name string) (activeClient, error) {
 // from lib/x86_64 have no fallback in the loader and always fail setup.
 // TIPSY_STRICT_SYMBOLS=1 restores the loader's abort for every missing import
 // and therefore fails setup for functions too.
-func ValidateExtractedClientImports(ctx context.Context, runtimeDir string) error {
-	report, err := InspectExtractedClientImports(ctx, runtimeDir)
+func ValidateExtractedClientImports(ctx context.Context, runtimeDir string, supports ImportSupport) error {
+	report, err := InspectExtractedClientImports(ctx, runtimeDir, supports)
 	if err != nil {
 		return setupError(ErrCompatibility, "check client imports", "the verified root client library's native imports could not be read", err)
 	}
@@ -233,30 +246,16 @@ func strictNativeSymbols() bool {
 	return false
 }
 
-// FindMissingClientImports lists, sorted by name, the non-weak undefined
-// dynamic imports of <runtimeDir>/lib/x86_64/libroblox.so that nothing can
-// supply. Resolution mirrors the loader's resolveUndef: exports of bundled
-// DT_NEEDED libraries, then the Tipsy Android provider (android.SupportsImport).
-// Weak imports bind to zero, as in the loader, and are never reported.
-//
-// A bundled DT_NEEDED library absent from lib/x86_64 is not an import, so it is
-// not named here; ValidateExtractedClientImports reports it as fatal.
-//
-// It is safe to run before any launch: the library is parsed as data with
-// debug/elf and never mapped, relocated or executed, no JNI_OnLoad runs, and
-// SupportsImport loads no host library.
-func FindMissingClientImports(ctx context.Context, runtimeDir string) ([]MissingImport, error) {
-	missing, _, err := findClientImports(ctx, runtimeDir)
-	return missing, err
-}
-
 // findClientImports returns the missing imports plus the non-system DT_NEEDED
 // libraries absent from lib/x86_64. The loader's authenticated open aborts on
 // an absent dependency, so a caller that gates install must treat that list as
 // fatal.
-func findClientImports(ctx context.Context, runtimeDir string) ([]MissingImport, []string, error) {
+func findClientImports(ctx context.Context, runtimeDir string, supports ImportSupport) ([]MissingImport, []string, error) {
 	if ctx == nil {
 		ctx = context.Background()
+	}
+	if supports == nil {
+		return nil, nil, errNoImportSupport
 	}
 	libDir := filepath.Join(runtimeDir, "lib", "x86_64")
 	root, closeRoot, err := openELFRegular(filepath.Join(libDir, "libroblox.so"))
@@ -290,7 +289,7 @@ func findClientImports(ctx context.Context, runtimeDir string) ([]MissingImport,
 		if bind := elf.ST_BIND(s.Info); bind == elf.STB_WEAK || bind == elf.STB_LOCAL {
 			continue
 		}
-		if importResolves(s, direct, all) {
+		if importResolves(s, direct, all, supports) {
 			continue
 		}
 		key := s.Name + "\x00" + s.Library + "\x00" + s.Version
@@ -315,20 +314,20 @@ func findClientImports(ctx context.Context, runtimeDir string) ([]MissingImport,
 // importResolves follows loader.Module.resolveUndef. A versioned import is
 // bound to exactly the dependency named by its verneed entry; an unversioned
 // one is searched through every loaded dependency, then the provider.
-func importResolves(s elf.Symbol, direct map[string]map[string]struct{}, all []map[string]struct{}) bool {
+func importResolves(s elf.Symbol, direct map[string]map[string]struct{}, all []map[string]struct{}, supports ImportSupport) bool {
 	if s.Library != "" && s.Version != "" {
 		if dep, ok := direct[s.Library]; ok {
 			_, has := dep[s.Name]
 			return has
 		}
-		return android.SupportsImport(s.Library, s.Name, s.Version)
+		return supports(s.Library, s.Name, s.Version)
 	}
 	for _, exports := range all {
 		if _, ok := exports[s.Name]; ok {
 			return true
 		}
 	}
-	return android.SupportsImport("", s.Name, "")
+	return supports("", s.Name, "")
 }
 
 // importKind classifies an unresolved import the way the loader's
@@ -441,7 +440,7 @@ func bundledExports(ctx context.Context, libDir string, needed []string) (map[st
 		item := queue[0]
 		queue = queue[1:]
 		base := filepath.Base(item.name)
-		if base == "." || base == ".." || base == string(filepath.Separator) || loader.IsSystemSoname(base) {
+		if base == "." || base == ".." || base == string(filepath.Separator) || syssoname.Is(base) {
 			continue
 		}
 		if exports, dup := known[base]; dup {

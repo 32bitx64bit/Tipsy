@@ -12,8 +12,8 @@ import (
 	"strings"
 
 	"github.com/tipsy-linux/tipsy/internal/apk"
+	"github.com/tipsy-linux/tipsy/internal/authfiles"
 	"github.com/tipsy-linux/tipsy/internal/integrity"
-	"github.com/tipsy-linux/tipsy/internal/runtime"
 )
 
 type verifiedGenerationAPK struct {
@@ -233,23 +233,12 @@ func (g *AuthorizedGeneration) NativeDescriptorSet(ctx context.Context) (*integr
 	return set, nil
 }
 
-// NativeDescriptors is a compatibility shim. Callers must consume
-// NativeDescriptorSet so identity cannot be discarded before Loader
-// validation.
-func (g *AuthorizedGeneration) NativeDescriptors(ctx context.Context) ([]integrity.NativeDescriptor, error) {
-	set, err := g.NativeDescriptorSet(ctx)
-	if err != nil {
-		return nil, err
-	}
-	return set.Descriptors()
-}
-
 // AuthorizedRuntimeFiles verifies every APK-derived asset against the retained
 // signed base APK and returns the canonical same-generation paths needed by
 // the Android asset bridge. The caller must retain g until launch completes.
-func (g *AuthorizedGeneration) AuthorizedRuntimeFiles(ctx context.Context) (runtime.AuthorizedRuntimeFiles, error) {
+func (g *AuthorizedGeneration) AuthorizedRuntimeFiles(ctx context.Context) (authfiles.Files, error) {
 	if g == nil || g.generation == nil || g.storeRoot == "" {
-		return runtime.AuthorizedRuntimeFiles{}, fmt.Errorf("setup: authorized generation is closed")
+		return authfiles.Files{}, fmt.Errorf("setup: authorized generation is closed")
 	}
 	basePath := ""
 	for _, record := range g.generation.Inventory.Files {
@@ -257,17 +246,17 @@ func (g *AuthorizedGeneration) AuthorizedRuntimeFiles(ctx context.Context) (runt
 		case record.Origin == integrity.OriginAPK && record.APKEntry == "@apk":
 			pinned := g.generation.Files[record.Path]
 			if pinned == nil || pinned.File == nil {
-				return runtime.AuthorizedRuntimeFiles{}, fmt.Errorf("setup: retained APK descriptor is unavailable")
+				return authfiles.Files{}, fmt.Errorf("setup: retained APK descriptor is unavailable")
 			}
 			if err := pinned.Recheck(ctx); err != nil {
-				return runtime.AuthorizedRuntimeFiles{}, err
+				return authfiles.Files{}, err
 			}
 			if record.Path == "apk/base.apk" {
 				basePath = record.Path
 			}
 		case strings.HasPrefix(record.Path, "assets/"):
-			if err := g.verifyFileOrigin(ctx, record.Path, false); err != nil {
-				return runtime.AuthorizedRuntimeFiles{}, err
+			if err := g.verifyFileOrigin(ctx, record.Path); err != nil {
+				return authfiles.Files{}, err
 			}
 		}
 	}
@@ -276,14 +265,14 @@ func (g *AuthorizedGeneration) AuthorizedRuntimeFiles(ctx context.Context) (runt
 	// asset; the latter turns launch into O(asset count * APK size).
 	for _, retained := range g.apks {
 		if err := retained.file.Recheck(ctx); err != nil {
-			return runtime.AuthorizedRuntimeFiles{}, err
+			return authfiles.Files{}, err
 		}
 	}
 	if basePath == "" {
-		return runtime.AuthorizedRuntimeFiles{}, fmt.Errorf("setup: authenticated base APK is unavailable")
+		return authfiles.Files{}, fmt.Errorf("setup: authenticated base APK is unavailable")
 	}
 	root := filepath.Join(g.storeRoot, "generations", g.generation.ID)
-	return runtime.AuthorizedRuntimeFiles{
+	return authfiles.Files{
 		GenerationID: g.generation.ID,
 		RootDir:      root,
 		AssetsDir:    filepath.Join(root, "assets"),
@@ -292,12 +281,7 @@ func (g *AuthorizedGeneration) AuthorizedRuntimeFiles(ctx context.Context) (runt
 	}, nil
 }
 
-// VerifyFileOrigin lazily verifies an asset against the retained base APK.
-func (g *AuthorizedGeneration) VerifyFileOrigin(ctx context.Context, name string) error {
-	return g.verifyFileOrigin(ctx, name, true)
-}
-
-func (g *AuthorizedGeneration) verifyFileOrigin(ctx context.Context, name string, recheckAPK bool) error {
+func (g *AuthorizedGeneration) verifyFileOrigin(ctx context.Context, name string) error {
 	if g == nil || g.generation == nil {
 		return fmt.Errorf("setup: authorized generation is closed")
 	}
@@ -321,11 +305,6 @@ func (g *AuthorizedGeneration) verifyFileOrigin(ctx context.Context, name string
 	}
 	if err := retained.entries.Verify(ctx, pinned.Record.APKEntry, pinned.Record.Size, pinned.Record.SHA256); err != nil {
 		return err
-	}
-	if recheckAPK {
-		if err := retained.file.Recheck(ctx); err != nil {
-			return err
-		}
 	}
 	return pinned.Recheck(ctx)
 }

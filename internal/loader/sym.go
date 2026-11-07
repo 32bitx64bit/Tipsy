@@ -41,42 +41,29 @@ func (s dynSym) defined() bool {
 	return s.shndx != uint16(elf.SHN_UNDEF) && s.shndx != uint16(elf.SHN_COMMON)
 }
 
-func loadDynsym(ef *elf.File, d *dynInfo) ([]dynSym, []byte, error) {
+func loadDynsym(ef *elf.File, d *dynInfo, strtab []byte) ([]dynSym, error) {
 	if d.strtab == 0 {
-		return nil, nil, fmt.Errorf("loader: no DT_STRTAB")
-	}
-	strsz := d.strsz
-	var strtab []byte
-	var err error
-	if strsz != 0 {
-		strtab, err = vaddrFileBytesExact(ef, d.strtab, strsz)
-	} else {
-		// No DT_STRSZ: names are still bounds-checked against the clamped
-		// file bytes below.
-		strtab, err = vaddrFileBytes(ef, d.strtab, 1<<20)
-	}
-	if err != nil {
-		return nil, nil, fmt.Errorf("loader: dynstr: %w", err)
+		return nil, fmt.Errorf("loader: no DT_STRTAB")
 	}
 	nsym, err := dynsymCount(ef, d)
 	if err != nil {
-		return nil, nil, err
+		return nil, err
 	}
 	// ELF64 dynsym entries are exactly 24 bytes; anything else makes the range
 	// arithmetic below ambiguous.
 	if d.syment != 24 {
-		return nil, nil, fmt.Errorf("loader: unsupported DT_SYMENT %d (ELF64 requires 24)", d.syment)
+		return nil, fmt.Errorf("loader: unsupported DT_SYMENT %d (ELF64 requires 24)", d.syment)
 	}
 	if nsym <= 0 || nsym > 1<<24 {
-		return nil, nil, fmt.Errorf("loader: implausible dynsym count %d", nsym)
+		return nil, fmt.Errorf("loader: implausible dynsym count %d", nsym)
 	}
 	size := d.syment * uint64(nsym)
 	if size/d.syment != uint64(nsym) {
-		return nil, nil, fmt.Errorf("loader: dynsym size overflow (%d x %d)", d.syment, nsym)
+		return nil, fmt.Errorf("loader: dynsym size overflow (%d x %d)", d.syment, nsym)
 	}
 	raw, err := vaddrFileBytesExact(ef, d.symtab, size)
 	if err != nil {
-		return nil, nil, fmt.Errorf("loader: dynsym: %w", err)
+		return nil, fmt.Errorf("loader: dynsym: %w", err)
 	}
 	out := make([]dynSym, nsym)
 	for i := 0; i < nsym; i++ {
@@ -100,7 +87,7 @@ func loadDynsym(ef *elf.File, d *dynInfo) ([]dynSym, []byte, error) {
 		}
 		out[i] = dynSym{name: name, value: value, size: size, info: info, other: other, shndx: shndx}
 	}
-	return out, strtab, nil
+	return out, nil
 }
 
 func dynsymCount(ef *elf.File, d *dynInfo) (int, error) {

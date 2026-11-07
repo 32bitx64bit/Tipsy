@@ -99,7 +99,7 @@ func TestSnapshotDoesNotTrustInventoryOnlyAndLogsContentFreeFailure(t *testing.T
 	slog.SetDefault(slog.New(slog.NewTextHandler(&logs, nil)))
 	t.Cleanup(func() { slog.SetDefault(previous) })
 
-	service := New()
+	service := New(testHooks())
 	service.GenerationStoreRoot = storeRoot
 	service.Trust = testTrust(cert)
 	snapshot, err := service.Snapshot(context.Background())
@@ -117,7 +117,7 @@ func TestSnapshotDoesNotTrustInventoryOnlyAndLogsContentFreeFailure(t *testing.T
 }
 
 func TestSnapshotStatesAreExplicitAndIncompleteVerdictsFailClosed(t *testing.T) {
-	service := New()
+	service := New(testHooks())
 	service.GenerationStoreRoot = filepath.Join(t.TempDir(), "absent-store")
 	absent, err := service.Snapshot(context.Background())
 	if err != nil || absent.Installed || absent.Readiness != ReadinessNotInstalled {

@@ -10,6 +10,7 @@ import (
 	"io"
 	"strings"
 
+	"github.com/tipsy-linux/tipsy/internal/android"
 	"github.com/tipsy-linux/tipsy/internal/apk"
 	"github.com/tipsy-linux/tipsy/internal/compat"
 	"github.com/tipsy-linux/tipsy/internal/config"
@@ -19,6 +20,18 @@ import (
 	"github.com/tipsy-linux/tipsy/internal/runtime"
 	"github.com/tipsy-linux/tipsy/internal/setupsvc"
 )
+
+// SetupHooks wires the setup service to the runtime directory, persistent
+// app-storage preparation and the Android provider's import check. setupsvc
+// takes them as hooks so it does not import the runtime, android or loader
+// packages; every setupsvc.New caller passes these.
+func SetupHooks() setupsvc.Hooks {
+	return setupsvc.Hooks{
+		RuntimeDir:        runtime.RuntimeDir(),
+		PrepareAppStorage: runtime.PrepareAppStorageForSetup,
+		SupportsImport:    android.SupportsImport,
+	}
+}
 
 func cmdSetup(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 	f, development, err := parseSetupFlags(args)
@@ -48,7 +61,7 @@ func cmdSetup(ctx context.Context, args []string, stdout, stderr io.Writer) int 
 	if authority.Mode == setupsvc.DevelopmentUnrestricted {
 		printDevelopmentWarning(stderr)
 	}
-	service := setupsvc.New()
+	service := setupsvc.New(SetupHooks())
 	service.Trust = authority.Trust
 	res, err := service.Install(ctx, setupsvc.InstallRequest{Mode: setupsvc.InstallLocal, LocalPaths: f.rest}, nil)
 	if err != nil {

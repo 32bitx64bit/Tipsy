@@ -13,7 +13,6 @@ import (
 	"github.com/tipsy-linux/tipsy/internal/apk"
 	"github.com/tipsy-linux/tipsy/internal/integrity"
 	"github.com/tipsy-linux/tipsy/internal/logging"
-	"github.com/tipsy-linux/tipsy/internal/runtime"
 )
 
 type Service struct {
@@ -27,26 +26,45 @@ type Service struct {
 	verify          func(context.Context, *apk.Report) error
 	extract         func(context.Context, []string, string) (*apk.ExtractResult, error)
 	prepare         func() error
+	supportsImport  ImportSupport
 	authorizeStaged func(context.Context, integrity.Store, string, TrustPolicy) error
 	compatibility   func(context.Context, string) error
 	importPreflight func(context.Context, string) error
 	snapshot        func(context.Context, string, TrustPolicy) (InstallSnapshot, error)
 }
 
-func New() *Service {
-	return NewWithSource(&APKPureSource{})
+// Hooks are the host-environment seams the composition root injects so
+// setupsvc does not import the runtime, android or loader packages. A zero
+// field fails closed: no runtime directory means setup and status report an
+// error instead of writing under a guessed path, no PrepareAppStorage means
+// Install stops before touching account storage, and no SupportsImport means
+// the native import preflight errors instead of passing.
+type Hooks struct {
+	// RuntimeDir is the Tipsy runtime directory (runtime.RuntimeDir()).
+	RuntimeDir string
+	// PrepareAppStorage migrates persistent account storage before a build is
+	// activated (runtime.PrepareAppStorageForSetup).
+	PrepareAppStorage func() error
+	// SupportsImport asks the Android provider whether it can bind an import
+	// (android.SupportsImport).
+	SupportsImport ImportSupport
 }
 
-func NewWithSource(source Source) *Service {
+func New(hooks Hooks) *Service {
+	return NewWithSource(&APKPureSource{}, hooks)
+}
+
+func NewWithSource(source Source, hooks Hooks) *Service {
 	return &Service{
-		Source:     source,
-		Limits:     DefaultLimits(),
-		Trust:      OfficialTrustPolicy(),
-		RuntimeDir: runtime.RuntimeDir(),
-		inspect:    apk.Inspect,
-		verify:     apk.VerifyReportSignatures,
-		extract:    apk.Extract,
-		prepare:    runtime.PrepareAppStorageForSetup,
+		Source:         source,
+		Limits:         DefaultLimits(),
+		Trust:          OfficialTrustPolicy(),
+		RuntimeDir:     hooks.RuntimeDir,
+		inspect:        apk.Inspect,
+		verify:         apk.VerifyReportSignatures,
+		extract:        apk.Extract,
+		prepare:        hooks.PrepareAppStorage,
+		supportsImport: hooks.SupportsImport,
 	}
 }
 
@@ -65,6 +83,10 @@ func (s *Service) Snapshot(ctx context.Context) (InstallSnapshot, error) {
 	snapshot := InstallSnapshot{RuntimeDir: storeRoot, Readiness: ReadinessNotInstalled, Automatic: s.AutomaticAvailability(ctx)}
 	if err := ctx.Err(); err != nil {
 		return snapshot, setupError(ErrCanceled, "installation status", "operation canceled", err)
+	}
+	if storeRoot == "" {
+		snapshot.Readiness = ReadinessRejected
+		return snapshot, setupError(ErrInstall, "installation status", errRuntimeDirUnset, nil)
 	}
 	verified, err := s.snapshotFn()(ctx, storeRoot, s.trust())
 	if errors.Is(err, os.ErrNotExist) {
@@ -113,7 +135,11 @@ func (s *Service) Install(ctx context.Context, req InstallRequest, progress Prog
 		return nil, setupError(ErrSourceUnavailable, "automatic setup", s.AutomaticAvailability(ctx).Reason, nil)
 	}
 	report(progress, PhasePreparing, 0, 0, "Preparing private setup workspace")
-	parent := filepath.Dir(s.generationStoreRoot())
+	storeRoot := s.generationStoreRoot()
+	if storeRoot == "" {
+		return nil, setupError(ErrInstall, "setup", errRuntimeDirUnset, nil)
+	}
+	parent := filepath.Dir(storeRoot)
 	if err := os.MkdirAll(parent, 0o700); err != nil {
 		return nil, setupError(ErrInstall, "setup", "cannot create the Tipsy data directory", err)
 	}
@@ -207,7 +233,7 @@ func (s *Service) Install(ctx context.Context, req InstallRequest, progress Prog
 	if err := s.prepareFn()(); err != nil {
 		return nil, setupError(ErrInstall, "preserve account data", "persistent account storage could not be prepared", err)
 	}
-	store := StoreForTrust(s.generationStoreRoot(), s.trust())
+	store := StoreForTrust(storeRoot, s.trust())
 	id, err := PrepareGeneration(ctx, stagedRuntime, store.Root, rep, s.trust())
 	if err != nil {
 		return nil, setupError(ErrIntegrity, "stage generation", "extracted client provenance could not be authenticated", err)
@@ -229,18 +255,22 @@ func (s *Service) Install(ctx context.Context, req InstallRequest, progress Prog
 	return &InstallResult{Snapshot: snapshot}, nil
 }
 
-func (s *Service) runtimeDir() string {
-	if s != nil && s.RuntimeDir != "" {
-		return s.RuntimeDir
-	}
-	return runtime.RuntimeDir()
-}
+const errRuntimeDirUnset = "the Tipsy runtime directory is not configured"
 
+// generationStoreRoot returns the explicit store root, else the store beside
+// the injected runtime directory. It is empty when neither was configured, and
+// callers must then fail instead of deriving a path from "".
 func (s *Service) generationStoreRoot() string {
-	if s != nil && s.GenerationStoreRoot != "" {
+	if s == nil {
+		return ""
+	}
+	if s.GenerationStoreRoot != "" {
 		return s.GenerationStoreRoot
 	}
-	return GenerationStoreDir(s.runtimeDir())
+	if s.RuntimeDir == "" {
+		return ""
+	}
+	return GenerationStoreDir(s.RuntimeDir)
 }
 
 func (s *Service) limits() Limits {
@@ -282,7 +312,7 @@ func (s *Service) prepareFn() func() error {
 	if s != nil && s.prepare != nil {
 		return s.prepare
 	}
-	return runtime.PrepareAppStorageForSetup
+	return func() error { return errors.New("setup: persistent app storage preparation is not configured") }
 }
 
 func (s *Service) authorizeStagedFn() func(context.Context, integrity.Store, string, TrustPolicy) error {
@@ -318,7 +348,13 @@ func (s *Service) importPreflightFn() func(context.Context, string) error {
 	if s != nil && s.importPreflight != nil {
 		return s.importPreflight
 	}
-	return ValidateExtractedClientImports
+	var supports ImportSupport
+	if s != nil {
+		supports = s.supportsImport
+	}
+	return func(ctx context.Context, runtimeDir string) error {
+		return ValidateExtractedClientImports(ctx, runtimeDir, supports)
+	}
 }
 
 func (s *Service) snapshotFn() func(context.Context, string, TrustPolicy) (InstallSnapshot, error) {

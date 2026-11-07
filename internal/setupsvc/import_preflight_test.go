@@ -362,7 +362,7 @@ func TestValidateExtractedClientImportsRejectsNotypeDataRelocation(t *testing.T)
 	logs := captureLog(t)
 	err := ValidateExtractedClientImports(context.Background(), writeRuntimeLibs(t, map[string][]byte{
 		"libroblox.so": clientWithNotypeRelocations(),
-	}))
+	}), testHooks().SupportsImport)
 	if ErrorKindOf(err) != ErrCompatibility {
 		t.Fatalf("kind=%q err=%v", ErrorKindOf(err), err)
 	}
@@ -382,7 +382,7 @@ func TestInspectExtractedClientReportsFatalAndFallbackImports(t *testing.T) {
 		"libroblox.so":  clientWithUnresolvableImports(),
 		"libbundled.so": bundledLibrary(),
 	})
-	report, err := InspectExtractedClientImports(context.Background(), runtimeDir)
+	report, err := InspectExtractedClientImports(context.Background(), runtimeDir, testHooks().SupportsImport)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -399,7 +399,7 @@ func TestInspectExtractedClientReportsFatalAndFallbackImports(t *testing.T) {
 func TestInspectExtractedClientReportsAbsentLibraryWithoutFallbackClaim(t *testing.T) {
 	report, err := InspectExtractedClientImports(context.Background(), writeRuntimeLibs(t, map[string][]byte{
 		"libroblox.so": clientWithUnresolvableImports(),
-	}))
+	}), testHooks().SupportsImport)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -412,7 +412,7 @@ func TestInspectExtractedClientStrictMakesFunctionFatal(t *testing.T) {
 	t.Setenv("TIPSY_STRICT_SYMBOLS", "1")
 	report, err := InspectExtractedClientImports(context.Background(), writeRuntimeLibs(t, map[string][]byte{
 		"libroblox.so": clientWithUnresolvableFunction(),
-	}))
+	}), testHooks().SupportsImport)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -424,7 +424,7 @@ func TestInspectExtractedClientStrictMakesFunctionFatal(t *testing.T) {
 
 func TestInspectActiveClientImportsDoesNotCreateMissingStore(t *testing.T) {
 	root := filepath.Join(t.TempDir(), "missing-generations")
-	if _, err := InspectActiveClientImports(context.Background(), root, DevelopmentTrustPolicy()); err == nil {
+	if _, err := InspectActiveClientImports(context.Background(), root, DevelopmentTrustPolicy(), testHooks().SupportsImport); err == nil {
 		t.Fatal("missing active generation was accepted")
 	}
 	if _, err := os.Lstat(root); !os.IsNotExist(err) {
@@ -443,7 +443,7 @@ func TestFindMissingClientImportsAcceptsResolvableClient(t *testing.T) {
 	if err != nil || len(missing) != 0 {
 		t.Fatalf("missing=%+v err=%v", missing, err)
 	}
-	if err := ValidateExtractedClientImports(context.Background(), runtimeDir); err != nil {
+	if err := ValidateExtractedClientImports(context.Background(), runtimeDir, testHooks().SupportsImport); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -470,7 +470,7 @@ func TestValidateExtractedClientImportsWarnsForFunctionsAndRejectsData(t *testin
 		"libbundled.so": bundledLibrary(),
 	})
 	logs := captureLog(t)
-	err := ValidateExtractedClientImports(context.Background(), runtimeDir)
+	err := ValidateExtractedClientImports(context.Background(), runtimeDir, testHooks().SupportsImport)
 	if ErrorKindOf(err) != ErrCompatibility {
 		t.Fatalf("kind=%q err=%v", ErrorKindOf(err), err)
 	}
@@ -505,7 +505,7 @@ func TestValidateExtractedClientImportsAcceptsMissingFunctionWithWarning(t *test
 	logs := captureLog(t)
 	err := ValidateExtractedClientImports(context.Background(), writeRuntimeLibs(t, map[string][]byte{
 		"libroblox.so": clientWithUnresolvableFunction(),
-	}))
+	}), testHooks().SupportsImport)
 	if err != nil {
 		t.Fatalf("missing function rejected by default: %v", err)
 	}
@@ -519,7 +519,7 @@ func TestValidateExtractedClientImportsStrictRejectsMissingFunction(t *testing.T
 	logs := captureLog(t)
 	err := ValidateExtractedClientImports(context.Background(), writeRuntimeLibs(t, map[string][]byte{
 		"libroblox.so": clientWithUnresolvableFunction(),
-	}))
+	}), testHooks().SupportsImport)
 	if ErrorKindOf(err) != ErrCompatibility {
 		t.Fatalf("kind=%q err=%v", ErrorKindOf(err), err)
 	}
@@ -535,7 +535,7 @@ func TestValidateExtractedClientImportsRejectsMissingData(t *testing.T) {
 	logs := captureLog(t)
 	err := ValidateExtractedClientImports(context.Background(), writeRuntimeLibs(t, map[string][]byte{
 		"libroblox.so": clientWithUnresolvableData(),
-	}))
+	}), testHooks().SupportsImport)
 	if ErrorKindOf(err) != ErrCompatibility {
 		t.Fatalf("kind=%q err=%v", ErrorKindOf(err), err)
 	}
@@ -551,7 +551,7 @@ func TestValidateExtractedClientImportsRejectsVersionedMissingFunction(t *testin
 	logs := captureLog(t)
 	err := ValidateExtractedClientImports(context.Background(), writeRuntimeLibs(t, map[string][]byte{
 		"libroblox.so": clientWithVersionedUnresolvableFunction(),
-	}))
+	}), testHooks().SupportsImport)
 	if ErrorKindOf(err) != ErrCompatibility {
 		t.Fatalf("kind=%q err=%v", ErrorKindOf(err), err)
 	}
@@ -566,7 +566,7 @@ func TestValidateExtractedClientImportsRejectsVersionedMissingFunction(t *testin
 func TestValidateExtractedClientImportsRejectsAbsentBundledLibrary(t *testing.T) {
 	err := ValidateExtractedClientImports(context.Background(), writeRuntimeLibs(t, map[string][]byte{
 		"libroblox.so": clientWithAbsentBundledLibrary(),
-	}))
+	}), testHooks().SupportsImport)
 	if ErrorKindOf(err) != ErrCompatibility {
 		t.Fatalf("kind=%q err=%v", ErrorKindOf(err), err)
 	}
@@ -589,7 +589,7 @@ func TestValidateExtractedClientImportsRejectsUnreadableRoot(t *testing.T) {
 				ctx = canceled
 				libs["libbundled.so"] = bundledLibrary()
 			}
-			err := ValidateExtractedClientImports(ctx, writeRuntimeLibs(t, libs))
+			err := ValidateExtractedClientImports(ctx, writeRuntimeLibs(t, libs), testHooks().SupportsImport)
 			want := ErrCompatibility
 			if name == "cancelled" {
 				want = ErrCanceled
@@ -625,7 +625,7 @@ func installClient(t *testing.T, libroblox []byte, bundled map[string][]byte) in
 	}
 	const cert = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 	var out installOutcome
-	s := New()
+	s := New(testHooks())
 	s.RuntimeDir = runtimeDir
 	s.GenerationStoreRoot = filepath.Join(root, "data", "runtime-generations")
 	t.Cleanup(func() { makeGenerationTreeWritable(s.GenerationStoreRoot) })

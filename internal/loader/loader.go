@@ -219,12 +219,15 @@ func openFile(key, display string, f *os.File, authenticated bool, r Resolver, s
 	}
 	strtabVA, _ := dynVal(ents, elf.DT_STRTAB)
 	strsz, _ := dynVal(ents, elf.DT_STRSZ)
-	if strsz == 0 {
-		strsz = 1 << 20
-	}
 	var strtab []byte
 	if strtabVA != 0 {
-		strtab, err = vaddrFileBytes(ef, strtabVA, strsz)
+		if strsz != 0 {
+			strtab, err = vaddrFileBytesExact(ef, strtabVA, strsz)
+		} else {
+			// No DT_STRSZ: names are still bounds-checked against the
+			// clamped file bytes below.
+			strtab, err = vaddrFileBytes(ef, strtabVA, 1<<20)
+		}
 		if err != nil {
 			return fail(fmt.Errorf("loader: strtab %s: %w", display, err))
 		}
@@ -240,11 +243,11 @@ func openFile(key, display string, f *os.File, authenticated bool, r Resolver, s
 		return fail(fmt.Errorf("loader: authenticated descriptor %s declares SONAME %s", display, d.soname))
 	}
 
-	syms, dynstr, err := loadDynsym(ef, d)
+	syms, err := loadDynsym(ef, d, strtab)
 	if err != nil {
 		return fail(err)
 	}
-	versions, err := loadSymbolVersions(ef, d, syms, dynstr)
+	versions, err := loadSymbolVersions(ef, d, syms, strtab)
 	if err != nil {
 		return fail(fmt.Errorf("loader: GNU symbol versions %s: %w", display, err))
 	}
@@ -261,7 +264,7 @@ func openFile(key, display string, f *os.File, authenticated bool, r Resolver, s
 		if authenticated && base != n {
 			return fail(fmt.Errorf("loader: authenticated DT_NEEDED %q is not a SONAME", n))
 		}
-		if _, sys := systemSonames[base]; sys {
+		if IsSystemSoname(base) {
 			continue
 		}
 		if authenticated {
