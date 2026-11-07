@@ -58,6 +58,13 @@ func analyzeNatives(ctx context.Context, apkRep *apk.Report) ([]elfinspect.Repor
 	libs := nativeLibs(apkRep)
 	other := map[string]struct{}{}
 	seen := map[string]struct{}{}
+	// Each APK is opened once for all of its native libraries.
+	apks := map[string]*apk.ZIPFiles{}
+	defer func() {
+		for _, z := range apks {
+			z.Close()
+		}
+	}()
 	var elves []elfinspect.Report
 	for _, lib := range libs {
 		if err := ctx.Err(); err != nil {
@@ -79,7 +86,16 @@ func analyzeNatives(ctx context.Context, apkRep *apk.Report) ([]elfinspect.Repor
 		}
 		seen[key] = struct{}{}
 
-		data, err := apk.ReadZipFile(lib.APKPath, lib.ZIPPath)
+		zf := apks[lib.APKPath]
+		if zf == nil {
+			opened, err := apk.OpenZIPFiles(lib.APKPath)
+			if err != nil {
+				return nil, nil, fmt.Errorf("compat: read %s:%s: %w", lib.APKPath, lib.ZIPPath, err)
+			}
+			apks[lib.APKPath] = opened
+			zf = opened
+		}
+		data, err := zf.ReadFile(lib.ZIPPath)
 		if err != nil {
 			return nil, nil, fmt.Errorf("compat: read %s:%s: %w", lib.APKPath, lib.ZIPPath, err)
 		}

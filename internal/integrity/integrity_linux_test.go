@@ -59,7 +59,11 @@ func TestStoreStageActivatePinsExactDescriptorsAndRetainsAPKByDigest(t *testing.
 		t.Fatal(err)
 	}
 	defer generation.Close()
-	natives, err := generation.NativeDescriptors()
+	set, err := generation.NativeDescriptorSet()
+	if err != nil {
+		t.Fatal(err)
+	}
+	natives, err := set.Descriptors()
 	if err != nil || len(natives) != 1 || natives[0].SONAME != "libroblox.so" {
 		t.Fatalf("native descriptors=%+v err=%v", natives, err)
 	}

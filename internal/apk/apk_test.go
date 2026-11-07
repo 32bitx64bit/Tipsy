@@ -148,6 +148,22 @@ func TestInspectSynthetic(t *testing.T) {
 	if !bytes.Equal(got, dummy) {
 		t.Fatalf("ReadZipFile mismatch")
 	}
+
+	// One open serves several entries; a missing entry fails without closing it.
+	zf, err := OpenZIPFiles(apkPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer zf.Close()
+	for range 2 {
+		got, err := zf.ReadFile("lib/x86_64/libdummy.so")
+		if err != nil || !bytes.Equal(got, dummy) {
+			t.Fatalf("ZIPFiles.ReadFile = %d bytes, err %v", len(got), err)
+		}
+	}
+	if _, err := zf.ReadFile("lib/x86_64/missing.so"); err == nil {
+		t.Fatal("missing entry must fail")
+	}
 }
 
 func TestInspectSplits(t *testing.T) {

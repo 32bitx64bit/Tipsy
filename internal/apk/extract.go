@@ -3,8 +3,6 @@ package apk
 import (
 	"archive/zip"
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -12,6 +10,8 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+
+	"github.com/tipsy-linux/tipsy/internal/integrity"
 )
 
 const (
@@ -211,6 +211,13 @@ func extractX86_64Libs(ctx context.Context, destDir string, libs []NativeLib) ([
 	seen := map[string]string{}
 	var paths []string
 	var meta []MetaLib
+	// Each APK named by a lib is opened once, not once per native library.
+	apks := map[string]*ZIPFiles{}
+	defer func() {
+		for _, z := range apks {
+			z.Close()
+		}
+	}()
 
 	for _, lib := range libs {
 		if err := ctx.Err(); err != nil {
@@ -226,7 +233,16 @@ func extractX86_64Libs(ctx context.Context, destDir string, libs []NativeLib) ([
 			}
 			continue
 		}
-		data, err := ReadZipFile(lib.APKPath, lib.ZIPPath)
+		zf := apks[lib.APKPath]
+		if zf == nil {
+			opened, err := OpenZIPFiles(lib.APKPath)
+			if err != nil {
+				return nil, nil, fmt.Errorf("apk: extract %s: %w", lib.ZIPPath, err)
+			}
+			apks[lib.APKPath] = opened
+			zf = opened
+		}
+		data, err := zf.ReadFile(lib.ZIPPath)
 		if err != nil {
 			return nil, nil, fmt.Errorf("apk: extract %s: %w", lib.ZIPPath, err)
 		}
@@ -392,11 +408,8 @@ func hashFile(path string) (string, error) {
 		return "", err
 	}
 	defer f.Close()
-	h := sha256.New()
-	if _, err := io.Copy(h, f); err != nil {
-		return "", err
-	}
-	return hex.EncodeToString(h.Sum(nil)), nil
+	digest, _, err := integrity.SHA256Stream(context.Background(), f)
+	return digest, err
 }
 
 func safeRelFile(root, rel string) (string, error) {

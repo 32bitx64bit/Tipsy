@@ -5,11 +5,8 @@ package setupsvc
 
 import (
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
 	"encoding/json"
 	"fmt"
-	"io"
 	"os"
 	"path/filepath"
 	"sort"
@@ -239,24 +236,5 @@ func hashGenerationFile(ctx context.Context, name string) (string, int64, error)
 		return "", 0, err
 	}
 	defer file.Close()
-	hash := sha256.New()
-	buffer := make([]byte, 1<<20)
-	var size int64
-	for {
-		if err := ctx.Err(); err != nil {
-			return "", 0, err
-		}
-		n, readErr := file.Read(buffer)
-		if n > 0 {
-			size += int64(n)
-			_, _ = hash.Write(buffer[:n])
-		}
-		if readErr == io.EOF {
-			break
-		}
-		if readErr != nil {
-			return "", 0, readErr
-		}
-	}
-	return hex.EncodeToString(hash.Sum(nil)), size, nil
+	return integrity.SHA256Stream(ctx, file)
 }

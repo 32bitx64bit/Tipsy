@@ -104,7 +104,7 @@ func TestOpenFDCallerCannotSpliceReturnedDescriptorCopy(t *testing.T) {
 		t.Fatal(err)
 	}
 	copyOfSet[0].GenerationID = foreignSet.GenerationID()
-	copyOfSet = append(copyOfSet, foreignDescriptors[0])
+	_ = append(copyOfSet, foreignDescriptors[0])
 
 	m, err := OpenFD(context.Background(), "libmain.so", set, mapRes{})
 	if err != nil {

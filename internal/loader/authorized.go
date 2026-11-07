@@ -9,7 +9,6 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
-	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -197,7 +196,7 @@ func validateAuthorizedSONAME(soname string) error {
 	if soname == "" || len(soname) > 255 || path.Base(soname) != soname || strings.ContainsAny(soname, "/\\\x00") || soname == "." || soname == ".." {
 		return fmt.Errorf("unsafe SONAME %q", soname)
 	}
-	if _, system := systemSonames[soname]; system {
+	if IsSystemSoname(soname) {
 		return fmt.Errorf("system SONAME %q cannot be supplied as a guest descriptor", soname)
 	}
 	return nil
@@ -331,36 +330,14 @@ func sameAuthorizedIdentity(a, b integrity.FileIdentity) bool {
 }
 
 func digestAuthorizedFile(ctx context.Context, file *os.File, size int64) (string, error) {
-	if ctx == nil {
-		ctx = context.Background()
-	}
-	if err := ctx.Err(); err != nil {
+	digest, read, err := integrity.SHA256Stream(ctx, io.NewSectionReader(file, 0, size))
+	if err != nil {
 		return "", err
-	}
-	hash := sha256.New()
-	reader := io.NewSectionReader(file, 0, size)
-	buffer := make([]byte, 1<<20)
-	var read int64
-	for read < size {
-		if err := ctx.Err(); err != nil {
-			return "", err
-		}
-		n, err := reader.Read(buffer)
-		if n > 0 {
-			read += int64(n)
-			_, _ = hash.Write(buffer[:n])
-		}
-		if err != nil {
-			if errors.Is(err, io.EOF) {
-				break
-			}
-			return "", err
-		}
 	}
 	if read != size {
 		return "", io.ErrUnexpectedEOF
 	}
-	return hex.EncodeToString(hash.Sum(nil)), nil
+	return digest, nil
 }
 
 func (files *authorizedFiles) close() error {

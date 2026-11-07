@@ -7,10 +7,11 @@ import (
 	"archive/zip"
 	"context"
 	"crypto/sha256"
-	"encoding/hex"
 	"fmt"
 	"io"
 	"strings"
+
+	"github.com/tipsy-linux/tipsy/internal/integrity"
 )
 
 // ZIPEntryVerifier indexes a retained signed APK descriptor once, then
@@ -76,23 +77,8 @@ func ReportFromPackages(packages []Package) *Report {
 	return &Report{Packages: copyOfPackages, Merged: mergePackages(copyOfPackages)}
 }
 
-// VerifyZIPEntry verifies one derived file directly against an authenticated
-// APK descriptor. It rejects duplicate ZIP names and streams exactly the
-// expected size.
-func VerifyZIPEntry(ctx context.Context, ra io.ReaderAt, apkSize int64, entry string, expectedSize int64, expectedSHA256 string) error {
-	if ctx == nil {
-		ctx = context.Background()
-	}
-	if ra == nil || apkSize <= 0 || expectedSize < 0 || len(expectedSHA256) != sha256.Size*2 {
-		return fmt.Errorf("apk: invalid ZIP entry verification input")
-	}
-	verifier, err := NewZIPEntryVerifier(ra, apkSize)
-	if err != nil {
-		return err
-	}
-	return verifier.Verify(ctx, entry, expectedSize, expectedSHA256)
-}
-
+// Verify checks one derived file against an authenticated APK descriptor. It
+// rejects duplicate ZIP names and streams exactly the expected size.
 func (v *ZIPEntryVerifier) Verify(ctx context.Context, entry string, expectedSize int64, expectedSHA256 string) error {
 	if ctx == nil {
 		ctx = context.Background()
@@ -109,29 +95,15 @@ func (v *ZIPEntryVerifier) Verify(ctx context.Context, entry string, expectedSiz
 		return fmt.Errorf("apk: open authenticated ZIP entry: %w", err)
 	}
 	defer reader.Close()
-	hash := sha256.New()
-	buffer := make([]byte, 1<<20)
-	var total int64
-	for total <= expectedSize {
-		if err := ctx.Err(); err != nil {
-			return err
-		}
-		n, readErr := reader.Read(buffer)
-		if n > 0 {
-			total += int64(n)
-			if total > expectedSize {
-				return fmt.Errorf("apk: authenticated ZIP entry exceeds expected size")
-			}
-			_, _ = hash.Write(buffer[:n])
-		}
-		if readErr == io.EOF {
-			break
-		}
-		if readErr != nil {
-			return readErr
-		}
+	// One byte past the expected size is enough to detect overflow.
+	digest, total, err := integrity.SHA256Stream(ctx, io.LimitReader(reader, expectedSize+1))
+	if err != nil {
+		return err
 	}
-	if total != expectedSize || strings.ToLower(hex.EncodeToString(hash.Sum(nil))) != strings.ToLower(expectedSHA256) {
+	if total > expectedSize {
+		return fmt.Errorf("apk: authenticated ZIP entry exceeds expected size")
+	}
+	if total != expectedSize || !strings.EqualFold(digest, expectedSHA256) {
 		return fmt.Errorf("apk: authenticated ZIP entry digest mismatch")
 	}
 	return nil

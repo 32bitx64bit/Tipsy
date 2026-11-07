@@ -7,8 +7,6 @@ package integrity
 
 import (
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
@@ -149,16 +147,6 @@ func (g *Generation) NativeDescriptorSet() (*NativeDescriptorSet, error) {
 		return nil, err
 	}
 	return set, nil
-}
-
-// NativeDescriptors is a compatibility shim. Official integration must
-// consume NativeDescriptorSet so the generation binding is not discarded.
-func (g *Generation) NativeDescriptors() ([]NativeDescriptor, error) {
-	set, err := g.NativeDescriptorSet()
-	if err != nil {
-		return nil, err
-	}
-	return set.Descriptors()
 }
 
 func OpenGeneration(ctx context.Context, storeRoot, id string) (*Generation, error) {
@@ -366,33 +354,14 @@ func sameIdentity(a, b FileIdentity) bool {
 }
 
 func digestWithContext(ctx context.Context, file *os.File, size int64) (string, error) {
-	if err := ctx.Err(); err != nil {
+	digest, read, err := SHA256Stream(ctx, io.NewSectionReader(file, 0, size))
+	if err != nil {
 		return "", err
-	}
-	reader := io.NewSectionReader(file, 0, size)
-	buffer := make([]byte, 1<<20)
-	hash := sha256.New()
-	var read int64
-	for read < size {
-		if err := ctx.Err(); err != nil {
-			return "", err
-		}
-		n, err := reader.Read(buffer)
-		read += int64(n)
-		if n > 0 {
-			_, _ = hash.Write(buffer[:n])
-		}
-		if err != nil && !errors.Is(err, io.EOF) {
-			return "", err
-		}
-		if errors.Is(err, io.EOF) {
-			break
-		}
 	}
 	if read != size {
 		return "", io.ErrUnexpectedEOF
 	}
-	return hex.EncodeToString(hash.Sum(nil)), nil
+	return digest, nil
 }
 
 func readBoundedSafe(root, name string, maximum int, requireReadOnly bool) ([]byte, error) {

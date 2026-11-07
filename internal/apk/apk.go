@@ -164,22 +164,51 @@ func Inspect(ctx context.Context, paths []string) (*Report, error) {
 // ReadZipFile returns the uncompressed bytes of zipPath inside apkPath.
 // Nested containers from Inspect use "container.apkm!inner.apk" display paths.
 func ReadZipFile(apkPath, zipPath string) ([]byte, error) {
+	z, err := OpenZIPFiles(apkPath)
+	if err != nil {
+		return nil, err
+	}
+	defer z.Close()
+	return z.ReadFile(zipPath)
+}
+
+// ZIPFiles is one APK opened for repeated entry reads. Callers that pull many
+// entries from the same archive, such as native libraries of one XAPK inner
+// APK, open it once instead of once per entry.
+type ZIPFiles struct {
+	apkPath string
+	src     *apkSource
+	zr      *zip.Reader
+}
+
+// OpenZIPFiles opens apkPath once. Close releases it.
+func OpenZIPFiles(apkPath string) (*ZIPFiles, error) {
 	src, err := openSource(apkPath)
 	if err != nil {
 		return nil, err
 	}
-	defer src.Close()
 	zr, err := zip.NewReader(src.Reader, src.Size)
 	if err != nil {
+		src.Close()
 		return nil, fmt.Errorf("apk: open zip %s: %w", apkPath, err)
 	}
+	return &ZIPFiles{apkPath: apkPath, src: src, zr: zr}, nil
+}
+
+// ReadFile returns the uncompressed bytes of zipPath inside the opened APK.
+func (z *ZIPFiles) ReadFile(zipPath string) ([]byte, error) {
 	zipPath = strings.TrimPrefix(filepath.ToSlash(zipPath), "/")
-	for _, f := range zr.File {
+	for _, f := range z.zr.File {
 		if filepath.ToSlash(f.Name) == zipPath {
 			return readZipEntry(f)
 		}
 	}
-	return nil, fmt.Errorf("apk: %s: %s not found", apkPath, zipPath)
+	return nil, fmt.Errorf("apk: %s: %s not found", z.apkPath, zipPath)
+}
+
+// Close releases the opened APK.
+func (z *ZIPFiles) Close() error {
+	return z.src.Close()
 }
 
 func inspectSource(src *apkSource) (*Package, error) {
