@@ -533,5 +533,4 @@ func resetEngineMouseBehavior() {
 	mouseBehaviorAuthority.disabled.Store(false)
 	mouseBehaviorAuthority.seen.Store(false)
 	mouseBehaviorAuthority.mismatch.Store(0)
-	resetEngineCursorHidden()
 }

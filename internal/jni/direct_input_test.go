@@ -2096,7 +2096,6 @@ func TestAlwaysPolicyOffViewZoomOutNeverRecentersTheWheel(t *testing.T) {
 func TestEngineLockCurrentPositionEngagesAnAnchoredGrabAndMovesNoCursor(t *testing.T) {
 	selectPointerPath(t, "direct")
 	wireRecordingDirectTarget(t, 0x1234, 0x5678)
-	stubCursorHidden(t, false, true)
 	calls := stubCaptureSeams(t)
 	vm := newCaptureVM(t)
 	enterExperienceForTest(t, vm, 79966250354565)
@@ -2163,7 +2162,6 @@ func TestEngineLockCurrentPositionEngagesAnAnchoredGrabAndMovesNoCursor(t *testi
 func TestEngineLockCurrentPositionReleaseRestoresFrozenOrigin(t *testing.T) {
 	selectPointerPath(t, "direct")
 	wireRecordingDirectTarget(t, 0x1234, 0x5678)
-	stubCursorHidden(t, false, true)
 	calls := stubCaptureSeams(t)
 	vm := newCaptureVM(t)
 	enterExperienceForTest(t, vm, 79966250354565)

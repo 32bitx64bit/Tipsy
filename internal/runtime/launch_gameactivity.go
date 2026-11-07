@@ -594,7 +594,6 @@ func wireRobloxDirectInput(mod *loader.Module, env *jni.Env, cacheDir, libroblox
 	}
 	class := env.FindClass("com/roblox/engine/jni/NativeInputInterface")
 	jni.SetRobloxDirectInputTarget(env.Raw(), class, buttonFn, moveFn, wheelFn, lockedFn)
-	jni.InitEngineCursorHidden(mod.Base, mod.Size, cacheDir, librobloxBuild)
 	// Camera sampling always runs for first-person capture; only its trace is optional.
 	jni.InitEngineCamera(mod.Base, mod.Size)
 }

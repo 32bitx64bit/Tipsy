@@ -905,8 +905,8 @@ var engineAnchorLock struct {
 	active           bool
 	x, y             float32
 	originX, originY float32
-	// centered distinguishes the centered (camera first-person or hidden-cursor)
-	// lock from the lock-in-place one. It must survive the hidden->visible edge
+	// centered distinguishes the camera first-person lock from the
+	// lock-in-place one. It must survive the hidden->visible edge
 	// so that edge still releases the grab at the window center.
 	centered bool
 	// zoomIn is the retained name for a camera first-person centered lock.
@@ -949,14 +949,6 @@ func engineAnchorZoomCentered() bool {
 	engineAnchorLock.mu.Lock()
 	defer engineAnchorLock.mu.Unlock()
 	return engineAnchorLock.active && engineAnchorLock.zoomIn
-}
-
-// engineAnchorHiddenCentered reports a centered lock taken only because the
-// engine cursor was hidden; a visible cursor reshapes it to lock-in-place.
-func engineAnchorHiddenCentered() bool {
-	engineAnchorLock.mu.Lock()
-	defer engineAnchorLock.mu.Unlock()
-	return engineAnchorLock.active && engineAnchorLock.centered && !engineAnchorLock.zoomIn
 }
 
 // rememberEngineAnchorOrigin records the engage-time frozen origin. Only a
@@ -1015,9 +1007,10 @@ func engineAnchorPoint(preferX, preferY float32, havePrefer bool) (float32, floa
 }
 
 // engageEngineAnchorLock mirrors the engine's LockCurrentPosition on the host.
-// A first-person camera or a known-hidden engine cursor selects the centered
-// lock; otherwise the grab stays at the cursor's frozen origin. The integrator keeps running in
-// either shape, so look, buttons and wheel retain anchor-style delivery.
+// A first-person camera selects the centered lock; otherwise the grab stays at
+// the cursor's frozen origin. The
+// integrator keeps running in either shape, so look, buttons and wheel retain
+// anchor-style delivery.
 // Returns false when no honest anchor point exists yet, or when the host
 // refused the grab.
 func engageEngineAnchorLock(edge string, preferX, preferY float32, havePrefer bool) bool {
@@ -1025,35 +1018,21 @@ func engageEngineAnchorLock(edge string, preferX, preferY float32, havePrefer bo
 }
 
 // adoptEngineAnchorLock hands an already-held grab to the engine on a button
-// edge. Matching visible-icon anchors are reused without a host call; a hidden
-// anchor (or a hidden->visible shape change) re-anchors that grab as needed.
+// edge. A matching anchor is reused without a host call.
 func adoptEngineAnchorLock(edge string) bool {
 	return takeEngineAnchorLock(edge, 0, 0, false, false)
 }
 
 func takeEngineAnchorLock(edge string, preferX, preferY float32, havePrefer, reacquire bool) bool {
-	hidden, hiddenOK := engineCursorHiddenSource()
 	// The lock's shape is decided when it starts: a camera first-person lock
 	// stays centered for its whole life, whatever the cursor reader says later.
 	// Held RMB keeps its long-standing lock-in-place shape.
 	cameraFirstPerson := engineCameraFirstPersonSource() && !secondaryButtonHeld() && !rmbPointerFallback.Load()
 	zoomIn := engineAnchorZoomCentered() || (!engineAnchorActive() && cameraFirstPerson)
 	if zoomIn {
-		return takeHiddenEngineAnchorLock(edge, reacquire, true)
+		return takeCenteredEngineAnchorLock(edge, reacquire)
 	}
-	if engineAnchorHiddenCentered() && (!hiddenOK || !hidden) {
-		// The engine still reports LockCurrentPosition, so this is a change of
-		// lock shape rather than a release to Free. End the hidden lock at the
-		// center, then let the visible-icon path below lock there in place. The
-		// absolute center announcement is deferred until MouseBehavior changes.
-		releaseEngineLockAtCenter(edge)
-		// adoptEngineAnchorLock normally reuses a grab, but the shape change
-		// above released it; this visible-icon lock must take a fresh one.
-		reacquire = true
-	}
-	if hiddenOK && hidden {
-		return takeHiddenEngineAnchorLock(edge, reacquire, false)
-	}
+	// LockCurrentPosition freezes the engine cursor where it is.
 	x, y, ok := engineAnchorPoint(preferX, preferY, havePrefer)
 	if !ok {
 		return false
@@ -1088,18 +1067,18 @@ func takeEngineAnchorLock(edge string, preferX, preferY float32, havePrefer, rea
 	return true
 }
 
-// takeHiddenEngineAnchorLock is the centered LockCurrentPosition shape, taken
-// for camera first person or a hidden engine cursor (Project 12 does both). The
+// takeCenteredEngineAnchorLock is the centered LockCurrentPosition shape, taken
+// only for camera first person (Project 12). The
 // X11 grab warps the host pointer to the window center and only then confines
 // it; the entry announcement seeds both direct dispatch and the anchor-style
 // fallback integrator there. Relative samples continue through
 // DispatchRobloxDirectPointerFallbackDelta; only the lock and release geometry
-// differ from a visible-icon anchor.
-func takeHiddenEngineAnchorLock(edge string, reacquire, zoomIn bool) bool {
+// differ from a lock-in-place anchor.
+func takeCenteredEngineAnchorLock(edge string, reacquire bool) bool {
 	if engineAnchorCentered() && !reacquire {
 		return true
 	}
-	if zoomIn && !engineAnchorActive() && persistentPointerCapture.Load() {
+	if !engineAnchorActive() && persistentPointerCapture.Load() {
 		if _, _, ok := RobloxDirectFallbackPosition(); ok {
 			// The persistent grab was centered on entry; the engine takes it over
 			// in place so look keeps integrating without a second jump.
@@ -1123,7 +1102,7 @@ func takeHiddenEngineAnchorLock(edge string, reacquire, zoomIn bool) bool {
 	pointerLockSticky.Store(false)
 	engaged := !engineAnchorActive()
 	cx, cy := announceCenteredCapture(true)
-	storeEngineAnchorLockMode(true, cx, cy, true, zoomIn)
+	storeEngineAnchorLockMode(true, cx, cy, true, true)
 	if engaged {
 		rememberEngineAnchorOrigin(cx, cy)
 	}
@@ -1190,7 +1169,7 @@ func releaseEngineLockAtCenter(edge string) {
 //
 // The engine's lock and Tipsy's own desktop capture policy are separate
 // decisions. When the state machine still wants the pointer confined (the
-// engine hides its cursor or the always policy is active) it recenters the held
+// camera first person or the always policy) it recenters the held
 // grab on entry. Otherwise the pointer goes free on this edge.
 func releaseEngineLockAtOrigin(edge string) {
 	x, y, ok := engineAnchorFrozenOrigin()
@@ -1226,20 +1205,18 @@ func releaseEngineLockAtOrigin(edge string) {
 }
 
 // releaseEngineAnchor applies the release geometry belonging to the lock that
-// was actually held, not the cursor's new visibility. In particular, a hidden
-// anchor remains center-releasing when the hidden->visible and Default edges
-// arrive together. Centered locks release at the center; lock-in-place ones
+// was actually held. Centered locks release at the center; lock-in-place ones
 // at the frozen origin.
 func releaseEngineAnchor(edge string) {
 	if engineAnchorCentered() {
-		releaseHiddenEngineAnchorAtCenter(edge)
+		releaseCenteredEngineAnchor(edge)
 		return
 	}
 	releaseEngineLockAtOrigin(edge)
 }
 
-func releaseHiddenEngineAnchorAtCenter(edge string) {
-	// A still-hidden engine cursor (or the Always opt-in) takes over the same
+func releaseCenteredEngineAnchor(edge string) {
+	// Camera first person (or the Always opt-in) takes over the same
 	// centered host grab instead of briefly freeing it. This is a state handoff,
 	// not a release to Free, so it needs no additional absolute center move.
 	if persistentAcquireWanted() && inExperience() {
@@ -1289,7 +1266,7 @@ func acquirePersistentCaptureAtCenter(cause captureState) bool {
 	announceCenteredCapture(true)
 	// A centered persistent grab supersedes the held-RMB fallback. Clearing
 	// here covers every conversion, including the relative-motion handoff from
-	// an RMB gesture to CursorHidden/AlwaysOptIn that leaves the button down.
+	// an RMB gesture to camera first person/AlwaysOptIn that leaves the button down.
 	rmbPointerFallback.Store(false)
 	publishPersistentCapture(cause)
 	return true
@@ -1344,7 +1321,7 @@ func releasePersistentCapture(edge string) {
 
 // reconcilePersistentCapture re-evaluates the persistent grab after a button,
 // wheel or motion edge. It releases a grab the state machine no longer wants,
-// re-centers a held grab whose state changed to CursorHidden or AlwaysOptIn,
+// re-centers a held grab whose state changed to camera first person or AlwaysOptIn,
 // and takes a new one only for camera first person; AlwaysOptIn acquires on its
 // own edges.
 func reconcilePersistentCapture() {
@@ -1599,9 +1576,6 @@ func selectCaptureState(in captureInputs) captureState {
 	return captureFree
 }
 
-// engineCursorHiddenSource is the legacy cursor-hidden reader; tests substitute it.
-var engineCursorHiddenSource = EngineCursorHidden
-
 // engineCameraFirstPersonSource is the camera detector; tests substitute it.
 var engineCameraFirstPersonSource = EngineCameraFirstPerson
 
@@ -1642,7 +1616,7 @@ func wantedCaptureState(obs engineLockObservation) captureState {
 }
 
 // persistentWantedState ranks only the states that use the persistent
-// grab (CursorHidden, AlwaysOptIn); engine locks and RMB own their own grabs.
+// grab (camera first person, AlwaysOptIn); engine locks and RMB own their own grabs.
 func persistentWantedState() captureState {
 	in := liveCaptureInputs(engineLockObservation{})
 	in.rmb = false
@@ -1678,20 +1652,17 @@ func noteCaptureTransition(edge string) {
 			nowName := now.String()
 			if now == captureEngineAnchor && engineAnchorZoomCentered() {
 				nowName = "EngineAnchor(zoom)"
-			} else if now == captureEngineAnchor && engineAnchorCentered() {
-				nowName = "EngineAnchor(hidden)"
 			}
 			behavior := "unavailable"
 			if engineBehavior.known.Load() {
 				behavior = MouseBehavior(engineBehavior.value.Load()).String()
 			}
-			hidden, ok := engineCursorHiddenSource()
 			warp := captureWarpTarget
 			if warp == "" {
 				warp = "none"
 			}
 			logging.Logger(logging.CatJNI).Info(fmt.Sprintf("[jni] capture state: %s -> %s", old, nowName),
-				"MouseBehavior", behavior, "hidden", hidden, "hiddenAvailable", ok, "warp", warp, "edge", edge)
+				"MouseBehavior", behavior, "warp", warp, "edge", edge)
 		}
 	}
 	captureWarpTarget = ""
@@ -1947,7 +1918,7 @@ func handleX11InputEvent(ev x11.InputEvent) {
 				storeEngineAnchorLock(false, 0, 0)
 				// Free keeps the host cursor hidden, matching the engine's
 				// window-scoped blank cursor; a state that acquires on the next
-				// absolute motion (always, cursor-hidden) hides it as well.
+				// absolute motion (always, camera first person) hides it as well.
 				pointerCursorSetter(false)
 			}
 		}
@@ -2157,14 +2128,7 @@ func handleX11InputEvent(ev x11.InputEvent) {
 							engageEngineAnchorLock("absolute move", ev.X, ev.Y, true)
 							return
 						}
-						if engineAnchorHiddenCentered() {
-							// A hidden->visible edge without a MouseBehavior change still
-							// ends the centered lock at the center; takeEngineAnchorLock
-							// then applies the visible-icon lock-in-place shape.
-							if hidden, ok := engineCursorHiddenSource(); !ok || !hidden {
-								engageEngineAnchorLock(edge, 0, 0, false)
-							}
-						} else if !engineAnchorActive() {
+						if !engineAnchorActive() {
 							engageEngineAnchorLock(edge, 0, 0, false)
 						} else if _, _, held := RobloxDirectFallbackPosition(); !held {
 							// The integrator was cleared (focus loss, a target
@@ -2188,7 +2152,7 @@ func handleX11InputEvent(ev x11.InputEvent) {
 						// The engine left LockCurrentPosition for Default and the edge
 						// that ended it did not release synchronously, so the release
 						// lands on this transition sample, which is consumed. A centered
-						// (zoom-in or hidden) lock releases at the center; a lock-in-place
+						// (camera first-person) lock releases at the center; a lock-in-place
 						// one, RMB camera-look above all, at its frozen origin.
 						releaseEngineAnchor("captured motion")
 						return
@@ -2238,8 +2202,8 @@ func handleX11InputEvent(ev x11.InputEvent) {
 						return
 					}
 					if !persistentAcquireWanted() {
-						// The state machine left CursorHidden (the engine cursor is
-						// visible again) and nothing else wants the grab: Free. The
+						// The state machine left camera first person and nothing
+						// else wants the grab: Free. The
 						// relative sample is the dying grab's and is consumed.
 						releasePersistentCapture("relative motion")
 						return
@@ -2357,7 +2321,7 @@ func handleX11InputEvent(ev x11.InputEvent) {
 						logging.Logger(logging.CatJNI).Info("[jni] held-RMB pointer-lock fallback acquired")
 					}
 				case captureCameraFirstPerson:
-					// The engine hides its cursor but no grab is held yet: the
+					// Camera first person but no grab is held yet: the
 					// edge is already delivered, so take the persistent grab here.
 					reconcilePersistentCapture()
 				}
@@ -2558,11 +2522,6 @@ func handleX11InputEvent(ev x11.InputEvent) {
 				// delivered at wx,wy, which is the logical cursor the engine
 				// froze, so no move and no centering is needed here at all.
 				if engineAnchorActive() {
-					if engineAnchorHiddenCentered() {
-						if hidden, ok := engineCursorHiddenSource(); !ok || !hidden {
-							engageEngineAnchorLock("wheel detent", wx, wy, true)
-						}
-					}
 					break
 				}
 				persistentPointerCapture.Store(false)
@@ -2583,7 +2542,7 @@ func handleX11InputEvent(ev x11.InputEvent) {
 				releaseEngineLockAtCenter("wheel detent")
 			}
 		}
-		// Re-evaluate the engine's cursor-hidden state on the detent too.
+		// Re-evaluate the capture state on the detent too.
 		reconcilePersistentCapture()
 	}
 }
