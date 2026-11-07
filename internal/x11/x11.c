@@ -2205,6 +2205,17 @@ int tipsy_x11_pump(uintptr_t dpy_ptr, unsigned long xid, unsigned long wm_delete
 						tipsy_capture.anchor_x = ax;
 						tipsy_capture.anchor_y = ay;
 						tipsy_warp_to_anchor(dpy, win);
+						// A shrinking resize makes the server clamp the confined
+						// pointer into the new window, queuing a core MotionNotify
+						// at the new edge. That is geometry, not physical travel;
+						// read as relative motion it jerks the camera by the
+						// anchor-to-edge distance. Drop it with the recenter's own
+						// motion, as unlock does.
+						XSync(dpy, False);
+						tipsy_discard_queued_motion(dpy, win);
+						tipsy_capture.ignore_warps = 0;
+						tipsy_capture.last_x = tipsy_capture.anchor_x;
+						tipsy_capture.last_y = tipsy_capture.anchor_y;
 					}
 				}
 				if (inout_w != NULL) {
