@@ -11,9 +11,9 @@ This guide is the contribution contract. Please read the [README](README.md),
 ## Start here
 
 The supported development target is Linux x86_64-v3 (AVX2), matching official
-packages. Tipsy uses Go 1.27.1, a C compiler, pkg-config, Qt 6, and the native
+packages. Tipsy uses Go 1.27.3, a C compiler, pkg-config, Qt 6, and the native
 headers listed in the README's
-[source-build instructions](README.md#compile-from-source).
+[source-build instructions](README.md#build-from-source).
 
 ```sh
 git clone https://github.com/32bitx64bit/Tipsy.git

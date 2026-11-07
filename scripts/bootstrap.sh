@@ -18,7 +18,7 @@ if command -v go >/dev/null 2>&1; then
 	ver=$(go version)
 	pass "Go: $ver"
 else
-	bad "Go not found. Install Go 1.23+ and retry."
+	bad "Go not found. Install Go 1.27+ and retry."
 fi
 
 arch=$(uname -m)

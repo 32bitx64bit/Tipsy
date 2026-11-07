@@ -477,9 +477,10 @@ TIPSY_MICROPHONE_SOURCE=<name>     Pin a Pulse source (unset = host default)
 > [!NOTE]
 > The target is Linux x86_64-v3 (`GOAMD64=v3`, AVX2). The CLI is Go-first, and
 > the GUI uses Qt 6 through [MIQT](https://github.com/mappu/miqt). Both
-> binaries use cgo against X11, EGL/GLES, Pango/Cairo, and PulseAudio. Vulkan
-> development headers are not required; the Vulkan path `dlopen`s the host
-> loader at runtime.
+> binaries use cgo against X11, EGL/GLES, Vulkan, Pango/Cairo, and PulseAudio.
+> Vulkan development headers are required at build time (CI installs
+> `libvulkan-dev` / `vulkan-headers`); the Vulkan loader itself is `dlopen`ed
+> at runtime.
 
 GitHub Actions runs `gofmt`, `go vet`, the full `go test` suite under Xvfb, and
 CLI/GUI builds on Ubuntu 22.04, Ubuntu 24.04, Debian Bookworm, and Fedora 43.
@@ -488,7 +489,7 @@ synthesizes them from `qmake6`.)
 
 | Tool | Version |
 | --- | --- |
-| Go | 1.27.1 (matches `go.mod` and CI) |
+| Go | 1.27.3 (matches `go.mod` and CI) |
 | C compiler | `gcc` or `g++` |
 | pkg-config | needed for the native libraries and the Qt GUI |
 
