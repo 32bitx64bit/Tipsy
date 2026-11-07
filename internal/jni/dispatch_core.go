@@ -198,13 +198,6 @@ func init() {
 		return obj, true
 	})
 	registerCore("bootstrapTheApp()V", func(vm *VM, env unsafe.Pointer, o *Object, obj C.jobject, args *C.jvalue) (C.jobject, bool) {
-		if onBootstrap != nil {
-			key := uintptr(env)
-			if key == 0 {
-				key = vm.currentEnvKey()
-			}
-			onBootstrap(key, uintptr(obj))
-		}
 		return obj, true
 	})
 	noopObj := func(vm *VM, env unsafe.Pointer, o *Object, obj C.jobject, args *C.jvalue) (C.jobject, bool) {

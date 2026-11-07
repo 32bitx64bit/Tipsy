@@ -454,7 +454,10 @@ func TestRbxTextBoxInfoRefreshMissingAndNullFailOnce(t *testing.T) {
 			env := vm.Env()
 			SetRobloxTextInputTarget(env, env.FindClass("com/roblox/engine/jni/NativeGLInterface"),
 				testRbxRecordPassFn(), 0, 0, tc.getInfoFn, caller)
-			if RefreshRbxTextOverlayInfo() || RefreshRbxTextOverlayInfo() {
+			if RefreshRbxTextOverlayInfo() {
+				t.Fatal("missing/null getter fabricated a text-box configuration")
+			}
+			if RefreshRbxTextOverlayInfo() {
 				t.Fatal("missing/null getter fabricated a text-box configuration")
 			}
 			if calls > 1 {

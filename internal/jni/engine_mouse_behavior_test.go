@@ -415,9 +415,6 @@ func TestEngineMouseBehaviorReadsTheEnumWord(t *testing.T) {
 			if got != MouseBehavior(value) {
 				t.Fatalf("behavior=%v, want %v", got, MouseBehavior(value))
 			}
-			if !engineBehaviorAuthoritative() {
-				t.Fatal("a valid read did not make the authority authoritative")
-			}
 		})
 	}
 }
@@ -435,9 +432,6 @@ func TestEngineMouseBehaviorNULLObjectIsUnavailable(t *testing.T) {
 	}
 	if got != MouseBehaviorDefault {
 		t.Fatalf("behavior=%v, want the Default zero value with ok=false", got)
-	}
-	if engineBehaviorAuthoritative() {
-		t.Fatal("a NULL object must not make the authority authoritative")
 	}
 }
 
@@ -494,12 +488,9 @@ func TestEngineMouseBehaviorValidatorIsPolicedByTheExportedBoolean(t *testing.T)
 	if !mouseBehaviorAuthority.disabled.Load() {
 		t.Fatal("three consecutive disagreements did not disable the authority")
 	}
-	if engineBehaviorAuthoritative() {
-		t.Fatal("a disabled authority still reported itself authoritative")
-	}
 
 	resetEngineMouseBehavior()
-	if mouseBehaviorAuthority.disabled.Load() || mouseBehaviorAuthority.seen.Load() ||
+	if mouseBehaviorAuthority.disabled.Load() ||
 		mouseBehaviorAuthority.mismatch.Load() != 0 ||
 		mouseBehaviorAuthority.attempted || mouseBehaviorAuthority.layout != nil {
 		t.Fatal("resetEngineMouseBehavior left a latch behind")
@@ -543,7 +534,7 @@ func TestResetEngineMouseBehaviorClearsEveryLatch(t *testing.T) {
 	resetEngineMouseBehavior()
 	if mouseBehaviorAuthority.attempted || mouseBehaviorAuthority.getter != 0 ||
 		mouseBehaviorAuthority.layout != nil || mouseBehaviorAuthority.disabled.Load() ||
-		mouseBehaviorAuthority.seen.Load() || mouseBehaviorAuthority.mismatch.Load() != 0 {
+		mouseBehaviorAuthority.mismatch.Load() != 0 {
 		t.Fatal("resetEngineMouseBehavior left a latch behind")
 	}
 }
@@ -553,9 +544,6 @@ func TestEngineMouseBehaviorDisabledByDefaultFailsClosed(t *testing.T) {
 	resetEngineMouseBehavior()
 	if got, ok := EngineMouseBehavior(); ok || got != MouseBehaviorDefault {
 		t.Fatalf("behavior=(%v,%t) with no target, want (Default,false)", got, ok)
-	}
-	if engineBehaviorAuthoritative() {
-		t.Fatal("an unwired process reported the authority as authoritative")
 	}
 }
 

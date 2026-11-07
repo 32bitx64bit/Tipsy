@@ -32,7 +32,6 @@ func writeGamepadConfigFile(t *testing.T, body string) {
 func selectGamepadConfigFile(t *testing.T, body string, env map[string]string) {
 	t.Helper()
 	writeGamepadConfigFile(t, body)
-	t.Setenv("TIPSY_GAMEPAD_PATH", "direct")
 	t.Setenv("TIPSY_GAMEPAD", "")
 	t.Setenv("TIPSY_GAMEPAD_DEADZONE", "")
 	for k, v := range env {

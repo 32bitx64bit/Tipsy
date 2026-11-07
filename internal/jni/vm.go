@@ -133,11 +133,6 @@ func (vm *VM) NativeInterface() uintptr {
 	return uintptr(vm.functions)
 }
 
-// Handle is an alias for JavaVM().
-func (vm *VM) Handle() uintptr {
-	return vm.JavaVM()
-}
-
 // SetAppVersion sets the APK versionName used by getAppVersion and
 // DeviceStaticParams.appVersion.
 func (vm *VM) SetAppVersion(version string) {
@@ -226,13 +221,6 @@ func (vm *VM) screenPhysicalSizeMM() (int32, int32) {
 		return int32((int64(w)*254 + 480) / 960), int32((int64(h)*254 + 480) / 960)
 	}
 	return w, h
-}
-
-var onBootstrap func(env, activity uintptr)
-
-// SetOnBootstrap is called from Java MainGameActivity.bootstrapTheApp().
-func SetOnBootstrap(fn func(env, activity uintptr)) {
-	onBootstrap = fn
 }
 
 func (vm *VM) fillDisplayMetricsLocked(m *Object) {

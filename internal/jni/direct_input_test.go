@@ -88,8 +88,6 @@ func (s *scriptedEngineMouseBehavior) read() (MouseBehavior, bool) {
 	if value > MouseBehaviorLockCurrentPosition {
 		return MouseBehaviorDefault, false
 	}
-	// Emulate the latch EngineMouseBehavior sets on a valid read.
-	mouseBehaviorAuthority.seen.Store(true)
 	return value, true
 }
 
@@ -2467,9 +2465,6 @@ func TestEngineAnchorLockConvertsAnExistingCameraGrabInPlace(t *testing.T) {
 	if currentCaptureState() != captureCameraFirstPerson || !persistentPointerCapture.Load() || len(calls.center) != 1 || !calls.center[0] || len(calls.cursor) != 0 {
 		t.Fatalf("camera state: state=%v persistent=%t calls=%+v",
 			currentCaptureState(), persistentPointerCapture.Load(), calls)
-	}
-	if engineBehaviorAuthoritative() {
-		t.Fatal("an authority that never answered reported itself authoritative")
 	}
 
 	// The engine then answers 2. The grab it wants is the grab already held,

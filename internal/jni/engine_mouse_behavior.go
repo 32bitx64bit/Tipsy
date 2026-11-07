@@ -371,8 +371,6 @@ var mouseBehaviorAuthority struct {
 	// disabled latches the authority off: a decode failure, an out-of-range
 	// value, or the exported boolean disagreeing with the read.
 	disabled atomic.Bool
-	// seen latches on the first valid read and retires the zoom heuristic.
-	seen     atomic.Bool
 	mismatch atomic.Int32
 }
 
@@ -412,7 +410,6 @@ func EngineMouseBehavior() (MouseBehavior, bool) {
 		disableEngineMouseBehavior(fmt.Sprintf("read %d, which is not an Enum.MouseBehavior value", value))
 		return MouseBehaviorDefault, false
 	}
-	mouseBehaviorAuthority.seen.Store(true)
 	return MouseBehavior(value), true
 }
 
@@ -509,17 +506,9 @@ func disableEngineMouseBehavior(reason string) {
 	if mouseBehaviorAuthority.disabled.Swap(true) {
 		return
 	}
-	mouseBehaviorAuthority.seen.Store(false)
 	logging.Logger(logging.CatJNI).Error(
 		"[jni] engine MouseBehavior authority disabled; falling back to the exported boolean",
 		"reason", reason)
-}
-
-// engineBehaviorAuthoritative reports whether the enum authority has produced
-// at least one valid read in this process and has not been disabled. It gates
-// the wheel-driven zoom heuristic.
-func engineBehaviorAuthoritative() bool {
-	return mouseBehaviorAuthority.seen.Load() && !mouseBehaviorAuthority.disabled.Load()
 }
 
 // resetEngineMouseBehavior drops the decode and every latch so a re-wired
@@ -531,6 +520,5 @@ func resetEngineMouseBehavior() {
 	mouseBehaviorAuthority.layout = nil
 	mouseBehaviorAuthority.mu.Unlock()
 	mouseBehaviorAuthority.disabled.Store(false)
-	mouseBehaviorAuthority.seen.Store(false)
 	mouseBehaviorAuthority.mismatch.Store(0)
 }

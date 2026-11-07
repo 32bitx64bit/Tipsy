@@ -126,9 +126,6 @@ func keyboardDeliveryPath() KeyboardDeliveryPath {
 	return keyboardPath.value
 }
 
-// KeyboardInputPath reports the selected keyboard delivery path.
-func KeyboardInputPath() KeyboardDeliveryPath { return keyboardDeliveryPath() }
-
 // ResetKeyboardInputPath makes the next lookup re-read TIPSY_KEY_INPUT_PATH.
 func ResetKeyboardInputPath() {
 	keyboardPath.Once = sync.Once{}

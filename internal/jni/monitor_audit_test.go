@@ -21,13 +21,19 @@ func TestAuditMonitorRecursionAndOwnership(t *testing.T) {
 	// Explicit identities test the monitor bookkeeping without native pthread attachment.
 	var tokens [2]byte
 	e1, e2 := unsafe.Pointer(&tokens[0]), unsafe.Pointer(&tokens[1])
-	if !vm.monitorEnter(e1, a) || !vm.monitorEnter(e1, a) {
+	if !vm.monitorEnter(e1, a) {
+		t.Fatal("recursive enter")
+	}
+	if !vm.monitorEnter(e1, a) {
 		t.Fatal("recursive enter")
 	}
 	if vm.monitorExit(e2, a) {
 		t.Fatal("wrong owner accepted")
 	}
-	if !vm.monitorExit(e1, a) || !vm.monitorExit(e1, a) {
+	if !vm.monitorExit(e1, a) {
+		t.Fatal("recursive exit")
+	}
+	if !vm.monitorExit(e1, a) {
 		t.Fatal("recursive exit")
 	}
 	if vm.monitorExit(e1, a) {
@@ -49,7 +55,10 @@ func TestAuditMonitorDetachWakesWaiter(t *testing.T) {
 	a := testNewByteObject(vm, []byte{1})
 	var tokens [2]byte
 	e1, e2 := unsafe.Pointer(&tokens[0]), unsafe.Pointer(&tokens[1])
-	if !vm.monitorEnter(e1, a) || !vm.monitorEnter(e1, a) {
+	if !vm.monitorEnter(e1, a) {
+		t.Fatal("enter")
+	}
+	if !vm.monitorEnter(e1, a) {
 		t.Fatal("enter")
 	}
 	done := make(chan bool, 1)

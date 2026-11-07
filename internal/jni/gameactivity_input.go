@@ -909,9 +909,6 @@ var engineAnchorLock struct {
 	// lock-in-place one. It must survive the hidden->visible edge
 	// so that edge still releases the grab at the window center.
 	centered bool
-	// zoomIn is the retained name for a camera first-person centered lock.
-	// Cursor visibility never reshapes it.
-	zoomIn bool
 }
 
 func engineAnchorActive() bool {
@@ -924,14 +921,13 @@ func engineAnchorActive() bool {
 // the host grab was taken at while it is active. Clearing also forgets the
 // frozen origin, which belongs to a live lock.
 func storeEngineAnchorLock(active bool, x, y float32) {
-	storeEngineAnchorLockMode(active, x, y, false, false)
+	storeEngineAnchorLockMode(active, x, y, false)
 }
 
-func storeEngineAnchorLockMode(active bool, x, y float32, centered, zoomIn bool) {
+func storeEngineAnchorLockMode(active bool, x, y float32, centered bool) {
 	engineAnchorLock.mu.Lock()
 	engineAnchorLock.active, engineAnchorLock.x, engineAnchorLock.y = active, x, y
 	engineAnchorLock.centered = active && centered
-	engineAnchorLock.zoomIn = active && centered && zoomIn
 	if !active {
 		engineAnchorLock.originX, engineAnchorLock.originY = 0, 0
 	}
@@ -945,10 +941,9 @@ func engineAnchorCentered() bool {
 }
 
 // engineAnchorZoomCentered reports a centered lock taken for camera first person.
+// The camera zoom lock is the centered lock: there is no separate shape.
 func engineAnchorZoomCentered() bool {
-	engineAnchorLock.mu.Lock()
-	defer engineAnchorLock.mu.Unlock()
-	return engineAnchorLock.active && engineAnchorLock.zoomIn
+	return engineAnchorCentered()
 }
 
 // rememberEngineAnchorOrigin records the engage-time frozen origin. Only a
@@ -1085,7 +1080,7 @@ func takeCenteredEngineAnchorLock(edge string, reacquire bool) bool {
 			persistentPointerCapture.Store(false)
 			pointerLockSticky.Store(false)
 			cx, cy := pointerViewportCenter()
-			storeEngineAnchorLockMode(true, cx, cy, true, true)
+			storeEngineAnchorLockMode(true, cx, cy, true)
 			rememberEngineAnchorOrigin(cx, cy)
 			pointerCursorSetter(false)
 			noteEngineAnchorEngaged(edge, true)
@@ -1102,7 +1097,7 @@ func takeCenteredEngineAnchorLock(edge string, reacquire bool) bool {
 	pointerLockSticky.Store(false)
 	engaged := !engineAnchorActive()
 	cx, cy := announceCenteredCapture(true)
-	storeEngineAnchorLockMode(true, cx, cy, true, true)
+	storeEngineAnchorLockMode(true, cx, cy, true)
 	if engaged {
 		rememberEngineAnchorOrigin(cx, cy)
 	}

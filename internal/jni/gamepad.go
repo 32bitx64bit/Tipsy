@@ -46,25 +46,9 @@ const (
 	sourceJoystick = int32(0x1000010)
 )
 
-var gamepadPathOnce sync.Once
-
-// gamepadPathNote parses TIPSY_GAMEPAD_PATH once and ignores it: pads are
-// direct-only, so any non-direct value logs one warn and delivery still goes
-// direct. Unset (or direct) is silent.
-func gamepadPathNote() {
-	gamepadPathOnce.Do(func() {
-		raw := strings.TrimSpace(os.Getenv("TIPSY_GAMEPAD_PATH"))
-		if raw == "" || strings.EqualFold(raw, "direct") {
-			return
-		}
-		logging.Logger(logging.CatJNI).Info("[jni] gamepad path ignored (direct-only lean build)",
-			"TIPSY_GAMEPAD_PATH", raw)
-	})
-}
-
-// GamepadInputPath reports the pad feed-in arm. Always direct; the selector
-// is parsed-but-ignored (see gamepadPathNote).
-func GamepadInputPath() string { gamepadPathNote(); return "direct" }
+// GamepadInputPath reports the pad feed-in arm. Pads are direct-only, so the
+// selector is constant.
+func GamepadInputPath() string { return "direct" }
 
 // gamepadLive serves the effective gamepad settings for the process: the
 // persisted "gamepad" section of the settings file overlaid with the
@@ -116,7 +100,6 @@ func gamepadDebug() bool {
 // ResetGamepadInputPath re-reads the environment and settings file on the next
 // lookup and clears the pad delivery state. Test seam.
 func ResetGamepadInputPath() {
-	gamepadPathOnce = sync.Once{}
 	gamepadDebugOnce = sync.Once{}
 	gamepadDebugValue = false
 	gamepadLive.Reset()
@@ -671,7 +654,6 @@ func reconcileGamepadSwitchLocked(snap gamepad.LiveSnapshot) bool {
 // While the controller switch is off the pad is remembered but never shown to
 // the engine; it is announced when the switch comes back on.
 func GamepadConnected(deviceID, gamepadType int32, keys []int, motions []int) bool {
-	gamepadPathNote()
 	snap := gamepadLive.Get()
 	gamepadState.mu.Lock()
 	defer gamepadState.mu.Unlock()
@@ -735,7 +717,6 @@ func GamepadDisconnected(deviceID int32) bool {
 // (rate-limited stat, see gamepadLive): turning it off withdraws the pad
 // mid-session and drops frames; turning it back on re-announces it.
 func handleGamepadFrame(af gamepad.AndroidFrame) {
-	gamepadPathNote()
 	handleGamepadFrameSnap(gamepadLive.Get(), af)
 }
 
@@ -907,7 +888,6 @@ func StartRobloxDirectGamepadPumpDir(dir string) bool {
 	if gamepadPump.running {
 		return true
 	}
-	gamepadPathNote()
 	return startGamepadPumpLocked(dir, gamepadLive.Reload())
 }
 

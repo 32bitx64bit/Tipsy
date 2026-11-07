@@ -447,7 +447,6 @@ struct JNIInvokeInterface_ {
 };
 
 int tipsy_jni_init(void);
-JNIEnv *tipsy_jni_env(void);
 JNIEnv *tipsy_jni_attach_native_main(void);
 JNIEnv *tipsy_jni_current_env(void);
 JavaVM *tipsy_jni_java_vm(void);

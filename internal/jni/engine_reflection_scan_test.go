@@ -129,28 +129,6 @@ func TestReflectionGetterLocatorNotFound(t *testing.T) {
 	check("no registration")
 }
 
-type cursorReadCounter struct {
-	img        *fakeEngineImage
-	fullChunks int
-}
-
-func (c *cursorReadCounter) bytes(addr uintptr, n int) ([]byte, bool) {
-	if n > mouseBehaviorGetterWindow {
-		c.fullChunks++
-	}
-	return c.img.bytes(addr, n)
-}
-
-func (c *cursorReadCounter) read(addr uintptr, out []byte) bool {
-	if len(out) > mouseBehaviorGetterWindow {
-		c.fullChunks++
-	}
-	return c.img.read(addr, out)
-}
-
-func (c *cursorReadCounter) u64(addr uintptr) (uint64, bool) { return c.img.u64(addr) }
-func (c *cursorReadCounter) u32(addr uintptr) (uint32, bool) { return c.img.u32(addr) }
-
 // locateCursorGetterPerChunkCopy is the superseded locator, retained here to
 // measure the allocation regression prevented by the reusable-buffer scan.
 func locateCursorGetterPerChunkCopy(ranges []engineAddrRange, base, end uintptr) []reflectionGetterCandidate {

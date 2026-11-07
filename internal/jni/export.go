@@ -130,12 +130,6 @@ func classNameOf(vm *VM, cls C.jclass) string {
 	return ""
 }
 
-//export GoJNI_GetVersion
-func GoJNI_GetVersion(env *C.JNIEnv) C.jint {
-	_ = env
-	return C.jint(JNIVersion16)
-}
-
 //export GoJNI_FindClass
 func GoJNI_FindClass(env *C.JNIEnv, name *C.char) C.jclass {
 	vm := vmFromEnv(unsafe.Pointer(env))
@@ -1461,15 +1455,6 @@ func GoJNI_MonitorExit(env *C.JNIEnv, obj C.jobject) C.jint {
 	vm.setPending(unsafe.Pointer(env), o.id)
 	vm.deleteLocalRef(unsafe.Pointer(env), o.id)
 	return C.JNI_ERR
-}
-
-//export GoJNI_GetJavaVM
-func GoJNI_GetJavaVM(env *C.JNIEnv, vmOut **C.JavaVM) C.jint {
-	_ = env
-	if vmOut != nil {
-		*vmOut = C.tipsy_jni_java_vm()
-	}
-	return C.JNI_OK
 }
 
 //export GoJNI_EnvDetached
