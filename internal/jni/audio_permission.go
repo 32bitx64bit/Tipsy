@@ -13,8 +13,8 @@ import "C"
 
 import (
 	"sync"
+	"sync/atomic"
 
-	"github.com/tipsy-linux/tipsy/internal/android"
 	"github.com/tipsy-linux/tipsy/internal/logging"
 )
 
@@ -38,15 +38,48 @@ var (
 	recordAudioLogged       sync.Map
 )
 
+// MicrophoneHooks connects the JNI layer to the OpenSL capture gate without
+// importing internal/android. internal/runtime sets it once before the VM runs.
+type MicrophoneHooks struct {
+	// DoorOpen reports the process-wide microphone door (android.MicrophoneDoorOpen).
+	DoorOpen func() bool
+	// CaptureMuted and SetCaptureMuted read and write the OpenSL capture mute.
+	CaptureMuted    func() bool
+	SetCaptureMuted func(bool)
+}
+
+var microphoneHooks atomic.Pointer[MicrophoneHooks]
+
+// SetMicrophoneHooks installs the microphone hooks. Unset or nil members act
+// as door closed and capture muted, so a missing wiring can never open capture.
+func SetMicrophoneHooks(h MicrophoneHooks) { microphoneHooks.Store(&h) }
+
+func captureMuted() bool {
+	if h := microphoneHooks.Load(); h != nil && h.CaptureMuted != nil {
+		return h.CaptureMuted()
+	}
+	return true
+}
+
+func setCaptureMuted(muted bool) {
+	if h := microphoneHooks.Load(); h != nil && h.SetCaptureMuted != nil {
+		h.SetCaptureMuted(muted)
+	}
+}
+
 // microphoneDoorOpen is the process-wide RECORD_AUDIO / hasSystemFeature
-// microphone door. It is not a second opinion: android.MicrophoneDoorOpen
-// re-reads the persisted Settings switch and returns the very gate the OpenSL
-// recorder uses (env kill-switches over config file, file < env; a missing or
-// unreadable config falls back to the defaults and is logged there). So the
-// answer the engine gets here and whether capture can actually open cannot
-// disagree, and a Settings toggle takes effect live.
+// microphone door. It is not a second opinion: the DoorOpen hook is
+// android.MicrophoneDoorOpen, which re-reads the persisted Settings switch and
+// returns the very gate the OpenSL recorder uses (env kill-switches over config
+// file, file < env; a missing or unreadable config falls back to the defaults
+// and is logged there). So the answer the engine gets here and whether capture
+// can actually open cannot disagree, and a Settings toggle takes effect live.
+// Without the hook the door stays closed.
 func microphoneDoorOpen() bool {
-	return android.MicrophoneDoorOpen()
+	if h := microphoneHooks.Load(); h != nil && h.DoorOpen != nil {
+		return h.DoorOpen()
+	}
+	return false
 }
 
 func evaluatePermission(name string) int32 {

@@ -300,6 +300,11 @@ func Launch(ctx context.Context, opt LaunchOptions) error {
 	android.NewResolver(android.Config{AssetsDir: assets, APKPath: runtimeFiles.BaseAPKPath, Width: int32(opt.Width), Height: int32(opt.Height)})
 	aw := android.NewWindow(opt.Width, opt.Height, xidHandle{xid: win.XID()})
 	android.BindDefaultWindow(aw)
+	jni.SetMicrophoneHooks(jni.MicrophoneHooks{
+		DoorOpen:        android.MicrophoneDoorOpen,
+		CaptureMuted:    android.CaptureMuted,
+		SetCaptureMuted: android.SetCaptureMuted,
+	})
 	vm, err := jni.NewVM()
 	if err != nil {
 		return fmt.Errorf("jni: %w", err)

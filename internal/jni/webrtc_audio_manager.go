@@ -15,7 +15,6 @@ import "C"
 import (
 	"sync/atomic"
 
-	"github.com/tipsy-linux/tipsy/internal/android"
 	"github.com/tipsy-linux/tipsy/internal/logging"
 )
 
@@ -141,8 +140,8 @@ func (vm *VM) dispatchWebRtcAudioManager(o *Object, class, name, sig string, arg
 	case "setMicrophoneMute(Z)V":
 		// Process-wide OpenSL capture mute; logged only when the gate flips.
 		muted := jvalueIAt(args, 0) != 0
-		prev := android.CaptureMuted()
-		android.SetCaptureMuted(muted)
+		prev := captureMuted()
+		setCaptureMuted(muted)
 		if prev != muted {
 			logging.Logger(logging.CatJNI).Info("[jni] WebRtcAudioManager microphone mute", "muted", muted)
 		}
