@@ -38,6 +38,29 @@ func callDataABI(t *testing.T, library, name string, args ...uintptr) int64 {
 	return loader.CallP8(dataABISymbol(t, library, name), a[0], a[1], a[2], a[3], a[4], a[5], a[6], a[7])
 }
 
+// cBytes copies n bytes from a native pointer into freshly mapped memory using
+// the compat memcpy entry. Copying this way avoids converting a pointer-sized
+// native result straight back into an unsafe.Pointer, which checkptr rejects
+// under -race when the source buffer lives in the Go heap.
+func cBytes(t *testing.T, ptr uintptr, n int) []byte {
+	t.Helper()
+	buf, bufPtr := mmapBuffer(t, n)
+	if n == 0 {
+		return buf
+	}
+	if dst := callDataABI(t, "libc.so", "__memcpy_chk", bufPtr, ptr, uintptr(n), uintptr(n)); dst == 0 {
+		t.Fatal("__memcpy_chk returned NULL")
+	}
+	return buf
+}
+
+func munmapTest(t *testing.T, ptr uintptr, n int) {
+	t.Helper()
+	if rc := callDataABI(t, "libc.so", "munmap", ptr, uintptr(n)); rc != 0 {
+		t.Fatalf("munmap(%#x, %d) = %d", ptr, n, rc)
+	}
+}
+
 func binaryMeshFixture(size int) []byte {
 	data := make([]byte, size)
 	x := uint32(0x91e10da5)
@@ -90,8 +113,7 @@ func assertAssetDataABI(t *testing.T, want []byte) {
 	if buffer == 0 {
 		t.Fatal("AAsset_getBuffer returned NULL")
 	}
-	view := unsafe.Slice((*byte)(unsafe.Pointer(buffer)), len(want))
-	if !bytes.Equal(view, want) {
+	if !bytes.Equal(cBytes(t, buffer, len(want)), want) {
 		t.Fatal("AAsset_getBuffer differs from source bytes")
 	}
 
@@ -236,10 +258,10 @@ func assertResolvedFileDataABI(t *testing.T, fd int, want []byte) {
 	mappingLive := true
 	t.Cleanup(func() {
 		if mappingLive {
-			_ = unix.Munmap(unsafe.Slice((*byte)(unsafe.Pointer(mappedPointer)), len(want)))
+			munmapTest(t, mappedPointer, len(want))
 		}
 	})
-	if !bytes.Equal(unsafe.Slice((*byte)(unsafe.Pointer(mappedPointer)), len(want)), want) {
+	if !bytes.Equal(cBytes(t, mappedPointer, len(want)), want) {
 		t.Fatal("resolved mmap differs from AAsset bytes")
 	}
 	if rc := callDataABI(t, "libc.so", "munmap", mappedPointer, uintptr(len(want))); rc != 0 {
@@ -296,10 +318,10 @@ func TestResolvedLibcLargeFileOffsets(t *testing.T) {
 	mappingLive := true
 	t.Cleanup(func() {
 		if mappingLive {
-			_ = unix.Munmap(unsafe.Slice((*byte)(unsafe.Pointer(mappedPointer)), int(page)))
+			munmapTest(t, mappedPointer, int(page))
 		}
 	})
-	if !bytes.Equal(unsafe.Slice((*byte)(unsafe.Pointer(mappedPointer)), len(want)), want) {
+	if !bytes.Equal(cBytes(t, mappedPointer, len(want)), want) {
 		t.Fatal("mmap64 high offset differs from source bytes")
 	}
 	if rc := callDataABI(t, "libc.so", "munmap", mappedPointer, uintptr(page)); rc != 0 {
