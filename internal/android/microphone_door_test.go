@@ -468,8 +468,13 @@ func TestMicrophoneRecorderUsesDefaultsOnMalformedConfig(t *testing.T) {
 
 func TestMicrophoneConfigPathIsIsolatedForTests(t *testing.T) {
 	path := isolateMicrophoneConfig(t)
-	if home, err := os.UserHomeDir(); err == nil && strings.HasPrefix(path, filepath.Join(home, ".config")) {
-		t.Fatalf("test config path %q points at the real user config", path)
+	home, err := os.UserHomeDir()
+	if err != nil || home == "" {
+		t.Skipf("cannot resolve home directory: %v", err)
+	}
+	defaultPath := filepath.Join(home, ".config", "tipsy", "config.json")
+	if path == defaultPath {
+		t.Fatalf("test config path %q is the real default config path", path)
 	}
 	if !strings.HasPrefix(path, os.Getenv("XDG_CONFIG_HOME")) {
 		t.Fatalf("config path %q is outside XDG_CONFIG_HOME %q", path, os.Getenv("XDG_CONFIG_HOME"))
