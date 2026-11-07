@@ -66,9 +66,6 @@ func assertAssetCacheAccounting(t testing.TB, snapshot assetCacheSnapshot) {
 	if snapshot.NameEntries != snapshot.PositiveEntries+snapshot.NegativeEntries {
 		t.Fatalf("name accounting mismatch: %+v", snapshot)
 	}
-	if snapshot.NegativeEntries != snapshot.NegativeCandidates+snapshot.NegativeOther {
-		t.Fatalf("negative accounting mismatch: %+v", snapshot)
-	}
 	if snapshot.CachedBytes != snapshot.BorrowedCacheBytes+snapshot.EvictableCacheBytes {
 		t.Fatalf("cached byte ownership mismatch: %+v", snapshot)
 	}
@@ -361,7 +358,7 @@ func TestAssetCacheSnapshotAccountsAliasesAndBlobOwnership(t *testing.T) {
 	if snapshot.ActiveHandles != before.ActiveHandles || snapshot.PinnedBytes != before.PinnedBytes || snapshot.LiveWorkingSetBytes != before.LiveWorkingSetBytes {
 		t.Fatalf("cache-only aliases changed live ownership: before=%+v after=%+v", before, snapshot)
 	}
-	t.Logf("asset cache accounting snapshot generation=%d names=%d blobs=%d cached_bytes=%d borrowed_cache_bytes=%d evictable_cache_bytes=%d active_handles=%d pinned_bytes=%d in_flight=%d negative_candidates=%d", snapshot.Generation, snapshot.NameEntries, snapshot.BlobCount, snapshot.CachedBytes, snapshot.BorrowedCacheBytes, snapshot.EvictableCacheBytes, snapshot.ActiveHandles, snapshot.PinnedBytes, snapshot.InFlightLoads, snapshot.NegativeCandidates)
+	t.Logf("asset cache accounting snapshot generation=%d names=%d blobs=%d cached_bytes=%d borrowed_cache_bytes=%d evictable_cache_bytes=%d active_handles=%d pinned_bytes=%d in_flight=%d negative_entries=%d", snapshot.Generation, snapshot.NameEntries, snapshot.BlobCount, snapshot.CachedBytes, snapshot.BorrowedCacheBytes, snapshot.EvictableCacheBytes, snapshot.ActiveHandles, snapshot.PinnedBytes, snapshot.InFlightLoads, snapshot.NegativeEntries)
 
 	asset := assetFromBytes(short)
 	if asset == nil {
@@ -386,6 +383,48 @@ func TestAssetCacheSnapshotAccountsAliasesAndBlobOwnership(t *testing.T) {
 	}
 }
 
+// Path and ZIP lookups share one map, so equal strings must stay distinct.
+func TestAssetCacheSourceKindsDoNotCollide(t *testing.T) {
+	cache := newAssetCache(704, "", "")
+	pathBlob := []byte("path-blob")
+	zipBlob := []byte("zip-blob!")
+
+	cache.mu.Lock()
+	cache.setPathLocked("same", pathBlob)
+	cache.setZIPLocked("same", zipBlob)
+	cache.mu.Unlock()
+	if got, ok := cache.cachedSource(assetBlobAlias{kind: assetBlobAliasPath, key: "same"}); !ok || string(got) != string(pathBlob) {
+		t.Fatalf("path source = %q ok=%t", got, ok)
+	}
+	if got, ok := cache.cachedSource(assetBlobAlias{kind: assetBlobAliasZIP, key: "same"}); !ok || string(got) != string(zipBlob) {
+		t.Fatalf("zip source = %q ok=%t", got, ok)
+	}
+	if snapshot := cache.snapshot(); snapshot.PathEntries != 1 || snapshot.ZipEntries != 1 || snapshot.BlobCount != 2 || snapshot.CachedBytes != int64(len(pathBlob)+len(zipBlob)) {
+		t.Fatalf("source accounting = %+v", snapshot)
+	}
+
+	cache.mu.Lock()
+	cache.removeBlobAliasesLocked(assetBlobKey(pathBlob))
+	cache.mu.Unlock()
+	if _, ok := cache.cachedSource(assetBlobAlias{kind: assetBlobAliasZIP, key: "same"}); !ok {
+		t.Fatal("evicting the path blob dropped the ZIP entry")
+	}
+	if snapshot := cache.snapshot(); snapshot.PathEntries != 0 || snapshot.ZipEntries != 1 || snapshot.BlobCount != 1 {
+		t.Fatalf("source accounting after eviction = %+v", snapshot)
+	}
+}
+
+// Test-only wrappers over setSourceLocked and the cached-byte counter.
+func (c *assetCache) setPathLocked(path string, data []byte) []byte {
+	return c.setSourceLocked(assetBlobAlias{kind: assetBlobAliasPath, key: path}, data)
+}
+
+func (c *assetCache) setZIPLocked(name string, data []byte) []byte {
+	return c.setSourceLocked(assetBlobAlias{kind: assetBlobAliasZIP, key: name}, data)
+}
+
+func (c *assetCache) cachedBytesLocked() int64 { return c.cachedBytes }
+
 func TestAssetCacheSnapshotClassifiesNegativeCandidates(t *testing.T) {
 	setAssetsLocked("", "")
 	t.Cleanup(func() { setAssetsLocked("", "") })
@@ -396,7 +435,7 @@ func TestAssetCacheSnapshotClassifiesNegativeCandidates(t *testing.T) {
 	}
 	snapshot := assetCacheSnapshotForTest()
 	assertAssetCacheAccounting(t, snapshot)
-	if snapshot.NameEntries != 1 || snapshot.PositiveEntries != 0 || snapshot.NegativeEntries != 1 || snapshot.NegativeCandidates != 1 || snapshot.NegativeOther != 0 || snapshot.BlobCount != 0 || snapshot.CachedBytes != 0 || snapshot.EvictableCacheBytes != 0 {
+	if snapshot.NameEntries != 1 || snapshot.PositiveEntries != 0 || snapshot.NegativeEntries != 1 || snapshot.BlobCount != 0 || snapshot.CachedBytes != 0 || snapshot.EvictableCacheBytes != 0 {
 		t.Fatalf("negative candidate accounting = %+v", snapshot)
 	}
 	if snapshot.ActiveHandles != before.ActiveHandles || snapshot.PinnedBytes != before.PinnedBytes || snapshot.LiveWorkingSetBytes != before.LiveWorkingSetBytes {
@@ -434,7 +473,7 @@ func TestAssetCacheBudgetEvictsAliasesAtomically(t *testing.T) {
 	if before.CacheByteBudget != int64(len(second)) || before.NameEntries != 2 || before.BlobCount != 1 || before.CachedBytes != int64(len(first)) || before.EvictableCacheBytes != int64(len(first)) {
 		t.Fatalf("before budget trim = %+v", before)
 	}
-	t.Logf("asset cache policy before generation=%d blobs=%d cached_bytes=%d evictable_cache_bytes=%d byte_budget=%d negative_candidates=%d", before.Generation, before.BlobCount, before.CachedBytes, before.EvictableCacheBytes, before.CacheByteBudget, before.NegativeCandidates)
+	t.Logf("asset cache policy before generation=%d blobs=%d cached_bytes=%d evictable_cache_bytes=%d byte_budget=%d negative_entries=%d", before.Generation, before.BlobCount, before.CachedBytes, before.EvictableCacheBytes, before.CacheByteBudget, before.NegativeEntries)
 
 	got, err := openAssetBytes("second.txt")
 	if err != nil || string(got) != string(second) {
@@ -445,7 +484,7 @@ func TestAssetCacheBudgetEvictsAliasesAtomically(t *testing.T) {
 	if after.NameEntries != 1 || after.PositiveEntries != 1 || after.BlobCount != 1 || after.ZipEntries != 1 || after.CachedBytes != int64(len(second)) || after.BorrowedCacheBytes != 0 || after.EvictableCacheBytes != int64(len(second)) || after.CachedBytes > after.CacheByteBudget {
 		t.Fatalf("alias eviction must leave one budget-sized blob: %+v", after)
 	}
-	t.Logf("asset cache policy after generation=%d blobs=%d cached_bytes=%d evictable_cache_bytes=%d byte_budget=%d negative_candidates=%d", after.Generation, after.BlobCount, after.CachedBytes, after.EvictableCacheBytes, after.CacheByteBudget, after.NegativeCandidates)
+	t.Logf("asset cache policy after generation=%d blobs=%d cached_bytes=%d evictable_cache_bytes=%d byte_budget=%d negative_entries=%d", after.Generation, after.BlobCount, after.CachedBytes, after.EvictableCacheBytes, after.CacheByteBudget, after.NegativeEntries)
 
 	var firstReads int
 	restoreRead := setAssetTestBeforeZipRead(func(name string) error {
@@ -606,10 +645,10 @@ func TestAssetNegativeCachePolicyCapsExpiresAndInvalidatesSource(t *testing.T) {
 	}
 	capped := assetCacheSnapshotForTest()
 	assertAssetCacheAccounting(t, capped)
-	if capped.NegativeEntries != 2 || capped.NegativeCandidates != 2 || capped.NegativeOther != 0 || capped.NameEntries != 2 || capped.CachedBytes != 0 || capped.NegativeCacheLimit != 2 {
+	if capped.NegativeEntries != 2 || capped.NameEntries != 2 || capped.CachedBytes != 0 || capped.NegativeCacheLimit != 2 {
 		t.Fatalf("bounded ENOENT cache = %+v", capped)
 	}
-	t.Logf("asset negative policy before generation=%d names=%d negative_candidates=%d negative_limit=%d cached_bytes=%d", capped.Generation, capped.NameEntries, capped.NegativeCandidates, capped.NegativeCacheLimit, capped.CachedBytes)
+	t.Logf("asset negative policy before generation=%d names=%d negative_entries=%d negative_limit=%d cached_bytes=%d", capped.Generation, capped.NameEntries, capped.NegativeEntries, capped.NegativeCacheLimit, capped.CachedBytes)
 
 	replacement := t.TempDir()
 	if err := os.WriteFile(filepath.Join(replacement, "c.txt"), []byte("replacement"), 0o600); err != nil {
@@ -638,7 +677,7 @@ func TestAssetNegativeCachePolicyCapsExpiresAndInvalidatesSource(t *testing.T) {
 	if after.NegativeEntries != 0 || after.PositiveEntries != 2 || after.CachedBytes != int64(len("replacement")+len("expired-negative")) || after.CachedBytes > after.CacheByteBudget {
 		t.Fatalf("expiry/replacement accounting = %+v", after)
 	}
-	t.Logf("asset negative policy after generation=%d names=%d negative_candidates=%d negative_limit=%d cached_bytes=%d", after.Generation, after.NameEntries, after.NegativeCandidates, after.NegativeCacheLimit, after.CachedBytes)
+	t.Logf("asset negative policy after generation=%d names=%d negative_entries=%d negative_limit=%d cached_bytes=%d", after.Generation, after.NameEntries, after.NegativeEntries, after.NegativeCacheLimit, after.CachedBytes)
 }
 
 func TestOpenAssetBytesDoesNotCacheNonENOENTDirectoryFailure(t *testing.T) {
@@ -653,7 +692,7 @@ func TestOpenAssetBytesDoesNotCacheNonENOENTDirectoryFailure(t *testing.T) {
 	if _, err := openAssetBytes("bad.txt"); err == nil || errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("directory read error must remain non-ENOENT: %v", err)
 	}
-	if snapshot := assetCacheSnapshotForTest(); snapshot.NameEntries != 0 || snapshot.NegativeEntries != 0 || snapshot.NegativeOther != 0 || snapshot.CachedBytes != 0 {
+	if snapshot := assetCacheSnapshotForTest(); snapshot.NameEntries != 0 || snapshot.NegativeEntries != 0 || snapshot.CachedBytes != 0 {
 		t.Fatalf("non-ENOENT directory failure entered cache: %+v", snapshot)
 	}
 	if err := os.Remove(bad); err != nil {
@@ -738,7 +777,7 @@ func TestOpenAssetBytesEmptyAndMissing(t *testing.T) {
 	t.Cleanup(func() { closeAssetForTest(p) })
 	buf, length, owned := assetPinView(p)
 	if buf != unsafe.Pointer(&emptyAsset) {
-		t.Fatal("empty asset must use the static byte, not CMalloc")
+		t.Fatal("empty asset must use the static byte, not a heap allocation")
 	}
 	if owned != 0 || length != 0 {
 		t.Fatalf("empty owned=%d len=%d", owned, length)
@@ -777,7 +816,7 @@ func TestOpenAssetBytesPinLifetime(t *testing.T) {
 	buf, length, owned := assetPinView(p)
 	data := unsafe.SliceData(b)
 	if buf != unsafe.Pointer(data) {
-		t.Fatal("C buffer must be the pinned Go blob, not a CMalloc copy")
+		t.Fatal("C buffer must be the pinned Go blob, not a copy")
 	}
 	if owned != 0 {
 		t.Fatalf("owned=%d; C must not free a Go-owned pin", owned)
@@ -1147,7 +1186,7 @@ func TestOpenAssetBytesDeduplicatesErrorAndUnblocksWaiters(t *testing.T) {
 			t.Fatalf("waiter %d error = %v, want controlled cancellation", i, err)
 		}
 	}
-	if snapshot := assetCacheSnapshotForTest(); snapshot.InFlightLoads != 0 || snapshot.NegativeEntries != 0 || snapshot.NegativeOther != 0 || snapshot.BlobCount != 0 || snapshot.CachedBytes != 0 {
+	if snapshot := assetCacheSnapshotForTest(); snapshot.InFlightLoads != 0 || snapshot.NegativeEntries != 0 || snapshot.BlobCount != 0 || snapshot.CachedBytes != 0 {
 		t.Fatalf("non-ENOENT reader failure must not enter any cache, snapshot=%+v", snapshot)
 	}
 	restore()
