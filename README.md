@@ -489,7 +489,7 @@ synthesizes them from `qmake6`.)
 
 | Tool | Version |
 | --- | --- |
-| Go | 1.27.3 (matches `go.mod` and CI) |
+| Go | 1.27.1 (matches `go.mod` and CI) |
 | C compiler | `gcc` or `g++` |
 | pkg-config | needed for the native libraries and the Qt GUI |
 
