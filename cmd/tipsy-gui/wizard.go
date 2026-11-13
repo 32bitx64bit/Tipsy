@@ -16,7 +16,7 @@ import (
 func (w *mainWindow) ShowSetupWizard(firstRun bool) {
 	w.refreshSnapshot()
 	wizard := qt.NewQWizard(w.win.QWidget)
-	wizard.SetWindowTitle("Set up Tipsy")
+	wizard.SetWindowTitle(guiTitle("Set up Tipsy"))
 	wizard.SetWindowIcon(w.icon)
 	wizard.SetWizardStyle(qt.QWizard__ModernStyle)
 	wizard.SetTitleFormat(qt.RichText)

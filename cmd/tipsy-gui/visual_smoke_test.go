@@ -34,18 +34,7 @@ func TestOffscreenVisualProof(t *testing.T) {
 	qt.QApplication_SetStyleWithStyle("Fusion")
 	app.SetStyleSheet(appStyleSheet)
 
-	service := &secureVisualService{
-		visualService: visualService{
-			launchEntered: make(chan struct{}),
-			launchReady:   make(chan struct{}),
-			launchDone:    make(chan struct{}),
-		},
-		requireConsent: true,
-		authority: guimodel.LaunchAuthority{
-			Mode:    "development-unrestricted",
-			Warning: "WARNING: DevelopmentUnrestricted mode is active; this is not an OfficialVerified Tipsy session.",
-		},
-	}
+	service := newVisualProofService()
 	icon := brandIcon()
 	win := newMainWindow(service, icon)
 	// Appearance changes are immediate and separate from the settings draft.
@@ -308,45 +297,7 @@ func TestOffscreenVisualProof(t *testing.T) {
 	wizard.Delete()
 
 	win.selectPage(0)
-	originalConfirm := confirmDevelopmentLaunch
-	defer func() { confirmDevelopmentLaunch = originalConfirm }()
-	confirmDevelopmentLaunch = func(*qt.QWidget) bool { return false }
-	if !win.beginLaunch(launchFromHome, guimodel.LaunchRequest{}) {
-		t.Fatal("launch preparation did not start")
-	}
-	waitGUI(t, func() bool { return !win.launchPreparing })
-	if !win.launchFailure {
-		t.Fatal("declined development launch did not show failure")
-	}
-
-	if got := win.playAuthority.Text(); !strings.Contains(got, "Approval required") || !strings.Contains(got, "OfficialVerified") {
-		t.Fatalf("missing-consent warning was not visible: %q", got)
-	}
-	select {
-	case <-service.launchEntered:
-		t.Fatal("declined development consent reached the launch backend")
-	default:
-	}
-	confirmDevelopmentLaunch = func(*qt.QWidget) bool { return true }
-	win.playButton.Click()
-	waitGUI(t, func() bool {
-		select {
-		case <-service.launchEntered:
-			return true
-		default:
-			return false
-		}
-	})
-	if win.externalProgress != nil || !win.launchBusy.IsVisible() {
-		t.Fatal("in-GUI Play did not keep its busy state in the main window")
-	}
-
-	if got := win.playAuthority.Text(); got != service.authority.Warning {
-		t.Fatalf("development warning was not propagated exactly: %q", got)
-	}
-	if approvals := service.approvalCalls(); len(approvals) != 3 || approvals[0] || approvals[1] || !approvals[2] {
-		t.Fatalf("development approval flow = %v", approvals)
-	}
+	exerciseVisualProofLaunch(t, win, service)
 	win.refreshLaunchState()
 	if !win.win.IsVisible() || win.launcherHidden {
 		t.Fatal("launcher hid before the client acknowledged startup")

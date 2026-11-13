@@ -22,6 +22,14 @@ func main() {
 		os.Exit(graphics.RunAntiLagProbeMain())
 	}
 	logging.Init()
+	logging.Logger(logging.CatRuntime).Info("tipsy-gui startup",
+		"version", version.String(),
+		"channel", version.Channel,
+		"provenance", version.Provenance(),
+		"sourceCommit", version.SourceCommit)
+	if !version.IsOfficialBuild() {
+		fmt.Fprintln(os.Stderr, "tipsy-gui: "+version.UnofficialBuildLabel)
+	}
 	stop, err := perf.StartFromEnv()
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "tipsy-gui:", err)
@@ -36,7 +44,7 @@ func main() {
 	qt.QCoreApplication_SetOrganizationDomain("tipsy-linux.github.io")
 	qt.QCoreApplication_SetApplicationName("tipsy-gui")
 	qt.QCoreApplication_SetApplicationVersion(version.String())
-	qt.QGuiApplication_SetApplicationDisplayName("Tipsy")
+	qt.QGuiApplication_SetApplicationDisplayName(guiTitle("Tipsy"))
 	qt.QGuiApplication_SetDesktopFileName("io.github.tipsy_linux.Tipsy.Settings")
 	qt.QGuiApplication_SetQuitOnLastWindowClosed(true)
 	qt.QApplication_SetStyleWithStyle("Fusion")
@@ -52,4 +60,14 @@ func main() {
 		win.startSettingsInitialization()
 	}
 	qt.QApplication_Exec()
+}
+
+// guiTitle marks window chrome of unofficial builds so a local or modified
+// binary cannot present the plain official Tipsy title. Official releases
+// keep their titles unchanged.
+func guiTitle(title string) string {
+	if version.IsOfficialBuild() {
+		return title
+	}
+	return title + " (" + version.UnofficialBuildLabel + ")"
 }

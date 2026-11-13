@@ -2,7 +2,10 @@ package main
 
 import (
 	"reflect"
+	"strings"
 	"testing"
+
+	"github.com/tipsy-linux/tipsy/internal/version"
 )
 
 func TestSplitGUIArgs(t *testing.T) {
@@ -36,5 +39,21 @@ func TestSplitGUIArgs(t *testing.T) {
 				t.Fatalf("qt args=%q, want %q", qtArgs, test.qt)
 			}
 		})
+	}
+}
+
+func TestGUITitleMarksUnofficialBuilds(t *testing.T) {
+	got := guiTitle("Tipsy")
+	if version.IsOfficialBuild() {
+		if got != "Tipsy" {
+			t.Fatalf("official guiTitle = %q, want plain Tipsy", got)
+		}
+		return
+	}
+	if !strings.Contains(got, version.UnofficialBuildLabel) {
+		t.Fatalf("unofficial guiTitle = %q must carry %q", got, version.UnofficialBuildLabel)
+	}
+	if !strings.HasPrefix(got, "Tipsy") {
+		t.Fatalf("unofficial guiTitle = %q must keep the Tipsy prefix", got)
 	}
 }

@@ -5,7 +5,6 @@ import (
 
 	qt "github.com/mappu/miqt/qt6"
 	guimodel "github.com/tipsy-linux/tipsy/internal/gui"
-	"github.com/tipsy-linux/tipsy/internal/setupsvc"
 )
 
 type launchOrigin int
@@ -35,7 +34,26 @@ type launchProgressWindow struct {
 	note                     *qt.QLabel
 	busy                     *qt.QProgressBar
 	actions                  *qt.QWidget
+	cancel                   *qt.QPushButton
 	active                   bool
+	// onCancel aborts the launch or startup verification behind this dialog.
+	// It reports whether cancellation was accepted; an active client that
+	// already reached LaunchRunning is never torn down from this surface.
+	onCancel func() bool
+}
+
+// requestCancel asks the window to abort the in-flight launch and dismisses
+// the dialog. It returns false when cancellation is unavailable so close and
+// reject handlers can leave the dialog in place instead of losing the only
+// visible window.
+func (p *launchProgressWindow) requestCancel() bool {
+	if !p.active || p.onCancel == nil || !p.onCancel() {
+		return false
+	}
+	p.active = false
+	p.cancel.Hide()
+	p.dialog.Hide()
+	return true
 }
 
 const safeLaunchFailure = "Roblox could not start. Open Tipsy to check Installation and Diagnostics, then try again."
@@ -46,7 +64,7 @@ func (w *mainWindow) ensureLaunchProgress() {
 		return
 	}
 	p := &launchProgressWindow{dialog: qt.NewQDialog(w.win.QWidget)}
-	p.dialog.SetWindowTitle("Tipsy — Launching Roblox")
+	p.dialog.SetWindowTitle(guiTitle("Tipsy — Launching Roblox"))
 	p.dialog.SetWindowIcon(w.icon)
 	p.dialog.Resize(420, 280)
 	p.dialog.SetMinimumSize2(360, 240)
@@ -74,7 +92,18 @@ func (w *mainWindow) ensureLaunchProgress() {
 	p.busy.SetRange(0, 0)
 	p.busy.SetTextVisible(false)
 	p.busy.SetAccessibleName("Roblox startup in progress")
-	layout.AddWidget(p.busy.QWidget)
+	p.cancel = qt.NewQPushButton3("Cancel")
+	p.cancel.SetAccessibleName("Cancel Roblox launch")
+	p.cancel.SetAccessibleDescription("Stop waiting for startup and return to Tipsy")
+	p.cancel.SetToolTip("Cancel startup and return to Tipsy")
+	p.cancel.OnClicked(func() { p.requestCancel() })
+	p.cancel.Hide()
+	busyRow := qt.NewQWidget2()
+	busyLayout := qt.NewQHBoxLayout(busyRow)
+	busyLayout.SetContentsMargins(0, 0, 0, 0)
+	busyLayout.AddWidget2(p.busy.QWidget, 1)
+	busyLayout.AddWidget(p.cancel.QWidget)
+	layout.AddWidget(busyRow)
 	p.note = qt.NewQLabel3("This window closes when Roblox is ready.")
 	p.note.SetWordWrap(true)
 	p.note.SetAlignment(qt.AlignCenter)
@@ -98,19 +127,22 @@ func (w *mainWindow) ensureLaunchProgress() {
 	actions.AddWidget(close.QWidget)
 	p.actions.Hide()
 	layout.AddWidget(p.actions)
-	// Startup has no safe cancellation contract. Closing this surface must not
-	// terminate an in-process client halfway through initialization.
+	// Closing the progress window or pressing Esc cancels the launch. The
+	// window manager's close button stays available while startup runs, so a
+	// stalled client can never leave an unclosable surface behind.
+	p.onCancel = w.cancelActiveLaunch
 	p.dialog.OnCloseEvent(func(super func(*qt.QCloseEvent), event *qt.QCloseEvent) {
-		if p.active {
+		if p.active && !p.requestCancel() {
 			event.Ignore()
 			return
 		}
 		super(event)
 	})
 	p.dialog.OnReject(func(super func()) {
-		if !p.active {
-			super()
+		if p.active && !p.requestCancel() {
+			return
 		}
+		super()
 	})
 	w.externalProgress = p
 }
@@ -119,15 +151,16 @@ func (w *mainWindow) showExternalProgress() {
 	w.ensureLaunchProgress()
 	p := w.externalProgress
 	p.active = true
-	p.dialog.SetWindowFlag2(qt.WindowCloseButtonHint, false)
+	p.dialog.SetWindowFlag2(qt.WindowCloseButtonHint, true)
 	p.title.SetText("Launching Roblox…")
 	p.detail.SetText("Checking launch authorization…")
 	p.note.SetText("This window closes when Roblox is ready.")
 	p.busy.Show()
 	p.note.Show()
 	p.actions.Hide()
+	p.cancel.Show()
 	p.authority.Hide()
-	p.dialog.SetWindowTitle("Tipsy — Launching Roblox")
+	p.dialog.SetWindowTitle(guiTitle("Tipsy — Launching Roblox"))
 	placeWidgetOnDisplay(p.dialog.QWidget, configuredDisplay(w))
 	p.dialog.Show()
 }
@@ -145,6 +178,7 @@ func (w *mainWindow) beginLaunch(origin launchOrigin, request guimodel.LaunchReq
 	w.launchFailure = false
 	w.launchRequest = request
 	w.launchPreparing = true
+	w.beginLaunchContext()
 	if w.playState != nil {
 		setObjectName(w.playState.QObject, "mutedText")
 		refreshStyle(w.playState.QWidget)
@@ -163,9 +197,13 @@ func (w *mainWindow) prepareLaunch(approved bool) {
 	// No Qt values cross this goroutine boundary. The GUI timer consumes the
 	// result and displays consent on the Qt thread if it is required.
 	service := w.service
+	ctx := w.launchContext
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	go func() {
 		defer w.queueOwnerState()
-		authority, err := service.PrepareLaunch(context.Background(), approved)
+		authority, err := service.PrepareLaunch(ctx, approved)
 		result <- launchPreparation{authority, err}
 	}()
 }
@@ -179,25 +217,7 @@ func (w *mainWindow) pollLaunchPreparation() {
 		w.launchPreparation = nil
 		w.setLaunchAuthority(result.authority)
 		if result.authority.DevelopmentConsentRequired {
-			if w.launchConsentRequested {
-				w.launchPreparing = false
-				w.launchRequest = guimodel.LaunchRequest{}
-				w.showLaunchFailure(safeLaunchFailure)
-				return
-			}
-			w.launchConsentRequested = true
-			parent := w.win.QWidget
-			if w.launchOrigin == launchFromExternal {
-				parent = w.externalProgress.dialog.QWidget
-				w.externalProgress.detail.SetText("Your approval is required to continue.")
-			}
-			if !confirmDevelopmentLaunch(parent) {
-				w.launchPreparing = false
-				w.launchRequest = guimodel.LaunchRequest{}
-				w.showLaunchFailure("Launch was not authorized. Open Tipsy when you are ready to review the development-build approval.")
-				return
-			}
-			w.prepareLaunch(true)
+			w.handleDevelopmentConsentRequired()
 			return
 		}
 		w.launchPreparing = false
@@ -208,17 +228,18 @@ func (w *mainWindow) pollLaunchPreparation() {
 		}
 		request := w.launchRequest
 		w.launchRequest = guimodel.LaunchRequest{}
-		if err := w.launch.StartRequest(context.Background(), request); err != nil {
+		ctx := w.launchContext
+		if ctx == nil {
+			ctx = context.Background()
+		}
+		if err := w.launch.StartRequest(ctx, request); err != nil {
 			w.showLaunchFailure(safeLaunchFailure)
 			return
 		}
 		w.lastLaunchState = guimodel.LaunchStarting
 		if w.launchOrigin == launchFromExternal {
 			w.externalProgress.detail.SetText("Waiting for Roblox to open its window…")
-			if result.authority.Mode == string(setupsvc.DevelopmentUnrestricted) {
-				w.externalProgress.authority.SetText("DevelopmentUnrestricted mode is active; this is not an OfficialVerified Tipsy session.")
-				w.externalProgress.authority.Show()
-			}
+			w.updateExternalProgressAuthority(result.authority)
 		}
 	default:
 	}
@@ -233,7 +254,7 @@ func (w *mainWindow) showLaunchFailure(message string) {
 		p := w.externalProgress
 		p.active = false
 		p.dialog.SetWindowFlag2(qt.WindowCloseButtonHint, true)
-		p.dialog.SetWindowTitle("Tipsy — Launch could not complete")
+		p.dialog.SetWindowTitle(guiTitle("Tipsy — Launch could not complete"))
 		if w.launch.View().Started {
 			p.title.SetText("Roblox closed unexpectedly")
 		} else {
@@ -243,6 +264,7 @@ func (w *mainWindow) showLaunchFailure(message string) {
 		p.busy.Hide()
 		p.note.Hide()
 		p.actions.Show()
+		p.cancel.Hide()
 		p.dialog.Show()
 	} else {
 		w.Show()
@@ -263,11 +285,11 @@ type launchInitialization struct {
 	setupErr, settingsErr error
 }
 
-func loadWindowModels(service guimodel.Service) launchInitialization {
+func loadWindowModels(ctx context.Context, service guimodel.Service) launchInitialization {
 	setup := guimodel.NewSetupModel(service)
 	settings := guimodel.NewSettingsModel(service)
-	setupErr := setup.Load(context.Background())
-	settingsErr := settings.Load(context.Background())
+	setupErr := setup.Load(ctx)
+	settingsErr := settings.Load(ctx)
 	return launchInitialization{setup: setup, settings: settings, setupErr: setupErr, settingsErr: settingsErr}
 }
 
@@ -280,12 +302,13 @@ func (w *mainWindow) startExternalInitialization(uri string) {
 	w.launchRequest = guimodel.LaunchRequest{URI: uri}
 	w.showExternalProgress()
 	w.externalProgress.detail.SetText("Checking the installed client…")
+	ctx := w.beginLaunchContext()
 	result := make(chan launchInitialization, 1)
 	w.launchInitialization = result
 	service := w.service
 	go func() {
 		defer w.queueOwnerState()
-		result <- loadWindowModels(service)
+		result <- loadWindowModels(ctx, service)
 	}()
 }
 
@@ -296,12 +319,13 @@ func (w *mainWindow) startSettingsInitialization() {
 	w.launchInitializing = true
 	w.startupSettings = true
 	w.showStartupProgress()
+	ctx := w.beginLaunchContext()
 	result := make(chan launchInitialization, 1)
 	w.launchInitialization = result
 	service := w.service
 	go func() {
 		defer w.queueOwnerState()
-		result <- loadWindowModels(service)
+		result <- loadWindowModels(ctx, service)
 	}()
 }
 
@@ -309,15 +333,16 @@ func (w *mainWindow) showStartupProgress() {
 	w.ensureLaunchProgress()
 	p := w.externalProgress
 	p.active = true
-	p.dialog.SetWindowFlag2(qt.WindowCloseButtonHint, false)
+	p.dialog.SetWindowFlag2(qt.WindowCloseButtonHint, true)
 	p.title.SetText("Starting Tipsy…")
 	p.detail.SetText("Checking the installed client…")
 	p.note.SetText("This window closes when Tipsy is ready.")
 	p.note.Show()
 	p.busy.Show()
 	p.actions.Hide()
+	p.cancel.Show()
 	p.authority.Hide()
-	p.dialog.SetWindowTitle("Tipsy — Checking the installed client")
+	p.dialog.SetWindowTitle(guiTitle("Tipsy — Checking the installed client"))
 	placeWidgetOnDisplay(p.dialog.QWidget, configuredDisplay(w))
 	p.dialog.Show()
 }
@@ -327,6 +352,7 @@ func (w *mainWindow) pollLaunchInitialization() {
 	case result := <-w.launchInitialization:
 		w.launchInitializing = false
 		w.launchInitialization = nil
+		w.releaseLaunchContext()
 		w.setup, w.settings = result.setup, result.settings
 		w.setupLoadErr, w.settingsErr = result.setupErr, result.settingsErr
 		w.finishShell()

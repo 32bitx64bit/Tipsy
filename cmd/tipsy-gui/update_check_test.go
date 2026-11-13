@@ -171,10 +171,20 @@ func TestUpdateCheckPresentationCoversEveryState(t *testing.T) {
 		release: updatecheck.Release{TagName: "v0.3.0"},
 		method:  updatecheck.AppImage,
 		message: "A newer Tipsy release is available. Download the latest AppImage.",
-		url:     "https://example.invalid/Tipsy.AppImage",
+		url:     "https://github.com/32bitx64bit/Tipsy/releases/download/v0.3.0/Tipsy-v0.3.0-x86_64.AppImage",
 	}, "0.2.0")
-	if !strings.Contains(appImage.detail, `<a href="https://example.invalid/Tipsy.AppImage">`) {
+	if !strings.Contains(appImage.detail, `<a href="https://github.com/32bitx64bit/Tipsy/releases/download/v0.3.0/Tipsy-v0.3.0-x86_64.AppImage">`) {
 		t.Fatalf("appimage detail = %q, want a link", appImage.detail)
+	}
+	// Release JSON from an arbitrary host must never render as a link.
+	foreign := updateCheckPresentation(updateAvailable, updateCheckOutcome{
+		release: updatecheck.Release{TagName: "v0.3.0"},
+		method:  updatecheck.AppImage,
+		message: "A newer Tipsy release is available. Download the latest AppImage.",
+		url:     "https://attacker.invalid/Tipsy.AppImage",
+	}, "0.2.0")
+	if foreign.link != "" || strings.Contains(foreign.detail, "<a href=") {
+		t.Fatalf("foreign release host produced a link: %+v", foreign)
 	}
 	flatpak := updateCheckPresentation(updateAvailable, updateCheckOutcome{
 		release: updatecheck.Release{TagName: "v0.3.0"},
@@ -186,14 +196,33 @@ func TestUpdateCheckPresentationCoversEveryState(t *testing.T) {
 	}
 }
 
-func TestSafeUpdateLinkRejectsOtherSchemes(t *testing.T) {
-	for _, raw := range []string{"", "javascript:alert(1)", "file:///tmp/x", "http://github.com/32bitx64bit/Tipsy", "not a url"} {
+func TestSafeUpdateLinkRejectsOtherSchemesAndHosts(t *testing.T) {
+	for _, raw := range []string{
+		"",
+		"javascript:alert(1)",
+		"file:///tmp/x",
+		"http://github.com/32bitx64bit/Tipsy",
+		"not a url",
+		"https://example.invalid/Tipsy.AppImage",
+		"https://raw.githubusercontent.com/32bitx64bit/Tipsy/main/README.md",
+		"https://github.com.evil.example/32bitx64bit/Tipsy/releases",
+		"https://evil.example/github.com/32bitx64bit/Tipsy/releases",
+		"https://github.com@evil.example/Tipsy/releases",
+		"https://user:pass@github.com/32bitx64bit/Tipsy/releases",
+		"https://github.com:8443/32bitx64bit/Tipsy/releases",
+	} {
 		if got := safeUpdateLink(raw); got != "" {
 			t.Fatalf("safeUpdateLink(%q) = %q, want empty", raw, got)
 		}
 	}
-	if got := safeUpdateLink("https://github.com/32bitx64bit/Tipsy/releases"); !strings.HasPrefix(got, "https://github.com/") {
-		t.Fatalf("safeUpdateLink https = %q", got)
+	for _, raw := range []string{
+		"https://github.com/32bitx64bit/Tipsy/releases",
+		"https://github.com/32bitx64bit/Tipsy/releases/download/v0.3.0/Tipsy-v0.3.0-x86_64.AppImage",
+		"https://GitHub.com/32bitx64bit/Tipsy/releases",
+	} {
+		if got := safeUpdateLink(raw); got == "" {
+			t.Fatalf("safeUpdateLink(%q) = empty, want a github.com link", raw)
+		}
 	}
 }
 

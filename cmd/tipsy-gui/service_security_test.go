@@ -1,6 +1,8 @@
 // Copyright 2026 The Tipsy Authors
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
+//go:build !official_release
+
 package main
 
 import (
@@ -12,6 +14,7 @@ import (
 	"testing"
 	"time"
 
+	qt "github.com/mappu/miqt/qt6"
 	"github.com/tipsy-linux/tipsy/internal/app"
 	guimodel "github.com/tipsy-linux/tipsy/internal/gui"
 	"github.com/tipsy-linux/tipsy/internal/runtime"
@@ -189,5 +192,117 @@ func TestProductionInvalidURIClosesPreparedAuthority(t *testing.T) {
 	}
 	if session.launchCalls.Load() != 0 || session.closeCalls.Load() != 1 {
 		t.Fatalf("invalid URI launch/close calls = %d/%d", session.launchCalls.Load(), session.closeCalls.Load())
+	}
+}
+
+func newVisualProofService() *secureVisualService {
+	return &secureVisualService{
+		visualService: visualService{
+			launchEntered: make(chan struct{}),
+			launchReady:   make(chan struct{}),
+			launchDone:    make(chan struct{}),
+		},
+		requireConsent: true,
+		authority: guimodel.LaunchAuthority{
+			Mode:    string(setupsvc.DevelopmentUnrestricted),
+			Warning: app.DevelopmentUnrestrictedWarning,
+		},
+	}
+}
+
+func exerciseVisualProofLaunch(t *testing.T, win *mainWindow, service *secureVisualService) {
+	t.Helper()
+	originalConfirm := confirmDevelopmentLaunch
+	t.Cleanup(func() { confirmDevelopmentLaunch = originalConfirm })
+	confirmDevelopmentLaunch = func(*qt.QWidget) bool { return false }
+	if !win.beginLaunch(launchFromHome, guimodel.LaunchRequest{}) {
+		t.Fatal("launch preparation did not start")
+	}
+	waitGUI(t, func() bool { return !win.launchPreparing })
+	if !win.launchFailure {
+		t.Fatal("declined development launch did not show failure")
+	}
+
+	if got := win.playAuthority.Text(); !strings.Contains(got, "Approval required") || !strings.Contains(got, "OfficialVerified") {
+		t.Fatalf("missing-consent warning was not visible: %q", got)
+	}
+	select {
+	case <-service.launchEntered:
+		t.Fatal("declined development consent reached the launch backend")
+	default:
+	}
+	confirmDevelopmentLaunch = func(*qt.QWidget) bool { return true }
+	win.playButton.Click()
+	waitGUI(t, func() bool {
+		select {
+		case <-service.launchEntered:
+			return true
+		default:
+			return false
+		}
+	})
+	if win.externalProgress != nil || !win.launchBusy.IsVisible() {
+		t.Fatal("in-GUI Play did not keep its busy state in the main window")
+	}
+
+	if got := win.playAuthority.Text(); got != service.authority.Warning {
+		t.Fatalf("development warning was not propagated exactly: %q", got)
+	}
+	if approvals := service.approvalCalls(); len(approvals) != 3 || approvals[0] || approvals[1] || !approvals[2] {
+		t.Fatalf("development approval flow = %v", approvals)
+	}
+}
+
+func stubExternalConsentDecline(t *testing.T, win *mainWindow) {
+	t.Helper()
+	originalConfirm := confirmDevelopmentLaunch
+	t.Cleanup(func() { confirmDevelopmentLaunch = originalConfirm })
+	confirmDevelopmentLaunch = func(parent *qt.QWidget) bool {
+		if parent.UnsafePointer() != win.externalProgress.dialog.QWidget.UnsafePointer() {
+			t.Fatal("external consent was not parented to progress")
+		}
+		return false
+	}
+}
+
+func TestProductionInstallBindsDevelopmentPackageTrustBeforeBackendInstall(t *testing.T) {
+	t.Parallel()
+	positive := setupsvc.InstallSnapshot{Installed: true, Readiness: setupsvc.ReadinessLaunchInputs}
+	backend := &readinessBackendFixture{install: &setupsvc.InstallResult{Snapshot: positive}}
+	service := &productionService{
+		installer: backend,
+		packageTrust: func(context.Context) (setupsvc.TrustPolicy, error) {
+			return setupsvc.DevelopmentTrustPolicy(), nil
+		},
+	}
+	if err := service.Install(context.Background(), guimodel.InstallRequest{}, func(guimodel.InstallProgress) {}); err != nil {
+		t.Fatalf("development install=%v", err)
+	}
+	if backend.installCalls != 1 {
+		t.Fatalf("install calls=%d", backend.installCalls)
+	}
+	if backend.trust.Mode != setupsvc.DevelopmentUnrestricted || backend.trust.ReleaseAuthenticated {
+		t.Fatalf("bound trust=%+v", backend.trust)
+	}
+}
+
+func TestProductionInstallAppliesDevelopmentTrustToLiveSetupService(t *testing.T) {
+	t.Parallel()
+	inner := setupsvc.New(app.SetupHooks())
+	if inner.Trust.Mode != setupsvc.OfficialVerified || inner.Trust.ReleaseAuthenticated {
+		t.Fatalf("default live trust=%+v", inner.Trust)
+	}
+	service := &productionService{
+		installer: inner,
+		packageTrust: func(context.Context) (setupsvc.TrustPolicy, error) {
+			return setupsvc.DevelopmentTrustPolicy(), nil
+		},
+	}
+	err := service.Install(context.Background(), guimodel.InstallRequest{Mode: guimodel.InstallLocal}, func(guimodel.InstallProgress) {})
+	if err == nil {
+		t.Fatal("empty local install unexpectedly succeeded")
+	}
+	if inner.Trust.Mode != setupsvc.DevelopmentUnrestricted || inner.Trust.ReleaseAuthenticated {
+		t.Fatalf("live setup trust=%+v", inner.Trust)
 	}
 }

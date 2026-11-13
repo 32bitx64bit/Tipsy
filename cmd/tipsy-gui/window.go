@@ -116,6 +116,8 @@ type mainWindow struct {
 	launchConsentRequested bool
 	launchInitializing     bool
 	launchInitialization   chan launchInitialization
+	launchContext          context.Context
+	launchCancel           context.CancelFunc
 	startupSettings        bool
 
 	doctorPending bool
@@ -142,7 +144,7 @@ func newWindowBase(service guimodel.Service, icon *qt.QIcon) *mainWindow {
 	}
 
 	w.win = qt.NewQMainWindow2()
-	w.win.SetWindowTitle("Tipsy")
+	w.win.SetWindowTitle(guiTitle("Tipsy"))
 	w.win.SetWindowIcon(icon)
 	w.win.Resize(680, 820)
 	w.win.SetMinimumSize2(640, 560)
@@ -520,46 +522,53 @@ func (w *mainWindow) launchRoblox() bool {
 	return w.beginLaunch(launchFromHome, guimodel.LaunchRequest{})
 }
 
-var confirmDevelopmentLaunch = func(parent *qt.QWidget) bool {
-	buttons := qt.QMessageBox__StandardButton(int(qt.QMessageBox__Yes) | int(qt.QMessageBox__No))
-	dialog := qt.NewQMessageBox6(
-		qt.QMessageBox__Warning,
-		"Authorize development launch",
-		"This local build cannot be authenticated as an official Tipsy release. Continue in DevelopmentUnrestricted mode?\n\nThis records your explicit choice in Tipsy's owner-private configuration. The official Roblox APK and active generation will still be verified, but this Tipsy session must not be represented as OfficialVerified.",
-		buttons,
-		parent,
-	)
-	dialog.SetDefaultButtonWithButton(qt.QMessageBox__No)
-	dialog.SetEscapeButtonWithButton(qt.QMessageBox__No)
-	result := dialog.Exec()
-	dialog.Delete()
-	return result == int(qt.QMessageBox__Yes)
+// beginLaunchContext installs the cancelable context that backs one launch or
+// startup verification, replacing any finished one.
+func (w *mainWindow) beginLaunchContext() context.Context {
+	w.releaseLaunchContext()
+	ctx, cancel := context.WithCancel(context.Background())
+	w.launchContext, w.launchCancel = ctx, cancel
+	return ctx
 }
 
-func (w *mainWindow) setLaunchAuthority(authority guimodel.LaunchAuthority) {
-	if w.playAuthority == nil {
-		return
+// releaseLaunchContext cancels and forgets the active launch context. It is
+// idempotent and only runs once backend work has returned or been abandoned.
+func (w *mainWindow) releaseLaunchContext() {
+	if w.launchCancel != nil {
+		w.launchCancel()
 	}
-	switch {
-	case authority.DevelopmentConsentRequired:
-		w.playAuthority.SetText("Approval required — local builds cannot launch as OfficialVerified.")
-		setObjectName(w.playAuthority.QObject, "noticeWarning")
-	case authority.Mode == string(setupsvc.DevelopmentUnrestricted):
-		warning := authority.Warning
-		if warning == "" {
-			warning = "DevelopmentUnrestricted mode is active; this is not an OfficialVerified Tipsy session."
-		}
-		w.playAuthority.SetText(warning)
-		setObjectName(w.playAuthority.QObject, "noticeWarning")
-	case authority.Mode == string(setupsvc.OfficialVerified):
-		w.playAuthority.SetText("OfficialVerified — release authority and the active Roblox generation are authenticated.")
-		setObjectName(w.playAuthority.QObject, "noticeSuccess")
-	default:
-		w.playAuthority.SetText("Launch authority will be verified before Roblox starts.")
-		setObjectName(w.playAuthority.QObject, "noticeInfo")
+	w.launchCancel = nil
+	w.launchContext = nil
+}
+
+// cancelActiveLaunch aborts the launch or startup verification behind the
+// progress dialog and returns the user to Tipsy. A client that already
+// reached LaunchRunning is never torn down from the progress surface; the
+// dialog then stays in place and close is refused.
+func (w *mainWindow) cancelActiveLaunch() bool {
+	if w.launch.View().State == guimodel.LaunchRunning {
+		return false
 	}
-	w.playAuthority.SetVisible(authority.DevelopmentConsentRequired || authority.Mode == string(setupsvc.DevelopmentUnrestricted))
-	refreshStyle(w.playAuthority.QWidget)
+	w.releaseLaunchContext()
+	w.launchPreparing = false
+	w.launchPreparation = nil
+	w.launchRequest = guimodel.LaunchRequest{}
+	w.launchInitializing = false
+	w.launchInitialization = nil
+	w.startupSettings = false
+	// A cancelled verification never waits for its worker: the worker owns the
+	// models it loaded, so the shell is built from the window's own unloaded
+	// models and honestly reports that startup was abandoned.
+	if w.playButton == nil {
+		w.setupLoadErr = fmt.Errorf("startup was cancelled")
+		w.settingsErr = fmt.Errorf("startup was cancelled")
+		w.finishShell()
+	}
+	w.launchOrigin = launchFromHome
+	w.Show()
+	w.status.ShowMessage2("Launch cancelled.", 6000)
+	w.refreshLaunchState()
+	return true
 }
 
 func (w *mainWindow) refreshLaunchState() {
@@ -574,12 +583,19 @@ func (w *mainWindow) refreshLaunchState() {
 	}
 	w.pollLaunchPreparation()
 	view := w.launch.View()
+	if !w.launchPreparing && !w.launchInitializing {
+		switch view.State {
+		case guimodel.LaunchIdle, guimodel.LaunchExited, guimodel.LaunchFailed:
+			w.releaseLaunchContext()
+		}
+	}
 	if view.State == guimodel.LaunchRunning && !w.launcherHidden {
 		qt.QGuiApplication_SetQuitOnLastWindowClosed(false)
 		w.stopVisibleTimers()
 		w.win.Hide()
 		if w.externalProgress != nil {
 			w.externalProgress.active = false
+			w.externalProgress.cancel.Hide()
 			w.externalProgress.dialog.Hide()
 		}
 		w.launcherHidden = true
@@ -634,10 +650,15 @@ func (w *mainWindow) refreshSettingsProfile() {
 }
 
 func showAboutMessage(parent *qt.QWidget) {
-	qt.QMessageBox_About(parent, "About Tipsy", fmt.Sprintf(
+	provenance := "<p>Build provenance: " + version.Provenance() + ".</p>"
+	if !version.IsOfficialBuild() {
+		provenance = "<p><b>" + version.UnofficialBuildLabel + "</b> — this build was not produced by the official Tipsy release pipeline and must not be presented as an official Tipsy release.</p>"
+	}
+	qt.QMessageBox_About(parent, guiTitle("About Tipsy"), fmt.Sprintf(
 		"<h2>Tipsy %s</h2><p>A Linux desktop runtime for the official Roblox Android x86-64 client.</p>"+
-			"<p>Tipsy is licensed GPL-3.0-or-later. Roblox is not included and remains copyright Roblox Corporation.</p>"+
+			"%s"+
+			"<p>Tipsy is licensed AGPL-3.0-or-later with additional terms under AGPLv3 section 7 (see NOTICE). Roblox is not included and remains copyright Roblox Corporation.</p>"+
 			"<p>The desktop application is built with Qt 6 and MIQT. X11 is the primary display target.</p>",
-		version.String(),
+		version.String(), provenance,
 	))
 }

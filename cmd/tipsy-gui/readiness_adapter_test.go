@@ -9,7 +9,6 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/tipsy-linux/tipsy/internal/app"
 	guimodel "github.com/tipsy-linux/tipsy/internal/gui"
 	"github.com/tipsy-linux/tipsy/internal/setupsvc"
 )
@@ -189,48 +188,6 @@ func TestProductionInstallRequiresAuthenticatedLaunchInputs(t *testing.T) {
 	backend := &readinessBackendFixture{install: &setupsvc.InstallResult{Snapshot: positive}}
 	if err := (&productionService{installer: backend}).Install(context.Background(), guimodel.InstallRequest{}, func(guimodel.InstallProgress) {}); err != nil {
 		t.Fatalf("positive install result=%v", err)
-	}
-}
-
-func TestProductionInstallBindsDevelopmentPackageTrustBeforeBackendInstall(t *testing.T) {
-	t.Parallel()
-	positive := setupsvc.InstallSnapshot{Installed: true, Readiness: setupsvc.ReadinessLaunchInputs}
-	backend := &readinessBackendFixture{install: &setupsvc.InstallResult{Snapshot: positive}}
-	service := &productionService{
-		installer: backend,
-		packageTrust: func(context.Context) (setupsvc.TrustPolicy, error) {
-			return setupsvc.DevelopmentTrustPolicy(), nil
-		},
-	}
-	if err := service.Install(context.Background(), guimodel.InstallRequest{}, func(guimodel.InstallProgress) {}); err != nil {
-		t.Fatalf("development install=%v", err)
-	}
-	if backend.installCalls != 1 {
-		t.Fatalf("install calls=%d", backend.installCalls)
-	}
-	if backend.trust.Mode != setupsvc.DevelopmentUnrestricted || backend.trust.ReleaseAuthenticated {
-		t.Fatalf("bound trust=%+v", backend.trust)
-	}
-}
-
-func TestProductionInstallAppliesDevelopmentTrustToLiveSetupService(t *testing.T) {
-	t.Parallel()
-	inner := setupsvc.New(app.SetupHooks())
-	if inner.Trust.Mode != setupsvc.OfficialVerified || inner.Trust.ReleaseAuthenticated {
-		t.Fatalf("default live trust=%+v", inner.Trust)
-	}
-	service := &productionService{
-		installer: inner,
-		packageTrust: func(context.Context) (setupsvc.TrustPolicy, error) {
-			return setupsvc.DevelopmentTrustPolicy(), nil
-		},
-	}
-	err := service.Install(context.Background(), guimodel.InstallRequest{Mode: guimodel.InstallLocal}, func(guimodel.InstallProgress) {})
-	if err == nil {
-		t.Fatal("empty local install unexpectedly succeeded")
-	}
-	if inner.Trust.Mode != setupsvc.DevelopmentUnrestricted || inner.Trust.ReleaseAuthenticated {
-		t.Fatalf("live setup trust=%+v", inner.Trust)
 	}
 }
 

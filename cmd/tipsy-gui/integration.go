@@ -150,7 +150,7 @@ func (w *mainWindow) buildIntegrationCard() *qt.QFrame {
 	cardLayout.AddWidget(w.integrationDetail.QWidget)
 
 	actions := qt.NewQHBoxLayout2()
-	build := qt.NewQLabel3(fmt.Sprintf("This build: %s %s (%s channel)", desktop.Current().Name, version.String(), version.Channel))
+	build := qt.NewQLabel3(fmt.Sprintf("This build: %s %s (%s channel) — %s", desktop.Current().Name, version.String(), version.Channel, version.Provenance()))
 	setObjectName(build.QObject, "mutedText")
 	actions.AddWidget(build.QWidget)
 	actions.AddStretch()

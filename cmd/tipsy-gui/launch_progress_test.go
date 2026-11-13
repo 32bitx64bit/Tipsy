@@ -215,14 +215,7 @@ func TestExternalLaunchProgress(t *testing.T) {
 			service.missing = scenario == "not-installed"
 			win := newWindowBase(service, brandIcon())
 			defer win.win.Delete()
-			originalConfirm := confirmDevelopmentLaunch
-			defer func() { confirmDevelopmentLaunch = originalConfirm }()
-			confirmDevelopmentLaunch = func(parent *qt.QWidget) bool {
-				if parent.UnsafePointer() != win.externalProgress.dialog.QWidget.UnsafePointer() {
-					t.Fatal("external consent was not parented to progress")
-				}
-				return false
-			}
+			stubExternalConsentDecline(t, win)
 			if mode := appearanceMode(os.Getenv("TIPSY_GUI_TEST_APPEARANCE")); validAppearance(mode) {
 				win.chooseAppearance(mode)
 			}
@@ -237,12 +230,6 @@ func TestExternalLaunchProgress(t *testing.T) {
 			timer.OnTimeout(func() { pulses++ })
 			timer.Start(5)
 			waitGUI(t, func() bool { return pulses >= 3 && service.snapshots.Load() == 1 })
-			p.dialog.Close()
-			p.dialog.Reject()
-			qt.QCoreApplication_ProcessEvents()
-			if !p.dialog.IsVisible() || !p.active {
-				t.Fatal("active verification window could be dismissed")
-			}
 
 			if scenario == "not-installed" {
 				setupShown := false
@@ -270,11 +257,6 @@ func TestExternalLaunchProgress(t *testing.T) {
 			waitGUI(t, func() bool { return service.preparations.Load() == 1 })
 			if win.beginLaunch(launchFromExternal, guimodel.LaunchRequest{URI: opaqueURI}) {
 				t.Fatal("duplicate authorization accepted")
-			}
-			p.dialog.Close()
-			p.dialog.Reject()
-			if !p.dialog.IsVisible() {
-				t.Fatal("active authorization window could be dismissed")
 			}
 			close(service.prepareGate)
 			if scenario == "authorization-failed" || scenario == "consent-declined" {
@@ -384,6 +366,106 @@ func TestExternalLaunchProgress(t *testing.T) {
 	}
 	win.win.Close()
 
+}
+
+func TestLaunchProgressCancelReleasesActiveDialog(t *testing.T) {
+	t.Setenv("QT_QPA_PLATFORM", "offscreen")
+	root := t.TempDir()
+	for _, dir := range []string{"CONFIG", "DATA", "CACHE", "STATE"} {
+		t.Setenv("XDG_"+dir+"_HOME", filepath.Join(root, dir))
+	}
+	t.Setenv("TIPSY_ICON_PATH", filepath.Join("..", "..", "tipsy.png"))
+	app := qt.NewQApplication([]string{"tipsy-progress-cancel-test"})
+	defer app.Delete()
+	qt.QApplication_SetStyleWithStyle("Fusion")
+	const opaqueURI = "roblox://opaque-cancel-sentinel?ticket=private-test-sentinel"
+
+	// Cancelling verification releases the dialog, discards the opaque URI and
+	// leaves a usable Tipsy window instead of an unclosable splash.
+	func() {
+		service := newProgressService()
+		win := newWindowBase(service, brandIcon())
+		defer win.win.Delete()
+		win.startExternalInitialization(opaqueURI)
+		p := win.externalProgress
+		if p == nil || !p.active || !p.dialog.IsVisible() || !p.cancel.IsVisible() {
+			t.Fatal("active progress dialog did not offer cancellation")
+		}
+		p.cancel.Click()
+		qt.QCoreApplication_ProcessEvents()
+		if p.active || p.dialog.IsVisible() {
+			t.Fatal("cancel did not release the progress dialog")
+		}
+		if win.launchInitializing || win.launchRequest.URI != "" {
+			t.Fatal("cancel retained the in-flight verification")
+		}
+		if win.playButton == nil || !win.win.IsVisible() {
+			t.Fatal("cancel left no usable Tipsy window")
+		}
+		close(service.snapshotGate)
+		waitGUI(t, func() bool {
+			return service.snapshots.Load() == 1 && win.metrics.snapshot().OwnerQueued >= 1
+		})
+		qt.QCoreApplication_ProcessEvents()
+		if service.preparations.Load() != 0 || service.launches.Load() != 0 {
+			t.Fatal("cancelled verification still reached authorization or runtime")
+		}
+		win.win.Close()
+	}()
+
+	// Closing the progress window while authorization is in flight takes the
+	// same cancellation path instead of being ignored forever.
+	func() {
+		service := newProgressService()
+		close(service.snapshotGate)
+		win := newWindowBase(service, brandIcon())
+		defer win.win.Delete()
+		win.startExternalInitialization(opaqueURI)
+		waitGUI(t, func() bool { return service.preparations.Load() == 1 })
+		p := win.externalProgress
+		if p == nil || !p.active || !p.dialog.IsVisible() {
+			t.Fatal("authorization progress was not active")
+		}
+		p.dialog.Close()
+		qt.QCoreApplication_ProcessEvents()
+		if p.active || p.dialog.IsVisible() {
+			t.Fatal("closing an active progress dialog was ignored")
+		}
+		if win.launchPreparing || win.launchRequest.URI != "" {
+			t.Fatal("close did not cancel the in-flight preparation")
+		}
+		if !win.win.IsVisible() || win.playButton == nil || !win.playButton.IsEnabled() {
+			t.Fatal("cancelled authorization did not restore an actionable home surface")
+		}
+		close(service.prepareGate)
+		qt.QCoreApplication_ProcessEvents()
+		if service.launches.Load() != 0 {
+			t.Fatal("cancelled preparation reached runtime")
+		}
+		win.win.Close()
+	}()
+
+	// Esc/reject is a cancel too.
+	func() {
+		service := newProgressService()
+		win := newWindowBase(service, brandIcon())
+		defer win.win.Delete()
+		win.startExternalInitialization(opaqueURI)
+		p := win.externalProgress
+		if p == nil || !p.active {
+			t.Fatal("verification progress was not active")
+		}
+		p.dialog.Reject()
+		qt.QCoreApplication_ProcessEvents()
+		if p.active || p.dialog.IsVisible() || win.launchInitializing || win.launchRequest.URI != "" {
+			t.Fatal("reject did not cancel the active progress dialog")
+		}
+		close(service.snapshotGate)
+		waitGUI(t, func() bool {
+			return service.snapshots.Load() == 1 && win.metrics.snapshot().OwnerQueued >= 1
+		})
+		win.win.Close()
+	}()
 }
 
 func TestSettingsStartupVerifiesBeforeShell(t *testing.T) {

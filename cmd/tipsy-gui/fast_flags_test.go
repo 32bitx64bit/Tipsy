@@ -57,7 +57,9 @@ func TestFastFlagEditorUsesDedicatedRowsAndExplicitConfirmation(t *testing.T) {
 	app.SetStyleSheet(appStyleSheet)
 
 	var saved []clientsettings.FastFlag
-	editor := newFastFlagEditor(nil, []clientsettings.FastFlag{{Name: "FFlagFirst", Value: "True"}}, func(_ context.Context, flags []clientsettings.FastFlag) error {
+	// Allowlisted names keep the editor contract identical in development
+	// and official_release builds (neither has a Settings control label).
+	editor := newFastFlagEditor(nil, []clientsettings.FastFlag{{Name: "FFlagRenderPipelineVersioningFlag4", Value: "True"}}, func(_ context.Context, flags []clientsettings.FastFlag) error {
 		saved = append([]clientsettings.FastFlag(nil), flags...)
 		return nil
 	})
@@ -65,11 +67,11 @@ func TestFastFlagEditorUsesDedicatedRowsAndExplicitConfirmation(t *testing.T) {
 	if len(editor.rows) != 1 || editor.rows[0].container == nil {
 		t.Fatalf("initial editor rows=%+v", editor.rows)
 	}
-	editor.addRow(clientsettings.FastFlag{Name: "DFIntSecond", Value: "37"})
+	editor.addRow(clientsettings.FastFlag{Name: "FIntEnableRenderPipelineHundredthsPercent", Value: "37"})
 	if len(editor.rows) != 2 || editor.rows[0].container.UnsafePointer() == editor.rows[1].container.UnsafePointer() {
 		t.Fatalf("entries did not receive dedicated containers: %+v", editor.rows)
 	}
-	if editor.rows[1].name.Text() != "DFIntSecond" || editor.rows[1].value.Text() != "37" {
+	if editor.rows[1].name.Text() != "FIntEnableRenderPipelineHundredthsPercent" || editor.rows[1].value.Text() != "37" {
 		t.Fatalf("second editor row=%q=%q", editor.rows[1].name.Text(), editor.rows[1].value.Text())
 	}
 	editor.addRow(clientsettings.FastFlag{Name: "FFlagDebugGraphicsPreferOpenGL", Value: "True"})
@@ -81,7 +83,7 @@ func TestFastFlagEditorUsesDedicatedRowsAndExplicitConfirmation(t *testing.T) {
 	}
 	editor.confirmSave()
 	qt.QCoreApplication_ProcessEvents()
-	want := []clientsettings.FastFlag{{Name: "FFlagFirst", Value: "True"}, {Name: "DFIntSecond", Value: "37"}, {Name: "FFlagDebugGraphicsPreferOpenGL", Value: "True"}}
+	want := []clientsettings.FastFlag{{Name: "FFlagRenderPipelineVersioningFlag4", Value: "True"}, {Name: "FIntEnableRenderPipelineHundredthsPercent", Value: "37"}, {Name: "FFlagDebugGraphicsPreferOpenGL", Value: "True"}}
 	if !reflect.DeepEqual(saved, want) || editor.dialog.Result() != int(qt.QDialog__Accepted) {
 		t.Fatalf("confirmation saved=%+v result=%d want=%+v", saved, editor.dialog.Result(), want)
 	}

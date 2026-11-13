@@ -70,7 +70,7 @@ func (s *productionService) Snapshot(ctx context.Context) (guimodel.InstallSnaps
 	if s == nil || s.installer == nil {
 		return guimodel.InstallSnapshot{}, fmt.Errorf("installation verification service is unavailable")
 	}
-	if err := s.bindPackageTrust(ctx); err != nil && !errors.Is(err, app.ErrDevelopmentConsentRequired) {
+	if err := s.bindPackageTrust(ctx); err != nil && !isDevelopmentConsentError(err) {
 		if errors.Is(err, context.Canceled) || setupsvc.ErrorKindOf(err) == setupsvc.ErrCanceled {
 			return guimodel.InstallSnapshot{}, context.Canceled
 		}
@@ -193,6 +193,9 @@ func (s *productionService) PrepareLaunch(ctx context.Context, approveDevelopmen
 	if s == nil || s.launchBackend.open == nil {
 		return guimodel.LaunchAuthority{}, fmt.Errorf("authorized GUI launch integration is unavailable")
 	}
+	if err := allowGUIDevelopmentApproval(approveDevelopment); err != nil {
+		return guimodel.LaunchAuthority{}, err
+	}
 	session, err := s.launchBackend.open(ctx, approveDevelopment)
 	if err != nil {
 		state := app.LaunchAuthorityState{}
@@ -206,24 +209,9 @@ func (s *productionService) PrepareLaunch(ctx context.Context, approveDevelopmen
 		return guimodel.LaunchAuthority{}, fmt.Errorf("authorized GUI launch session is nil")
 	}
 	state := guiLaunchAuthority(session.State())
-	if state.DevelopmentConsentRequired {
+	if err := validatePreparedGUIAuthority(state); err != nil {
 		_ = session.Close()
-		return state, fmt.Errorf("authorized GUI launch session returned incomplete authority")
-	}
-	switch state.Mode {
-	case string(setupsvc.DevelopmentUnrestricted):
-		if state.Warning != app.DevelopmentUnrestrictedWarning {
-			_ = session.Close()
-			return state, fmt.Errorf("development GUI launch omitted its required warning")
-		}
-	case string(setupsvc.OfficialVerified):
-		if state.Warning != "" {
-			_ = session.Close()
-			return state, fmt.Errorf("official GUI launch returned an unexpected warning")
-		}
-	default:
-		_ = session.Close()
-		return state, fmt.Errorf("authorized GUI launch session returned an unknown authority mode")
+		return state, err
 	}
 
 	s.launchMu.Lock()

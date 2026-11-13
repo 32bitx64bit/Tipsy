@@ -78,7 +78,7 @@ func fetchLatestRelease(ctx context.Context) (updatecheck.Release, error) {
 		BaseURL:   updatecheck.DefaultBaseURL,
 		HTTP:      http.DefaultClient,
 		Timeout:   10 * time.Second,
-		UserAgent: "Tipsy-Linux",
+		UserAgent: version.UserAgent(),
 	}
 	return client.Latest(ctx)
 }
@@ -193,17 +193,22 @@ func updateCheckPresentation(view updateCheckView, outcome updateCheckOutcome, l
 	return presentation
 }
 
-// safeUpdateLink accepts only absolute https URLs from GitHub metadata.
+// safeUpdateLink accepts only absolute https URLs on github.com, the host that
+// serves Tipsy's release metadata. Userinfo and every other third-party host
+// are rejected so release JSON cannot turn into an arbitrary external link.
 func safeUpdateLink(raw string) string {
 	raw = strings.TrimSpace(raw)
 	if raw == "" {
 		return ""
 	}
 	parsed, err := url.Parse(raw)
-	if err != nil || parsed.Host == "" {
+	if err != nil || parsed.Scheme != "https" || parsed.Host == "" {
 		return ""
 	}
-	if parsed.Scheme != "https" {
+	if parsed.User != nil {
+		return ""
+	}
+	if !strings.EqualFold(parsed.Host, "github.com") {
 		return ""
 	}
 	return parsed.String()
