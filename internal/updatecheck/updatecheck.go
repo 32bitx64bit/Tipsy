@@ -8,12 +8,16 @@ package updatecheck
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/tipsy-linux/tipsy/internal/version"
 )
 
 const (
@@ -26,10 +30,15 @@ const (
 	// DefaultBaseURL is the public GitHub API root.
 	DefaultBaseURL = "https://api.github.com"
 
-	defaultUserAgent = "Tipsy-Linux"
-	defaultTimeout   = 10 * time.Second
-	maxReleaseBytes  = 1 << 20
+	defaultTimeout  = 10 * time.Second
+	maxReleaseBytes = 1 << 20
 )
+
+// defaultUserAgent is Tipsy's own User-Agent, derived from the compile-time
+// build identity: unofficial builds carry the Unofficial / Local Build marker.
+func defaultUserAgent() string {
+	return version.UserAgent()
+}
 
 // Asset is one downloadable file attached to a GitHub release.
 type Asset struct {
@@ -42,6 +51,13 @@ type Release struct {
 	TagName string  `json:"tag_name"`
 	HTMLURL string  `json:"html_url"`
 	Assets  []Asset `json:"assets"`
+
+	// VerifiedSHA256 is the cryptographically verified SHA-256 hex digest of the
+	// primary official AppImage asset populated by Client.Latest.
+	VerifiedSHA256 string `json:"-"`
+	// VerifiedAssets maps each verified release asset name to its verified
+	// Sigstore provenance summary populated by Client.Latest.
+	VerifiedAssets map[string]VerifiedBundle `json:"-"`
 }
 
 // Status is the result of comparing the running build with the latest release.
@@ -58,7 +74,8 @@ const (
 )
 
 // Client fetches releases from the GitHub API. Zero values use the official
-// repository, the public API and a ten second timeout.
+// repository, the public API, embedded Sigstore Public Good roots, and a ten
+// second timeout.
 type Client struct {
 	// BaseURL is the API root, or a complete releases/latest endpoint.
 	BaseURL string
@@ -68,11 +85,16 @@ type Client struct {
 	Timeout time.Duration
 	// UserAgent is sent to GitHub. GitHub rejects requests without one.
 	UserAgent string
+	// Policy overrides offline Sigstore verification parameters (such as test
+	// trust roots). Zero values enforce official 32bitx64bit/Tipsy release.yml
+	// provenance against embedded Sigstore Public Good roots.
+	Policy BundlePolicy
 }
 
-// Latest fetches the latest published release. It sets a context timeout and
-// the GitHub-recommended Accept and User-Agent headers. A non-200 response or
-// malformed body is an error; the caller keeps its previous quiet state.
+// Latest fetches the latest published release and verifies offline Sigstore
+// bundles (.sigstore.json) and checksums (.sha256) for official release assets.
+// A non-200 response, malformed body, missing signature bundle, or failed
+// provenance check returns an error so the caller keeps its quiet state.
 func (c Client) Latest(ctx context.Context) (Release, error) {
 	if ctx == nil {
 		ctx = context.Background()
@@ -84,13 +106,14 @@ func (c Client) Latest(ctx context.Context) (Release, error) {
 	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
+	userAgent := strings.TrimSpace(c.UserAgent)
+	if userAgent == "" {
+		userAgent = defaultUserAgent()
+	}
+
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.latestEndpoint(), nil)
 	if err != nil {
 		return Release{}, fmt.Errorf("updatecheck: build request: %w", err)
-	}
-	userAgent := strings.TrimSpace(c.UserAgent)
-	if userAgent == "" {
-		userAgent = defaultUserAgent
 	}
 	req.Header.Set("User-Agent", userAgent)
 	req.Header.Set("Accept", "application/vnd.github+json")
@@ -112,7 +135,144 @@ func (c Client) Latest(ctx context.Context) (Release, error) {
 	if strings.TrimSpace(release.TagName) == "" {
 		return Release{}, fmt.Errorf("updatecheck: latest release has no tag_name")
 	}
+	if err := c.verifyReleaseAssets(ctx, userAgent, &release); err != nil {
+		return Release{}, err
+	}
 	return release, nil
+}
+
+func (c Client) verifyReleaseAssets(ctx context.Context, userAgent string, release *Release) error {
+	assetsByName := make(map[string]Asset, len(release.Assets))
+	var targets []Asset
+	hasAppImage := false
+
+	for _, asset := range release.Assets {
+		name := strings.TrimSpace(asset.Name)
+		if name == "" {
+			continue
+		}
+		if _, dup := assetsByName[name]; dup {
+			return fmt.Errorf("updatecheck: duplicate release asset %q", name)
+		}
+		assetsByName[name] = asset
+
+		lower := strings.ToLower(name)
+		switch {
+		case strings.HasSuffix(lower, ".appimage"):
+			hasAppImage = true
+			targets = append(targets, asset)
+		case strings.HasSuffix(lower, ".appdir.tar.gz"):
+			targets = append(targets, asset)
+		}
+	}
+	if !hasAppImage {
+		return errors.New("updatecheck: release has no official AppImage asset")
+	}
+
+	verified := make(map[string]VerifiedBundle, len(targets))
+	var primarySHA256, fallbackSHA256 string
+
+	for _, target := range targets {
+		if err := c.validateAssetDownloadURL(target.BrowserDownloadURL); err != nil {
+			return fmt.Errorf("updatecheck: asset %q: %w", target.Name, err)
+		}
+		shaAsset, ok := assetsByName[target.Name+".sha256"]
+		if !ok {
+			return fmt.Errorf("updatecheck: release asset %q is missing %s.sha256", target.Name, target.Name)
+		}
+		bundleAsset, ok := assetsByName[target.Name+".sigstore.json"]
+		if !ok {
+			return fmt.Errorf("updatecheck: release asset %q is missing %s.sigstore.json", target.Name, target.Name)
+		}
+
+		shaBytes, err := c.fetchAssetBytes(ctx, userAgent, shaAsset, maxSHA256FileBytes)
+		if err != nil {
+			return fmt.Errorf("updatecheck: fetch %s: %w", shaAsset.Name, err)
+		}
+		declaredHex, err := ParseSHA256File(shaBytes, target.Name)
+		if err != nil {
+			return fmt.Errorf("updatecheck: %s: %w", shaAsset.Name, err)
+		}
+
+		bundleBytes, err := c.fetchAssetBytes(ctx, userAgent, bundleAsset, maxSigstoreBundleSz)
+		if err != nil {
+			return fmt.Errorf("updatecheck: fetch %s: %w", bundleAsset.Name, err)
+		}
+
+		policy := c.Policy
+		policy.Tag = release.TagName
+		policy.ArtifactName = target.Name
+		vb, err := VerifySigstoreBundle(bundleBytes, declaredHex, policy)
+		if err != nil {
+			return fmt.Errorf("updatecheck: verify %s: %w", bundleAsset.Name, err)
+		}
+		verified[target.Name] = vb
+
+		lower := strings.ToLower(target.Name)
+		if strings.HasSuffix(lower, ".appimage") {
+			if strings.Contains(lower, "x86_64") || strings.Contains(lower, "amd64") {
+				if primarySHA256 == "" {
+					primarySHA256 = vb.ArtifactSHA256
+				}
+			} else if fallbackSHA256 == "" {
+				fallbackSHA256 = vb.ArtifactSHA256
+			}
+		}
+	}
+
+	if primarySHA256 == "" {
+		primarySHA256 = fallbackSHA256
+	}
+	release.VerifiedSHA256 = primarySHA256
+	release.VerifiedAssets = verified
+	return nil
+}
+
+func (c Client) fetchAssetBytes(ctx context.Context, userAgent string, asset Asset, maxBytes int64) ([]byte, error) {
+	if err := c.validateAssetDownloadURL(asset.BrowserDownloadURL); err != nil {
+		return nil, err
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, asset.BrowserDownloadURL, nil)
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("User-Agent", userAgent)
+	req.Header.Set("Accept", "application/octet-stream")
+
+	resp, err := c.httpClient().Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("server returned %s", resp.Status)
+	}
+	data, err := io.ReadAll(io.LimitReader(resp.Body, maxBytes+1))
+	if err != nil {
+		return nil, err
+	}
+	if int64(len(data)) > maxBytes {
+		return nil, fmt.Errorf("asset exceeds %d bytes", maxBytes)
+	}
+	return data, nil
+}
+
+func (c Client) validateAssetDownloadURL(raw string) error {
+	parsed, err := url.Parse(strings.TrimSpace(raw))
+	if err != nil || parsed.Host == "" {
+		return fmt.Errorf("invalid asset download URL %q", raw)
+	}
+	if parsed.Scheme == "https" {
+		return nil
+	}
+	if parsed.Scheme == "http" {
+		baseParsed, err := url.Parse(strings.TrimSpace(c.BaseURL))
+		if err == nil && baseParsed.Scheme == "http" && baseParsed.Host != "" && strings.EqualFold(parsed.Host, baseParsed.Host) {
+			return nil
+		}
+	}
+	return fmt.Errorf("refusing non-HTTPS asset download URL %q", raw)
 }
 
 func (c Client) latestEndpoint() string {
