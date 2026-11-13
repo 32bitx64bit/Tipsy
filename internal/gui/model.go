@@ -1,5 +1,5 @@
 // Copyright 2026 The Tipsy Authors
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: AGPL-3.0-or-later
 
 // Package gui contains presentation-neutral state for the Qt desktop client.
 // It deliberately describes workflows only; package installation, client

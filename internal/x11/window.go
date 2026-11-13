@@ -1,5 +1,5 @@
 // Copyright 2026 The Tipsy Authors
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: AGPL-3.0-or-later
 
 package x11
 
@@ -7,6 +7,8 @@ import (
 	"errors"
 	"sort"
 	"sync"
+
+	"github.com/tipsy-linux/tipsy/internal/version"
 )
 
 var (
@@ -27,8 +29,16 @@ var (
 )
 
 // RobloxWindowTitle is the desktop title of the official Roblox client when
-// it is hosted by Tipsy.
-const RobloxWindowTitle = "Roblox - Tipsy"
+// it is hosted by Tipsy. Unofficial builds must not present the plain
+// official title, so they carry the Unofficial / Local Build marker.
+var RobloxWindowTitle = robloxWindowTitle()
+
+func robloxWindowTitle() string {
+	if version.IsOfficialBuild() {
+		return "Roblox - Tipsy"
+	}
+	return "Roblox - Tipsy (" + version.UnofficialBuildLabel + ")"
+}
 
 // RobloxMinimumWidth and RobloxMinimumHeight are the minimum logical X11
 // client pixels for the official Android client; a resize storm below this

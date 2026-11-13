@@ -132,5 +132,5 @@ repository's security-reporting channel when available; otherwise ask a
 maintainer for a confidential contact before publishing details.
 
 By submitting a contribution, you confirm that you have the right to submit
-it under Tipsy's GPL-3.0-or-later license and that it contains no material the
+it under Tipsy's AGPL-3.0-or-later license and that it contains no material the
 project cannot lawfully publish.

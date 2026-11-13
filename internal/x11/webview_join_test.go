@@ -1,5 +1,5 @@
 // Copyright 2026 The Tipsy Authors
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: AGPL-3.0-or-later
 
 package x11
 
@@ -315,5 +315,65 @@ func TestHandleHybridExecuteRobloxRejectsUnsupportedRequestType(t *testing.T) {
 	}
 	if started {
 		t.Fatal("unsupported requestType must not StartGame")
+	}
+}
+
+// TestParseWebViewJoinURIRejectsHostileHosts pins the join-host allowlist:
+// only https://roblox.com and its subdomains may hand off an HTTP(S) join
+// path. Lookalike hosts, suffix tricks, plain http, and foreign schemes are
+// browsing content, never StartGame requests.
+func TestParseWebViewJoinURIRejectsHostileHosts(t *testing.T) {
+	for _, raw := range []string{
+		"https://evil.com/games/start?placeId=1818",
+		"https://roblox.com.evil.com/games/start?placeId=1818",
+		"https://www.roblox.com.evil.com/experiences/start?placeId=1818",
+		"https://evilroblox.com/games/start?placeId=1818",
+		"https://roblox.com.games.evil.com/experiences/start?userId=123456",
+		"http://www.roblox.com/games/start?placeId=1818",
+		"http://roblox.com/experiences/start?placeId=1818",
+		"ftp://www.roblox.com/games/start?placeId=1818",
+		"https://evil.com/games/start?placeId=1818&userId=123456",
+		"https://www.roblox.com%2Eevil.com/games/start?placeId=1818",
+	} {
+		if req, ok := ParseWebViewJoinURI(raw); ok {
+			t.Errorf("hostile join accepted: %s -> %+v", ClassifyWebViewURL(raw).Host, req)
+		}
+	}
+	for _, raw := range []string{
+		"https://roblox.com/games/start?placeId=1818",
+		"https://www.roblox.com/games/start?placeId=1818",
+		// rbxuri's web-join host list is the stricter intersection: apex,
+		// www, and web. Other Roblox subdomains stay browsing content.
+		"https://web.roblox.com/experiences/start?placeId=1818",
+		"https://www.roblox.com/games/start?userId=123456",
+	} {
+		if _, ok := ParseWebViewJoinURI(raw); !ok {
+			t.Errorf("official join rejected: %s", ClassifyWebViewURL(raw).Host)
+		}
+	}
+}
+
+// TestHandleWebViewPolicyURIHostileHostKeepsBrowsing verifies a hostile join
+// URL is left to ordinary navigation: no StartGame, no overlay dismissal.
+func TestHandleWebViewPolicyURIHostileHostKeepsBrowsing(t *testing.T) {
+	var started bool
+	var closed bool
+	SetWebViewStartGame(func(rbxuri.Request) { started = true })
+	SetWebViewUserClosed(func() { closed = true })
+	t.Cleanup(func() {
+		SetWebViewStartGame(nil)
+		SetWebViewUserClosed(nil)
+	})
+	for _, raw := range []string{
+		"https://evil.com/games/start?placeId=1818",
+		"https://roblox.com.evil.com/experiences/start?placeId=1818",
+		"http://www.roblox.com/games/start?placeId=1818",
+	} {
+		if HandleWebViewPolicyURI(raw) {
+			t.Errorf("hostile join intercepted as a command: %s", ClassifyWebViewURL(raw).Host)
+		}
+	}
+	if started || closed {
+		t.Fatal("hostile join reached StartGame or dismissed the overlay")
 	}
 }

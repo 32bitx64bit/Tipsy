@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Copyright 2026 The Tipsy Authors
-# SPDX-License-Identifier: GPL-3.0-or-later
+# SPDX-License-Identifier: AGPL-3.0-or-later
 #
 # Full package vet, test suite, and CLI/GUI build. Starts a private Xvfb so
 # X11 tests that only skip when DISPLAY is unset actually run.

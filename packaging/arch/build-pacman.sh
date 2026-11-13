@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Copyright 2026 The Tipsy Authors
-# SPDX-License-Identifier: GPL-3.0-or-later
+# SPDX-License-Identifier: AGPL-3.0-or-later
 #
 # Build a native tipsy-<version>-1-x86_64.pkg.tar.zst from the current source
 # tree by reusing scripts/install-desktop.sh (DESTDIR staging).
@@ -102,7 +102,7 @@ builddate = $builddate
 packager = $packager
 size = $installed_size
 arch = x86_64
-license = GPL-3.0-or-later
+license = AGPL-3.0-or-later
 depend = qt6-base
 depend = libx11
 depend = libxext

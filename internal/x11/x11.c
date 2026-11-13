@@ -1,5 +1,5 @@
 /* Copyright 2026 The Tipsy Authors
- * SPDX-License-Identifier: GPL-3.0-or-later
+ * SPDX-License-Identifier: AGPL-3.0-or-later
  */
 
 #include "x11.h"
@@ -484,6 +484,69 @@ static int tipsy_pump_nudge_fd = -1;
 // an unrelated descriptor if the OS reuses its number.
 static pthread_mutex_t tipsy_pump_wake_mu = PTHREAD_MUTEX_INITIALIZER;
 
+// A pump thread that outlived its join deadline still reads its Display from
+// poll()/XPending(). tipsy_x11_close must not XCloseDisplay() that connection
+// underneath it, so remember the Display pointers whose pump was abandoned.
+// The pump thread removes its entry under the wake mutex when it finally
+// exits, after which the connection can be closed normally. Protected by
+// tipsy_pump_wake_mu.
+struct tipsy_abandoned_dpy {
+	uintptr_t dpy;
+	struct tipsy_abandoned_dpy *next;
+};
+static struct tipsy_abandoned_dpy *tipsy_abandoned_dpys;
+// If recording the Display fails (allocation failure), err on the side of
+// never closing a connection again; the server reclaims it at process exit.
+static int tipsy_abandoned_dpy_unrecorded;
+// Test-only observation of XCloseDisplay calls from tipsy_x11_close.
+static int tipsy_test_close_display_calls;
+
+static int tipsy_dpy_has_abandoned_pump_locked(uintptr_t dpy) {
+	if (tipsy_abandoned_dpy_unrecorded) {
+		return 1;
+	}
+	for (struct tipsy_abandoned_dpy *n = tipsy_abandoned_dpys; n != NULL; n = n->next) {
+		if (n->dpy == dpy) {
+			return 1;
+		}
+	}
+	return 0;
+}
+
+static void tipsy_record_abandoned_dpy_locked(uintptr_t dpy) {
+	if (dpy == 0 || tipsy_dpy_has_abandoned_pump_locked(dpy)) {
+		return;
+	}
+	struct tipsy_abandoned_dpy *n = malloc(sizeof(*n));
+	if (n == NULL) {
+		tipsy_abandoned_dpy_unrecorded = 1;
+		return;
+	}
+	n->dpy = dpy;
+	n->next = tipsy_abandoned_dpys;
+	tipsy_abandoned_dpys = n;
+}
+
+static void tipsy_clear_abandoned_dpy_locked(uintptr_t dpy) {
+	struct tipsy_abandoned_dpy **link = &tipsy_abandoned_dpys;
+	while (*link != NULL) {
+		if ((*link)->dpy == dpy) {
+			struct tipsy_abandoned_dpy *dead = *link;
+			*link = dead->next;
+			free(dead);
+			return;
+		}
+		link = &(*link)->next;
+	}
+}
+
+static int tipsy_dpy_has_abandoned_pump(uintptr_t dpy) {
+	pthread_mutex_lock(&tipsy_pump_wake_mu);
+	int found = tipsy_dpy_has_abandoned_pump_locked(dpy);
+	pthread_mutex_unlock(&tipsy_pump_wake_mu);
+	return found;
+}
+
 // Fire-and-forget token on the nonblocking wake pipe. EAGAIN means a wake is
 // already pending, so the result is deliberately dropped; assigning it is what
 // silences glibc's warn_unused_result (a bare (void) cast does not).
@@ -604,6 +667,26 @@ static int tipsy_test_last_pump_raw_samples;
 static int tipsy_test_last_pump_warps;
 static int tipsy_warp_dry_run;
 
+/* Synthetic-event test opt-in, default off. XSendEvent input is forged
+ * input: any client on the same display can inject keys, buttons, motion,
+ * and focus. The pump drops it by default (tipsy_synthetic_event_allowed).
+ * Only development builds compile this opt-in, and only tests enable it;
+ * official_release builds have neither the macro nor the setters. */
+#ifdef TIPSY_X11_ALLOW_SYNTHETIC_TEST_EVENTS
+static atomic_int tipsy_allow_synthetic_test_events;
+
+int tipsy_x11_set_allow_synthetic_test_events(int enabled) {
+	atomic_store_explicit(&tipsy_allow_synthetic_test_events,
+		enabled ? 1 : 0, memory_order_relaxed);
+	return enabled ? 1 : 0;
+}
+
+int tipsy_x11_allow_synthetic_test_events(void) {
+	return atomic_load_explicit(&tipsy_allow_synthetic_test_events,
+		memory_order_relaxed);
+}
+#endif
+
 static struct tipsy_pointer_capture tipsy_capture;
 // Keyboard focus for the sole client window. Pointer-lock acquisition is
 // refused while this is 0 so a Roblox getter that stays true after Alt-Tab
@@ -628,6 +711,16 @@ int tipsy_x11_startup_measurement_dispatch_vertical_scroll(uintptr_t dpy_ptr,
 	if (dpy == NULL || win == None || tipsy_x_io_error) {
 		return 0;
 	}
+#ifdef TIPSY_X11_ALLOW_SYNTHETIC_TEST_EVENTS
+	if (!atomic_load_explicit(&tipsy_allow_synthetic_test_events,
+		memory_order_relaxed)) {
+		return 0;
+	}
+#else
+	/* The fixed wheel detent is synthetic test input. Official builds drop
+	 * it at the pump, so the driver must not claim a dispatch. */
+	return 0;
+#endif
 	int dispatched = 0;
 	pthread_mutex_lock(&tipsy_event_mu);
 	if (!tipsy_x_io_error && tipsy_have_keyboard_focus && !tipsy_capture.active) {
@@ -1886,8 +1979,65 @@ void tipsy_x11_restore_cursor(uintptr_t dpy_ptr, unsigned long xid, unsigned lon
 	XFlush(dpy);
 }
 
-int tipsy_x11_pump(uintptr_t dpy_ptr, unsigned long xid, unsigned long wm_delete,
-	int randr_event_base, int *inout_w, int *inout_h, int *out_closed) {
+/* Decide whether a synthetic (send_event != 0) X event may be processed.
+ * XSendEvent lets any client on the same display forge input and window
+ * state, so only two classes survive the default policy:
+ *  - ClientMessage: the ICCCM WM protocol channel. The pump still requires
+ *    message_type == WM_PROTOCOLS plus a known protocol atom below.
+ *  - ConfigureNotify: accepted only when the claimed geometry matches the
+ *    server's current window attributes, so a forged resize cannot drive
+ *    the Android surface or the pointer-capture anchor.
+ * Everything else (key/button/motion, focus, property, map/reparent/destroy,
+ * XI2 GenericEvent, XDamage, RandR) is dropped. Development builds may
+ * explicitly opt in to synthetic test input; official builds never can. */
+static int tipsy_synthetic_event_allowed(Display *dpy, Window win, const XEvent *ev) {
+#ifdef TIPSY_X11_ALLOW_SYNTHETIC_TEST_EVENTS
+	if (atomic_load_explicit(&tipsy_allow_synthetic_test_events,
+		memory_order_relaxed)) {
+		return 1;
+	}
+#endif
+	switch (ev->type) {
+	case ClientMessage:
+		return 1;
+	case ConfigureNotify: {
+		if (ev->xconfigure.window != win) {
+			return 0;
+		}
+		XWindowAttributes attr;
+		if (XGetWindowAttributes(dpy, win, &attr) == 0) {
+			return 0;
+		}
+		return ev->xconfigure.width == attr.width &&
+			ev->xconfigure.height == attr.height &&
+			ev->xconfigure.x == attr.x &&
+			ev->xconfigure.y == attr.y &&
+			ev->xconfigure.border_width == attr.border_width;
+	}
+	default:
+		return 0;
+	}
+}
+
+/* Pure focus-event mode policy, shared by the pump and unit tests.
+ * NotifyNormal is a real focus transition. NotifyGrab/NotifyWhileGrabbed are
+ * artifacts of an active grab and must never change keyboard-focus state.
+ * NotifyUngrab is only trustworthy when the caller corroborates it against
+ * XGetInputFocus. Unknown modes fail closed (ignored). */
+int tipsy_x11_focus_mode_action(int mode) {
+	switch (mode) {
+	case NotifyNormal:
+		return TIPSY_FOCUS_MODE_APPLY;
+	case NotifyUngrab:
+		return TIPSY_FOCUS_MODE_CORROBORATE;
+	default:
+		return TIPSY_FOCUS_MODE_IGNORE;
+	}
+}
+
+static int tipsy_x11_pump_impl(uintptr_t dpy_ptr, unsigned long xid, unsigned long wm_delete,
+	int randr_event_base, int *inout_w, int *inout_h, int *out_closed,
+	const atomic_int *run) {
 	Display *dpy = (Display *)dpy_ptr;
 	if (dpy == NULL || tipsy_x_io_error) {
 		return -1;
@@ -1895,12 +2045,28 @@ int tipsy_x11_pump(uintptr_t dpy_ptr, unsigned long xid, unsigned long wm_delete
 	Window win = (Window)xid;
 	*out_closed = 0;
 	pthread_mutex_lock(&tipsy_event_mu);
+	/* A pump abandoned by a timed-out join must not start a new drain after
+	 * the lock is finally granted: stop already returned and may be closing
+	 * or unmapping this connection. Rechecking the run flag here, after the
+	 * event lock, serializes the decision with teardown. */
+	if (run != NULL && !atomic_load_explicit(run, memory_order_acquire)) {
+		pthread_mutex_unlock(&tipsy_event_mu);
+		return 0;
+	}
 	tipsy_test_last_pump_raw_samples = 0;
 	tipsy_test_last_pump_warps = 0;
 	tipsy_in_pump = 1;
 	while (XPending(dpy) > 0) {
 		XEvent ev;
 		XNextEvent(dpy, &ev);
+		/* Forged-input filter: drop synthetic XSendEvent events unless they
+		 * are ICCCM ClientMessages or server-verified ConfigureNotify
+		 * geometry. Applies to the XI2, RandR, and XDamage branches below
+		 * as well as the core event switch. */
+		if (ev.xany.send_event != 0 &&
+			!tipsy_synthetic_event_allowed(dpy, win, &ev)) {
+			continue;
+		}
 		if (ev.type == GenericEvent && ev.xcookie.extension == tipsy_xi_opcode &&
 			tipsy_xi_opcode != 0 && XGetEventData(dpy, &ev.xcookie)) {
 			if (ev.xcookie.evtype == XI_RawMotion) {
@@ -1951,8 +2117,12 @@ int tipsy_x11_pump(uintptr_t dpy_ptr, unsigned long xid, unsigned long wm_delete
 			ev.xkey.time != CurrentTime && XEventsQueued(dpy, QueuedAfterReading) > 0) {
 			XEvent next;
 			XPeekEvent(dpy, &next);
+			/* A forged KeyPress must not swallow a real release: the paired
+			 * press has to survive the synthetic-event policy too. */
 			if (next.type == KeyPress && next.xkey.window == ev.xkey.window &&
-				next.xkey.keycode == ev.xkey.keycode && next.xkey.time == ev.xkey.time) {
+				next.xkey.keycode == ev.xkey.keycode && next.xkey.time == ev.xkey.time &&
+				(next.xany.send_event == 0 ||
+					tipsy_synthetic_event_allowed(dpy, win, &next))) {
 				continue;
 			}
 		}
@@ -1966,6 +2136,24 @@ int tipsy_x11_pump(uintptr_t dpy_ptr, unsigned long xid, unsigned long wm_delete
 				ev.xfocus.detail != NotifyPointer &&
 				ev.xfocus.detail != NotifyPointerRoot &&
 				ev.xfocus.detail != NotifyInferior) {
+				/* Grab-induced focus edges are not real keyboard-focus
+				 * transitions. Acting on them let a background window claim
+				 * focus and re-acquire the desktop pointer grab. Ignore
+				 * NotifyGrab/NotifyWhileGrabbed; apply NotifyUngrab only when
+				 * the server's actual input focus corroborates the edge. The
+				 * corroboration round trip runs only on rare ungrab edges. */
+				int mode_action = tipsy_x11_focus_mode_action(ev.xfocus.mode);
+				if (mode_action == TIPSY_FOCUS_MODE_IGNORE) {
+					break;
+				}
+				if (mode_action == TIPSY_FOCUS_MODE_CORROBORATE) {
+					Window focused = None;
+					int revert_to = 0;
+					XGetInputFocus(dpy, &focused, &revert_to);
+					if (ev.type == FocusIn ? focused != win : focused == win) {
+						break;
+					}
+				}
 				int alt_held = 0;
 				if (ev.type == FocusOut) {
 					tipsy_have_keyboard_focus = 0;
@@ -2143,6 +2331,12 @@ int tipsy_x11_pump(uintptr_t dpy_ptr, unsigned long xid, unsigned long wm_delete
 					int move_y = ev.xmotion.y;
 					XEvent newer;
 					while (XCheckTypedWindowEvent(dpy, win, MotionNotify, &newer)) {
+						/* Coalescing must not smuggle forged coordinates past
+						 * the synthetic-event filter. */
+						if (newer.xany.send_event != 0 &&
+							!tipsy_synthetic_event_allowed(dpy, win, &newer)) {
+							continue;
+						}
 						if (tipsy_is_recenter_motion(newer.xmotion.x, newer.xmotion.y)) {
 							if (tipsy_capture.ignore_warps > 0) {
 								tipsy_capture.ignore_warps--;
@@ -2243,9 +2437,12 @@ int tipsy_x11_pump(uintptr_t dpy_ptr, unsigned long xid, unsigned long wm_delete
 				tipsy_input_push(TIPSY_INPUT_CLOSE, 0, (long)win, 0, 0, 0);
 				*out_closed = 1;
 			} else if (ev.xclient.window == win &&
+				ev.xclient.message_type == tipsy_atom_wm_protocols &&
 				(Atom)ev.xclient.data.l[0] == tipsy_atom_wm_take_focus) {
 				// ICCCM: the WM offered focus; claim it. The resulting
-				// FocusIn is the real focus event.
+				// FocusIn is the real focus event. Like WM_DELETE_WINDOW,
+				// the offer is only valid inside a WM_PROTOCOLS message;
+				// any other ClientMessage carrying the atom is forged.
 				XSetInputFocus(dpy, win, RevertToParent,
 					(Time)ev.xclient.data.l[1]);
 			}
@@ -2293,6 +2490,12 @@ int tipsy_x11_pump(uintptr_t dpy_ptr, unsigned long xid, unsigned long wm_delete
 	return 0;
 }
 
+int tipsy_x11_pump(uintptr_t dpy_ptr, unsigned long xid, unsigned long wm_delete,
+	int randr_event_base, int *inout_w, int *inout_h, int *out_closed) {
+	return tipsy_x11_pump_impl(dpy_ptr, xid, wm_delete, randr_event_base,
+		inout_w, inout_h, out_closed, NULL);
+}
+
 struct tipsy_pump {
 	uintptr_t dpy;
 	unsigned long xid;
@@ -2300,8 +2503,15 @@ struct tipsy_pump {
 	int randr_event_base;
 	int w;
 	int h;
-	volatile int run;
+	atomic_int run;
 	volatile int closed;
+	/* Both guarded by tipsy_pump_wake_mu. abandoned transfers the struct and
+	 * wake pipe to the pump thread when the join times out. exited is the
+	 * thread's last write under that mutex: after setting it the thread never
+	 * touches the struct again (unless it owns it), so stop may free a pump
+	 * that exited just before the abandon decision. */
+	int abandoned;
+	int exited;
 	pthread_t thr;
 	int wake_r;
 	int wake_w;
@@ -2310,7 +2520,7 @@ struct tipsy_pump {
 // Block until the X connection has bytes, Xlib already has queued events, or
 // the stop/nudge pipe is readable. Returns 1 when the caller should pump,
 // 0 when the thread should exit, and -1 on I/O failure.
-static int tipsy_wait_x11(Display *dpy, int wake_fd) {
+static int tipsy_wait_x11(Display *dpy, int wake_fd, const atomic_int *run) {
 	if (dpy == NULL || wake_fd < 0) {
 		if (atomic_load_explicit(&tipsy_input_diag_enabled, memory_order_relaxed)) {
 			atomic_fetch_add_explicit(&tipsy_input_diag_pump_errors, 1, memory_order_relaxed);
@@ -2331,6 +2541,14 @@ static int tipsy_wait_x11(Display *dpy, int wake_fd) {
 			return -1;
 		}
 		pthread_mutex_lock(&tipsy_event_mu);
+		/* Stop may have abandoned this pump while it waited for the event
+		 * mutex. Recheck after taking the lock so the thread never touches
+		 * the Display (XPending) once the owner has moved on. */
+		if (run != NULL && !atomic_load_explicit(run, memory_order_acquire)) {
+			pthread_mutex_unlock(&tipsy_event_mu);
+			tipsy_input_diag_finish_pump_wait(diagnostics, started_ns, TIPSY_INPUT_DIAG_PUMP_PIPE_WAKE);
+			return 0;
+		}
 		int pending = !tipsy_x_io_error && XPending(dpy) > 0;
 		pthread_mutex_unlock(&tipsy_event_mu);
 		if (pending) {
@@ -2362,9 +2580,9 @@ static int tipsy_wait_x11(Display *dpy, int wake_fd) {
 static void *tipsy_pump_main(void *arg) {
 	(void)pthread_setname_np(pthread_self(), "tip.x11pump");
 	struct tipsy_pump *p = (struct tipsy_pump *)arg;
-	while (p->run && !p->closed) {
-		int st = tipsy_wait_x11((Display *)p->dpy, p->wake_r);
-		if (!p->run) {
+	while (atomic_load_explicit(&p->run, memory_order_acquire) && !p->closed) {
+		int st = tipsy_wait_x11((Display *)p->dpy, p->wake_r, &p->run);
+		if (!atomic_load_explicit(&p->run, memory_order_acquire)) {
 			break;
 		}
 		if (st < 0 || tipsy_x_io_error) {
@@ -2373,11 +2591,40 @@ static void *tipsy_pump_main(void *arg) {
 			break;
 		}
 		int closed = 0;
-		if (tipsy_x11_pump(p->dpy, p->xid, p->del, p->randr_event_base, &p->w, &p->h, &closed) != 0 || closed) {
+		if (tipsy_x11_pump_impl(p->dpy, p->xid, p->del, p->randr_event_base,
+			&p->w, &p->h, &closed, &p->run) != 0 || closed) {
 			p->closed = 1;
 			tipsy_wake_go();
 			break;
 		}
+	}
+	/* Ownership handshake with tipsy_x11_pump_thread_stop. Set exited under
+	 * the wake mutex as the last access to the struct: if stop already
+	 * abandoned the struct to this thread, clean it up here; if stop still
+	 * owns it (exited was observed before it set abandoned), it frees the
+	 * struct and pipes itself. This removes both the use-after-free of
+	 * p->thr in stop and the leak when the thread exits just before the
+	 * abandon decision. */
+	pthread_mutex_lock(&tipsy_pump_wake_mu);
+	int abandoned = p->abandoned;
+	p->exited = 1;
+	if (tipsy_pump_nudge_fd == p->wake_w) {
+		tipsy_pump_nudge_fd = -1;
+	}
+	if (abandoned) {
+		/* The Display is no longer referenced from this point on; close may
+		 * safely XCloseDisplay it again. */
+		tipsy_clear_abandoned_dpy_locked(p->dpy);
+	}
+	pthread_mutex_unlock(&tipsy_pump_wake_mu);
+	if (abandoned) {
+		if (p->wake_r >= 0) {
+			close(p->wake_r);
+		}
+		if (p->wake_w >= 0) {
+			close(p->wake_w);
+		}
+		free(p);
 	}
 	return NULL;
 }
@@ -2394,7 +2641,7 @@ uintptr_t tipsy_x11_pump_thread_start(uintptr_t dpy, unsigned long xid,
 	p->randr_event_base = randr_event_base;
 	p->w = w;
 	p->h = h;
-	p->run = 1;
+	atomic_init(&p->run, 1);
 	p->wake_r = -1;
 	p->wake_w = -1;
 	int fds[2];
@@ -2429,25 +2676,114 @@ uintptr_t tipsy_x11_pump_thread_start(uintptr_t dpy, unsigned long xid,
 	return (uintptr_t)p;
 }
 
+/* Bounded teardown. Dismiss/Close must release the desktop pointer grab even
+ * when the event pump or another Xlib caller is wedged: an X11 pointer grab
+ * survives until its grab window is unmapped or the owning connection dies,
+ * so waiting forever on tipsy_event_mu or the pump thread traps the cursor
+ * desktop-wide. These bounds hand control back to the caller, which can then
+ * force the grab release on a fresh connection. */
+#define TIPSY_TEARDOWN_LOCK_MS 500
+#define TIPSY_TEARDOWN_JOIN_MS 500
+
+static struct timespec tipsy_deadline_after_ms(long ms) {
+	struct timespec ts;
+	clock_gettime(CLOCK_REALTIME, &ts);
+	ts.tv_sec += ms / 1000;
+	ts.tv_nsec += (ms % 1000) * 1000000L;
+	if (ts.tv_nsec >= 1000000000L) {
+		ts.tv_sec++;
+		ts.tv_nsec -= 1000000000L;
+	}
+	return ts;
+}
+
+/* Emergency grab release on a dedicated short-lived connection. Unmapping
+ * grab_window/confine_to forces the X server to terminate an active pointer
+ * grab even when the primary Display is deadlocked (a wedged render thread
+ * can hold the shared Xlib display lock). Returns 0 when the unmap was
+ * issued and synced, -1 when no connection could be opened. */
+static int tipsy_x11_emergency_unmap(unsigned long xid) {
+	if (xid == 0) {
+		return -1;
+	}
+	Display *dpy2 = XOpenDisplay(NULL);
+	if (dpy2 == NULL) {
+		return -1;
+	}
+	XUnmapWindow(dpy2, (Window)xid);
+	XSync(dpy2, False);
+	XCloseDisplay(dpy2);
+	return 0;
+}
+
 void tipsy_x11_pump_thread_stop(uintptr_t ptr, int *out_w, int *out_h, int *out_closed) {
 	struct tipsy_pump *p = (struct tipsy_pump *)ptr;
 	if (p == NULL) {
 		return;
 	}
-	p->run = 0;
+	/* Snapshot the thread id before any ownership transfer: once abandoned
+	 * is set the pump thread may free p, so p->thr must never be read again. */
+	pthread_t thr = p->thr;
+	atomic_store_explicit(&p->run, 0, memory_order_release);
 	if (p->wake_w >= 0) {
 		tipsy_pipe_write_token(p->wake_w);
 	}
-	pthread_join(p->thr, NULL);
-	pthread_mutex_lock(&tipsy_pump_wake_mu);
-	tipsy_pump_nudge_fd = -1;
-	if (p->wake_r >= 0) {
-		close(p->wake_r);
+	struct timespec deadline = tipsy_deadline_after_ms(TIPSY_TEARDOWN_JOIN_MS);
+	if (pthread_timedjoin_np(thr, NULL, &deadline) == 0) {
+		pthread_mutex_lock(&tipsy_pump_wake_mu);
+		if (tipsy_pump_nudge_fd == p->wake_w) {
+			tipsy_pump_nudge_fd = -1;
+		}
+		if (p->wake_r >= 0) {
+			close(p->wake_r);
+		}
+		if (p->wake_w >= 0) {
+			close(p->wake_w);
+		}
+		pthread_mutex_unlock(&tipsy_pump_wake_mu);
+		if (out_w != NULL) {
+			*out_w = p->w;
+		}
+		if (out_h != NULL) {
+			*out_h = p->h;
+		}
+		if (out_closed != NULL) {
+			*out_closed = p->closed;
+		}
+		free(p);
+		return;
 	}
-	if (p->wake_w >= 0) {
-		close(p->wake_w);
+	/* The pump is wedged, often inside Xlib behind the shared display lock.
+	 * Do not block shutdown. Under the wake mutex decide who owns the struct:
+	 * if the thread has not yet marked itself exited, transfer the struct and
+	 * wake pipe to it (it frees them when it finally exits) and remember the
+	 * Display so close cannot free the connection underneath it. If it exited
+	 * just before this point, it never touches p again and stop still owns the
+	 * cleanup. Output values are left untouched when abandoned because the
+	 * struct may be freed by the thread. */
+	int abandoned = 0;
+	pthread_mutex_lock(&tipsy_pump_wake_mu);
+	if (!p->exited) {
+		p->abandoned = 1;
+		abandoned = 1;
+		tipsy_record_abandoned_dpy_locked(p->dpy);
+	}
+	if (tipsy_pump_nudge_fd == p->wake_w) {
+		tipsy_pump_nudge_fd = -1;
+	}
+	if (!abandoned) {
+		if (p->wake_r >= 0) {
+			close(p->wake_r);
+		}
+		if (p->wake_w >= 0) {
+			close(p->wake_w);
+		}
 	}
 	pthread_mutex_unlock(&tipsy_pump_wake_mu);
+	pthread_detach(thr);
+	if (abandoned) {
+		return;
+	}
 	if (out_w != NULL) {
 		*out_w = p->w;
 	}
@@ -2465,7 +2801,49 @@ void tipsy_x11_close(uintptr_t dpy_ptr, unsigned long xid) {
 	if (dpy == NULL) {
 		return;
 	}
-	pthread_mutex_lock(&tipsy_event_mu);
+	struct timespec deadline = tipsy_deadline_after_ms(TIPSY_TEARDOWN_LOCK_MS);
+	if (pthread_mutex_timedlock(&tipsy_event_mu, &deadline) != 0) {
+		/* The event pump or another Xlib caller is wedged holding the
+		 * event mutex. Release the desktop grab on a fresh connection and
+		 * leave the wedged Display alone: closing it under a stuck thread
+		 * is unsafe, and process exit disconnects it (the server then
+		 * destroys the window and any remaining grab). */
+		tipsy_x11_emergency_unmap(xid);
+		return;
+	}
+	if (tipsy_dpy_has_abandoned_pump(dpy_ptr)) {
+		/* A pump thread that outlived its join deadline still reads this
+		 * Display from poll()/XPending(). Closing the connection here would
+		 * free it underneath that thread, so release the grab window on a
+		 * fresh connection and leave the Display to process exit (the server
+		 * then reclaims it). The pump clears its registry entry when it
+		 * finally exits, after which a later close can reclaim it here. */
+		tipsy_x11_emergency_unmap(xid);
+		if (tipsy_startup_drawable_dpy == dpy) {
+			tipsy_startup_drawable_dpy = NULL;
+			tipsy_startup_drawable_window = None;
+			tipsy_startup_drawable_damage = None;
+			tipsy_startup_drawable_event_base = 0;
+			tipsy_startup_drawable_enabled = 0;
+			tipsy_startup_drawable_armed = 0;
+		}
+		if (atomic_load_explicit(&tipsy_startup_drawable_ready_dpy, memory_order_relaxed) == dpy_ptr) {
+			atomic_store_explicit(&tipsy_startup_drawable_ready_dpy, 0, memory_order_relaxed);
+			atomic_store_explicit(&tipsy_startup_drawable_ready_window, 0, memory_order_relaxed);
+		}
+		if (atomic_load_explicit(&tipsy_startup_map_dpy, memory_order_relaxed) == dpy_ptr) {
+			atomic_store_explicit(&tipsy_startup_map_dpy, 0, memory_order_relaxed);
+			atomic_store_explicit(&tipsy_startup_map_window, 0, memory_order_relaxed);
+		}
+		if (atomic_load_explicit(&tipsy_startup_map_observer_dpy, memory_order_relaxed) == dpy_ptr) {
+			atomic_store_explicit(&tipsy_startup_map_observer_dpy, 0, memory_order_relaxed);
+			atomic_store_explicit(&tipsy_startup_map_observer_window, 0, memory_order_relaxed);
+		}
+		memset(&tipsy_capture, 0, sizeof(tipsy_capture));
+		tipsy_have_keyboard_focus = 0;
+		pthread_mutex_unlock(&tipsy_event_mu);
+		return;
+	}
 	tipsy_pointer_unlock(dpy, (Window)xid, 0, 0);
 	tipsy_x11_startup_measurement_disable_drawable_locked(dpy, (Window)xid);
 	if (atomic_load_explicit(&tipsy_startup_map_dpy, memory_order_relaxed) == dpy_ptr &&
@@ -2489,6 +2867,7 @@ void tipsy_x11_close(uintptr_t dpy_ptr, unsigned long xid) {
 	if (xid != 0 && !tipsy_x_io_error) {
 		XDestroyWindow(dpy, (Window)xid);
 	}
+	tipsy_test_close_display_calls++;
 	XCloseDisplay(dpy);
 	memset(&tipsy_capture, 0, sizeof(tipsy_capture));
 	tipsy_have_keyboard_focus = 0;
@@ -2500,11 +2879,198 @@ int tipsy_x11_unmap(uintptr_t dpy_ptr, unsigned long xid) {
 	if (dpy == NULL || xid == 0 || tipsy_x_io_error) {
 		return -1;
 	}
-	pthread_mutex_lock(&tipsy_event_mu);
+	struct timespec deadline = tipsy_deadline_after_ms(TIPSY_TEARDOWN_LOCK_MS);
+	if (pthread_mutex_timedlock(&tipsy_event_mu, &deadline) != 0) {
+		/* Wedged event mutex: unmapping the grab window on a dedicated
+		 * connection still forces the server to drop the pointer grab,
+		 * so Dismiss cannot trap the desktop cursor behind a stuck pump
+		 * or Xlib caller. */
+		int rc = tipsy_x11_emergency_unmap(xid);
+		tipsy_nudge_pump();
+		return rc;
+	}
 	tipsy_pointer_unlock(dpy, (Window)xid, 0, 0);
 	XUnmapWindow(dpy, (Window)xid);
 	XFlush(dpy);
 	pthread_mutex_unlock(&tipsy_event_mu);
 	tipsy_nudge_pump();
 	return tipsy_x_io_error ? -1 : 0;
+}
+
+/* Test-only second-connection focus/grab driver. A keyboard grab activated
+ * from another client makes the server emit real FocusOut/FocusIn edges with
+ * mode NotifyGrab/NotifyUngrab on the owned window; observing them here
+ * proves the pump filtered an edge that actually arrived. The same
+ * connection can forge focus modes for the development synthetic-opt-in
+ * tests. Production never calls these. */
+static Display *tipsy_fg_test_dpy;
+static Window tipsy_fg_test_grab_win;
+
+int tipsy_x11_focus_grab_test_open(void) {
+	if (tipsy_fg_test_dpy != NULL) {
+		return 0;
+	}
+	tipsy_x11_once();
+	tipsy_fg_test_dpy = XOpenDisplay(NULL);
+	if (tipsy_fg_test_dpy == NULL) {
+		return -1;
+	}
+	tipsy_fg_test_grab_win = XCreateSimpleWindow(tipsy_fg_test_dpy,
+		DefaultRootWindow(tipsy_fg_test_dpy), 0, 0, 32, 32, 0, 0, 0);
+	XMapWindow(tipsy_fg_test_dpy, tipsy_fg_test_grab_win);
+	XSync(tipsy_fg_test_dpy, False);
+	return 0;
+}
+
+void tipsy_x11_focus_grab_test_close(void) {
+	if (tipsy_fg_test_dpy != NULL) {
+		XUngrabKeyboard(tipsy_fg_test_dpy, CurrentTime);
+		XCloseDisplay(tipsy_fg_test_dpy);
+		tipsy_fg_test_dpy = NULL;
+		tipsy_fg_test_grab_win = 0;
+	}
+}
+
+int tipsy_x11_focus_grab_test_grab_keyboard(void) {
+	if (tipsy_fg_test_dpy == NULL) {
+		return -1;
+	}
+	int status = XGrabKeyboard(tipsy_fg_test_dpy, tipsy_fg_test_grab_win,
+		False, GrabModeAsync, GrabModeAsync, CurrentTime);
+	XSync(tipsy_fg_test_dpy, False);
+	return status;
+}
+
+void tipsy_x11_focus_grab_test_ungrab_keyboard(void) {
+	if (tipsy_fg_test_dpy == NULL) {
+		return;
+	}
+	XUngrabKeyboard(tipsy_fg_test_dpy, CurrentTime);
+	XSync(tipsy_fg_test_dpy, False);
+}
+
+int tipsy_x11_focus_grab_test_set_focus(unsigned long xid) {
+	if (tipsy_fg_test_dpy == NULL) {
+		return -1;
+	}
+	XSetInputFocus(tipsy_fg_test_dpy, (Window)xid, RevertToParent, CurrentTime);
+	XSync(tipsy_fg_test_dpy, False);
+	return 0;
+}
+
+unsigned long tipsy_x11_focus_grab_test_grab_window(void) {
+	return (unsigned long)tipsy_fg_test_grab_win;
+}
+
+int tipsy_x11_focus_grab_test_watch(unsigned long xid) {
+	if (tipsy_fg_test_dpy == NULL) {
+		return -1;
+	}
+	XSelectInput(tipsy_fg_test_dpy, (Window)xid, FocusChangeMask);
+	XSync(tipsy_fg_test_dpy, False);
+	return 0;
+}
+
+// Wait up to ms for a FocusIn (gained=1) / FocusOut (gained=0) of the given
+// mode on xid, observed on the second connection. Returns 1 when seen.
+int tipsy_x11_focus_grab_test_wait_focus(unsigned long xid, int gained,
+	int mode, int ms) {
+	if (tipsy_fg_test_dpy == NULL) {
+		return 0;
+	}
+	int type = gained ? FocusIn : FocusOut;
+	for (int waited = 0; waited <= ms; waited += 10) {
+		while (XPending(tipsy_fg_test_dpy) > 0) {
+			XEvent ev;
+			XNextEvent(tipsy_fg_test_dpy, &ev);
+			if (ev.type == type && ev.xfocus.window == (Window)xid &&
+				ev.xfocus.mode == mode) {
+				return 1;
+			}
+		}
+		usleep(10000);
+	}
+	return 0;
+}
+
+int tipsy_x11_focus_grab_test_send_focus(unsigned long xid, int gained,
+	int mode, int detail) {
+	if (tipsy_fg_test_dpy == NULL) {
+		return -1;
+	}
+	XEvent ev;
+	memset(&ev, 0, sizeof(ev));
+	ev.xfocus.type = gained ? FocusIn : FocusOut;
+	ev.xfocus.display = tipsy_fg_test_dpy;
+	ev.xfocus.window = (Window)xid;
+	ev.xfocus.mode = mode;
+	ev.xfocus.detail = detail;
+	Status st = XSendEvent(tipsy_fg_test_dpy, (Window)xid, False,
+		FocusChangeMask, &ev);
+	XFlush(tipsy_fg_test_dpy);
+	return st == 0 ? -1 : 0;
+}
+
+/* Test-only: deterministically wedge tipsy_event_mu for ms milliseconds so
+ * bounded-teardown tests can exercise the timedlock/timedjoin fallbacks.
+ * Returns once a detached thread has acquired the mutex; that same thread
+ * releases it ms later. */
+struct tipsy_teardown_hold {
+	int ms;
+	atomic_int acquired;
+};
+
+static void *tipsy_teardown_hold_main(void *arg) {
+	struct tipsy_teardown_hold *h = (struct tipsy_teardown_hold *)arg;
+	int ms = h->ms;
+	pthread_mutex_lock(&tipsy_event_mu);
+	atomic_store_explicit(&h->acquired, 1, memory_order_release);
+	/* The seam's stack frame stays valid until acquired is observed; this
+	 * thread must not touch h afterwards. */
+	struct timespec sl = { ms / 1000, (long)(ms % 1000) * 1000000L };
+	nanosleep(&sl, NULL);
+	pthread_mutex_unlock(&tipsy_event_mu);
+	return NULL;
+}
+
+int tipsy_x11_teardown_test_hold_event_mu(int ms) {
+	struct tipsy_teardown_hold h;
+	h.ms = ms;
+	atomic_init(&h.acquired, 0);
+	pthread_t thr;
+	if (pthread_create(&thr, NULL, tipsy_teardown_hold_main, &h) != 0) {
+		return -1;
+	}
+	pthread_detach(thr);
+	while (!atomic_load_explicit(&h.acquired, memory_order_acquire)) {
+		usleep(1000);
+	}
+	return 0;
+}
+
+/* Test-only: expose the abandoned-Display registry and XCloseDisplay counter
+ * so teardown tests can pin the "never close a Display under an abandoned
+ * pump" policy deterministically. Production never calls these. */
+int tipsy_x11_test_dpy_has_abandoned_pump(uintptr_t dpy) {
+	return tipsy_dpy_has_abandoned_pump(dpy);
+}
+
+void tipsy_x11_test_record_abandoned_dpy(uintptr_t dpy) {
+	pthread_mutex_lock(&tipsy_pump_wake_mu);
+	tipsy_record_abandoned_dpy_locked(dpy);
+	pthread_mutex_unlock(&tipsy_pump_wake_mu);
+}
+
+void tipsy_x11_test_clear_abandoned_dpy(uintptr_t dpy) {
+	pthread_mutex_lock(&tipsy_pump_wake_mu);
+	tipsy_clear_abandoned_dpy_locked(dpy);
+	pthread_mutex_unlock(&tipsy_pump_wake_mu);
+}
+
+int tipsy_x11_test_close_display_calls(void) {
+	return tipsy_test_close_display_calls;
+}
+
+void tipsy_x11_test_reset_close_display_calls(void) {
+	tipsy_test_close_display_calls = 0;
 }

@@ -1,5 +1,5 @@
 /* Copyright 2026 The Tipsy Authors
- * SPDX-License-Identifier: GPL-3.0-or-later
+ * SPDX-License-Identifier: AGPL-3.0-or-later
  *
  * libandroid.so / liblog.so NDK surface: log, looper, window, config, assets.
  */

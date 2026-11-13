@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Copyright 2026 The Tipsy Authors
-# SPDX-License-Identifier: GPL-3.0-or-later
+# SPDX-License-Identifier: AGPL-3.0-or-later
 set -euo pipefail
 
 fail() { printf 'pgo-merge: %s\n' "$*" >&2; exit 1; }

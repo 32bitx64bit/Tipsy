@@ -1,5 +1,5 @@
 // Copyright 2026 The Tipsy Authors
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: AGPL-3.0-or-later
 
 package x11
 
@@ -131,6 +131,20 @@ func drainPump(w *Window, t *testing.T) {
 }
 
 func requireProbe(t *testing.T) {
+	t.Helper()
+	// The pump drops synthetic XSendEvent input by default. Development
+	// tests opt in explicitly; official_release builds compile the opt-in
+	// out, so synthetic-injection tests skip there.
+	if !setSyntheticTestEvents(true) {
+		t.Skip("synthetic XSendEvent test input is compiled out (official_release)")
+	}
+	t.Cleanup(func() { setSyntheticTestEvents(false) })
+	requireProbeConnection(t)
+}
+
+// requireProbeConnection opens the probe display without enabling the
+// synthetic-event opt-in. Negative tests use it to verify the default drop.
+func requireProbeConnection(t *testing.T) {
 	t.Helper()
 	if err := x11probe.Open(); err != nil {
 		t.Skipf("probe display unavailable: %v", err)
@@ -598,6 +612,9 @@ func waitPointerPosition(t *testing.T, w *Window, wantX, wantY int) {
 }
 
 func TestPointerLockKeepsPressAnchorAndDeliversRelativeMotion(t *testing.T) {
+	// The 16x12 resize below must not be clamped by a desktop WM's minimum
+	// window size; a private bare server keeps the geometry deterministic.
+	startXvfb(t)
 	const winW, winH = 320, 180
 	centerX, centerY := winW/2, winH/2
 	w := openInputWindowSize(t, winW, winH)

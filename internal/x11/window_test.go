@@ -1,5 +1,5 @@
 // Copyright 2026 The Tipsy Authors
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: AGPL-3.0-or-later
 
 package x11
 
@@ -13,8 +13,26 @@ import (
 	"testing"
 	"time"
 
+	"github.com/tipsy-linux/tipsy/internal/version"
 	"github.com/tipsy-linux/tipsy/internal/x11/x11probe"
 )
+
+func TestRobloxWindowTitleMarksUnofficialBuilds(t *testing.T) {
+	got := robloxWindowTitle()
+	if version.IsOfficialBuild() {
+		if got != "Roblox - Tipsy" {
+			t.Fatalf("official RobloxWindowTitle = %q, want plain Roblox - Tipsy", got)
+		}
+		return
+	}
+	want := "Roblox - Tipsy (" + version.UnofficialBuildLabel + ")"
+	if got != want {
+		t.Fatalf("unofficial RobloxWindowTitle = %q, want %q", got, want)
+	}
+	if RobloxWindowTitle != got {
+		t.Fatalf("RobloxWindowTitle var = %q, want %q", RobloxWindowTitle, got)
+	}
+}
 
 func TestDecodePointerRingAction(t *testing.T) {
 	t.Parallel()
@@ -534,9 +552,18 @@ func settleBackgroundInput(t *testing.T, w *Window, c *inputCollector) {
 	}
 }
 
+// xvfbTestDisplay is the private display startXvfb started for the currently
+// running test. ensureDisplay reuses it so every window and probe within one
+// test shares a single private server; it is cleared when that server dies.
+var xvfbTestDisplay string
+
+// ensureDisplay gives every test a private bare Xvfb server. The ambient
+// desktop display is never used: it is shared with the user's session and
+// other test runs, whose focus changes, pointer grabs, and XTest input
+// otherwise leak into assertions (and test input would leak onto the desktop).
 func ensureDisplay(t *testing.T) {
 	t.Helper()
-	if os.Getenv("DISPLAY") != "" {
+	if d := os.Getenv("DISPLAY"); d != "" && d == xvfbTestDisplay {
 		return
 	}
 	startXvfb(t)
@@ -546,12 +573,12 @@ func startXvfb(t *testing.T, extraArgs ...string) {
 	t.Helper()
 	xvfb, err := exec.LookPath("Xvfb")
 	if err != nil {
-		t.Skip("DISPLAY unset and Xvfb not found")
+		t.Skip("Xvfb not found")
 	}
 
 	n, err := unusedDisplay()
 	if err != nil {
-		t.Skipf("DISPLAY unset; no free Xvfb display: %v", err)
+		t.Skipf("no free Xvfb display: %v", err)
 	}
 	display := ":" + strconv.Itoa(n)
 	args := append([]string{display, "-screen", "0", "1280x720x24", "-nolisten", "tcp"}, extraArgs...)
@@ -562,6 +589,9 @@ func startXvfb(t *testing.T, extraArgs ...string) {
 		t.Skipf("Xvfb start failed: %v", err)
 	}
 	t.Cleanup(func() {
+		if xvfbTestDisplay == display {
+			xvfbTestDisplay = ""
+		}
 		// Let Xvfb remove its socket/lock. SIGKILL alone leaves stale
 		// display locks and eventually turns repeated suites into skips.
 		_ = cmd.Process.Signal(os.Interrupt)
@@ -578,6 +608,7 @@ func startXvfb(t *testing.T, extraArgs ...string) {
 		}
 	})
 	t.Setenv("DISPLAY", display)
+	xvfbTestDisplay = display
 
 	deadline := time.Now().Add(2 * time.Second)
 	for time.Now().Before(deadline) {
@@ -659,10 +690,12 @@ func TestRefreshVersionInvalidation(t *testing.T) {
 					}
 				}
 				// The same reader edge must wake the launch loop's coalesced
-				// refresh channel, not only move the version counter.
+				// refresh channel, not only move the version counter. The
+				// wake token is queued by the reader goroutine just after the
+				// version store becomes visible, so allow it a moment to land.
 				select {
 				case <-w.RefreshReady():
-				default:
+				case <-time.After(time.Second):
 					t.Fatalf("%s changed the refresh version without a RefreshReady wake", change.name)
 				}
 			}

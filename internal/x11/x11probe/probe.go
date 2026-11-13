@@ -1,11 +1,12 @@
 // Copyright 2026 The Tipsy Authors
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: AGPL-3.0-or-later
 
 // Package x11probe sends synthetic X11 input events to a window for tests.
 // It exists because cgo is forbidden in x11 package _test.go files (the
 // same constraint that created internal/graphics/flickercap). XSendEvent
-// marks events send_event=true; the x11 decoder accepts both synthetic and
-// real events. Test and diagnostics use only.
+// marks events send_event=true; the hardened x11 decoder drops synthetic
+// input unless a development test explicitly opts in. Test and diagnostics
+// use only.
 package x11probe
 
 /*
@@ -228,6 +229,45 @@ func WMDelete(xid uintptr) error {
 		return err
 	}
 	if C.probe_wm_delete(C.ulong(xid)) != 0 {
+		return ErrProbe
+	}
+	return nil
+}
+
+// WMTakeFocus sends the standards-defined ICCCM focus offer: a WM_PROTOCOLS
+// ClientMessage carrying WM_TAKE_FOCUS.
+func WMTakeFocus(xid uintptr) error {
+	if err := mustOpen(); err != nil {
+		return err
+	}
+	if C.probe_wm_take_focus(C.ulong(xid)) != 0 {
+		return ErrProbe
+	}
+	return nil
+}
+
+// ForgedWMTakeFocus carries the WM_TAKE_FOCUS atom inside a foreign
+// message_type. Only a decoder that skips the WM_PROTOCOLS check would
+// grant it focus; tests use it to pin the hardened drop.
+func ForgedWMTakeFocus(xid uintptr) error {
+	if err := mustOpen(); err != nil {
+		return err
+	}
+	if C.probe_forged_wm_take_focus(C.ulong(xid)) != 0 {
+		return ErrProbe
+	}
+	return nil
+}
+
+// ConfigureNotify forges a synthetic ConfigureNotify with arbitrary
+// geometry. The hardened pump accepts it only when the claimed geometry
+// matches the server's current window attributes.
+func ConfigureNotify(xid uintptr, x, y, width, height int) error {
+	if err := mustOpen(); err != nil {
+		return err
+	}
+	if C.probe_configure_notify(C.ulong(xid), C.int(x), C.int(y),
+		C.uint(width), C.uint(height)) != 0 {
 		return ErrProbe
 	}
 	return nil

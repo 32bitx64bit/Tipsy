@@ -1,5 +1,5 @@
 // Copyright 2026 The Tipsy Authors
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: AGPL-3.0-or-later
 
 //go:build linux && cgo
 
@@ -10,6 +10,7 @@ package x11
 #cgo LDFLAGS: -lX11 -pthread
 #cgo CFLAGS: -D_GNU_SOURCE
 #include "x11.h"
+#include <X11/Xlib.h>
 #include <stdlib.h>
 */
 import "C"
@@ -125,6 +126,93 @@ func testCoalesceRawPump(n int) int {
 
 func inputABISizes() (evBytes, textBytes int) {
 	return int(C.tipsy_x11_input_ev_size()), int(C.TIPSY_INPUT_TEXT_BYTES)
+}
+
+// Focus-event mode policy actions (x11.h) and X11 focus modes/details,
+// mirrored for the focus-grab tests.
+const (
+	focusModeIgnore      = int(C.TIPSY_FOCUS_MODE_IGNORE)
+	focusModeApply       = int(C.TIPSY_FOCUS_MODE_APPLY)
+	focusModeCorroborate = int(C.TIPSY_FOCUS_MODE_CORROBORATE)
+
+	focusModeNormal       = int(C.NotifyNormal)
+	focusModeGrab         = int(C.NotifyGrab)
+	focusModeUngrab       = int(C.NotifyUngrab)
+	focusModeWhileGrabbed = int(C.NotifyWhileGrabbed)
+	focusDetailNonlinear  = int(C.NotifyNonlinear)
+)
+
+func testFocusModeAction(mode int) int {
+	return int(C.tipsy_x11_focus_mode_action(C.int(mode)))
+}
+
+// Test-only second-connection focus/grab driver wrappers.
+func testFocusGrabOpen() bool {
+	return C.tipsy_x11_focus_grab_test_open() == 0
+}
+
+func testFocusGrabClose() {
+	C.tipsy_x11_focus_grab_test_close()
+}
+
+func testFocusGrabKeyboard() int {
+	return int(C.tipsy_x11_focus_grab_test_grab_keyboard())
+}
+
+func testFocusUngrabKeyboard() {
+	C.tipsy_x11_focus_grab_test_ungrab_keyboard()
+}
+
+func testFocusGrabSetFocus(xid uintptr) bool {
+	return C.tipsy_x11_focus_grab_test_set_focus(C.ulong(xid)) == 0
+}
+
+func testFocusGrabWindow() uintptr {
+	return uintptr(C.tipsy_x11_focus_grab_test_grab_window())
+}
+
+func testFocusGrabWatch(xid uintptr) bool {
+	return C.tipsy_x11_focus_grab_test_watch(C.ulong(xid)) == 0
+}
+
+func testFocusGrabWaitFocus(xid uintptr, gained bool, mode, ms int) bool {
+	g := C.int(0)
+	if gained {
+		g = 1
+	}
+	return C.tipsy_x11_focus_grab_test_wait_focus(C.ulong(xid), g, C.int(mode), C.int(ms)) == 1
+}
+
+func testFocusGrabSendFocus(xid uintptr, gained bool, mode, detail int) bool {
+	g := C.int(0)
+	if gained {
+		g = 1
+	}
+	return C.tipsy_x11_focus_grab_test_send_focus(C.ulong(xid), g, C.int(mode), C.int(detail)) == 0
+}
+
+func testTeardownHoldEventMu(ms int) bool {
+	return C.tipsy_x11_teardown_test_hold_event_mu(C.int(ms)) == 0
+}
+
+func testDpyHasAbandonedPump(dpy uintptr) bool {
+	return C.tipsy_x11_test_dpy_has_abandoned_pump(C.uintptr_t(dpy)) == 1
+}
+
+func testRecordAbandonedDpy(dpy uintptr) {
+	C.tipsy_x11_test_record_abandoned_dpy(C.uintptr_t(dpy))
+}
+
+func testClearAbandonedDpy(dpy uintptr) {
+	C.tipsy_x11_test_clear_abandoned_dpy(C.uintptr_t(dpy))
+}
+
+func testCloseDisplayCalls() int {
+	return int(C.tipsy_x11_test_close_display_calls())
+}
+
+func testResetCloseDisplayCalls() {
+	C.tipsy_x11_test_reset_close_display_calls()
 }
 
 // ListOutputs reports connected XRandR outputs on the current DISPLAY.

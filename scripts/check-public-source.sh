@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Copyright 2026 The Tipsy Authors
-# SPDX-License-Identifier: GPL-3.0-or-later
+# SPDX-License-Identifier: AGPL-3.0-or-later
 #
 # Admit only source that is safe to make public. This is intentionally a Git
 # object-database audit rather than a working-tree scan: an artifact built at

@@ -1,6 +1,6 @@
 #!/bin/sh
 # Copyright 2026 The Tipsy Authors
-# SPDX-License-Identifier: GPL-3.0-or-later
+# SPDX-License-Identifier: AGPL-3.0-or-later
 set -eu
 
 appdir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)

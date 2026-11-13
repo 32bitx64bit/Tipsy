@@ -1,5 +1,5 @@
 /* Copyright 2026 The Tipsy Authors
- * SPDX-License-Identifier: GPL-3.0-or-later
+ * SPDX-License-Identifier: AGPL-3.0-or-later
  *
  * Bionic getaddrinfo / getnameinfo / gai_strerror. glibc's struct addrinfo
  * swaps ai_addr and ai_canonname vs BSD/Android, and AI_/NI_/EAI_* numbers

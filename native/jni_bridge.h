@@ -1,5 +1,5 @@
 /* Copyright 2026 The Tipsy Authors
- * SPDX-License-Identifier: GPL-3.0-or-later
+ * SPDX-License-Identifier: AGPL-3.0-or-later
  *
  * Minimal JNI 1.6 types and vtable matching the C++ JNIEnv/JavaVM layout
  * used by Android NDK native code (first field is the function table pointer).

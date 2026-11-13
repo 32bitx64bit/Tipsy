@@ -1,5 +1,5 @@
 /* Copyright 2026 The Tipsy Authors
- * SPDX-License-Identifier: GPL-3.0-or-later
+ * SPDX-License-Identifier: AGPL-3.0-or-later
  */
 
 #include "probe.h"
@@ -295,6 +295,61 @@ int probe_wm_delete(unsigned long xid) {
 	ev.xclient.data.l[0] = (long)XInternAtom(probe_dpy, "WM_DELETE_WINDOW", False);
 	ev.xclient.data.l[1] = (long)CurrentTime;
 	return probe_send(&ev, NoEventMask);
+}
+
+// probe_wm_take_focus sends the standards-defined ICCCM focus offer: a
+// WM_PROTOCOLS ClientMessage carrying WM_TAKE_FOCUS.
+int probe_wm_take_focus(unsigned long xid) {
+	if (probe_dpy == NULL) return -1;
+	XEvent ev;
+	memset(&ev, 0, sizeof(ev));
+	ev.xclient.type = ClientMessage;
+	ev.xclient.display = probe_dpy;
+	ev.xclient.window = (Window)xid;
+	ev.xclient.message_type = XInternAtom(probe_dpy, "WM_PROTOCOLS", False);
+	ev.xclient.format = 32;
+	ev.xclient.data.l[0] = (long)XInternAtom(probe_dpy, "WM_TAKE_FOCUS", False);
+	ev.xclient.data.l[1] = (long)CurrentTime;
+	return probe_send(&ev, NoEventMask);
+}
+
+// probe_forged_wm_take_focus carries the WM_TAKE_FOCUS atom but a foreign
+// message_type. A decoder that skips the WM_PROTOCOLS check would grant
+// focus; the hardened pump must drop it.
+int probe_forged_wm_take_focus(unsigned long xid) {
+	if (probe_dpy == NULL) return -1;
+	XEvent ev;
+	memset(&ev, 0, sizeof(ev));
+	ev.xclient.type = ClientMessage;
+	ev.xclient.display = probe_dpy;
+	ev.xclient.window = (Window)xid;
+	ev.xclient.message_type = XInternAtom(probe_dpy, "_TIPSY_FORGED_PROTOCOL", False);
+	ev.xclient.format = 32;
+	ev.xclient.data.l[0] = (long)XInternAtom(probe_dpy, "WM_TAKE_FOCUS", False);
+	ev.xclient.data.l[1] = (long)CurrentTime;
+	return probe_send(&ev, NoEventMask);
+}
+
+// probe_configure_notify forges a synthetic ConfigureNotify with arbitrary
+// geometry. The hardened pump accepts it only when the claimed geometry
+// matches the server's current window attributes.
+int probe_configure_notify(unsigned long xid, int x, int y,
+	unsigned int width, unsigned int height) {
+	if (probe_dpy == NULL) return -1;
+	XEvent ev;
+	memset(&ev, 0, sizeof(ev));
+	ev.xconfigure.type = ConfigureNotify;
+	ev.xconfigure.display = probe_dpy;
+	ev.xconfigure.event = (Window)xid;
+	ev.xconfigure.window = (Window)xid;
+	ev.xconfigure.x = x;
+	ev.xconfigure.y = y;
+	ev.xconfigure.width = (int)width;
+	ev.xconfigure.height = (int)height;
+	ev.xconfigure.border_width = 0;
+	ev.xconfigure.above = None;
+	ev.xconfigure.override_redirect = False;
+	return probe_send(&ev, StructureNotifyMask);
 }
 
 int probe_is_viewable(unsigned long xid) {

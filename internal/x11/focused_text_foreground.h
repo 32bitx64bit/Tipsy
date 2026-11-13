@@ -1,5 +1,5 @@
 /* Copyright 2026 The Tipsy Authors
- * SPDX-License-Identifier: GPL-3.0-or-later
+ * SPDX-License-Identifier: AGPL-3.0-or-later
  */
 #ifndef TIPSY_FOCUSED_TEXT_FOREGROUND_H
 #define TIPSY_FOCUSED_TEXT_FOREGROUND_H

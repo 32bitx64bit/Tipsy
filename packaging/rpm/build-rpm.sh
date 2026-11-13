@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Copyright 2026 The Tipsy Authors
-# SPDX-License-Identifier: GPL-3.0-or-later
+# SPDX-License-Identifier: AGPL-3.0-or-later
 #
 # Build a native tipsy-*.rpm from the current source tree by reusing
 # scripts/install-desktop.sh (DESTDIR staging) plus rpmbuild.
@@ -69,7 +69,7 @@ Name:           tipsy
 Version:        $version
 Release:        1
 Summary:        Run the official Roblox Android client on Linux
-License:        GPL-3.0-or-later
+License:        AGPL-3.0-or-later
 URL:            https://github.com/32bitx64bit/Tipsy
 BuildArch:      x86_64
 Requires:       qt6-qtbase-gui, libX11, libX11-xcb, libxcb, libXext, libXrandr, libXtst, libXi, mesa-libEGL, mesa-libGLES, pango, cairo, pulseaudio-libs

@@ -1,5 +1,5 @@
 /* Copyright 2026 The Tipsy Authors
- * SPDX-License-Identifier: GPL-3.0-or-later
+ * SPDX-License-Identifier: AGPL-3.0-or-later
  */
 #ifndef TIPSY_X11_H
 #define TIPSY_X11_H
@@ -140,11 +140,50 @@ unsigned long tipsy_x11_hide_cursor(uintptr_t dpy_ptr, unsigned long xid);
 void tipsy_x11_restore_cursor(uintptr_t dpy_ptr, unsigned long xid, unsigned long cursor);
 int tipsy_x11_pump(uintptr_t dpy_ptr, unsigned long xid, unsigned long wm_delete,
 	int randr_event_base, int *inout_w, int *inout_h, int *out_closed);
+#ifdef TIPSY_X11_ALLOW_SYNTHETIC_TEST_EVENTS
+/* Development-only synthetic-event test opt-in (default off). The macro is
+ * defined by synthetic_events_dev.go; official_release builds compile these
+ * setters out, so the pump always drops forged XSendEvent input there. */
+int tipsy_x11_set_allow_synthetic_test_events(int enabled);
+int tipsy_x11_allow_synthetic_test_events(void);
+#endif
 uintptr_t tipsy_x11_pump_thread_start(uintptr_t dpy, unsigned long xid,
 	unsigned long del, int randr_event_base, int w, int h);
 void tipsy_x11_pump_thread_stop(uintptr_t ptr, int *out_w, int *out_h, int *out_closed);
 void tipsy_x11_close(uintptr_t dpy_ptr, unsigned long xid);
 int tipsy_x11_unmap(uintptr_t dpy_ptr, unsigned long xid);
+
+/* Focus-event mode policy returned by tipsy_x11_focus_mode_action.
+ * Grab-induced focus edges are not real keyboard-focus transitions:
+ * NotifyGrab and NotifyWhileGrabbed must be ignored, and NotifyUngrab may
+ * only be applied when XGetInputFocus corroborates the server's actual
+ * focus, so a background window cannot claim focus from a grab artifact
+ * and re-acquire the desktop pointer grab. */
+#define TIPSY_FOCUS_MODE_IGNORE 0
+#define TIPSY_FOCUS_MODE_APPLY 1
+#define TIPSY_FOCUS_MODE_CORROBORATE 2
+int tipsy_x11_focus_mode_action(int mode);
+
+/* Test-only second-connection focus/grab driver. It observes and drives real
+ * keyboard-grab focus edges (and, with the development synthetic opt-in,
+ * forged focus modes) on a private test display. Production never calls it. */
+int tipsy_x11_focus_grab_test_open(void);
+void tipsy_x11_focus_grab_test_close(void);
+int tipsy_x11_focus_grab_test_grab_keyboard(void);
+void tipsy_x11_focus_grab_test_ungrab_keyboard(void);
+int tipsy_x11_focus_grab_test_set_focus(unsigned long xid);
+unsigned long tipsy_x11_focus_grab_test_grab_window(void);
+int tipsy_x11_focus_grab_test_watch(unsigned long xid);
+int tipsy_x11_focus_grab_test_wait_focus(unsigned long xid, int gained,
+	int mode, int ms);
+int tipsy_x11_focus_grab_test_send_focus(unsigned long xid, int gained,
+	int mode, int detail);
+int tipsy_x11_teardown_test_hold_event_mu(int ms);
+int tipsy_x11_test_dpy_has_abandoned_pump(uintptr_t dpy);
+void tipsy_x11_test_record_abandoned_dpy(uintptr_t dpy);
+void tipsy_x11_test_clear_abandoned_dpy(uintptr_t dpy);
+int tipsy_x11_test_close_display_calls(void);
+void tipsy_x11_test_reset_close_display_calls(void);
 
 #ifdef __cplusplus
 }

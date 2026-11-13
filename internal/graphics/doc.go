@@ -1,5 +1,5 @@
 // Copyright 2026 The Tipsy Authors
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: AGPL-3.0-or-later
 
 // Package graphics binds EGL and OpenGL ES 2, and an Android Vulkan WSI
 // adapter, to a native Tipsy X11 window and reports pre-client renderer

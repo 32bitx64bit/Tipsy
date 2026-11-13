@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # Copyright 2026 The Tipsy Authors
-# SPDX-License-Identifier: GPL-3.0-or-later
+# SPDX-License-Identifier: AGPL-3.0-or-later
 """Emit deterministic, unsigned P1 release metadata and evidence."""
 
 from __future__ import annotations
@@ -173,7 +173,7 @@ def command_evidence(args: argparse.Namespace) -> None:
                 "downloadLocation": "NOASSERTION",
                 "filesAnalyzed": True,
                 "licenseConcluded": "NOASSERTION",
-                "licenseDeclared": "GPL-3.0-or-later",
+                "licenseDeclared": "AGPL-3.0-or-later",
                 "name": "Tipsy",
                 "packageVerificationCode": {"packageVerificationCodeValue": package_verification},
                 "supplier": "Organization: The Tipsy Authors",

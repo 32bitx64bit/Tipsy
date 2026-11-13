@@ -1,5 +1,5 @@
 /* Copyright 2026 The Tipsy Authors
- * SPDX-License-Identifier: GPL-3.0-or-later
+ * SPDX-License-Identifier: AGPL-3.0-or-later
  */
 #ifndef TIPSY_X11PROBE_H
 #define TIPSY_X11PROBE_H
@@ -34,6 +34,10 @@ int probe_resize(unsigned long xid, unsigned int width, unsigned int height);
 int probe_window_size(unsigned long xid, int *out_width, int *out_height);
 int probe_window_min_size(unsigned long xid, int *out_width, int *out_height);
 int probe_wm_delete(unsigned long xid);
+int probe_wm_take_focus(unsigned long xid);
+int probe_forged_wm_take_focus(unsigned long xid);
+int probe_configure_notify(unsigned long xid, int x, int y,
+	unsigned int width, unsigned int height);
 int probe_is_viewable(unsigned long xid);
 int probe_get_utf8_title(unsigned long xid, char *out, int cap);
 int probe_get_icon_info(unsigned long xid, unsigned long *out_width,

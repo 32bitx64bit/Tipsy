@@ -1,5 +1,5 @@
 // Copyright 2026 The Tipsy Authors
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: AGPL-3.0-or-later
 
 package x11
 
@@ -251,7 +251,9 @@ func IsWebViewCloseCommand(raw string) bool {
 }
 
 // ParseWebViewJoinURI returns a StartGame request when raw is an official
-// join URI. Listing pages under /games/<place> are not joins.
+// join URI. Listing pages under /games/<place> are not joins. HTTP(S) join
+// paths are joins only on https://roblox.com or a subdomain; the custom
+// roblox: schemes are the app's own protocol handlers.
 func ParseWebViewJoinURI(raw string) (rbxuri.Request, bool) {
 	n := NormalizeWebViewURI(raw)
 	if n == "" || !isWebViewJoinURI(n) {
@@ -267,11 +269,9 @@ func ParseWebViewJoinURI(raw string) (rbxuri.Request, bool) {
 func isWebViewJoinURI(raw string) bool {
 	lower := strings.ToLower(strings.TrimSpace(raw))
 	switch {
-	case strings.HasPrefix(lower, "roblox:"):
-		return true
-	case strings.HasPrefix(lower, "roblox-player:"):
-		return true
-	case strings.HasPrefix(lower, "robloxmobile:"):
+	case strings.HasPrefix(lower, "roblox:"),
+		strings.HasPrefix(lower, "roblox-player:"),
+		strings.HasPrefix(lower, "robloxmobile:"):
 		return true
 	}
 	u, err := url.Parse(raw)
@@ -279,7 +279,21 @@ func isWebViewJoinURI(raw string) bool {
 		return false
 	}
 	path := strings.ToLower(u.EscapedPath())
-	return strings.HasPrefix(path, "/games/start") || strings.HasPrefix(path, "/experiences/start")
+	if !strings.HasPrefix(path, "/games/start") && !strings.HasPrefix(path, "/experiences/start") {
+		return false
+	}
+	return isOfficialRobloxJoinHost(u)
+}
+
+// isOfficialRobloxJoinHost requires an https URL on roblox.com or one of its
+// subdomains. A join path on any other host (or plain http) is a hostile
+// handoff attempt: the overlay must keep browsing it, never start a game.
+func isOfficialRobloxJoinHost(u *url.URL) bool {
+	if !strings.EqualFold(u.Scheme, "https") {
+		return false
+	}
+	host := strings.ToLower(u.Hostname())
+	return host == "roblox.com" || strings.HasSuffix(host, ".roblox.com")
 }
 
 // HandleWebViewPolicyURI is the overlay policy decision: join, close, or

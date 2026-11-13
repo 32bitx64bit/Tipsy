@@ -2,7 +2,7 @@ Tipsy
 Copyright (C) 2026 Tipsy contributors
 
 This program is free software: you can redistribute it and/or modify
-it under the terms of the GNU General Public License as published by
+it under the terms of the GNU Affero General Public License as published by
 the Free Software Foundation, either version 3 of the License, or
 (at your option) any later version.
 
@@ -13,7 +13,7 @@ Third-party and adjacent works
 -----------------------------------------------------------------------------
 
 Tipsy project code
-    Licensed under GPL-3.0-or-later.
+    Licensed under AGPL-3.0-or-later.
 
 Roblox client, assets, and native libraries
     Copyright Roblox Corporation.
@@ -31,3 +31,7 @@ MIQT (github.com/mappu/miqt)
 
 Other third-party Go modules
     Subject to their respective licenses. See go.mod / go.sum.
+
+Tipsy versions released before 2026-11-13 were licensed under
+GPL-3.0-or-later and remain available under that license. Code added from
+that date is licensed under AGPL-3.0-or-later.

@@ -1,11 +1,12 @@
 // Copyright 2026 The Tipsy Authors
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: AGPL-3.0-or-later
 
 //go:build linux && cgo
 
 package x11
 
 import (
+	"encoding/base64"
 	"image"
 	"image/color"
 	"image/png"
@@ -13,6 +14,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/tipsy-linux/tipsy/internal/rbxuri"
 )
@@ -105,6 +107,40 @@ func setTestWebViewPresentation(t *testing.T) {
 		webViewOverlay.visible, webViewOverlay.started, webViewOverlay.failed = visible, started, failed
 		webViewOverlay.Unlock()
 	})
+}
+
+// TestWebViewJoinGateRequiresOfficialOriginAndRecentInput exercises the real
+// C join policy against explicit facts: a verified https Roblox origin plus
+// real user input within the gesture window. It needs no display or page.
+func TestWebViewJoinGateRequiresOfficialOriginAndRecentInput(t *testing.T) {
+	cases := []struct {
+		name string
+		uri  string
+		age  float64 // seconds since last real input; negative means none
+		want int
+	}{
+		{"official fresh input", "https://www.roblox.com/games/start?placeId=1818", 0.2, 1},
+		{"apex origin", "https://roblox.com/", 1, 1},
+		{"subdomain", "https://experiences.roblox.com/", 4, 1},
+		{"inside window", "https://www.roblox.com/", 4.9, 1},
+		{"stale input", "https://www.roblox.com/", 6, 0},
+		{"no input", "https://www.roblox.com/", -1, 0},
+		{"plain http", "http://www.roblox.com/", 0.2, 0},
+		{"hostile host", "https://evil.com/", 0.2, 0},
+		{"suffix trick", "https://roblox.com.evil.com/", 0.2, 0},
+		{"lookalike host", "https://evilroblox.com/", 0.2, 0},
+		{"deep suffix trick", "https://www.roblox.com.evil.com/", 0.2, 0},
+		{"data page", "data:text/html,<p>local</p>", 0.2, 0},
+		{"userinfo", "https://user:pass@www.roblox.com/", 0.2, 0},
+		{"empty uri", "", 0.2, 0},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := testWebViewJoinGate(tc.uri, tc.age); got != tc.want {
+				t.Fatalf("gate(%q, age=%v) = %d, want %d", tc.uri, tc.age, got, tc.want)
+			}
+		})
+	}
 }
 
 // This owns a separate host window and uses only synthetic local content;
@@ -214,6 +250,20 @@ func TestWebViewJoinHandoffAndHostRecreation(t *testing.T) {
 		first.Close()
 		t.Fatal("first synthetic WebView child did not map")
 	}
+	// With the gate armed, a local data: page has no verified Roblox origin
+	// and must not hand off a join, even for the app's own roblox: scheme.
+	if testWebViewPolicy("roblox://experiences/start?placeId=1818") != 0 {
+		first.Close()
+		t.Fatal("data: page join was accepted without a verified origin")
+	}
+	// The remaining lifecycle assertions drive joins from local data: pages,
+	// which requires the development-only gate bypass. Official builds
+	// compile it out and skip this host test.
+	if !testWebViewSetJoinGateBypass(true) {
+		first.Close()
+		t.Skip("webview join test seam is compiled out (official_release)")
+	}
+	t.Cleanup(func() { testWebViewSetJoinGateBypass(false) })
 	started := false
 	closed := 0
 	SetWebViewUserClosed(func() {
@@ -275,5 +325,134 @@ func TestWebViewJoinHandoffAndHostRecreation(t *testing.T) {
 	}
 	if testWebViewPolicy("bs:command:close") != 1 || closed != 2 {
 		t.Fatal("new presentation did not receive exactly one close notification")
+	}
+}
+
+func waitTestWebViewMapped(t *testing.T) {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		if testWebViewMapped() {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatal("WebView child did not map")
+}
+
+func waitTestWebViewDocument(t *testing.T, prefix string) {
+	t.Helper()
+	waitTestWebViewURI(t, func(uri string) bool {
+		return strings.HasPrefix(uri, prefix)
+	}, prefix)
+}
+
+func waitTestWebViewURI(t *testing.T, match func(string) bool, want string) {
+	t.Helper()
+	deadline := time.Now().Add(10 * time.Second)
+	for time.Now().Before(deadline) {
+		if uri, loading := testWebViewDocument(); !loading && match(uri) {
+			return
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	uri, loading := testWebViewDocument()
+	t.Fatalf("document %q loading=%t never became %s", uri, loading, want)
+}
+
+// TestWebViewPostMessageJoinRequiresOfficialOriginAndGesture drives the real
+// script-message-received::tipsyJoin path with window.webkit.messageHandlers
+// .tipsyJoin.postMessage on a live WebKitGTK view. It pins the
+// WebKitJavascriptResult decoding: without it no message reaches the gate.
+func TestWebViewPostMessageJoinRequiresOfficialOriginAndGesture(t *testing.T) {
+	if os.Getenv("TIPSY_WEBVIEW_HOST_TEST") != "1" {
+		t.Skip("set TIPSY_WEBVIEW_HOST_TEST=1 on an X11 display")
+	}
+	CloseWebViewOverlay()
+	SetWebViewStartGame(nil)
+	SetWebViewUserClosed(nil)
+	started := make(chan rbxuri.Request, 4)
+	SetWebViewStartGame(func(req rbxuri.Request) { started <- req })
+	w, err := Open("Tipsy WebView postMessage test", 640, 360)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		SetWebViewStartGame(nil)
+		SetWebViewUserClosed(nil)
+		CloseWebViewOverlay()
+		w.Close()
+	})
+
+	show := func(html string) {
+		t.Helper()
+		url := "data:text/html;base64," + base64.StdEncoding.EncodeToString([]byte(html))
+		if err := ShowWebViewOverlay(WebViewOpen{
+			URL: url, Theme: "Dark", Title: "PostMessage test",
+		}); err != nil {
+			t.Fatal(err)
+		}
+		waitTestWebViewMapped(t)
+	}
+	expectRejected := func(step string) {
+		t.Helper()
+		select {
+		case req := <-started:
+			t.Fatalf("%s: join %+v reached StartGame", step, req)
+		case <-time.After(750 * time.Millisecond):
+		}
+	}
+	expectJoin := func(step string) {
+		t.Helper()
+		select {
+		case req := <-started:
+			if req.PlaceID != 1818 {
+				t.Fatalf("%s: StartGame got place %d, want 1818", step, req.PlaceID)
+			}
+		case <-time.After(5 * time.Second):
+			t.Fatalf("%s: postMessage never reached StartGame", step)
+		}
+	}
+
+	// 1. A genuine https://*.roblox.com document whose load handler posts a
+	// join has no user input yet. The origin check passes; the gesture check
+	// must reject the message.
+	show("<p>origin probe</p>")
+	if !testWebViewLoadRobloxPage() {
+		t.Fatal("could not load the Roblox-origin document")
+	}
+	waitTestWebViewDocument(t, "https://www.roblox.com/")
+	expectRejected("official origin without user input")
+	if !WebViewOverlayVisible() {
+		t.Fatal("rejected join hid the overlay")
+	}
+
+	// 2. A real key press on the view licenses the join window. Reloading the
+	// first-party page makes its load handler post the same join again, now
+	// with fresh input.
+	if !testWebViewSendKey() {
+		t.Fatal("could not deliver real key input to the view")
+	}
+	if !testWebViewLoadRobloxPage() {
+		t.Fatal("could not reload the Roblox-origin document")
+	}
+	expectJoin("official origin with recent user input")
+	if WebViewOverlayVisible() {
+		t.Fatal("join handoff did not hide the overlay")
+	}
+
+	// 3. A non-Roblox document must fail the origin check even with fresh
+	// real input. Its own page script posts the same join shortly after load
+	// and then marks the document, so the rejection is not a missing post.
+	show(`<script>setTimeout(function(){window.webkit.messageHandlers.tipsyJoin.postMessage("roblox://experiences/start?placeId=1818");location.hash="posted"},500)</script>`)
+	if !testWebViewSendKey() {
+		t.Fatal("could not deliver real key input to the view")
+	}
+	waitTestWebViewURI(t, func(uri string) bool {
+		return strings.HasPrefix(uri, "data:") && strings.Contains(uri, "posted")
+	}, "the posted data: document")
+	expectRejected("non-Roblox origin with recent user input")
+	if !WebViewOverlayVisible() {
+		t.Fatal("rejected join hid the overlay")
 	}
 }

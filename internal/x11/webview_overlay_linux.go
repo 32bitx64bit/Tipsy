@@ -1,5 +1,5 @@
 // Copyright 2026 The Tipsy Authors
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: AGPL-3.0-or-later
 
 //go:build linux && cgo
 
@@ -226,6 +226,36 @@ func testWebViewPolicy(uri string) int {
 	uriC := C.CString(uri)
 	defer C.free(unsafe.Pointer(uriC))
 	return int(C.tipsy_webview_overlay_test_policy(uriC))
+}
+
+// testWebViewJoinGate evaluates the real join origin/gesture policy against
+// supplied facts. inputAgeSeconds < 0 means no user input was observed.
+func testWebViewJoinGate(uri string, inputAgeSeconds float64) int {
+	uriC := C.CString(uri)
+	defer C.free(unsafe.Pointer(uriC))
+	return int(C.tipsy_webview_overlay_test_join_gate(uriC, C.double(inputAgeSeconds)))
+}
+
+// testWebViewLoadRobloxPage loads the fixed local first-party page into the
+// live overlay view so host tests can exercise the real origin gate offline.
+func testWebViewLoadRobloxPage() bool {
+	return C.tipsy_webview_overlay_test_load_roblox_page() != 0
+}
+
+// testWebViewSendKey delivers a real GTK key event to the live view. GTK
+// marks it send_event == 0, the same recording path as an X11 key event.
+func testWebViewSendKey() bool {
+	return C.tipsy_webview_overlay_test_send_key() != 0
+}
+
+// testWebViewDocument reports the live view's URI and WebKit loading state.
+func testWebViewDocument() (string, bool) {
+	buf := make([]byte, 4096)
+	var loading C.int
+	if C.tipsy_webview_overlay_test_document((*C.char)(unsafe.Pointer(&buf[0])), C.size_t(len(buf)), &loading) == 0 {
+		return "", true
+	}
+	return C.GoString((*C.char)(unsafe.Pointer(&buf[0]))), loading != 0
 }
 
 //export tipsy_go_webview_policy

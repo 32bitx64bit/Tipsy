@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Copyright 2026 The Tipsy Authors
-# SPDX-License-Identifier: GPL-3.0-or-later
+# SPDX-License-Identifier: AGPL-3.0-or-later
 #
 # Install the native headers and Qt 6 surface required to vet, test, and
 # build tipsy and tipsy-gui. Supports Debian/Ubuntu apt and Fedora dnf.

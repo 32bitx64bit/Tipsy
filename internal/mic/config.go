@@ -1,5 +1,5 @@
 // Copyright 2026 The Tipsy Authors
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: AGPL-3.0-or-later
 
 // Package mic is the host microphone door: persisted settings, env overlay,
 // and Allowed() for JNI/diagnose/GUI. It never opens Pulse streams, never

@@ -1,5 +1,5 @@
 /* Copyright 2026 The Tipsy Authors
- * SPDX-License-Identifier: GPL-3.0-or-later
+ * SPDX-License-Identifier: AGPL-3.0-or-later
  *
  * SysV AMD64 trampolines. Roblox C++ runs on a dedicated 64 MiB
  * pthread that never enters Go except via JNIEnv callbacks.

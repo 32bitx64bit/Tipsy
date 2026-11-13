@@ -1,5 +1,5 @@
 // Copyright 2026 The Tipsy Authors
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: AGPL-3.0-or-later
 
 // Package authfiles holds the plain data a verified generation hands to the
 // launcher. It has no dependencies so the setup service can produce it without

@@ -1,5 +1,5 @@
 /* Copyright 2026 The Tipsy Authors
- * SPDX-License-Identifier: GPL-3.0-or-later
+ * SPDX-License-Identifier: AGPL-3.0-or-later
  *
  * Bionic LP64 sigaction / rt_sigaction. glibc's struct sigaction is ~152
  * bytes (128-byte sigset_t). AOSP bionic LP64 is 32 bytes (8-byte sigset_t)

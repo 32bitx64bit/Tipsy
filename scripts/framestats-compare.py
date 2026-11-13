@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # Copyright 2026 The Tipsy Authors
-# SPDX-License-Identifier: GPL-3.0-or-later
+# SPDX-License-Identifier: AGPL-3.0-or-later
 """Compare two frame-time captures written by TIPSY_PPROF_DIR.
 
 Reads framestats.json (or framestats.txt as a fallback) from each capture

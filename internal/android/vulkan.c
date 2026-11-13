@@ -1,5 +1,5 @@
 /* Copyright 2026 The Tipsy Authors
- * SPDX-License-Identifier: GPL-3.0-or-later
+ * SPDX-License-Identifier: AGPL-3.0-or-later
  *
  * Android libvulkan.so adapter: host Khronos-loader passthrough with
  * VK_KHR_android_surface rewritten to XCB (Xlib fallback).

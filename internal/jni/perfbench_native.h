@@ -1,5 +1,5 @@
 /* Copyright 2026 The Tipsy Authors
- * SPDX-License-Identifier: GPL-3.0-or-later
+ * SPDX-License-Identifier: AGPL-3.0-or-later
  *
  * Native-JNIEnv benchmark support.  The tagged Go wrapper is deliberately
  * the only package entry point: normal Tipsy builds do not expose this test

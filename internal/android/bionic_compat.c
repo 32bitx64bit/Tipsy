@@ -1,5 +1,5 @@
 /* Copyright 2026 The Tipsy Authors
- * SPDX-License-Identifier: GPL-3.0-or-later
+ * SPDX-License-Identifier: AGPL-3.0-or-later
  *
  * Bionic-only libc symbols that glibc does not export (FORTIFY, __sF, SSP)
  * and bionic `sysconf` names (numeric `_SC_*` differ from glibc).

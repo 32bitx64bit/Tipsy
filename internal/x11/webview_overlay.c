@@ -1,5 +1,5 @@
 /* Copyright 2026 The Tipsy Authors
- * SPDX-License-Identifier: GPL-3.0-or-later
+ * SPDX-License-Identifier: AGPL-3.0-or-later
  *
  * WebKitGTK 4.1 + GTK3 child overlay. Own Display/GTK loop; the Roblox X11
  * pump is not stolen. The GtkWindow is override-redirect and reparented
@@ -36,6 +36,9 @@ struct tipsy_webview_state {
 	int ox;
 	int oy;
 	unsigned long load_serial;
+	/* Monotonic microseconds of the last real (non-synthetic) user input
+	 * on the view, or 0 when none was observed in this presentation. */
+	gint64 last_user_input_us;
 };
 
 static pthread_t g_thread;
@@ -377,9 +380,139 @@ static gboolean on_key_press(GtkWidget *w, GdkEventKey *ev, gpointer data)
 	return FALSE;
 }
 
+/* Join handoff is a privileged transition out of the browser and into
+ * StartGame, so it requires both a verified first-party origin and a recent
+ * real user gesture. Page script alone (any frame, any injected content)
+ * must not be able to launch an experience. */
+#define TIPSY_WEBVIEW_JOIN_INPUT_WINDOW_US (5 * G_TIME_SPAN_SECOND)
+
+#ifdef TIPSY_WEBVIEW_ALLOW_TEST_SEAMS
+/* Development-only bypass for host tests that drive join handoffs from
+ * local data: pages. official_release builds compile it out. */
+static gint g_test_join_gate_bypass;
+
+void tipsy_webview_overlay_test_set_join_gate_bypass(int bypass)
+{
+	g_atomic_int_set(&g_test_join_gate_bypass, bypass ? 1 : 0);
+}
+#endif
+
+/* Record only real server input. GDK marks XSendEvent-forged events with
+ * send_event != 0; those must never license a join. */
+static void overlay_record_user_input(void)
+{
+	g_ov.last_user_input_us = g_get_monotonic_time();
+}
+
+static gboolean on_view_key_press(GtkWidget *w, GdkEventKey *ev, gpointer data)
+{
+	(void)w;
+	(void)data;
+	if (ev != NULL && ev->send_event == 0) {
+		overlay_record_user_input();
+	}
+	return FALSE;
+}
+
+static gboolean on_view_button_press(GtkWidget *w, GdkEventButton *ev, gpointer data)
+{
+	(void)w;
+	(void)data;
+	if (ev != NULL && ev->send_event == 0) {
+		overlay_record_user_input();
+	}
+	return FALSE;
+}
+
+static gboolean on_view_touch_event(GtkWidget *w, GdkEventTouch *ev, gpointer data)
+{
+	(void)w;
+	(void)data;
+	if (ev != NULL && ev->send_event == 0) {
+		overlay_record_user_input();
+	}
+	return FALSE;
+}
+
+/* The current top-level document must be https://roblox.com or a subdomain.
+ * webkit_web_view_get_uri reports the main frame's committed/provisional
+ * URI, so an iframe or a hostile page cannot supply the origin. */
+static int overlay_uri_is_official_https(const char *uri)
+{
+	GUri *parsed;
+	const char *scheme;
+	const char *host;
+	char *lower;
+	int ok = 0;
+
+	if (uri == NULL || uri[0] == 0) {
+		return 0;
+	}
+	parsed = g_uri_parse(uri, G_URI_FLAGS_NONE, NULL);
+	if (parsed == NULL) {
+		return 0;
+	}
+	scheme = g_uri_get_scheme(parsed);
+	host = g_uri_get_host(parsed);
+	if (scheme != NULL && g_ascii_strcasecmp(scheme, "https") == 0 &&
+		host != NULL && host[0] != 0 && strchr(host, '%') == NULL &&
+		g_uri_get_userinfo(parsed) == NULL) {
+		lower = g_ascii_strdown(host, -1);
+		ok = strcmp(lower, "roblox.com") == 0 ||
+			g_str_has_suffix(lower, ".roblox.com");
+		g_free(lower);
+	}
+	g_uri_unref(parsed);
+	return ok;
+}
+
+/* Pure decision over explicit facts so tests can exercise hostile origins
+ * and missing/stale input without a live Roblox page. */
+static int overlay_join_gate_facts_ok(const char *uri, gint64 last_input_us,
+	gint64 now_us)
+{
+	if (!overlay_uri_is_official_https(uri)) {
+		return 0;
+	}
+	if (last_input_us <= 0 || now_us < last_input_us) {
+		return 0;
+	}
+	return now_us - last_input_us <= TIPSY_WEBVIEW_JOIN_INPUT_WINDOW_US;
+}
+
+static int overlay_join_gate_ok(void)
+{
+	const char *uri;
+
+#ifdef TIPSY_WEBVIEW_ALLOW_TEST_SEAMS
+	if (g_atomic_int_get(&g_test_join_gate_bypass)) {
+		return 1;
+	}
+#endif
+	uri = g_ov.view != NULL ? webkit_web_view_get_uri(g_ov.view) : NULL;
+	return overlay_join_gate_facts_ok(uri, g_ov.last_user_input_us,
+		g_get_monotonic_time());
+}
+
+/* Test-only evaluation of the real join policy against supplied facts. It
+ * reads and mutates no overlay state and grants no bypass. */
+int tipsy_webview_overlay_test_join_gate(const char *uri, double input_age_seconds)
+{
+	gint64 now = g_get_monotonic_time();
+	gint64 last = 0;
+
+	if (input_age_seconds >= 0) {
+		last = now - (gint64)(input_age_seconds * (double)G_TIME_SPAN_SECOND);
+	}
+	return overlay_join_gate_facts_ok(uri, last, now);
+}
+
 static int dispatch_overlay_policy(WebKitWebView *view, const char *uri)
 {
 	if (view == NULL || view != g_ov.view || !g_ov.mapped || uri == NULL) {
+		return 0;
+	}
+	if (!overlay_join_gate_ok()) {
 		return 0;
 	}
 	return tipsy_go_webview_policy((char *)uri);
@@ -411,6 +544,11 @@ static gboolean on_decide_policy(WebKitWebView *view, WebKitPolicyDecision *deci
 	if (req == NULL) {
 		return FALSE;
 	}
+	/* A WebKit-verified user gesture (click, key, touch) also licenses the
+	 * join window; script-initiated navigations carry no gesture. */
+	if (webkit_navigation_action_is_user_gesture(act)) {
+		overlay_record_user_input();
+	}
 	uri = webkit_uri_request_get_uri(req);
 	if (dispatch_overlay_policy(view, uri) != 0) {
 		webkit_policy_decision_ignore(decision);
@@ -419,8 +557,12 @@ static gboolean on_decide_policy(WebKitWebView *view, WebKitPolicyDecision *deci
 	return FALSE;
 }
 
-static void on_script_message(WebKitUserContentManager *mgr, JSCValue *value, gpointer data)
+/* webkit2gtk-4.1 emits script-message-received::<name> with a
+ * WebKitJavascriptResult, not the legacy JSCValue the 2.6 API took. */
+static void on_script_message(WebKitUserContentManager *mgr,
+	WebKitJavascriptResult *js_result, gpointer data)
 {
+	JSCValue *value;
 	char *s;
 
 	(void)data;
@@ -428,6 +570,10 @@ static void on_script_message(WebKitUserContentManager *mgr, JSCValue *value, gp
 		mgr != webkit_web_view_get_user_content_manager(g_ov.view)) {
 		return;
 	}
+	if (js_result == NULL) {
+		return;
+	}
+	value = webkit_javascript_result_get_js_value(js_result);
 	if (value == NULL || !jsc_value_is_string(value)) {
 		return;
 	}
@@ -718,8 +864,11 @@ static void apply_document_scripts(const char *theme)
 		theme != NULL && g_ascii_strcasecmp(theme, "Light") == 0 ? kLightSchemeJS : kDarkSchemeJS };
 	webkit_user_content_manager_remove_all_scripts(manager);
 	for (unsigned i = 0; i < G_N_ELEMENTS(scripts); i++) {
+		/* The Hybrid bridge is a top-frame contract. Injecting it into
+		 * every frame would let any embedded third-party iframe call
+		 * tipsyJoin with its own script context. */
 		WebKitUserScript *script = webkit_user_script_new(scripts[i],
-			WEBKIT_USER_CONTENT_INJECT_ALL_FRAMES, WEBKIT_USER_SCRIPT_INJECT_AT_DOCUMENT_START,
+			WEBKIT_USER_CONTENT_INJECT_TOP_FRAME, WEBKIT_USER_SCRIPT_INJECT_AT_DOCUMENT_START,
 			NULL, NULL);
 		webkit_user_content_manager_add_script(manager, script);
 		webkit_user_script_unref(script);
@@ -743,6 +892,9 @@ static void show_overlay(struct tipsy_open_job *job)
 	gtk_widget_grab_focus(GTK_WIDGET(g_ov.view));
 	g_ov.mapped = 1;
 	g_ov.load_serial++;
+	/* A new presentation starts with no licensed gesture; stale input from
+	 * a previous page must not carry over into this one. */
+	g_ov.last_user_input_us = 0;
 	apply_cookies_then_load(g_ov.view, job);
 }
 
@@ -791,6 +943,11 @@ static void build_overlay(struct tipsy_open_job *job)
 
 	g_ov.view = WEBKIT_WEB_VIEW(webkit_web_view_new_with_user_content_manager(ucm));
 	g_signal_connect(g_ov.view, "realize", G_CALLBACK(on_view_realized), NULL);
+	/* Real user input on the view licenses the join gesture window. These
+	 * run before WebKit's own handlers and never consume the event. */
+	g_signal_connect(g_ov.view, "key-press-event", G_CALLBACK(on_view_key_press), NULL);
+	g_signal_connect(g_ov.view, "button-press-event", G_CALLBACK(on_view_button_press), NULL);
+	g_signal_connect(g_ov.view, "touch-event", G_CALLBACK(on_view_touch_event), NULL);
 	g_object_unref(ucm);
 	settings = webkit_web_view_get_settings(g_ov.view);
 	webkit_settings_set_javascript_can_open_windows_automatically(settings, FALSE);
@@ -1062,4 +1219,161 @@ int tipsy_webview_overlay_test_policy(const char *uri)
 	pthread_cond_destroy(&check.done);
 	pthread_mutex_destroy(&check.mutex);
 	return check.result;
+}
+
+/* Live-WebKit host-test support. These helpers grant no join-gate bypass: the
+ * document is a fixed local page with a first-party base URI, the join is
+ * posted by that page's own script, and the key is a real GTK key event. */
+static const char kTestPageBaseURI[] = "https://www.roblox.com/";
+static const char kTestPageHTML[] =
+	"<!DOCTYPE html><html><body><p>Tipsy join gate probe</p><script>"
+	"window.addEventListener('load',function(){"
+	"window.webkit.messageHandlers.tipsyJoin.postMessage("
+	"\"roblox://experiences/start?placeId=1818\");});"
+	"</script></body></html>";
+
+struct tipsy_test_call {
+	pthread_mutex_t mutex;
+	pthread_cond_t done;
+	int complete;
+	int result;
+	char *uri;
+	int loading;
+};
+
+static void test_call_finish(struct tipsy_test_call *call, int result)
+{
+	pthread_mutex_lock(&call->mutex);
+	call->result = result;
+	call->complete = 1;
+	pthread_cond_signal(&call->done);
+	pthread_mutex_unlock(&call->mutex);
+}
+
+static void test_call_run(struct tipsy_test_call *call, GSourceFunc idle)
+{
+	pthread_mutex_lock(&call->mutex);
+	g_idle_add(idle, call);
+	while (!call->complete) pthread_cond_wait(&call->done, &call->mutex);
+	pthread_mutex_unlock(&call->mutex);
+}
+
+static void test_call_clear(struct tipsy_test_call *call)
+{
+	g_free(call->uri);
+	call->uri = NULL;
+	pthread_cond_destroy(&call->done);
+	pthread_mutex_destroy(&call->mutex);
+}
+
+static gboolean idle_test_load_roblox_page(gpointer data)
+{
+	struct tipsy_test_call *call = data;
+	int ok = 0;
+
+	if (g_ov.view != NULL) {
+		webkit_web_view_load_html(g_ov.view, kTestPageHTML, kTestPageBaseURI);
+		ok = 1;
+	}
+	test_call_finish(call, ok);
+	return G_SOURCE_REMOVE;
+}
+
+int tipsy_webview_overlay_test_load_roblox_page(void)
+{
+	struct tipsy_test_call call = {
+		.mutex = PTHREAD_MUTEX_INITIALIZER,
+		.done = PTHREAD_COND_INITIALIZER,
+	};
+	int ok;
+
+	if (!g_init_ok) return 0;
+	test_call_run(&call, idle_test_load_roblox_page);
+	ok = call.result;
+	test_call_clear(&call);
+	return ok;
+}
+
+static gboolean idle_test_send_key(gpointer data)
+{
+	struct tipsy_test_call *call = data;
+	GdkEvent *event;
+	int ok = 0;
+
+	if (g_ov.view != NULL) {
+		GdkDisplay *display = gtk_widget_get_display(GTK_WIDGET(g_ov.view));
+		GdkSeat *seat = gdk_display_get_default_seat(display);
+		GdkDevice *keyboard = seat != NULL ? gdk_seat_get_keyboard(seat) : NULL;
+
+		event = gdk_event_new(GDK_KEY_PRESS);
+		event->key.window = g_object_ref(gtk_widget_get_window(GTK_WIDGET(g_ov.view)));
+		/* send_event == 0 is the real-input path on_view_key_press records;
+		 * forged XSendEvent input is marked send_event != 0 and dropped. */
+		event->key.send_event = FALSE;
+		event->key.time = GDK_CURRENT_TIME;
+		event->key.state = 0;
+		event->key.keyval = GDK_KEY_a;
+		event->key.hardware_keycode = 38;
+		event->key.group = 0;
+		event->key.is_modifier = 0;
+		if (keyboard != NULL) {
+			gdk_event_set_device(event, keyboard);
+		}
+		gtk_widget_grab_focus(GTK_WIDGET(g_ov.view));
+		gtk_widget_event(GTK_WIDGET(g_ov.view), event);
+		gdk_event_free(event);
+		ok = 1;
+	}
+	test_call_finish(call, ok);
+	return G_SOURCE_REMOVE;
+}
+
+int tipsy_webview_overlay_test_send_key(void)
+{
+	struct tipsy_test_call call = {
+		.mutex = PTHREAD_MUTEX_INITIALIZER,
+		.done = PTHREAD_COND_INITIALIZER,
+	};
+	int ok;
+
+	if (!g_init_ok) return 0;
+	test_call_run(&call, idle_test_send_key);
+	ok = call.result;
+	test_call_clear(&call);
+	return ok;
+}
+
+static gboolean idle_test_document(gpointer data)
+{
+	struct tipsy_test_call *call = data;
+
+	if (g_ov.view != NULL) {
+		call->uri = g_strdup(webkit_web_view_get_uri(g_ov.view));
+		call->loading = webkit_web_view_is_loading(g_ov.view) ? 1 : 0;
+	}
+	test_call_finish(call, g_ov.view != NULL);
+	return G_SOURCE_REMOVE;
+}
+
+int tipsy_webview_overlay_test_document(char *uri, size_t uri_len, int *loading)
+{
+	struct tipsy_test_call call = {
+		.mutex = PTHREAD_MUTEX_INITIALIZER,
+		.done = PTHREAD_COND_INITIALIZER,
+	};
+	int ok;
+
+	if (!g_init_ok) return 0;
+	test_call_run(&call, idle_test_document);
+	ok = call.complete ? call.result : 0;
+	if (uri != NULL && uri_len > 0) {
+		if (call.uri != NULL) {
+			g_strlcpy(uri, call.uri, uri_len);
+		} else {
+			uri[0] = 0;
+		}
+	}
+	if (loading != NULL) *loading = call.loading;
+	test_call_clear(&call);
+	return ok;
 }

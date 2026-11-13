@@ -1,5 +1,5 @@
 // Copyright 2026 The Tipsy Authors
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: AGPL-3.0-or-later
 
 // Package desktop owns Tipsy's freedesktop launcher integration: the .desktop
 // entries every packaging medium ships, and which installed copy of Tipsy

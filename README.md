@@ -13,7 +13,7 @@ client needs. Roblox itself is never included, patched, or redistributed.
 
 [![Website](https://img.shields.io/badge/Website-tipsyhq.org-2d6bff?style=for-the-badge)](https://tipsyhq.org)
 [![Download](https://img.shields.io/github/v/release/32bitx64bit/Tipsy?style=for-the-badge&label=Latest%20release&color=2d6bff)](https://github.com/32bitx64bit/Tipsy/releases/latest)
-[![License](https://img.shields.io/badge/License-GPL--3.0--or--later-227d48?style=for-the-badge)](LICENSE)
+[![License](https://img.shields.io/badge/License-AGPL--3.0--or--later-227d48?style=for-the-badge)](LICENSE)
 [![Discord](https://img.shields.io/badge/Discord-community-5865F2?style=for-the-badge&logo=discord&logoColor=white)](https://discord.gg/YQkZx8JT6R)
 
 [Website](https://tipsyhq.org)
@@ -56,7 +56,7 @@ that get actually played before they get tagged.
 **Our own runtime**
 
 The ELF loader, JavaVM/JNI, GameActivity support, X11 windowing, EGL and
-Vulkan, input, and audio are Tipsy code, licensed GPL-3.0-or-later. No vendored
+Vulkan, input, and audio are Tipsy code, licensed AGPL-3.0-or-later. No vendored
 internals from another stack.
 
 </td>
@@ -603,7 +603,7 @@ APT/RPM/pacman/Flatpak repositories. Native packages never replace the AppImage.
 
 ## License
 
-Tipsy is [GPL-3.0-or-later](LICENSE). See [NOTICE](NOTICE) for third-party
+Tipsy is [AGPL-3.0-or-later](LICENSE). See [NOTICE](NOTICE) for third-party
 notes.
 
 Roblox is copyright Roblox Corporation and is not part of this project. Please
