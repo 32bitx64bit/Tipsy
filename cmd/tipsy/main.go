@@ -9,6 +9,7 @@ import (
 	"io"
 	"os"
 	"os/signal"
+	"sync"
 	"syscall"
 
 	"github.com/tipsy-linux/tipsy/internal/app"
@@ -44,7 +45,60 @@ func tipsyMain(args []string) int {
 		runner = runCLISurface
 		args = nil
 	}
-	return run(signal.NotifyContext, runner, args, os.Stdout, os.Stderr)
+	return run(signalChannelNotifier(os.Exit), runner, args, os.Stdout, os.Stderr)
+}
+
+// signalExitCode is the conventional shell status for a signal-terminated
+// process: 130 for SIGINT, 143 for SIGTERM.
+func signalExitCode(sig os.Signal) int {
+	if s, ok := sig.(syscall.Signal); ok {
+		return 128 + int(s)
+	}
+	return 1
+}
+
+// awaitSignalEscalation cancels the app on the first signal and force-exits on
+// the next, so a second Ctrl+C terminates a client whose first shutdown is
+// wedged. done retires the listener once run returns.
+func awaitSignalEscalation(signals <-chan os.Signal, cancel context.CancelFunc, forceExit func(int), done <-chan struct{}) {
+	select {
+	case <-done:
+		return
+	case _, ok := <-signals:
+		if !ok {
+			return
+		}
+		cancel()
+	}
+	select {
+	case <-done:
+	case sig, ok := <-signals:
+		if ok {
+			forceExit(signalExitCode(sig))
+		}
+	}
+}
+
+// signalChannelNotifier is the production notifier: the first SIGINT/SIGTERM
+// cancels the app context cleanly, and a second one exits immediately instead
+// of re-entering the same shutdown path. forceExit is injectable for tests.
+func signalChannelNotifier(forceExit func(int)) contextNotifier {
+	return func(parent context.Context, signals ...os.Signal) (context.Context, context.CancelFunc) {
+		ctx, cancel := context.WithCancel(parent)
+		ch := make(chan os.Signal, 2)
+		signal.Notify(ch, signals...)
+		done := make(chan struct{})
+		go awaitSignalEscalation(ch, cancel, forceExit, done)
+		var once sync.Once
+		stop := func() {
+			once.Do(func() {
+				signal.Stop(ch)
+				close(done)
+				cancel()
+			})
+		}
+		return ctx, stop
+	}
 }
 
 func run(notify contextNotifier, runApp appRunner, args []string, stdout, stderr io.Writer) int {

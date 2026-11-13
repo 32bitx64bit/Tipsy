@@ -26,25 +26,6 @@ import (
 	"github.com/tipsy-linux/tipsy/internal/x11"
 )
 
-// testRendererEnv is a process-only visual-compatibility control; the sole
-// accepted value is `opengl`. It never writes the Tipsy settings document or
-// Roblox's durable settings files.
-const testRendererEnv = "TIPSY_TEST_RENDERER"
-
-func testOpenGLRequested(getenv func(string) string) (bool, error) {
-	if getenv == nil {
-		return false, nil
-	}
-	switch getenv(testRendererEnv) {
-	case "":
-		return false, nil
-	case "opengl":
-		return true, nil
-	default:
-		return false, fmt.Errorf("%s only accepts opengl", testRendererEnv)
-	}
-}
-
 // launchStartedAck gives in-process frontends one deterministic handoff from
 // launcher chrome to the live client. The sync.Once makes the signal idempotent.
 type launchStartedAck struct {
@@ -93,6 +74,40 @@ func closeClientModuleBeforeStart(clientStarted bool, closeFn func() error) erro
 		return nil
 	}
 	return closeFn()
+}
+
+// clientShutdownDeadline bounds the whole host teardown. The JNI phase keeps its
+// tighter gracefulShutdownDeadline, but a wedged X11 pump, presenter, or
+// lifecycle dispatcher would otherwise block before that watchdog is armed.
+const clientShutdownDeadline = 3 * time.Second
+
+// runBoundedShutdown runs every teardown step under one watchdog armed before
+// the first step starts. If the client does not finish in time, forceExit runs
+// so the process releases its X11 socket and pointer grab instead of lingering
+// hidden. A nil forceExit disables escalation for tests that drive the steps
+// themselves; deadline <= 0 falls back to clientShutdownDeadline.
+func runBoundedShutdown(deadline time.Duration, forceExit func(int), reason string, steps ...func()) {
+	if deadline <= 0 {
+		deadline = clientShutdownDeadline
+	}
+	var watchdog *time.Timer
+	if forceExit != nil {
+		watchdog = time.AfterFunc(deadline, func() {
+			logging.Logger(logging.CatRuntime).Error("client shutdown deadline exceeded; exiting host",
+				"reason", reason, "deadline", deadline)
+			forceExit(0)
+		})
+	}
+	defer func() {
+		if watchdog != nil {
+			watchdog.Stop()
+		}
+	}()
+	for _, step := range steps {
+		if step != nil {
+			step()
+		}
+	}
 }
 
 // Launch starts the official extracted Android x86-64 client under native X11.
@@ -203,7 +218,7 @@ func Launch(ctx context.Context, opt LaunchOptions) error {
 	if !opt.Probe {
 		checkCtx, cancelUpdateCheck := context.WithCancel(ctx)
 		defer cancelUpdateCheck()
-		client := updatecheck.Client{Timeout: launchUpdateCheckTimeout, UserAgent: "Tipsy-Linux"}
+		client := updatecheck.Client{Timeout: launchUpdateCheckTimeout, UserAgent: version.UserAgent()}
 		updateNoticeResults = startLaunchUpdateCheck(checkCtx, version.Version, client.Latest)
 	}
 	testOpenGL, err := testOpenGLRequested(os.Getenv)
@@ -481,12 +496,19 @@ func Launch(ctx context.Context, opt LaunchOptions) error {
 	// --probe return before this point.
 	started.signal()
 	shutdownClient := func(reason string) {
-		_ = win.Dismiss()
-		_ = win.StopBackgroundPump()
-		presenter.stop()
-		session.shutdown(reason)
+		// The session's own watchdog covers only the JNI join. Dismiss,
+		// StopBackgroundPump, presenter.stop, and closeLifecycle run before it and
+		// can each block on a wedged pump or engine thread, so cover every teardown
+		// step with one deadline armed before the first one starts.
+		runBoundedShutdown(clientShutdownDeadline, session.forceExit, reason,
+			func() { _ = win.Dismiss() },
+			func() { _ = win.StopBackgroundPump() },
+			presenter.stop,
+			func() { session.shutdown(reason) },
+		)
 		// terminateNativeCode's join has completed while the client lock is still held.
-		// Treat the payload as opaque: flush only the file and its directory.
+		// Treat the payload as opaque: flush only the file and its directory. Keep the
+		// fsync outside the watchdog so disk latency cannot force-exit mid-write.
 		if err := syncPrivateOpaqueFile(preferences); err != nil {
 			logging.Logger(logging.CatFilesystem).Info("official cookie storage sync failed", "err", err)
 		} else {

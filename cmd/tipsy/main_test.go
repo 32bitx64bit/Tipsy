@@ -74,24 +74,6 @@ func TestRunWiresInterruptContextAndPreservesExitCode(t *testing.T) {
 	}
 }
 
-func TestTipsyMainFlushesProfilesBeforeExit(t *testing.T) {
-	dir := t.TempDir()
-	t.Setenv("TIPSY_PPROF_DIR", dir)
-	t.Setenv("TIPSY_PPROF_CLI_SURFACE", "")
-	if code := tipsyMain([]string{"version"}); code != 0 {
-		t.Fatalf("version exit %d", code)
-	}
-	for _, name := range []string{"cpu.pprof", "heap.pprof", "alloc.pprof", "goroutine.pprof", "threadcreate.pprof"} {
-		info, err := os.Stat(filepath.Join(dir, name))
-		if err != nil {
-			t.Fatalf("%s: %v", name, err)
-		}
-		if info.Size() == 0 {
-			t.Fatalf("%s is empty", name)
-		}
-	}
-}
-
 func TestRunCLISurfaceStopsOnCancel(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()

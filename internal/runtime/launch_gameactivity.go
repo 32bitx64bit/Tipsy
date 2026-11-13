@@ -440,6 +440,11 @@ func subscribePostExitAppResume(mod *loader.Module, env *jni.Env, gl uintptr) fu
 	return bindPostExitAppObservers(route, jni.SubscribeNativeHelperLifecycle, jni.SubscribeNativeGLGameDidLeave)
 }
 
+// gameActivityInputBridgeStop is the shutdown stop for the async X11 input
+// worker. It stays a variable so tests can pin its ordering against
+// terminateNativeCode without an engine; production always uses jni's stopper.
+var gameActivityInputBridgeStop = jni.StopX11InputBridge
+
 // shutdown follows the GameActivity lifecycle: focus loss, pause, surface
 // destruction, stop, then terminateNativeCode, which joins the native app
 // thread before Launch's deferred module unmap. sync.Once prevents a context
@@ -463,6 +468,11 @@ func (s *gameActivitySession) shutdown(reason string) time.Duration {
 		// Park the evdev pad pump with the session it feeds: after terminateNativeCode
 		// no gamepad target is live, so further polls only count parked drops.
 		jni.StopRobloxDirectGamepadPump()
+		// Stop the async X11->GameActivity input worker before the engine is torn
+		// down. Queued input must not dispatch into terminateNativeCode's join or
+		// a half-destroyed native app; ClearGameActivityInputTarget's deferred
+		// stop runs only after Launch returns.
+		gameActivityInputBridgeStop()
 		// The runtime is an in-process host: unmapping libroblox while
 		// terminateNativeCode still runs is unsafe. Give the join path a deadline, then
 		// terminate the dismissed host as a last resort so a teardown stall cannot
@@ -524,7 +534,7 @@ func startGameActivity(ctx context.Context, vm *jni.VM, mod *loader.Module, aw *
 		return nil, fmt.Errorf("initializeNativeCode returned 0")
 	}
 	writeCommand, _ := mod.Lookup(android.GameActivityWriteCommandSymbol)
-	commands, err := android.NewGameActivityCommandWriter(uintptr(handle), writeCommand)
+	commands, err := android.NewGameActivityCommandWriter(uintptr(handle), writeCommand, mod)
 	if err != nil {
 		logging.Logger(logging.CatGameActivity).Error("GameActivity command bridge unavailable", "err", err)
 		// initializeNativeCode owns a native app thread; let its termination method
@@ -592,6 +602,7 @@ func wireRobloxDirectInput(mod *loader.Module, env *jni.Env, cacheDir, libroblox
 	if lockedErr != nil {
 		logging.Logger(logging.CatJNI).Info("[jni] missing direct input export", "sym", directMouseLockedSym, "err", lockedErr)
 	}
+	jni.SetRobloxEngineModule(mod)
 	class := env.FindClass("com/roblox/engine/jni/NativeInputInterface")
 	jni.SetRobloxDirectInputTarget(env.Raw(), class, buttonFn, moveFn, wheelFn, lockedFn)
 	// Camera sampling always runs for first-person capture; only its trace is optional.
@@ -765,7 +776,7 @@ func dispatchGameActivityLifecycle(ctx context.Context, vm *jni.VM, mod *loader.
 		{"onTouchEventNative", "(JLandroid/view/MotionEvent;IIIIIJJIIIIIIFF)Z"},
 	} {
 		logging.Logger(logging.CatGameActivity).Info("input native lookup",
-			"name", n[0], "fn", fmt.Sprintf("%#x", vm.NativeMethod("com/google/androidgamesdk/GameActivity", n[0], n[1])))
+			"name", n[0], "registered", vm.NativeMethod("com/google/androidgamesdk/GameActivity", n[0], n[1]) != 0)
 	}
 	return &gameActivitySession{
 		call:             call,
