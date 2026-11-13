@@ -133,8 +133,9 @@ func writeDiagnosticGeneration(t *testing.T, libroblox []byte) (setupsvc.TrustPo
 		PackageName:       "com.roblox.client",
 		VersionName:       "2.746.1266",
 		VersionCode:       7461266,
-		AuthorizationMode: string(setupsvc.DevelopmentUnrestricted),
-		SignerLineageID:   "compiled-development",
+		AuthorizationMode: string(setupsvc.OfficialVerified),
+		PolicyAuthorized:  true,
+		SignerLineageID:   "compiled-keyless-release",
 		SignerLineage:     []string{digest},
 		Splits:            []string{"base"},
 		Files: []integrity.FileRecord{{
@@ -161,10 +162,10 @@ func writeDiagnosticGeneration(t *testing.T, libroblox []byte) (setupsvc.TrustPo
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(storeRoot, "active-development.json"), active, 0o600); err != nil {
+	if err := os.WriteFile(filepath.Join(storeRoot, "active.json"), active, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	return setupsvc.DevelopmentTrustPolicy(), generation
+	return setupsvc.KeylessReleaseTrustPolicy(), generation
 }
 
 func TestDoctorAndDiagnoseActiveGenerationImports(t *testing.T) {

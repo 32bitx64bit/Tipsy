@@ -6,16 +6,10 @@ package setupsvc
 import "github.com/tipsy-linux/tipsy/internal/integrity"
 
 // StoreForTrust returns the generation store with the active pointer that
-// matches trust. OfficialVerified and DevelopmentUnrestricted keep separate
-// active records so the live client and a development build can share one
-// retained-APK pool without overwriting each other.
+// matches trust.
 func StoreForTrust(root string, trust TrustPolicy) integrity.Store {
-	store := integrity.Store{Root: root}
-	switch trust.Mode {
-	case OfficialVerified:
-		store.ActiveSlot = integrity.ActiveSlotOfficial
-	case DevelopmentUnrestricted:
-		store.ActiveSlot = integrity.ActiveSlotDevelopment
+	return integrity.Store{
+		Root:       root,
+		ActiveSlot: activeSlotForTrust(trust),
 	}
-	return store
 }

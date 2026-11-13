@@ -242,20 +242,10 @@ func extractX86_64Libs(ctx context.Context, destDir string, libs []NativeLib) ([
 			apks[lib.APKPath] = opened
 			zf = opened
 		}
-		data, err := zf.ReadFile(lib.ZIPPath)
+		dest := filepath.Join(libDir, name)
+		sum, err := extractNativeLib(ctx, zf, lib, dest)
 		if err != nil {
 			return nil, nil, fmt.Errorf("apk: extract %s: %w", lib.ZIPPath, err)
-		}
-		dest := filepath.Join(libDir, name)
-		if err := os.WriteFile(dest, data, 0o644); err != nil {
-			return nil, nil, err
-		}
-		sum, err := hashFile(dest)
-		if err != nil {
-			return nil, nil, err
-		}
-		if sum != lib.SHA256 {
-			return nil, nil, fmt.Errorf("apk: integrity mismatch for %s: extracted %s, inspect %s", name, sum, lib.SHA256)
 		}
 		seen[name] = sum
 		paths = append(paths, dest)
@@ -274,6 +264,56 @@ func extractX86_64Libs(ctx context.Context, destDir string, libs []NativeLib) ([
 	sort.Strings(paths)
 	sort.Slice(meta, func(i, j int) bool { return meta[i].Name < meta[j].Name })
 	return paths, meta, nil
+}
+
+func extractNativeLib(ctx context.Context, zf *ZIPFiles, lib NativeLib, dest string) (string, error) {
+	entry, err := zf.Entry(lib.ZIPPath)
+	if err != nil {
+		return "", err
+	}
+	if entry.UncompressedSize64 > uint64(maxZipEntryBytes) {
+		return "", fmt.Errorf("zip entry declares %d bytes, over the %d byte limit", entry.UncompressedSize64, maxZipEntryBytes)
+	}
+	rc, err := entry.Open()
+	if err != nil {
+		return "", err
+	}
+	defer rc.Close()
+	tmp, err := os.CreateTemp(filepath.Dir(dest), "."+filepath.Base(dest)+".partial-*")
+	if err != nil {
+		return "", err
+	}
+	keep := false
+	defer func() {
+		_ = tmp.Close()
+		if !keep {
+			_ = os.Remove(tmp.Name())
+		}
+	}()
+	// Stream the entry straight to disk while hashing it, so the ~120 MB
+	// library is never materialized in memory, and read one byte past the
+	// limit to reject a header that understates the real size.
+	digest, total, err := integrity.SHA256Stream(ctx, io.TeeReader(io.LimitReader(rc, maxZipEntryBytes+1), tmp))
+	if err != nil {
+		return "", err
+	}
+	if total > maxZipEntryBytes {
+		return "", fmt.Errorf("extracted entry exceeds the %d byte limit", maxZipEntryBytes)
+	}
+	if !strings.EqualFold(digest, lib.SHA256) {
+		return "", fmt.Errorf("integrity mismatch for %s: extracted %s, inspect %s", filepath.Base(dest), digest, lib.SHA256)
+	}
+	if err := tmp.Chmod(0o644); err != nil {
+		return "", err
+	}
+	if err := tmp.Close(); err != nil {
+		return "", err
+	}
+	if err := os.Rename(tmp.Name(), dest); err != nil {
+		return "", err
+	}
+	keep = true
+	return digest, nil
 }
 
 func extractAssets(ctx context.Context, destDir string, base Package) (string, error) {

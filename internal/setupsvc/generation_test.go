@@ -102,59 +102,6 @@ func TestOpenAuthorizedGenerationRejectsSelfDescribingUnsignedInventory(t *testi
 	}
 }
 
-func TestOpenAuthorizedDevelopmentGenerationWhenProvided(t *testing.T) {
-	raw := os.Getenv("TIPSY_TEST_OFFICIAL_PACKAGES")
-	if raw == "" {
-		t.Skip("set TIPSY_TEST_OFFICIAL_PACKAGES to colon-separated locally owned APK paths")
-	}
-	paths := strings.Split(raw, ":")
-	report, err := apk.Inspect(context.Background(), paths)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := apk.VerifyReportSignatures(context.Background(), report); err != nil {
-		t.Fatal(err)
-	}
-	trust := DevelopmentTrustPolicy()
-	if _, err := AuthorizeReport(report, trust); err != nil {
-		t.Fatal(err)
-	}
-	root := t.TempDir()
-	storeRoot := filepath.Join(root, "store")
-	t.Cleanup(func() { makeGenerationTreeWritable(storeRoot) })
-	id, err := DeriveAndActivateRetainedAPKs(context.Background(), paths, storeRoot, trust)
-	if err != nil || id == "" {
-		t.Fatal(err)
-	}
-	store := integrity.Store{Root: storeRoot}
-	generation, err := OpenAuthorizedGeneration(context.Background(), store, trust)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer generation.Close()
-	if authorization := generation.Authorization(); authorization.Mode != DevelopmentUnrestricted || authorization.PolicyAuthorized {
-		t.Fatalf("development generation claimed official status: %+v", authorization)
-	}
-	if _, err := generation.NativeDescriptorSet(context.Background()); err != nil {
-		t.Fatal(err)
-	}
-	files, err := generation.AuthorizedRuntimeFiles(context.Background())
-	if err != nil {
-		t.Fatal(err)
-	}
-	if files.GenerationID != id || files.RootDir != filepath.Join(storeRoot, "generations", id) ||
-		files.AssetsDir != filepath.Join(files.RootDir, "assets") || files.BaseAPKPath != filepath.Join(files.RootDir, "apk", "base.apk") || files.VersionName == "" {
-		t.Fatalf("authorized runtime files are not bound to the active generation: %+v", files)
-	}
-	service := New(testHooks())
-	service.GenerationStoreRoot = storeRoot
-	service.Trust = trust
-	snapshot, err := service.Snapshot(context.Background())
-	if err != nil || !snapshot.Installed || snapshot.Readiness != ReadinessLaunchInputs || snapshot.VersionCode != report.Merged.VersionCode {
-		t.Fatalf("verified installed-client snapshot=%+v err=%v", snapshot, err)
-	}
-}
-
 func TestBuildGenerationRejectsUnauthenticatedNativeAndRuntimeAccountData(t *testing.T) {
 	const cert = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 	for _, tc := range []struct {

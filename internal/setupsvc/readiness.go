@@ -91,23 +91,3 @@ func verifyInstalledClientSnapshot(ctx context.Context, storeRoot string, config
 		Architectures: []string{"x86_64"},
 	}, nil
 }
-
-func readinessTrust(inventory integrity.Inventory, configured TrustPolicy) (TrustPolicy, error) {
-	switch AuthorizationMode(inventory.AuthorizationMode) {
-	case DevelopmentUnrestricted:
-		if configured.Mode == DevelopmentUnrestricted && configured.PackageName != "" {
-			return configured, nil
-		}
-		return DevelopmentTrustPolicy(), nil
-	case OfficialVerified:
-		if inventory.SignerLineageID == "compiled-keyless-release" && inventory.PolicyAuthorized && inventory.PolicySequence == 0 {
-			// This does not authenticate the surrounding Tipsy executable. It
-			// only replays the compiled Roblox package identity check and must
-			// never be used as app release authority.
-			return KeylessReleaseTrustPolicy(), nil
-		}
-		return TrustPolicy{}, setupError(ErrPolicy, "installation readiness", "the active official generation requires an authenticated release", nil)
-	default:
-		return TrustPolicy{}, setupError(ErrIntegrity, "installation readiness", "the active generation has an unknown authorization mode", nil)
-	}
-}

@@ -281,6 +281,90 @@ func TestInspectNestedZip(t *testing.T) {
 	}
 }
 
+func TestReadZipEntryRejectsOversizedEntry(t *testing.T) {
+	// CreateRaw records the declared size verbatim, so this crafts a central
+	// directory that claims a multi-gigabyte manifest while carrying a few
+	// bytes. readZipEntry must reject it from the declared size alone.
+	var buf bytes.Buffer
+	w := zip.NewWriter(&buf)
+	body := []byte("tiny")
+	header := &zip.FileHeader{Name: "AndroidManifest.xml", Method: zip.Store}
+	header.UncompressedSize64 = uint64(maxZipEntryBytes) + 1
+	header.CompressedSize64 = uint64(len(body))
+	fw, err := w.CreateRaw(header)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := fw.Write(body); err != nil {
+		t.Fatal(err)
+	}
+	if err := w.Close(); err != nil {
+		t.Fatal(err)
+	}
+	zr, err := zip.NewReader(bytes.NewReader(buf.Bytes()), int64(buf.Len()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := readZipEntry(zr.File[0]); err == nil || !strings.Contains(err.Error(), "byte limit") {
+		t.Fatalf("oversized entry err=%v", err)
+	}
+	if _, _, err := hashZipEntry(zr.File[0]); err == nil || !strings.Contains(err.Error(), "byte limit") {
+		t.Fatalf("oversized entry hash err=%v", err)
+	}
+	if _, err := readCapped(bytes.NewReader(make([]byte, 33)), 32); err == nil {
+		t.Fatal("readCapped accepted a stream past the limit")
+	}
+	got, err := readCapped(strings.NewReader("short"), 32)
+	if err != nil || string(got) != "short" {
+		t.Fatalf("readCapped short=%q err=%v", got, err)
+	}
+}
+
+func TestExtractX86_64LibsStreamsAndVerifiesHash(t *testing.T) {
+	dir := t.TempDir()
+	libBody := bytes.Repeat([]byte("native-library-payload"), 4096)
+	apkPath := writeAPK(t, dir, "base.apk", inspectFiles(t, "com.example.tipsy", "1.2.3", 42, "", libBody))
+	rep, err := Inspect(context.Background(), []string{apkPath})
+	if err != nil {
+		t.Fatal(err)
+	}
+	libs := x86_64Libs(rep)
+	if len(libs) != 1 {
+		t.Fatalf("libs=%d", len(libs))
+	}
+	dest := filepath.Join(dir, "out")
+	paths, meta, err := extractX86_64Libs(context.Background(), dest, libs)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(paths) != 1 || len(meta) != 1 {
+		t.Fatalf("paths=%v meta=%v", paths, meta)
+	}
+	got, err := os.ReadFile(paths[0])
+	if err != nil || !bytes.Equal(got, libBody) {
+		t.Fatalf("extracted %d bytes err=%v", len(got), err)
+	}
+	if meta[0].SHA256 != libs[0].SHA256 || meta[0].Size != libs[0].Size {
+		t.Fatalf("meta=%+v lib=%+v", meta[0], libs[0])
+	}
+	if entries, _ := os.ReadDir(filepath.Dir(paths[0])); len(entries) != 1 {
+		t.Fatalf("streaming left scratch files: %v", entries)
+	}
+
+	tampered := append([]NativeLib(nil), libs...)
+	tampered[0].SHA256 = strings.Repeat("0", 64)
+	if _, _, err := extractX86_64Libs(context.Background(), filepath.Join(dir, "bad"), tampered); err == nil {
+		t.Fatal("extracted library with a mismatched hash")
+	}
+	entries, err := os.ReadDir(filepath.Join(dir, "bad", libSubdir, abiX86_64))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 0 {
+		t.Fatalf("hash mismatch left files behind: %v", entries)
+	}
+}
+
 func TestCompare(t *testing.T) {
 	dir := t.TempDir()
 	oldAPK := writeAPK(t, dir, "old.apk", inspectFiles(t, "com.example.tipsy", "1.2.3", 42, "", []byte("lib-v1")))

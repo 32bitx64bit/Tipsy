@@ -30,7 +30,7 @@ func TestMissingImportSupportHookFailsClosed(t *testing.T) {
 		t.Fatal("nil hook inspect passed")
 	}
 	root := filepath.Join(t.TempDir(), "generations")
-	if _, err := InspectActiveClientImports(context.Background(), root, DevelopmentTrustPolicy(), nil); err == nil {
+	if _, err := InspectActiveClientImports(context.Background(), root, KeylessReleaseTrustPolicy(), nil); err == nil {
 		t.Fatal("nil hook active inspect passed")
 	}
 	if _, err := os.Lstat(root); !os.IsNotExist(err) {

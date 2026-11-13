@@ -99,11 +99,11 @@ func InspectActiveClientImports(ctx context.Context, storeRoot string, trust Tru
 	if supports == nil {
 		return ActiveClientImportReport{}, errNoImportSupport
 	}
-	store := StoreForTrust(storeRoot, trust)
-	active, err := readActiveClient(store.Root, store.ActiveSlot)
+	active, err := inspectActiveClientForTrust(storeRoot, trust)
 	if err != nil {
 		return ActiveClientImportReport{}, err
 	}
+	store := StoreForTrust(storeRoot, trust)
 	imports, err := InspectExtractedClientImports(ctx, filepath.Join(store.Root, "generations", active.record.Generation), supports)
 	if err != nil {
 		return ActiveClientImportReport{}, err
@@ -119,28 +119,6 @@ func InspectActiveClientImports(ctx context.Context, storeRoot string, trust Tru
 type activeClient struct {
 	record    integrity.ActiveRecord
 	inventory integrity.Inventory
-}
-
-func readActiveClient(storeRoot, slot string) (activeClient, error) {
-	if slot == integrity.ActiveSlotDevelopment {
-		active, err := readActiveClientRecord(storeRoot, "active-development.json")
-		if err == nil {
-			return active, nil
-		}
-		legacy, legacyErr := readActiveClientRecord(storeRoot, "active.json")
-		if legacyErr == nil && legacy.inventory.AuthorizationMode == string(DevelopmentUnrestricted) {
-			return legacy, nil
-		}
-		return activeClient{}, err
-	}
-	active, err := readActiveClientRecord(storeRoot, "active.json")
-	if err != nil {
-		return activeClient{}, err
-	}
-	if slot == integrity.ActiveSlotOfficial && active.inventory.AuthorizationMode == string(DevelopmentUnrestricted) {
-		return activeClient{}, fmt.Errorf("integrity: official active record points at a development generation: %w", os.ErrNotExist)
-	}
-	return active, nil
 }
 
 func readActiveClientRecord(storeRoot, name string) (activeClient, error) {

@@ -61,8 +61,7 @@ type TrustPolicy struct {
 type AuthorizationMode string
 
 const (
-	OfficialVerified        AuthorizationMode = "official-verified"
-	DevelopmentUnrestricted AuthorizationMode = "development-unrestricted"
+	OfficialVerified AuthorizationMode = "official-verified"
 )
 
 type Authorization struct {
@@ -92,16 +91,6 @@ func OfficialTrustPolicy() TrustPolicy {
 func KeylessReleaseTrustPolicy() TrustPolicy {
 	trust := OfficialTrustPolicy()
 	trust.ReleaseAuthenticated = true
-	return trust
-}
-
-// DevelopmentTrustPolicy is an explicit non-official boundary for source
-// builds. It never yields official status and still requires APK signatures
-// plus a full rotation lineage whose oldest and current certificates are in
-// the compiled signer floor.
-func DevelopmentTrustPolicy() TrustPolicy {
-	trust := OfficialTrustPolicy()
-	trust.Mode = DevelopmentUnrestricted
 	return trust
 }
 
@@ -345,15 +334,9 @@ func ValidateReport(rep *apk.Report, policy TrustPolicy) error {
 }
 
 func AuthorizeReport(rep *apk.Report, policy TrustPolicy) (Authorization, error) {
-	mode := policy.Mode
-	if mode == "" {
-		mode = OfficialVerified
-	}
-	if mode != OfficialVerified && mode != DevelopmentUnrestricted {
-		return Authorization{}, setupError(ErrPolicy, "validate package", "package authorization mode is invalid", nil)
-	}
-	if mode == OfficialVerified && !policy.ReleaseAuthenticated {
-		return Authorization{}, setupError(ErrPolicy, "validate package", "official verification requires an authenticated release", nil)
+	mode, err := validateAuthorizationPolicy(policy)
+	if err != nil {
+		return Authorization{}, err
 	}
 	if rep == nil || rep.Merged == nil || len(rep.Packages) == 0 {
 		return Authorization{}, setupError(ErrInvalidArchive, "validate package", "package metadata is incomplete", nil)
@@ -432,19 +415,9 @@ func AuthorizeReport(rep *apk.Report, policy TrustPolicy) (Authorization, error)
 		if !validUniqueDigests(lineage) || lineage[len(lineage)-1] != strings.ToLower(verified[0]) || !allowedCerts[lineage[0]] {
 			return Authorization{}, setupError(ErrUntrustedSigner, "validate package", "the APK signer is not rooted in the compiled Roblox identity", nil)
 		}
-		lineageID, policySequence, ok := "compiled-development", uint64(0), false
-		policyAuthorized := false
-		if mode == DevelopmentUnrestricted {
-			ok = allowedCerts[lineage[len(lineage)-1]]
-		} else {
-			lineageID, policySequence, ok = "compiled-keyless-release", 0, allowedCerts[lineage[len(lineage)-1]]
-			policyAuthorized = ok
-		}
-		if !ok {
-			if mode == DevelopmentUnrestricted {
-				return Authorization{}, setupError(ErrUntrustedSigner, "validate package", "the development signer lineage does not terminate in the compiled Roblox identity", nil)
-			}
-			return Authorization{}, setupError(ErrUntrustedSigner, "validate package", "the authenticated Roblox policy does not authorize the verified signer lineage", nil)
+		lineageID, policySequence, policyAuthorized, err := authorizeLineage(mode, allowedCerts, lineage[len(lineage)-1])
+		if err != nil {
+			return Authorization{}, err
 		}
 		joined := strings.Join(verified, ",")
 		if signerSet == "" {

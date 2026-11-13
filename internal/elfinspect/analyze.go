@@ -46,6 +46,23 @@ func AnalyzeBytes(name string, data []byte) (*Report, error) {
 	return analyzeFile(name, f)
 }
 
+// AnalyzeReaderAt parses an ELF object through ra, so only the sections it
+// inspects are read instead of copying the whole object into memory. The
+// caller owns ra and must keep it valid for the duration of the call; pass a
+// non-closing reader such as io.NewSectionReader when the underlying file must
+// stay open.
+func AnalyzeReaderAt(name string, ra io.ReaderAt) (*Report, error) {
+	if ra == nil {
+		return nil, fmt.Errorf("elfinspect: nil reader for %s", name)
+	}
+	f, err := elf.NewFile(ra)
+	if err != nil {
+		return nil, fmt.Errorf("elfinspect: parse %s: %w", name, err)
+	}
+	defer f.Close()
+	return analyzeFile(name, f)
+}
+
 func analyzeFile(name string, f *elf.File) (*Report, error) {
 	rep := &Report{
 		Name:     name,

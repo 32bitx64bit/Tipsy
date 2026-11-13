@@ -197,10 +197,21 @@ func OpenZIPFiles(apkPath string) (*ZIPFiles, error) {
 
 // ReadFile returns the uncompressed bytes of zipPath inside the opened APK.
 func (z *ZIPFiles) ReadFile(zipPath string) ([]byte, error) {
+	f, err := z.Entry(zipPath)
+	if err != nil {
+		return nil, err
+	}
+	return readZipEntry(f)
+}
+
+// Entry returns the central-directory record for zipPath inside the opened
+// APK. Callers that stream a large entry should use the returned *zip.File
+// directly instead of ReadFile, which materializes the whole entry.
+func (z *ZIPFiles) Entry(zipPath string) (*zip.File, error) {
 	zipPath = strings.TrimPrefix(filepath.ToSlash(zipPath), "/")
 	for _, f := range z.zr.File {
 		if filepath.ToSlash(f.Name) == zipPath {
-			return readZipEntry(f)
+			return f, nil
 		}
 	}
 	return nil, fmt.Errorf("apk: %s: %s not found", z.apkPath, zipPath)
@@ -311,27 +322,64 @@ func nativeLibPath(zipPath string) (abi, name string, ok bool) {
 	return parts[1], parts[2], true
 }
 
+// maxZipEntryBytes caps how many bytes one ZIP entry may decompress to. It
+// matches setupsvc's default per-entry limit: legitimately extracted manifests,
+// nested APKs and native libraries are far smaller, while a spoofed central
+// directory must not turn into an unbounded allocation.
+const maxZipEntryBytes int64 = 1 << 30
+
 func hashZipEntry(f *zip.File) (string, int64, error) {
+	if f.UncompressedSize64 > uint64(maxZipEntryBytes) {
+		return "", 0, fmt.Errorf("zip entry declares %d bytes, over the %d byte limit", f.UncompressedSize64, maxZipEntryBytes)
+	}
 	rc, err := f.Open()
 	if err != nil {
 		return "", 0, err
 	}
 	defer rc.Close()
 	h := sha256.New()
-	n, err := io.Copy(h, rc)
+	n, err := io.Copy(h, io.LimitReader(rc, maxZipEntryBytes+1))
 	if err != nil {
 		return "", 0, err
+	}
+	if n > maxZipEntryBytes {
+		return "", 0, fmt.Errorf("zip entry exceeds the %d byte limit", maxZipEntryBytes)
 	}
 	return hex.EncodeToString(h.Sum(nil)), n, nil
 }
 
 func readZipEntry(f *zip.File) ([]byte, error) {
+	if f == nil {
+		return nil, fmt.Errorf("apk: nil zip entry")
+	}
+	// Reject an oversized declared size before opening the entry so a crafted
+	// header costs nothing beyond the central-directory read.
+	if f.UncompressedSize64 > uint64(maxZipEntryBytes) {
+		return nil, fmt.Errorf("apk: zip entry %q declares %d bytes, over the %d byte limit", f.Name, f.UncompressedSize64, maxZipEntryBytes)
+	}
 	rc, err := f.Open()
 	if err != nil {
 		return nil, err
 	}
 	defer rc.Close()
-	return io.ReadAll(rc)
+	return readCapped(rc, maxZipEntryBytes)
+}
+
+// readCapped reads at most max bytes and fails when the stream is longer, so a
+// header that understates the real uncompressed size still cannot grow the
+// allocation past the limit.
+func readCapped(r io.Reader, max int64) ([]byte, error) {
+	if max <= 0 {
+		return nil, fmt.Errorf("apk: invalid zip entry limit")
+	}
+	data, err := io.ReadAll(io.LimitReader(r, max+1))
+	if err != nil {
+		return nil, err
+	}
+	if int64(len(data)) > max {
+		return nil, fmt.Errorf("apk: zip entry exceeds the %d byte limit", max)
+	}
+	return data, nil
 }
 
 func hashReaderAt(ra io.ReaderAt, size int64) (string, error) {

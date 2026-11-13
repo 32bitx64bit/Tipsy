@@ -249,10 +249,43 @@ func (s *Service) Install(ctx context.Context, req InstallRequest, progress Prog
 	// report failure for an installation that is already active.
 	snapshot, err := s.Snapshot(context.Background())
 	if err != nil {
-		return nil, err
+		// The active record is already committed and this call verified the
+		// same generation before activating it. Reporting the commit as an
+		// activation failure would tell the user nothing was installed while a
+		// verified client is active, so fall back to that verified identity and
+		// let the next readiness check surface any real degradation.
+		kind := ErrorKindOf(err)
+		if kind == "" {
+			kind = ErrIntegrity
+		}
+		logging.Logger(logging.CatAPK).Error("post-activate readiness snapshot failed after the client was activated",
+			"kind", string(kind), "cause", err.Error())
+		snapshot = s.activatedInstallSnapshot(storeRoot, id, rep)
 	}
 	report(progress, PhaseComplete, 1, 1, "Setup complete")
 	return &InstallResult{Snapshot: snapshot}, nil
+}
+
+// activatedInstallSnapshot describes the generation Install just verified and
+// activated. It is used only when the post-activate readiness snapshot fails,
+// so a committed install is never reported as uninstalled.
+func (s *Service) activatedInstallSnapshot(storeRoot, id string, rep *apk.Report) InstallSnapshot {
+	snapshot := InstallSnapshot{
+		Installed:     true,
+		Readiness:     ReadinessLaunchInputs,
+		RuntimeDir:    filepath.Join(storeRoot, "generations", id),
+		Architectures: []string{"x86_64"},
+		Automatic:     s.AutomaticAvailability(context.Background()),
+	}
+	if rep != nil && rep.Merged != nil {
+		snapshot.PackageName = rep.Merged.PackageName
+		snapshot.VersionName = rep.Merged.VersionName
+		snapshot.VersionCode = rep.Merged.VersionCode
+		if len(rep.Merged.Architectures) > 0 {
+			snapshot.Architectures = append([]string(nil), rep.Merged.Architectures...)
+		}
+	}
+	return snapshot
 }
 
 const errRuntimeDirUnset = "the Tipsy runtime directory is not configured"

@@ -424,7 +424,7 @@ func TestInspectExtractedClientStrictMakesFunctionFatal(t *testing.T) {
 
 func TestInspectActiveClientImportsDoesNotCreateMissingStore(t *testing.T) {
 	root := filepath.Join(t.TempDir(), "missing-generations")
-	if _, err := InspectActiveClientImports(context.Background(), root, DevelopmentTrustPolicy(), testHooks().SupportsImport); err == nil {
+	if _, err := InspectActiveClientImports(context.Background(), root, KeylessReleaseTrustPolicy(), testHooks().SupportsImport); err == nil {
 		t.Fatal("missing active generation was accepted")
 	}
 	if _, err := os.Lstat(root); !os.IsNotExist(err) {

@@ -1,6 +1,8 @@
 // Copyright 2026 The Tipsy Authors
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
+//go:build !official_release
+
 package setupsvc
 
 import (
@@ -67,6 +69,59 @@ func TestValidateDevelopmentPackageWhenProvided(t *testing.T) {
 		t.Fatalf("development authorization claimed official policy: %+v", authorization)
 	}
 	t.Logf("validated official package %s (%d), files=%d", rep.Merged.VersionName, rep.Merged.VersionCode, len(rep.Packages))
+}
+
+func TestOpenAuthorizedDevelopmentGenerationWhenProvided(t *testing.T) {
+	raw := os.Getenv("TIPSY_TEST_OFFICIAL_PACKAGES")
+	if raw == "" {
+		t.Skip("set TIPSY_TEST_OFFICIAL_PACKAGES to colon-separated locally owned APK paths")
+	}
+	paths := strings.Split(raw, ":")
+	report, err := apk.Inspect(context.Background(), paths)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := apk.VerifyReportSignatures(context.Background(), report); err != nil {
+		t.Fatal(err)
+	}
+	trust := DevelopmentTrustPolicy()
+	if _, err := AuthorizeReport(report, trust); err != nil {
+		t.Fatal(err)
+	}
+	root := t.TempDir()
+	storeRoot := filepath.Join(root, "store")
+	t.Cleanup(func() { makeGenerationTreeWritable(storeRoot) })
+	id, err := DeriveAndActivateRetainedAPKs(context.Background(), paths, storeRoot, trust)
+	if err != nil || id == "" {
+		t.Fatal(err)
+	}
+	store := integrity.Store{Root: storeRoot}
+	generation, err := OpenAuthorizedGeneration(context.Background(), store, trust)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer generation.Close()
+	if authorization := generation.Authorization(); authorization.Mode != DevelopmentUnrestricted || authorization.PolicyAuthorized {
+		t.Fatalf("development generation claimed official status: %+v", authorization)
+	}
+	if _, err := generation.NativeDescriptorSet(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	files, err := generation.AuthorizedRuntimeFiles(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if files.GenerationID != id || files.RootDir != filepath.Join(storeRoot, "generations", id) ||
+		files.AssetsDir != filepath.Join(files.RootDir, "assets") || files.BaseAPKPath != filepath.Join(files.RootDir, "apk", "base.apk") || files.VersionName == "" {
+		t.Fatalf("authorized runtime files are not bound to the active generation: %+v", files)
+	}
+	service := New(testHooks())
+	service.GenerationStoreRoot = storeRoot
+	service.Trust = trust
+	snapshot, err := service.Snapshot(context.Background())
+	if err != nil || !snapshot.Installed || snapshot.Readiness != ReadinessLaunchInputs || snapshot.VersionCode != report.Merged.VersionCode {
+		t.Fatalf("verified installed-client snapshot=%+v err=%v", snapshot, err)
+	}
 }
 
 func testTrust(cert string) TrustPolicy {
@@ -405,6 +460,35 @@ func TestInstallStagesThenAtomicallyActivatesGeneration(t *testing.T) {
 	}
 	if got, _ := os.ReadFile(account); string(got) != "opaque-account-data" {
 		t.Fatalf("account data changed after interrupted activation: %q", got)
+	}
+
+	// A post-activate readiness snapshot failure must not report the committed
+	// activation as an install failure.
+	nativeBody = []byte("verified-third")
+	s.authorizeStaged = func(context.Context, integrity.Store, string, TrustPolicy) error { return nil }
+	s.snapshot = func(context.Context, string, TrustPolicy) (InstallSnapshot, error) {
+		return InstallSnapshot{}, errors.New("transient readiness read failure")
+	}
+	committed, err := s.Install(context.Background(), InstallRequest{Mode: InstallLocal, LocalPaths: []string{input}}, nil)
+	if err != nil {
+		t.Fatalf("committed activation reported as failure: %v", err)
+	}
+	if committed == nil || !committed.Snapshot.Installed || committed.Snapshot.Readiness != ReadinessLaunchInputs {
+		t.Fatalf("snapshot=%+v", committed)
+	}
+	if committed.Snapshot.PackageName != "com.roblox.client" || committed.Snapshot.VersionCode != 2908 || len(committed.Snapshot.Architectures) != 1 {
+		t.Fatalf("fallback snapshot lost verified identity: %+v", committed.Snapshot)
+	}
+	reactivated, err := StoreForTrust(s.GenerationStoreRoot, s.Trust).Active(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer reactivated.Close()
+	if reactivated.ID == priorID {
+		t.Fatal("setup did not activate a new generation")
+	}
+	if want := filepath.Join(s.GenerationStoreRoot, "generations", reactivated.ID); committed.Snapshot.RuntimeDir != want {
+		t.Fatalf("RuntimeDir=%q want %q", committed.Snapshot.RuntimeDir, want)
 	}
 }
 

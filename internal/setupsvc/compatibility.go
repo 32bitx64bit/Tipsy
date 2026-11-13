@@ -80,25 +80,14 @@ func validateOpenedClientCompatibility(ctx context.Context, file *os.File, size 
 	if file == nil || size <= 0 || uint64(size) > uint64(^uint(0)>>1) {
 		return setupError(ErrCompatibility, "check client compatibility", "the verified root client library has an invalid size", nil)
 	}
-	raw := make([]byte, int(size))
-	for offset := int64(0); offset < size; {
-		if err := ctx.Err(); err != nil {
-			return setupError(ErrCanceled, "check client compatibility", "operation canceled", err)
-		}
-		end := offset + 1<<20
-		if end > size {
-			end = size
-		}
-		n, err := file.ReadAt(raw[int(offset):int(end)], offset)
-		offset += int64(n)
-		if err != nil && !(err == io.EOF && offset == size) {
-			return setupError(ErrCompatibility, "check client compatibility", "the verified root client library could not be read", err)
-		}
-		if n == 0 && offset < size {
-			return setupError(ErrCompatibility, "check client compatibility", "the verified root client library ended before its authenticated size", io.ErrUnexpectedEOF)
-		}
+	if err := ctx.Err(); err != nil {
+		return setupError(ErrCanceled, "check client compatibility", "operation canceled", err)
 	}
-	report, err := elfinspect.AnalyzeBytes("authenticated libroblox.so", raw)
+	// Inspect through a reader bounded to the authenticated size instead of
+	// copying the ~120 MB object into a heap buffer: elfinspect reads only the
+	// headers and sections it needs.
+	bounded := io.NewSectionReader(file, 0, size)
+	report, err := elfinspect.AnalyzeReaderAt("authenticated libroblox.so", bounded)
 	if err != nil {
 		return setupError(ErrCompatibility, "check client compatibility", "the verified root client library is not a readable ELF object", err)
 	}
