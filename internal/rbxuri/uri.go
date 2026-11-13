@@ -8,6 +8,7 @@ package rbxuri
 import (
 	"errors"
 	"net/url"
+	"slices"
 	"strconv"
 	"strings"
 )
@@ -483,8 +484,18 @@ func firstQuery(q url.Values, keys ...string) string {
 		if v := q.Get(key); v != "" {
 			return v
 		}
-		for name, vals := range q {
-			if strings.EqualFold(name, key) && len(vals) > 0 && vals[0] != "" {
+		// Pick the case-insensitive fallback by sorted key so a launch URL
+		// carrying several spellings of one parameter always resolves to the
+		// same value instead of whichever map iteration order Go chose.
+		names := make([]string, 0, len(q))
+		for name := range q {
+			if strings.EqualFold(name, key) {
+				names = append(names, name)
+			}
+		}
+		slices.Sort(names)
+		for _, name := range names {
+			if vals := q[name]; len(vals) > 0 && vals[0] != "" {
 				return vals[0]
 			}
 		}

@@ -4,6 +4,7 @@
 package rbxuri
 
 import (
+	"net/url"
 	"strings"
 	"testing"
 )
@@ -369,6 +370,29 @@ func TestParseEmptyAndLooksLike(t *testing.T) {
 	}
 	if !LooksLike("https://www.roblox.com/games/start?userId=123456") || !LooksLike("roblox://experiences/start?userId=123456") {
 		t.Fatal("LooksLike rejected an official follow-user URI")
+	}
+}
+
+func TestFirstQueryCaseInsensitiveFallbackIsDeterministic(t *testing.T) {
+	t.Parallel()
+	// All three spellings miss the exact-case lookup, so the fallback has to
+	// choose one. A crafted URL must not resolve to a different place depending
+	// on Go's randomized map iteration order.
+	q := url.Values{
+		"PlaceID": {"1111"},
+		"placeID": {"2222"},
+		"PLACEID": {"3333"},
+	}
+	const want = "3333" // ASCII-sorted first key name
+	for i := 0; i < 200; i++ {
+		if got := firstQuery(q, "placeid"); got != want {
+			t.Fatalf("iteration %d: firstQuery=%q want=%q", i, got, want)
+		}
+	}
+	// An exact-case key still takes precedence over the sorted fallback.
+	exact := url.Values{"PLACEID": {"3333"}, "placeId": {"4444"}}
+	if got := firstQuery(exact, "placeId"); got != "4444" {
+		t.Fatalf("exact match lost to case-insensitive fallback: %q", got)
 	}
 }
 

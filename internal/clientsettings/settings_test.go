@@ -10,6 +10,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -914,13 +915,97 @@ func TestClientLockAllowsSettingsDocumentOnlyApply(t *testing.T) {
 	}
 }
 
+// waitForApplyOnDocumentLock waits until an Apply goroutine is blocked acquiring
+// the settings-document lock, so a test can commit a concurrent write in the
+// exact window between Apply's decision and its save.
+func waitForApplyOnDocumentLock(t *testing.T) {
+	t.Helper()
+	deadline := time.Now().Add(10 * time.Second)
+	buf := make([]byte, 1<<20)
+	for time.Now().Before(deadline) {
+		n := runtime.Stack(buf, true)
+		for _, goroutine := range strings.Split(string(buf[:n]), "\n\n") {
+			if strings.Contains(goroutine, "clientsettings.(*Service).Apply") && strings.Contains(goroutine, "syscall.Flock") {
+				return
+			}
+		}
+		time.Sleep(time.Millisecond)
+	}
+	t.Fatal("Apply did not reach the settings document lock")
+}
+
+// TestApplyDecidesDocumentOnlyUnderLock covers a concurrent settings writer: the
+// document Apply reads while choosing its path can be replaced before Apply
+// takes the lock. A frame-rate change committed in that window must still go
+// through the full client/XML path, not the document-only path that never
+// touches Roblox's settings file.
+func TestApplyDecidesDocumentOnlyUnderLock(t *testing.T) {
+	s := testService(t)
+	if err := os.MkdirAll(filepath.Dir(s.Path), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	// Apply first sees an untouched document: the anti-lag opt-in is its only
+	// difference from the draft, so its snapshot alone says "document only".
+	first := []byte(`{"renderer":"auto","frameRate":{"mode":"auto"}}`)
+	if err := os.WriteFile(s.Path, first, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	writeXML(t, s, "240")
+
+	releaseDocument, err := AcquireSettingsDocumentLock()
+	if err != nil {
+		t.Fatal(err)
+	}
+	wanted := Default()
+	wanted.AntiLag = true
+	done := make(chan error, 1)
+	go func() {
+		_, err := s.Apply(context.Background(), wanted)
+		done <- err
+	}()
+	waitForApplyOnDocumentLock(t)
+
+	// A concurrent owner owns a 60 FPS cap over Roblox's 240 default, so the
+	// draft now asks for a frame-rate change as well. Commit XML first, then the
+	// document, mirroring applyLocked's write order.
+	writeXML(t, s, "60")
+	concurrent := []byte(`{"renderer":"auto","frameRate":{"mode":"limited","limit":60},"fpsOwned":true,"fpsOriginal":"240","fpsApplied":"60"}`)
+	if err := os.WriteFile(s.Path, concurrent, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	releaseDocument()
+
+	if err := <-done; err != nil {
+		t.Fatalf("apply: %v", err)
+	}
+	raw, err := os.ReadFile(s.XMLPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, current, err := updateFramerateCap(raw, ""); err != nil || current != "240" {
+		t.Fatalf("frame-rate reconcile skipped Roblox XML: cap=%q err=%v xml=%s", current, err, raw)
+	}
+	reloaded, err := (&Service{Path: s.Path, XMLPath: s.XMLPath}).Load(context.Background())
+	if err != nil || reloaded != wanted {
+		t.Fatalf("reloaded=%+v want=%+v err=%v", reloaded, wanted, err)
+	}
+}
+
 func TestCustomFastFlagsPersistAndEnterOfficialClientSettingsOverrides(t *testing.T) {
 	s := testService(t)
 	flags := []FastFlag{
 		{Name: flagGameBasicSettingsFramerateCap, Value: "False"},
 		{Name: flagRenderUseTextureManager2, Value: "True"},
-		{Name: "DFIntExampleCustomLimit", Value: "77"},
-		{Name: "FStringExampleCustomName", Value: "custom value"},
+		{Name: intTaskSchedulerTargetFPS, Value: "77"},
+	}
+	if !officialFastFlagsEnforced {
+		// Development builds keep the full typed surface, including
+		// arbitrary names and string flags; official releases enforce the
+		// curated allowlist (see fastflags_official_test.go).
+		flags = append(flags,
+			FastFlag{Name: "DFIntExampleCustomLimit", Value: "77"},
+			FastFlag{Name: "FStringExampleCustomName", Value: "custom value"},
+		)
 	}
 	if err := s.SaveFastFlags(context.Background(), flags); err != nil {
 		t.Fatalf("save custom Fast Flags: %v", err)
@@ -953,9 +1038,13 @@ func TestCustomFastFlagsPersistAndEnterOfficialClientSettingsOverrides(t *testin
 	}
 	if overrides[flagGameBasicSettingsFramerateCap] != "False" ||
 		overrides[flagRenderUseTextureManager2] != "True" ||
-		overrides["DFIntExampleCustomLimit"] != "77" ||
-		overrides["FStringExampleCustomName"] != "custom value" {
+		overrides[intTaskSchedulerTargetFPS] != "77" {
 		t.Fatalf("custom Fast Flags did not enter ClientAppSettings overrides: %v", overrides)
+	}
+	if !officialFastFlagsEnforced &&
+		(overrides["DFIntExampleCustomLimit"] != "77" ||
+			overrides["FStringExampleCustomName"] != "custom value") {
+		t.Fatalf("development custom Fast Flags did not enter ClientAppSettings overrides: %v", overrides)
 	}
 }
 
@@ -968,7 +1057,11 @@ func TestCustomFastFlagsRemainAcrossNormalSettingsApplyAndPreserveUnknownData(t 
 	if err := os.WriteFile(s.Path, original, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	flags := []FastFlag{{Name: "FFlagCustomPersisted", Value: "True"}}
+	customName := "FFlagCustomPersisted"
+	if officialFastFlagsEnforced {
+		customName = flagPreferVulkan
+	}
+	flags := []FastFlag{{Name: customName, Value: "True"}}
 	if err := s.SaveFastFlags(context.Background(), flags); err != nil {
 		t.Fatal(err)
 	}
@@ -1005,12 +1098,22 @@ func TestCustomFastFlagsRemainAcrossNormalSettingsApplyAndPreserveUnknownData(t 
 
 func TestCustomFastFlagValidation(t *testing.T) {
 	valid := []FastFlag{
-		{Name: "FFlagExample", Value: "True"},
-		{Name: "DFFlagExample", Value: "False"},
-		{Name: "FIntExample", Value: "-2147483648"},
-		{Name: "DFIntExample", Value: "2147483647"},
-		{Name: "FStringExample", Value: "a printable value"},
-		{Name: "DFStringExample", Value: "another value"},
+		{Name: flagPreferVulkan, Value: "True"},
+		{Name: flagTextureQualityOverrideEnabled, Value: "False"},
+		{Name: intRenderTextureMipBias, Value: "-2"},
+		{Name: intTaskSchedulerTargetFPS, Value: "240"},
+	}
+	if !officialFastFlagsEnforced {
+		// The full typed development surface, including arbitrary names and
+		// string flags. Official releases enforce the curated allowlist.
+		valid = append(valid,
+			FastFlag{Name: "FFlagExample", Value: "True"},
+			FastFlag{Name: "DFFlagExample", Value: "False"},
+			FastFlag{Name: "FIntExample", Value: "-2147483648"},
+			FastFlag{Name: "DFIntExample", Value: "2147483647"},
+			FastFlag{Name: "FStringExample", Value: "a printable value"},
+			FastFlag{Name: "DFStringExample", Value: "another value"},
+		)
 	}
 	if err := ValidateFastFlags(valid); err != nil {
 		t.Fatalf("valid Fast Flags rejected: %v", err)
@@ -1030,10 +1133,16 @@ func TestCustomFastFlagValidation(t *testing.T) {
 }
 
 func TestCustomFastFlagsOverrideSettingsAndReportConflicts(t *testing.T) {
+	independent := "FFlagIndependentCustom"
+	if officialFastFlagsEnforced {
+		// An allowlisted flag with no Settings control label keeps the
+		// conflict expectations identical in official builds.
+		independent = FlagRenderPipelineVersioning
+	}
 	flags := []FastFlag{
 		{Name: flagRenderUseTextureManager2, Value: "True"},
 		{Name: flagGameBasicSettingsFramerateCap, Value: "False"},
-		{Name: "FFlagIndependentCustom", Value: "True"},
+		{Name: independent, Value: "True"},
 		{Name: flagPreferOpenGL, Value: "False"},
 		{Name: flagDisableVulkan11, Value: "False"},
 	}

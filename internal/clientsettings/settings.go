@@ -236,8 +236,16 @@ var fastFlagControlLabels = map[string]string{
 // ValidateFastFlags checks the bounded, typed custom-Fast-Flag surface: boolean
 // FFlag/DFFlag, signed 32-bit FInt/DFInt, and printable FString/DFString
 // values. Duplicate names are rejected so the persisted list always has one
-// unambiguous final value for each flag.
+// unambiguous final value for each flag. Official_release builds additionally
+// enforce the curated allowlist and numeric bounds (ValidateOfficialFastFlags).
 func ValidateFastFlags(flags []FastFlag) error {
+	if err := validateFastFlagSyntax(flags); err != nil {
+		return err
+	}
+	return validateOfficialFastFlagsPolicy(flags)
+}
+
+func validateFastFlagSyntax(flags []FastFlag) error {
 	if len(flags) > maxFastFlags {
 		return fmt.Errorf("at most %d custom Fast Flags are allowed", maxFastFlags)
 	}
@@ -300,6 +308,86 @@ func validateFastFlagValue(kind, value string) error {
 	case "FInt", "DFInt":
 		if _, err := strconv.ParseInt(value, 10, 32); err != nil {
 			return fmt.Errorf("integer Fast Flags require a signed 32-bit integer")
+		}
+	}
+	return nil
+}
+
+// officialFastFlagRule is one curated allowlist entry. Boolean rules carry no
+// bounds (syntax already pins True/False); integer rules bound the value to
+// the range Tipsy's own presets and documented user choices occupy.
+type officialFastFlagRule struct {
+	integer  bool
+	min, max int64
+}
+
+// officialFastFlagAllowlist is the complete custom-Fast-Flag surface an
+// official release accepts: exactly the flags Tipsy's renderer, frame-rate,
+// texture-quality, and persistent mesh-LOD presets generate. FString/DFString
+// and every unlisted name are rejected, so a modified config cannot smuggle
+// engine diagnostics, logging, or gameplay-altering flags into the official
+// client-settings initialization. Runtime-only diagnostics (Lua log strings,
+// FLog groups) are merged by internal/runtime, never through this surface.
+var officialFastFlagAllowlist = map[string]officialFastFlagRule{
+	// Renderer selection.
+	flagPreferOpenGL:    {},
+	flagPreferVulkan:    {},
+	flagDisableOpenGL:   {},
+	flagDisableVulkan:   {},
+	flagDisableVulkan11: {},
+	// Frame rate: -1 is the engine-default sentinel; finite targets stay
+	// within the supported 30..240 presentation range.
+	flagGameBasicSettingsFramerateCap: {},
+	flagTaskSchedulerLimitFPS240:      {},
+	intTaskSchedulerTargetFPS:         {integer: true, min: -1, max: MaxFrameRate},
+	// Texture quality: override levels 1 (low) .. 3 (high).
+	flagTextureQualityOverrideEnabled: {},
+	intTextureQualityOverride:         {integer: true, min: 1, max: 3},
+	flagUITextureCompressionDesktop:   {},
+	flagTCTextureCompressionDesktop:   {},
+	// Texture budgets in MiB and mip bias around the preset 64/128 MiB and
+	// 0/2 values.
+	intRenderTextureTotalBudgetMB: {integer: true, min: 16, max: 4096},
+	intRenderTextureMipBias:       {integer: true, min: -2, max: 4},
+	// Clothing-compositor byte budget: 8 MiB .. 1 GiB around the preset
+	// 48 MiB / 256 MiB caps.
+	intDebugTc1MaxAllowedMemoryBudget: {integer: true, min: 8 << 20, max: 1 << 30},
+	// Forced video-memory bytes: 64 MiB .. INT32_MAX around the preset
+	// 64 MiB / 1 GiB values.
+	intRenderForceVideoMemorySize:         {integer: true, min: 64 << 20, max: 2147483647},
+	flagTM2RuntimeTextureDisableStreaming: {},
+	flagTM2SkipMipsForUnstreamable2:       {},
+	flagUseTM1LegacyMipPackForDecal:       {},
+	flagRenderUseTextureManager2:          {},
+	flagNewRenderUseTextureManager2:       {},
+	// Persistent mesh-LOD gate: hundredths of a percent, 0..10000.
+	FlagRenderPipelineVersioning:             {},
+	IntEnableRenderPipelineHundredthsPercent: {integer: true, min: 0, max: 10000},
+}
+
+// ValidateOfficialFastFlags enforces the official-release custom-Fast-Flag
+// policy: full syntax validation plus the curated allowlist and numeric
+// bounds. It is exported so tests and tooling can exercise the official
+// policy in any build; ValidateFastFlags applies it only under
+// -tags official_release.
+func ValidateOfficialFastFlags(flags []FastFlag) error {
+	if err := validateFastFlagSyntax(flags); err != nil {
+		return err
+	}
+	for _, flag := range flags {
+		rule, ok := officialFastFlagAllowlist[flag.Name]
+		if !ok {
+			return fmt.Errorf("custom Fast Flag is not allowed in official releases")
+		}
+		if !rule.integer {
+			continue
+		}
+		value, err := strconv.ParseInt(flag.Value, 10, 32)
+		if err != nil {
+			return fmt.Errorf("integer Fast Flags require a signed 32-bit integer")
+		}
+		if value < rule.min || value > rule.max {
+			return fmt.Errorf("custom Fast Flag value is outside the allowed range")
 		}
 	}
 	return nil
@@ -493,30 +581,50 @@ func (s *Service) Apply(ctx context.Context, wanted Settings) (ApplyResult, erro
 	if err := wanted.Validate(); err != nil {
 		return ApplyResult{}, err
 	}
-	oldDoc, err := s.loadDocument(ctx)
+	// Choose the document-only path or the full client/XML path from a
+	// document read under the settings-document lock. Reading before taking
+	// that lock would let a concurrent writer change a renderer or frame-rate
+	// field in between, so a graphics change could be saved down the XML-free
+	// path that deliberately skips Roblox's settings file.
+	releaseDocument, err := AcquireSettingsDocumentLock()
 	if err != nil {
 		return ApplyResult{}, err
 	}
+	oldDoc, err := s.loadDocument(ctx)
+	if err != nil {
+		releaseDocument()
+		return ApplyResult{}, err
+	}
 	if settingsDocumentOnlyChange(wanted, oldDoc.Settings) {
-		release, err := AcquireSettingsDocumentLock()
-		if err != nil {
-			return ApplyResult{}, err
-		}
-		defer release()
+		defer releaseDocument()
 		// A document-only save must never read, reconcile, or rewrite Roblox's
 		// XML settings, because it deliberately does not take the client lock.
 		return s.applyDocumentOnlyLocked(ctx, wanted)
 	}
+	releaseDocument()
+
+	// Lock order is always client then settings document; only this Apply path
+	// takes both, and the document-only path above never takes the client lock.
 	release, err := AcquireClientLock()
 	if err != nil {
 		return ApplyResult{}, err
 	}
 	defer release()
-	releaseDocument, err := AcquireSettingsDocumentLock()
+	releaseDocument, err = AcquireSettingsDocumentLock()
 	if err != nil {
 		return ApplyResult{}, err
 	}
 	defer releaseDocument()
+	// The document lock was released while waiting for the client lock, so
+	// re-decide on the locked document: if a graphics or frame-rate field
+	// changed under it, escalate to the full path that reconciles Roblox's XML.
+	lockedDoc, err := s.loadDocument(ctx)
+	if err != nil {
+		return ApplyResult{}, err
+	}
+	if settingsDocumentOnlyChange(wanted, lockedDoc.Settings) {
+		return s.applyDocumentOnlyLocked(ctx, wanted)
+	}
 	return s.applyLocked(ctx, wanted)
 }
 
