@@ -13,7 +13,6 @@ package jni
 import "C"
 
 import (
-	"fmt"
 	"math"
 	"strings"
 	"sync"
@@ -477,7 +476,7 @@ func (vm *VM) fieldGetterOn(env unsafe.Pointer, o *Object, name, sig string) (C.
 			b = t != 0
 		}
 		if b {
-			return C.jobject(unsafe.Pointer(uintptr(1))), true
+			return C.jobject(uintptr(1)), true
 		}
 		return jnull(), true
 	case "I":
@@ -488,7 +487,7 @@ func (vm *VM) fieldGetterOn(env unsafe.Pointer, o *Object, name, sig string) (C.
 		case int:
 			n = int32(t)
 		}
-		return C.jobject(unsafe.Pointer(uintptr(uint32(n)))), true
+		return C.jobject(uintptr(uint32(n))), true
 	case "J":
 		var n int64
 		switch t := val.(type) {
@@ -502,7 +501,7 @@ func (vm *VM) fieldGetterOn(env unsafe.Pointer, o *Object, name, sig string) (C.
 			className = o.class.name
 		}
 		noteStartGamePlaceID(className, name, n)
-		return C.jobject(unsafe.Pointer(uintptr(n))), true
+		return C.jobject(uintptr(n)), true
 	case "F":
 		var f float32
 		switch t := val.(type) {
@@ -511,7 +510,7 @@ func (vm *VM) fieldGetterOn(env unsafe.Pointer, o *Object, name, sig string) (C.
 		case float64:
 			f = float32(t)
 		}
-		return C.jobject(unsafe.Pointer(uintptr(math.Float32bits(f)))), true
+		return C.jobject(uintptr(math.Float32bits(f))), true
 	}
 	if strings.HasPrefix(ret, "L") {
 		switch t := val.(type) {
@@ -1402,7 +1401,7 @@ func GoJNI_RegisterNatives(env *C.JNIEnv, clazz C.jclass, methods *C.JNINativeMe
 		sig := C.GoString(slice[i].signature)
 		key := methodLogName(cn, name, sig)
 		vm.natives[key] = uintptr(slice[i].fnPtr)
-		logging.Logger(logging.CatJNI).Info("[jni] RegisterNatives", "method", key, "fn", fmt.Sprintf("%#x", uintptr(slice[i].fnPtr)))
+		logging.Logger(logging.CatJNI).Info("[jni] RegisterNatives", "method", key, "present", slice[i].fnPtr != nil)
 	}
 	return C.JNI_OK
 }
@@ -1428,6 +1427,21 @@ func testRegisterNativesCount(n int32) int {
 	default:
 		return -2
 	}
+}
+
+func testRegisterNativeMethodForLogTest(vm *VM, className, methodName, sig string, fn uintptr) {
+	env := vm.Env()
+	cls := env.FindClass(className)
+	cName := C.CString(methodName)
+	defer C.free(unsafe.Pointer(cName))
+	cSig := C.CString(sig)
+	defer C.free(unsafe.Pointer(cSig))
+	m := C.JNINativeMethod{
+		name:      cName,
+		signature: cSig,
+		fnPtr:     ptrFromUintptr(fn),
+	}
+	_ = GoJNI_RegisterNatives((*C.JNIEnv)(ptrFromUintptr(env.Raw())), C.jclass(cls), &m, 1)
 }
 
 //export GoJNI_MonitorEnter

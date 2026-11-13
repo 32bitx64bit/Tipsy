@@ -56,31 +56,31 @@ import "C"
 import "unsafe"
 
 func testDiagnosticGetChars(env unsafe.Pointer, str uintptr) unsafe.Pointer {
-	return unsafe.Pointer(C.tipsy_test_diag_get_chars((*C.JNIEnv)(env), C.jstring(unsafe.Pointer(str))))
+	return unsafe.Pointer(C.tipsy_test_diag_get_chars((*C.JNIEnv)(env), C.jstring(str)))
 }
 
 func testDiagnosticGetCritical(env unsafe.Pointer, str uintptr) unsafe.Pointer {
-	return unsafe.Pointer(C.tipsy_test_diag_get_critical((*C.JNIEnv)(env), C.jstring(unsafe.Pointer(str))))
+	return unsafe.Pointer(C.tipsy_test_diag_get_critical((*C.JNIEnv)(env), C.jstring(str)))
 }
 
 func testDiagnosticReleaseChars(env unsafe.Pointer, str uintptr, chars unsafe.Pointer) {
-	C.tipsy_test_diag_release_chars((*C.JNIEnv)(env), C.jstring(unsafe.Pointer(str)), (*C.jchar)(chars))
+	C.tipsy_test_diag_release_chars((*C.JNIEnv)(env), C.jstring(str), (*C.jchar)(chars))
 }
 
 func testDiagnosticReleaseCritical(env unsafe.Pointer, str uintptr, chars unsafe.Pointer) {
-	C.tipsy_test_diag_release_critical((*C.JNIEnv)(env), C.jstring(unsafe.Pointer(str)), (*C.jchar)(chars))
+	C.tipsy_test_diag_release_critical((*C.JNIEnv)(env), C.jstring(str), (*C.jchar)(chars))
 }
 
 func testDiagnosticGetUTFChars(env unsafe.Pointer, str uintptr) unsafe.Pointer {
-	return unsafe.Pointer(C.tipsy_test_diag_get_utf_chars((*C.JNIEnv)(env), C.jstring(unsafe.Pointer(str))))
+	return unsafe.Pointer(C.tipsy_test_diag_get_utf_chars((*C.JNIEnv)(env), C.jstring(str)))
 }
 
 func testDiagnosticReleaseUTFChars(env unsafe.Pointer, str uintptr, chars unsafe.Pointer) {
-	C.tipsy_test_diag_release_utf_chars((*C.JNIEnv)(env), C.jstring(unsafe.Pointer(str)), (*C.char)(chars))
+	C.tipsy_test_diag_release_utf_chars((*C.JNIEnv)(env), C.jstring(str), (*C.char)(chars))
 }
 
 func testDiagnosticInstanceOf(env unsafe.Pointer, obj, cls uintptr) bool {
-	return C.tipsy_test_diag_instance_of((*C.JNIEnv)(env), C.jobject(unsafe.Pointer(obj)), C.jclass(unsafe.Pointer(cls))) == C.JNI_TRUE
+	return C.tipsy_test_diag_instance_of((*C.JNIEnv)(env), C.jobject(obj), C.jclass(cls)) == C.JNI_TRUE
 }
 
 func testDiagnosticFieldID(env unsafe.Pointer, cls uintptr, name, sig string) uintptr {
@@ -88,9 +88,9 @@ func testDiagnosticFieldID(env unsafe.Pointer, cls uintptr, name, sig string) ui
 	defer C.free(unsafe.Pointer(nameC))
 	sigC := C.CString(sig)
 	defer C.free(unsafe.Pointer(sigC))
-	return uintptr(C.tipsy_test_diag_field_id((*C.JNIEnv)(env), C.jclass(unsafe.Pointer(cls)), nameC, sigC))
+	return uintptr(C.tipsy_test_diag_field_id((*C.JNIEnv)(env), C.jclass(cls), nameC, sigC))
 }
 
 func testDiagnosticGetObjectField(env unsafe.Pointer, obj, cls, field uintptr) uintptr {
-	return uintptr(C.tipsy_test_diag_get_object_field((*C.JNIEnv)(env), C.jobject(unsafe.Pointer(obj)), C.jclass(unsafe.Pointer(cls)), C.jfieldID(unsafe.Pointer(field))))
+	return uintptr(C.tipsy_test_diag_get_object_field((*C.JNIEnv)(env), C.jobject(obj), C.jclass(cls), C.jfieldID(ptrFromUintptr(field))))
 }

@@ -10,8 +10,6 @@ package jni
 */
 import "C"
 
-import "unsafe"
-
 // windowInsetsTypeMasks holds the official androidx
 // WindowInsetsCompat.Type static mask values, verified against
 // androidx-main WindowInsetsCompat.java (2026-09-03): STATUS_BARS=1,
@@ -40,7 +38,7 @@ func (vm *VM) dispatchInsets(class, name, sig string, args *C.jvalue) (C.jobject
 	if class == "androidx/core/view/WindowInsetsCompat$Type" {
 		if sig == "()I" {
 			if mask, ok := windowInsetsTypeMasks[name]; ok {
-				return C.jobject(unsafe.Pointer(uintptr(uint32(mask)))), true
+				return C.jobject(uintptr(uint32(mask))), true
 			}
 		}
 		return jnull(), false

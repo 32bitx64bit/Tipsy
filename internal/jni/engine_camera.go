@@ -19,10 +19,10 @@
 // CurrentCamera slot points at an object whose CFrame and Focus are
 // orthonormal.
 //
-// A goroutine samples the camera for the first-person capture detector. With
-// TIPSY_TRACE_CAMERA=1 it also logs CameraType and the camera-to-focus distance,
-// or the exact reason there is no answer. No engine memory is written, no
-// engine code runs, and a miss never stops the sampling.
+// A goroutine samples the camera for the first-person capture detector.
+// Optional camera trace logging is compiled out in official release builds.
+// No engine memory is written, no engine code runs, and a miss never stops
+// the sampling.
 package jni
 
 import (
@@ -31,12 +31,10 @@ import (
 	"errors"
 	"fmt"
 	"math"
-	"os"
 	"sync"
 	"time"
-	"unsafe"
 
-	"github.com/tipsy-linux/tipsy/internal/logging"
+	"github.com/tipsy-linux/tipsy/internal/loader"
 )
 
 // engineCameraTypeMax bounds a plausible Enum.CameraType word.
@@ -191,7 +189,7 @@ func cameraPropAt(ref, base, end uintptr) (cameraProp, bool) {
 		return prop, false
 	}
 	start := ref - cameraRefBefore
-	win, ok := engineMem.bytes(start, cameraRefBefore+cameraRefAfter+0x20)
+	win, ok := engineCodeBytes(start, cameraRefBefore+cameraRefAfter+0x20)
 	if !ok {
 		return prop, false
 	}
@@ -215,13 +213,13 @@ func cameraPropAt(ref, base, end uintptr) (cameraProp, bool) {
 		return prop, false
 	}
 	prop = found[0]
-	if body, ok := engineMem.bytes(prop.getter, 8); ok {
+	if body, ok := engineCodeBytes(prop.getter, 8); ok {
 		prop.kind, prop.disp, _ = decodeCameraFieldGetter(body)
 	}
 	if prop.kind == cameraFieldNone {
 		return prop, false
 	}
-	if body, ok := engineMem.bytes(prop.setter, 0x60); ok {
+	if body, ok := engineCodeBytes(prop.setter, 0x60); ok {
 		prop.adjust, prop.hasAdjust = decodeCameraSetterAdjust(body)
 	}
 	return prop, true
@@ -369,9 +367,12 @@ func decodeEngineCameraChain(ranges []engineAddrRange, base, end uintptr, l *eng
 	if len(behavior) != 1 {
 		return fmt.Errorf("%w: MouseBehavior getter lookup found %d candidates", errEngineCameraShape, len(behavior))
 	}
+	if isLiveEngineMem() && !engineExecReadable(behavior[0].getter, 33) {
+		return fmt.Errorf("%w: unreadable MouseBehavior getter", errEngineCameraShape)
+	}
 	inImage := func(addr uintptr) bool { return addr >= base && addr < end }
 
-	resolver, ok := engineMem.bytes(behavior[0].resolver, 31)
+	resolver, ok := engineCodeBytes(behavior[0].resolver, 31)
 	if !ok {
 		return fmt.Errorf("%w: unreadable resolver", errEngineCameraShape)
 	}
@@ -379,7 +380,7 @@ func decodeEngineCameraChain(ranges []engineAddrRange, base, end uintptr, l *eng
 	if !ok || !inImage(create) {
 		return fmt.Errorf("%w: resolver shape", errEngineCameraShape)
 	}
-	createBody, ok := engineMem.bytes(create, 49)
+	createBody, ok := engineCodeBytes(create, 49)
 	if !ok {
 		return fmt.Errorf("%w: unreadable create", errEngineCameraShape)
 	}
@@ -387,7 +388,7 @@ func decodeEngineCameraChain(ranges []engineAddrRange, base, end uintptr, l *eng
 	if !ok || !inImage(vector) {
 		return fmt.Errorf("%w: create shape", errEngineCameraShape)
 	}
-	vectorBody, ok := engineMem.bytes(vector, 47)
+	vectorBody, ok := engineCodeBytes(vector, 47)
 	if !ok {
 		return fmt.Errorf("%w: unreadable service vector helper", errEngineCameraShape)
 	}
@@ -399,13 +400,22 @@ func decodeEngineCameraChain(ranges []engineAddrRange, base, end uintptr, l *eng
 	if len(bridges) != 1 {
 		return fmt.Errorf("%w: bridge lookup found %d candidates", errEngineCameraShape, len(bridges))
 	}
-	gameBody, ok := engineMem.bytes(bridges[0].getGame, 42)
+	if isLiveEngineMem() && !engineExecReadable(bridges[0].bridge, 50) {
+		return fmt.Errorf("%w: unreadable bridge", errEngineCameraShape)
+	}
+	gameBody, ok := engineCodeBytes(bridges[0].getGame, 42)
 	if !ok {
 		return fmt.Errorf("%w: unreadable getGame", errEngineCameraShape)
 	}
 	gameOffset, controlOffset, ok := cursorDecodeGame(gameBody)
 	if !ok {
 		return fmt.Errorf("%w: getGame shape", errEngineCameraShape)
+	}
+	if layout.singleton > ^uintptr(0)-uintptr(gameOffset) ||
+		layout.singleton > ^uintptr(0)-uintptr(controlOffset) ||
+		!engineStaticDataValid(layout.singleton+uintptr(gameOffset), 8) ||
+		!engineStaticDataValid(layout.singleton+uintptr(controlOffset), 8) {
+		return fmt.Errorf("%w: Game singleton slot outside module data segment", errEngineCameraShape)
 	}
 	l.singleton = layout.singleton
 	l.gameOffset, l.controlOffset = gameOffset, controlOffset
@@ -563,21 +573,38 @@ func EngineCameraFirstPerson() bool {
 	return engineCameraCapture.firstPerson
 }
 
-// engineCameraMemory is the guarded window the sampler reads through. It
-// takes its own /proc/self/maps snapshot on every sample, so probing heap
-// pointers can never spend the refresh budget the cursor and MouseBehavior
-// readers share through engineMaps.
+// engineCameraMemory is the guarded window the sampler reads through. Static
+// singleton slots validate strictly against the wired loader.Module's data
+// segments, while C++ heap fields copy through a dedicated non-faulting pipe
+// isolated from MouseBehavior and rejecting executable .text spans.
 type engineCameraMemory struct {
-	ranges []engineAddrRange
+	mod   *loader.Module
+	pipe  nonFaultingPipe
+	ready bool
 }
 
 func (m *engineCameraMemory) refresh() bool {
-	ranges, err := readProcSelfMaps()
-	if err != nil {
+	mod := currentEngineModule()
+	if mod == nil || !mod.IsOpen() {
+		m.close()
 		return false
 	}
-	m.ranges = ranges
+	m.mod = mod
+	m.ready = true
 	return true
+}
+
+func (m *engineCameraMemory) close() {
+	m.ready = false
+	m.mod = nil
+	m.pipe.reset()
+}
+
+func (m *engineCameraMemory) staticU64(addr uintptr) (uint64, bool) {
+	if !m.ready || m.mod == nil || addr%8 != 0 || !m.mod.ContainsData(addr, 8) {
+		return 0, false
+	}
+	return (liveEngineMemory{}).u64(addr)
 }
 
 func (m *engineCameraMemory) bytes(addr uintptr, n int) ([]byte, bool) {
@@ -592,11 +619,13 @@ func (m *engineCameraMemory) bytes(addr uintptr, n int) ([]byte, bool) {
 }
 
 func (m *engineCameraMemory) read(addr uintptr, out []byte) bool {
-	if addr == 0 || len(out) == 0 || addr+uintptr(len(out)) < addr || !engineRangesContain(m.ranges, addr, uintptr(len(out))) {
+	if !m.ready || m.mod == nil || len(out) == 0 || !m.mod.IsOpen() {
 		return false
 	}
-	copy(out, unsafe.Slice((*byte)(unsafe.Pointer(addr)), len(out))) //nolint:govet // addr is inside a mapping from this sample's snapshot, read-only
-	return true
+	if m.mod.OverlapsExec(addr, uintptr(len(out))) {
+		return false
+	}
+	return m.pipe.read(addr, out)
 }
 
 func (m *engineCameraMemory) u64(addr uintptr) (uint64, bool) {
@@ -633,14 +662,27 @@ func readCFrame(mem engineMemory, addr uintptr) (pos [3]float64, ok bool) {
 // furthest check reached, for the unresolved reason.
 func (r *engineCameraReader) probeWorkspace(service uintptr) (s engineCameraSample, stage int) {
 	l := r.layout
-	cam, ok := r.mem.u64(service + uintptr(l.workspaceAdjust) + uintptr(l.cameraSlot))
+	if service > ^uintptr(0)-uintptr(l.workspaceAdjust) {
+		return s, 0
+	}
+	wsRecv := service + uintptr(l.workspaceAdjust)
+	if wsRecv > ^uintptr(0)-uintptr(l.cameraSlot) {
+		return s, 0
+	}
+	cam, ok := r.mem.u64(wsRecv + uintptr(l.cameraSlot))
 	if !ok {
 		return s, 0
 	}
 	if cam == 0 {
 		return s, 1
 	}
+	if uintptr(cam) > ^uintptr(0)-uintptr(l.cameraAdjust) {
+		return s, 2
+	}
 	recv := uintptr(cam) + uintptr(l.cameraAdjust)
+	if recv > ^uintptr(0)-uintptr(l.cframe) || recv > ^uintptr(0)-uintptr(l.focus) || recv > ^uintptr(0)-uintptr(l.kind) {
+		return s, 2
+	}
 	camPos, ok := readCFrame(r.mem, recv+uintptr(l.cframe))
 	if !ok {
 		return s, 2
@@ -667,19 +709,32 @@ func (r *engineCameraReader) probeWorkspace(service uintptr) (s engineCameraSamp
 // otherwise the exact step that had no answer. No state is latched.
 func (r *engineCameraReader) sample() (s engineCameraSample, reason string) {
 	l := r.layout
-	game, ok := r.mem.u64(l.singleton + uintptr(l.gameOffset))
+	readSingleton := r.mem.u64
+	if cm, ok := r.mem.(*engineCameraMemory); ok {
+		readSingleton = cm.staticU64
+	}
+	if l.singleton > ^uintptr(0)-uintptr(l.gameOffset) {
+		return s, "Game slot is not readable"
+	}
+	game, ok := readSingleton(l.singleton + uintptr(l.gameOffset))
 	if !ok {
 		return s, "Game slot is not readable"
 	}
 	if game == 0 {
 		return s, "no DataModel yet"
 	}
-	control, ok := r.mem.u64(l.singleton + uintptr(l.controlOffset))
+	if l.singleton > ^uintptr(0)-uintptr(l.controlOffset) {
+		return s, "Game control-block slot is not readable"
+	}
+	control, ok := readSingleton(l.singleton + uintptr(l.controlOffset))
 	if !ok {
 		return s, "Game control-block slot is not readable"
 	}
 	if control == 0 {
 		return s, "no DataModel yet (no control block)"
+	}
+	if uintptr(control) > ^uintptr(0)-8 {
+		return s, "Game control block is not readable"
 	}
 	owners, ok := r.mem.u64(uintptr(control) + 8)
 	if !ok {
@@ -688,17 +743,27 @@ func (r *engineCameraReader) sample() (s engineCameraSample, reason string) {
 	if owners == 0 {
 		return s, "DataModel expired"
 	}
+	if uintptr(game) > ^uintptr(0)-uintptr(l.providerOffset) {
+		return s, "ServiceProvider vector is not readable"
+	}
 	provider := uintptr(game) + uintptr(l.providerOffset)
-	begin, ok := r.mem.u64(provider + uintptr(l.vectorOffset))
+	if provider > ^uintptr(0)-uintptr(l.vectorOffset) {
+		return s, "ServiceProvider vector is not readable"
+	}
+	vecAddr := provider + uintptr(l.vectorOffset)
+	if vecAddr > ^uintptr(0)-8 {
+		return s, "ServiceProvider vector end is not readable"
+	}
+	begin, ok := r.mem.u64(vecAddr)
 	if !ok {
 		return s, "ServiceProvider vector is not readable"
 	}
-	end, ok := r.mem.u64(provider + uintptr(l.vectorOffset) + 8)
+	end, ok := r.mem.u64(vecAddr + 8)
 	if !ok {
 		return s, "ServiceProvider vector end is not readable"
 	}
 	if end < begin || (end-begin)%16 != 0 || (begin == 0) != (end == 0) || (end-begin)>>4 > engineCameraMaxServices {
-		return s, fmt.Sprintf("ServiceProvider vector bounds are implausible (begin=%#x end=%#x)", begin, end)
+		return s, "ServiceProvider vector bounds are implausible"
 	}
 	count := int((end - begin) >> 4)
 	if count == 0 {
@@ -750,9 +815,7 @@ var engineCameraTrace struct {
 	started bool
 }
 
-func engineCameraLog(format string, args ...any) {
-	logging.Logger(logging.CatJNI).Info("[jni] camera trace: " + fmt.Sprintf(format, args...))
-}
+func noopCameraTraceLog(string, ...any) {}
 
 // describe formats a sample or an unresolved reason as one trace line.
 func (s engineCameraSample) describe() string {
@@ -765,6 +828,7 @@ func (s engineCameraSample) describe() string {
 // sampling miss on every change or heartbeat; nothing ever stops the loop.
 func (r *engineCameraReader) run(decodeErr error, logf func(string, ...any), sleep func(time.Duration), stop <-chan struct{}) {
 	var live engineCameraMemory
+	defer live.close()
 	var last string
 	var lastAt time.Time
 	report := func(line string) {
@@ -787,7 +851,7 @@ func (r *engineCameraReader) run(decodeErr error, logf func(string, ...any), sle
 			if _, isLive := engineMem.(liveEngineMemory); isLive {
 				if !live.refresh() {
 					engineCameraCapture.update(engineCameraSample{}, false)
-					report("unresolved: /proc/self/maps is not readable")
+					report("unresolved: engine module segments unavailable")
 					sleep(engineCameraInterval)
 					continue
 				}
@@ -808,9 +872,8 @@ func (r *engineCameraReader) run(decodeErr error, logf func(string, ...any), sle
 }
 
 // InitEngineCamera starts the process-wide camera reader. The latest result
-// feeds capture decisions through EngineCameraFirstPerson; trace logging alone
-// is controlled by TIPSY_TRACE_CAMERA=1. Initialization is idempotent and a
-// decode or sampling failure never latches the reader off.
+// feeds capture decisions through EngineCameraFirstPerson. Initialization is
+// idempotent and a decode or sampling failure never latches the reader off.
 func InitEngineCamera(base uintptr, size uint64) {
 	engineCameraTrace.mu.Lock()
 	defer engineCameraTrace.mu.Unlock()
@@ -818,11 +881,7 @@ func InitEngineCamera(base uintptr, size uint64) {
 		return
 	}
 	engineCameraTrace.started = true
-	trace := os.Getenv("TIPSY_TRACE_CAMERA") == "1"
-	logf := func(string, ...any) {}
-	if trace {
-		logf = engineCameraLog
-	}
+	logf := cameraTraceLogger()
 	if base == 0 || size == 0 || uint64(uintptr(size)) != size || base+uintptr(size) < base {
 		engineCameraCapture.update(engineCameraSample{}, false)
 		logf("unresolved: bad image bounds")
@@ -830,9 +889,12 @@ func InitEngineCamera(base uintptr, size uint64) {
 	}
 	end := base + uintptr(size)
 	go func() {
-		ranges, err := readProcSelfMaps()
 		var layout engineCameraLayout
-		if err == nil {
+		var err error
+		ranges, ok := engineReadableRanges()
+		if !ok {
+			err = errors.New("engine module segments unavailable")
+		} else {
 			layout, err = decodeEngineCamera(ranges, base, end)
 		}
 		if err != nil {

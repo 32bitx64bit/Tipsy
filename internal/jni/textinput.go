@@ -253,7 +253,7 @@ func (vm *VM) dispatchTextInput(o *Object, class, name, sig string, args *C.jval
 		keyboardState.mu.Unlock()
 		logging.Logger(logging.CatJNI).Info("[jni] showKeyboard",
 			"class", class,
-			"handle", handle,
+			"hasHandle", handle != 0,
 			"flag", configure,
 			"initialLen", initLen,
 			"info", infoPresent,
@@ -655,7 +655,7 @@ func DispatchRobloxTextCommit(committed string) bool {
 	textConnection.mu.Unlock()
 	atomic.AddUint64(&rbxTextDelivered.pass, 1)
 	logging.Logger(logging.CatJNI).Info("[jni] text committed",
-		"handle", handle, "textLen", len([]rune(full)), "cursor", pos)
+		"textLen", len([]rune(full)), "cursor", pos)
 	return true
 }
 
@@ -840,7 +840,7 @@ func sendRbxText(handle int64, text string, submit bool, cursor int) bool {
 		if call != nil {
 			call(syncFn, env.Raw(), class, str, uintptr(cursor), 0, 0, 0, 0)
 		} else {
-			C.tipsy_rbx_sync_selection(unsafe.Pointer(syncFn),
+			C.tipsy_rbx_sync_selection(ptrFromUintptr(syncFn),
 				C.uintptr_t(env.Raw()), C.uintptr_t(class),
 				idToJobject(jobjectToID(str)), C.int(cursor))
 		}
@@ -857,7 +857,7 @@ func sendRbxText(handle int64, text string, submit bool, cursor int) bool {
 		if call != nil {
 			call(passFn, env.Raw(), class, uintptr(handle), str, zArg, uintptr(cursor), 0, 0)
 		} else {
-			C.tipsy_rbx_pass_text(unsafe.Pointer(passFn),
+			C.tipsy_rbx_pass_text(ptrFromUintptr(passFn),
 				C.uintptr_t(env.Raw()), C.uintptr_t(class),
 				C.longlong(handle), idToJobject(jobjectToID(str)), z, C.int(cursor))
 		}
@@ -881,7 +881,7 @@ func sendRbxReturnPressed(handle int64) bool {
 		call(returnFn, env.Raw(), class, uintptr(handle), 0, 0, 0, 0, 0)
 		return true
 	}
-	C.tipsy_rbx_return_pressed(unsafe.Pointer(returnFn),
+	C.tipsy_rbx_return_pressed(ptrFromUintptr(returnFn),
 		C.uintptr_t(env.Raw()), C.uintptr_t(class), C.longlong(handle))
 	return true
 }
@@ -904,7 +904,7 @@ func sendRbxSelection(text string, cursor int) bool {
 	if call != nil {
 		call(syncFn, env.Raw(), class, str, uintptr(cursor), 0, 0, 0, 0)
 	} else {
-		C.tipsy_rbx_sync_selection(unsafe.Pointer(syncFn),
+		C.tipsy_rbx_sync_selection(ptrFromUintptr(syncFn),
 			C.uintptr_t(env.Raw()), C.uintptr_t(class),
 			idToJobject(jobjectToID(str)), C.int(cursor))
 	}

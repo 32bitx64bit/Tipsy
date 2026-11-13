@@ -240,22 +240,22 @@ func init() {
 	})
 	registerCore("currentTimeMillis()J", func(vm *VM, env unsafe.Pointer, o *Object, obj C.jobject, args *C.jvalue) (C.jobject, bool) {
 		ms := time.Now().UnixMilli()
-		return C.jobject(unsafe.Pointer(uintptr(ms))), true
+		return C.jobject(uintptr(ms)), true
 	})
 	registerCore("getProcessTimestamp()J", func(vm *VM, env unsafe.Pointer, o *Object, obj C.jobject, args *C.jvalue) (C.jobject, bool) {
 		ms := time.Now().UnixMilli()
-		return C.jobject(unsafe.Pointer(uintptr(ms))), true
+		return C.jobject(uintptr(ms)), true
 	})
 	registerCore("nanoTime()J", func(vm *VM, env unsafe.Pointer, o *Object, obj C.jobject, args *C.jvalue) (C.jobject, bool) {
 		ns := time.Now().UnixNano()
-		return C.jobject(unsafe.Pointer(uintptr(ns))), true
+		return C.jobject(uintptr(ns)), true
 	})
 	registerCore("getAllocatableBytes()J", func(vm *VM, env unsafe.Pointer, o *Object, obj C.jobject, args *C.jvalue) (C.jobject, bool) {
 		const allocatable = 8 << 30
-		return C.jobject(unsafe.Pointer(uintptr(allocatable))), true
+		return C.jobject(uintptr(allocatable)), true
 	})
 	registerCore("availableProcessors()I", func(vm *VM, env unsafe.Pointer, o *Object, obj C.jobject, args *C.jvalue) (C.jobject, bool) {
-		return C.jobject(unsafe.Pointer(uintptr(runtime.NumCPU()))), true
+		return C.jobject(uintptr(runtime.NumCPU())), true
 	})
 	registerCore("getIdentifier(Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;)I", func(vm *VM, env unsafe.Pointer, o *Object, obj C.jobject, args *C.jvalue) (C.jobject, bool) {
 		return jnull(), true
@@ -301,7 +301,7 @@ func init() {
 			n = len(o.elems)
 			vm.mu.RUnlock()
 		}
-		return C.jobject(unsafe.Pointer(uintptr(n))), true
+		return C.jobject(uintptr(n)), true
 	})
 	registerCore("isEmpty()Z", func(vm *VM, env unsafe.Pointer, o *Object, obj C.jobject, args *C.jvalue) (C.jobject, bool) {
 		empty := 1
@@ -313,7 +313,7 @@ func init() {
 				empty = 0
 			}
 		}
-		return C.jobject(unsafe.Pointer(uintptr(empty))), true
+		return C.jobject(uintptr(empty)), true
 	})
 	getIndex := func(vm *VM, env unsafe.Pointer, o *Object, obj C.jobject, args *C.jvalue) (C.jobject, bool) {
 		if o == nil || args == nil {
@@ -342,7 +342,7 @@ func init() {
 			o.elems = append(o.elems, id)
 			vm.mu.Unlock()
 		}
-		return C.jobject(unsafe.Pointer(uintptr(1))), true
+		return C.jobject(uintptr(1)), true
 	})
 	registerCore("iterator()Ljava/util/Iterator;", func(vm *VM, env unsafe.Pointer, o *Object, obj C.jobject, args *C.jvalue) (C.jobject, bool) {
 		vm.mu.Lock()
@@ -369,7 +369,7 @@ func init() {
 		}
 		vm.mu.RUnlock()
 		if int(idx) < n {
-			return C.jobject(unsafe.Pointer(uintptr(1))), true
+			return C.jobject(uintptr(1)), true
 		}
 		return jnull(), true
 	})

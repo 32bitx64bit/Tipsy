@@ -57,9 +57,9 @@ func logFindClassName(name string) {
 	logging.Logger(logging.CatJNI).Info("[jni] findClass-name", "class", name)
 }
 
-// logLifecycleStubArgs records the raw handle argument of the two lifecycle
-// identities at stub-dispatch time. The identity filter is exact (class AND
-// name AND sig), so nothing else is captured.
+// logLifecycleStubArgs records lifecycle stub-dispatch invocations deduplicated
+// by handle without emitting the raw handle value. The identity filter is exact
+// (class AND name AND sig), so nothing else is captured.
 func logLifecycleStubArgs(class, name, sig string, args *C.jvalue) {
 	if !diagnosticsEnabled() {
 		return
@@ -100,5 +100,5 @@ func logLifecycleStubArgs(class, name, sig string, args *C.jvalue) {
 		return
 	}
 	logging.Logger(logging.CatJNI).Info("[jni] lifecycle-handle",
-		"method", method, "handle", v)
+		"method", method, "nonZero", v != 0)
 }

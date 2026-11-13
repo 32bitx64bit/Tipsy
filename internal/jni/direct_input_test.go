@@ -6,10 +6,14 @@
 package jni
 
 import (
+	"encoding/binary"
+	"runtime"
 	"strings"
 	"testing"
+	"unsafe"
 
 	"github.com/tipsy-linux/tipsy/internal/x11"
+	"golang.org/x/sys/unix"
 )
 
 func selectPointerPath(t *testing.T, value string) {
@@ -2842,4 +2846,125 @@ func TestEngineAnchorLockReacquiresAtTheGrabAnchorNotTheDrift(t *testing.T) {
 	if x, y, ok := engineAnchorFrozenOrigin(); !ok || x != 900 || y != 220 {
 		t.Fatalf("frozen origin=(%v,%v,%v), want the engage point (900,220)", x, y, ok)
 	}
+}
+
+func TestLiveEngineMouseBehaviorModuleBoundsAndInvalidation(t *testing.T) {
+	mod, getterAddr, singletonAddr := openTestEngineModule(t)
+	t.Cleanup(ClearRobloxDirectInputTarget)
+
+	heapObj := make([]byte, 0x100)
+	binary.LittleEndian.PutUint32(heapObj[0x90:], uint32(MouseBehaviorLockCurrentPosition))
+	heapAddr := uintptr(unsafe.Pointer(&heapObj[0]))
+	*(*uint64)(ptrFromUintptr(singletonAddr + 0x80)) = uint64(heapAddr)
+
+	// Without SetRobloxEngineModule, live decode fails closed even with a real getter pointer.
+	clearRobloxEngineModule()
+	SetRobloxDirectInputTarget(0x10, 0x20, 0x30, 0x40, 0x50, getterAddr)
+	if _, ok := EngineMouseBehavior(); ok {
+		t.Fatal("EngineMouseBehavior succeeded without wired engine module")
+	}
+
+	// Wiring the module enables bounded .text/.data decode + non-faulting heap read.
+	SetRobloxEngineModule(mod)
+	SetRobloxDirectInputTarget(0x10, 0x20, 0x30, 0x40, 0x50, getterAddr)
+	if got, ok := EngineMouseBehavior(); !ok || got != MouseBehaviorLockCurrentPosition {
+		t.Fatalf("EngineMouseBehavior() = (%v, %v), want (LockCurrentPosition, true)", got, ok)
+	}
+
+	// Guarded PROT_NONE heap target fails closed without faulting.
+	guardPage, err := unix.Mmap(-1, 0, unix.Getpagesize(), unix.PROT_NONE, unix.MAP_PRIVATE|unix.MAP_ANONYMOUS)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = unix.Munmap(guardPage) })
+	*(*uint64)(ptrFromUintptr(singletonAddr + 0x80)) = uint64(uintptr(unsafe.Pointer(&guardPage[0])))
+	if _, ok := EngineMouseBehavior(); ok {
+		t.Fatal("EngineMouseBehavior accepted PROT_NONE guard page")
+	}
+
+	// Heap pointer aimed into executable .text is rejected by OverlapsExec.
+	*(*uint64)(ptrFromUintptr(singletonAddr + 0x80)) = uint64(getterAddr)
+	if _, ok := EngineMouseBehavior(); ok {
+		t.Fatal("EngineMouseBehavior accepted executable .text address as heap object")
+	}
+
+	// Restore valid heap object, then verify ClearRobloxDirectInputTarget invalidates the module.
+	*(*uint64)(ptrFromUintptr(singletonAddr + 0x80)) = uint64(heapAddr)
+	if got, ok := EngineMouseBehavior(); !ok || got != MouseBehaviorLockCurrentPosition {
+		t.Fatalf("EngineMouseBehavior recovery = (%v, %v), want (LockCurrentPosition, true)", got, ok)
+	}
+	ClearRobloxDirectInputTarget()
+	if currentEngineModule() != nil {
+		t.Fatal("ClearRobloxDirectInputTarget left engine module wired")
+	}
+	SetRobloxDirectInputTarget(0x10, 0x20, 0x30, 0x40, 0x50, getterAddr)
+	if _, ok := EngineMouseBehavior(); ok {
+		t.Fatal("EngineMouseBehavior succeeded after ClearRobloxDirectInputTarget cleared module")
+	}
+	runtime.KeepAlive(heapObj)
+}
+
+func TestJNILogsScrubRawPointersAndHandles(t *testing.T) {
+	setDiagnosticsForTest(t, true)
+	resetArgCaptureForTest()
+	resetStubDispatchForTest()
+	vm, err := NewVM()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(ClearRobloxDirectInputTarget)
+	t.Cleanup(ClearRobloxDirectKeyTarget)
+	t.Cleanup(ClearRobloxDirectGamepadTarget)
+	t.Cleanup(ClearRobloxTextInputTarget)
+
+	mod, getterAddr, singletonAddr := openTestEngineModule(t)
+	heapObj := make([]byte, 0x100)
+	binary.LittleEndian.PutUint32(heapObj[0x90:], uint32(MouseBehaviorDefault))
+	*(*uint64)(ptrFromUintptr(singletonAddr + 0x80)) = uint64(uintptr(unsafe.Pointer(&heapObj[0])))
+
+	buf := captureLogs(t)
+
+	const (
+		ptrA   = uintptr(0x7f1234560010)
+		ptrB   = uintptr(0x7f1234560020)
+		ptrC   = uintptr(0x7f1234560030)
+		ptrD   = uintptr(0x7f1234560040)
+		handle = int64(0x7f1234567890) // 139716169398416
+	)
+
+	SetRobloxEngineModule(mod)
+	SetRobloxDirectInputTarget(0xdeadbeef01, 0xdeadbeef02, ptrA, ptrB, ptrC, getterAddr)
+	_, _ = EngineMouseBehavior()
+	SetRobloxDirectKeyTarget(0xdeadbeef01, 0xdeadbeef02, ptrD)
+	SetRobloxDirectGamepadTarget(0xdeadbeef01, 0xdeadbeef02, ptrA, ptrB, ptrC, ptrD, ptrA+0x10, ptrB+0x10)
+	testRegisterNativeMethodForLogTest(vm, "com/google/androidgamesdk/GameActivity", "onStartNative", "(J)V", ptrA)
+	_, _ = callDispatchOrStub(vm, jnull(), "com/roblox/engine/jni/NativeGLJavaInterface", "gameLoadedCallback", "(J)V", packJlong(handle), 'V')
+
+	env := vm.Env()
+	cls := env.FindClass(nativeGLClass)
+	SetRobloxTextInputTarget(env, cls, ptrA, ptrB, ptrC, ptrD, func(fn, a0, a1, a2, a3, a4, a5, a6, a7 uintptr) int64 {
+		return 0
+	})
+	initID, boxesID := keyboardTestObjects(t, vm, []byte("a"), 1)
+	_, _ = vm.dispatch(jnull(), nativeGLClass, "showKeyboard", showKeyboardSig, testPackKeyboardArgs(handle, 1, initID, boxesID))
+	_ = DispatchRobloxTextCommit("b")
+
+	out := buf.String()
+	for _, forbidden := range []string{
+		"7f123456",
+		"deadbeef",
+		"139716169398416",
+		"mouseButton=0x",
+		"mouseLockedGetter=0x",
+		"keyEvent=0x",
+		"axisEvent=0x",
+		"fn=0x",
+		"singleton=0x",
+		"getter=0x",
+	} {
+		if strings.Contains(strings.ToLower(out), forbidden) {
+			t.Fatalf("JNI log output leaked pointer/handle marker %q:\n%s", forbidden, out)
+		}
+	}
+	runtime.KeepAlive(heapObj)
 }

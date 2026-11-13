@@ -55,7 +55,7 @@ func testReleaseStringCritical(envRaw unsafe.Pointer, strID int64, chars unsafe.
 }
 
 func testIsInstanceOf(envRaw unsafe.Pointer, obj, clazz uintptr) bool {
-	return GoJNI_IsInstanceOf((*C.JNIEnv)(envRaw), C.jobject(unsafe.Pointer(obj)), C.jclass(unsafe.Pointer(clazz))) == C.JNI_TRUE
+	return GoJNI_IsInstanceOf((*C.JNIEnv)(envRaw), C.jobject(obj), C.jclass(clazz)) == C.JNI_TRUE
 }
 
 func testPrimitiveArrayCritical(envRaw unsafe.Pointer, arrID int64) (ptr unsafe.Pointer, isCopy bool) {

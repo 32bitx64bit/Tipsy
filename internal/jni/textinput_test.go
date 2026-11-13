@@ -772,8 +772,11 @@ func TestShowKeyboardNativeHelper(t *testing.T) {
 		t.Fatalf("class = %q, want NativeHelper", class)
 	}
 	out := buf.String()
-	if !strings.Contains(out, "[jni] showKeyboard") || !strings.Contains(out, "handle=42") {
+	if !strings.Contains(out, "[jni] showKeyboard") || !strings.Contains(out, "hasHandle=true") {
 		t.Fatalf("log missing showKeyboard record: %s", out)
+	}
+	if strings.Contains(out, "handle=42") {
+		t.Fatalf("showKeyboard leaked raw handle value: %s", out)
 	}
 
 	if !isImplementedMethod("gameActivity_showKeyboard", showKeyboardSig) {

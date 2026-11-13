@@ -102,8 +102,8 @@ func (e *Env) AllocObject(clazz uintptr) uintptr {
 	if e == nil || clazz == 0 {
 		return 0
 	}
-	obj := C.tipsy_jni_AllocObject((*C.JNIEnv)(e.raw), C.jclass(unsafe.Pointer(clazz)))
-	return uintptr(unsafe.Pointer(obj))
+	obj := C.tipsy_jni_AllocObject((*C.JNIEnv)(e.raw), C.jclass(clazz))
+	return uintptr(obj)
 }
 
 // NewByteArray allocates a Java byte[] of length n.
@@ -115,7 +115,7 @@ func (e *Env) NewByteArray(n int) uintptr {
 		n = 0
 	}
 	arr := C.tipsy_jni_NewByteArray((*C.JNIEnv)(e.raw), C.jsize(n))
-	return uintptr(unsafe.Pointer(arr))
+	return uintptr(arr)
 }
 
 // BytesArray allocates a Java byte[] and copies data into it.

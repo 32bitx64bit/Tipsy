@@ -12,13 +12,11 @@ package jni
 import "C"
 
 import (
-	"fmt"
 	"math"
 	"os"
 	"strings"
 	"sync"
 	"sync/atomic"
-	"unsafe"
 
 	"github.com/tipsy-linux/tipsy/internal/logging"
 )
@@ -264,11 +262,11 @@ func SetRobloxDirectInputTarget(env, class, buttonFn, moveFn, wheelFn, lockFn ui
 	logging.Logger(logging.CatJNI).Info("[jni] pointer delivery path",
 		"mode", pointerDeliveryPath().String(),
 		"directReady", ready,
-		"mouseButton", fmt.Sprintf("%#x", buttonFn),
-		"mouseMove", fmt.Sprintf("%#x", moveFn),
-		"mouseWheel", fmt.Sprintf("%#x", wheelFn))
+		"mouseButtonReady", buttonFn != 0,
+		"mouseMoveReady", moveFn != 0,
+		"mouseWheelReady", wheelFn != 0)
 	logging.Logger(logging.CatJNI).Info("[jni] pointer lock handshake",
-		"ready", lockFn != 0, "mouseLockedGetter", fmt.Sprintf("%#x", lockFn))
+		"ready", lockFn != 0)
 	return ready
 }
 
@@ -294,8 +292,10 @@ func ClearRobloxDirectInputTarget() {
 	rmbPointerFallback.Store(false)
 	persistentPointerCapture.Store(false)
 	altToggleConsumed.Store(false)
-	// The decoded MouseBehavior layout belongs to the image that is about to
-	// be unmapped; drop it so a re-wired target decodes against its own bytes.
+	// The decoded MouseBehavior layout and wired module belong to the image
+	// that is about to be unmapped; drop both so no stale segment bounds or
+	// offsets survive teardown.
+	clearRobloxEngineModule()
 	resetEngineMouseBehavior()
 }
 
@@ -319,8 +319,7 @@ func SetRobloxDirectKeyTarget(env, class, fn uintptr) bool {
 
 	logging.Logger(logging.CatJNI).Info("[jni] keyboard delivery path",
 		"mode", keyboardDeliveryPath().String(),
-		"directReady", ready,
-		"keyEvent", fmt.Sprintf("%#x", fn))
+		"directReady", ready)
 	return ready
 }
 
@@ -372,7 +371,7 @@ func RobloxMainWindowMouseLocked() (locked bool, available bool) {
 	if env == 0 || class == 0 || lockFn == 0 {
 		return false, false
 	}
-	locked = C.tipsy_direct_mouse_locked(unsafe.Pointer(lockFn),
+	locked = C.tipsy_direct_mouse_locked(ptrFromUintptr(lockFn),
 		C.uintptr_t(env), C.uintptr_t(class)) != 0
 	atomic.AddUint64(&directInputStats.LockQueries, 1)
 	if locked {
@@ -399,7 +398,7 @@ func DispatchRobloxDirectScroll(x, y, deltaX, deltaY float32) bool {
 		dropDirectEvent("scroll: no direct wheel target wired")
 		return false
 	}
-	C.tipsy_direct_mouse_wheel(unsafe.Pointer(fn), C.uintptr_t(env), C.uintptr_t(class),
+	C.tipsy_direct_mouse_wheel(ptrFromUintptr(fn), C.uintptr_t(env), C.uintptr_t(class),
 		C.float(x), C.float(y), C.float(deltaY))
 	atomic.AddUint64(&directInputStats.WheelDelivered, 1)
 	return true
@@ -465,7 +464,7 @@ func DispatchRobloxDirectPointer(action int32, x, y float32, x11Button int32) bo
 		if action == motionActionDown {
 			pressed = 1
 		}
-		C.tipsy_direct_mouse_button(unsafe.Pointer(buttonFn), C.uintptr_t(env), C.uintptr_t(class),
+		C.tipsy_direct_mouse_button(ptrFromUintptr(buttonFn), C.uintptr_t(env), C.uintptr_t(class),
 			C.float(x), C.float(y), pressed, C.int(button))
 		atomic.AddUint64(&directInputStats.ButtonDelivered, 1)
 		return true
@@ -480,7 +479,7 @@ func DispatchRobloxDirectPointer(action int32, x, y float32, x11Button int32) bo
 		directInputTarget.lastX = x
 		directInputTarget.lastY = y
 		directInputTarget.mu.Unlock()
-		C.tipsy_direct_mouse_move(unsafe.Pointer(moveFn), C.uintptr_t(env), C.uintptr_t(class),
+		C.tipsy_direct_mouse_move(ptrFromUintptr(moveFn), C.uintptr_t(env), C.uintptr_t(class),
 			C.float(x), C.float(y), C.float(dx), C.float(dy))
 		atomic.AddUint64(&directInputStats.MoveDelivered, 1)
 		return true
@@ -527,7 +526,7 @@ func DispatchRobloxDirectPointerDelta(x, y, dx, dy float32) bool {
 	directInputTarget.lastX = x
 	directInputTarget.lastY = y
 	directInputTarget.mu.Unlock()
-	C.tipsy_direct_mouse_move(unsafe.Pointer(moveFn), C.uintptr_t(env), C.uintptr_t(class),
+	C.tipsy_direct_mouse_move(ptrFromUintptr(moveFn), C.uintptr_t(env), C.uintptr_t(class),
 		C.float(x), C.float(y), C.float(dx), C.float(dy))
 	atomic.AddUint64(&directInputStats.MoveDelivered, 1)
 	return true
@@ -607,7 +606,7 @@ func dispatchRobloxDirectPointerFallbackDelta(dx, dy float32, pinCenter bool) bo
 	directInputTarget.lastX = x
 	directInputTarget.lastY = y
 	directInputTarget.mu.Unlock()
-	C.tipsy_direct_mouse_move(unsafe.Pointer(moveFn), C.uintptr_t(env), C.uintptr_t(class),
+	C.tipsy_direct_mouse_move(ptrFromUintptr(moveFn), C.uintptr_t(env), C.uintptr_t(class),
 		C.float(x), C.float(y), C.float(dx), C.float(dy))
 	atomic.AddUint64(&directInputStats.MoveDelivered, 1)
 	return true
@@ -754,7 +753,7 @@ func DispatchRobloxDirectButtonCaptured(action int32, x11Button int32) bool {
 	if action == motionActionDown {
 		pressed = 1
 	}
-	C.tipsy_direct_mouse_button(unsafe.Pointer(buttonFn), C.uintptr_t(env), C.uintptr_t(class),
+	C.tipsy_direct_mouse_button(ptrFromUintptr(buttonFn), C.uintptr_t(env), C.uintptr_t(class),
 		C.float(x), C.float(y), pressed, C.int(button))
 	atomic.AddUint64(&directInputStats.ButtonDelivered, 1)
 	return true
@@ -820,7 +819,7 @@ func dispatchRobloxDirectKey(x11Keycode, androidKeycode int32, pressed bool, rep
 	if pressed && repeatCount > 0 {
 		repeat = 1
 	}
-	C.tipsy_direct_key_event(unsafe.Pointer(fn), C.uintptr_t(env), C.uintptr_t(class),
+	C.tipsy_direct_key_event(ptrFromUintptr(fn), C.uintptr_t(env), C.uintptr_t(class),
 		down, C.int(scanCode), C.int(androidKeycode), repeat)
 	atomic.AddUint64(&directInputStats.KeyDelivered, 1)
 	return true

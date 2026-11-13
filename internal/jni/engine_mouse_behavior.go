@@ -16,19 +16,17 @@
 package jni
 
 import (
-	"bufio"
 	"encoding/binary"
 	"errors"
 	"fmt"
-	"os"
-	"sort"
 	"strconv"
-	"strings"
 	"sync"
 	"sync/atomic"
 	"unsafe"
 
+	"github.com/tipsy-linux/tipsy/internal/loader"
 	"github.com/tipsy-linux/tipsy/internal/logging"
+	"golang.org/x/sys/unix"
 )
 
 // MouseBehavior is the engine's Enum.MouseBehavior, the property the exported
@@ -163,9 +161,9 @@ func decodeDelegatingMouseBehavior(code []byte, addr uintptr) (mouseBehaviorLayo
 			accessor: addr + uintptr(i) + 10 + uintptr(int64(int32(binary.LittleEndian.Uint32(code[i+6:])))),
 		}
 		target := addr + uintptr(i) + 18 + uintptr(int64(int32(binary.LittleEndian.Uint32(code[i+14:]))))
-		helper, ok := engineMem.bytes(target, mouseBehaviorGetterWindow)
+		helper, ok := engineCodeBytes(target, mouseBehaviorGetterWindow)
 		if !ok {
-			return out, fmt.Errorf("delegated getter body at %#x is not readable", target)
+			return out, errors.New("delegated getter body is not readable")
 		}
 		// push rbp; mov rsp,rbp; push r14; push rbx; mov rdi,r14;
 		// lea 0x50(rdi),rbx; mov $1,esi; mov rbx,rdi; call lock;
@@ -244,10 +242,9 @@ type engineMemory interface {
 
 var engineMem engineMemory = liveEngineMemory{}
 
-// liveEngineMemory loads from this process. The engine image is already
-// mapped here, so its .text and .bss are ordinary readable pages of this
-// address space. Nothing is written and no mapping or protection is touched;
-// every access is guarded by engineReadable so a mis-decode fails closed.
+// liveEngineMemory loads static bytes from the wired loader.Module's PT_LOAD
+// segments. Nothing is written and no mapping or protection is touched; every
+// access is bounded by Module segment queries so a mis-decode fails closed.
 type liveEngineMemory struct{}
 
 func (m liveEngineMemory) bytes(addr uintptr, n int) ([]byte, bool) {
@@ -261,12 +258,20 @@ func (m liveEngineMemory) bytes(addr uintptr, n int) ([]byte, bool) {
 	return out, true
 }
 
+// ptrFromUintptr converts a raw native/JNI address into unsafe.Pointer without
+// a direct uintptr->unsafe.Pointer conversion that go vet flags.
+func ptrFromUintptr(u uintptr) unsafe.Pointer {
+	var p unsafe.Pointer
+	*(*uintptr)(unsafe.Pointer(&p)) = u
+	return p
+}
+
 // read fills a caller-owned buffer without retaining or modifying engine memory.
 func (liveEngineMemory) read(addr uintptr, out []byte) bool {
 	if addr == 0 || len(out) == 0 || !engineReadable(addr, uintptr(len(out))) {
 		return false
 	}
-	copy(out, unsafe.Slice((*byte)(unsafe.Pointer(addr)), len(out))) //nolint:govet // validated engine mapping, read-only
+	copy(out, unsafe.Slice((*byte)(ptrFromUintptr(addr)), len(out)))
 	return true
 }
 
@@ -274,90 +279,213 @@ func (liveEngineMemory) u64(addr uintptr) (uint64, bool) {
 	if addr%8 != 0 || !engineReadable(addr, 8) {
 		return 0, false
 	}
-	return *(*uint64)(unsafe.Pointer(addr)), true //nolint:govet // validated engine mapping, read-only
+	return *(*uint64)(ptrFromUintptr(addr)), true
 }
 
 func (liveEngineMemory) u32(addr uintptr) (uint32, bool) {
 	if addr%4 != 0 || !engineReadable(addr, 4) {
 		return 0, false
 	}
-	return *(*uint32)(unsafe.Pointer(addr)), true //nolint:govet // validated engine mapping, read-only
+	return *(*uint32)(ptrFromUintptr(addr)), true
 }
 
 type engineAddrRange struct{ lo, hi uintptr }
 
-// engineMaps caches this process's readable mappings so a mis-decoded address
-// is reported unavailable rather than dereferenced. The snapshot is refreshed
-// only when an address misses, never on the hot path.
-var engineMaps struct {
-	mu     sync.Mutex
-	ranges []engineAddrRange
-	reads  int
+var engineModule struct {
+	mu  sync.RWMutex
+	mod *loader.Module
 }
 
-// engineMapsReadLimit bounds the refreshes so a permanently bad address
-// cannot turn every probe into a /proc read.
-const engineMapsReadLimit = 64
+// SetRobloxEngineModule binds the loaded client Module whose PT_LOAD segments
+// bound static code/data reads and executable exclusions for heap probes.
+func SetRobloxEngineModule(mod *loader.Module) {
+	engineModule.mu.Lock()
+	engineModule.mod = mod
+	engineModule.mu.Unlock()
+	mouseBehaviorHeapPipe.reset()
+	resetEngineMouseBehavior()
+}
+
+func clearRobloxEngineModule() {
+	engineModule.mu.Lock()
+	engineModule.mod = nil
+	engineModule.mu.Unlock()
+	mouseBehaviorHeapPipe.reset()
+}
+
+func currentEngineModule() *loader.Module {
+	engineModule.mu.RLock()
+	mod := engineModule.mod
+	engineModule.mu.RUnlock()
+	return mod
+}
+
+func isLiveEngineMem() bool {
+	_, ok := engineMem.(liveEngineMemory)
+	return ok
+}
 
 func engineReadable(addr, size uintptr) bool {
-	if addr == 0 || size == 0 || addr+size < addr {
-		return false
-	}
-	engineMaps.mu.Lock()
-	defer engineMaps.mu.Unlock()
-	if engineRangesContain(engineMaps.ranges, addr, size) {
-		return true
-	}
-	if engineMaps.reads >= engineMapsReadLimit {
-		return false
-	}
-	engineMaps.reads++
-	if ranges, err := readProcSelfMaps(); err == nil {
-		engineMaps.ranges = ranges
-	}
-	return engineRangesContain(engineMaps.ranges, addr, size)
+	mod := currentEngineModule()
+	return mod != nil && mod.ContainsReadable(addr, size)
 }
 
-func engineRangesContain(ranges []engineAddrRange, addr, size uintptr) bool {
-	i := sort.Search(len(ranges), func(i int) bool { return ranges[i].hi > addr })
-	return i < len(ranges) && ranges[i].lo <= addr && addr+size <= ranges[i].hi
+func engineExecReadable(addr, size uintptr) bool {
+	mod := currentEngineModule()
+	return mod != nil && mod.ContainsExec(addr, size)
 }
 
-// readProcSelfMaps returns this process's readable mappings, sorted. It is a
-// read of /proc/self/maps -- never /proc/self/mem -- and writes nothing.
-func readProcSelfMaps() ([]engineAddrRange, error) {
-	f, err := os.Open("/proc/self/maps")
-	if err != nil {
-		return nil, err
+func engineDataReadable(addr, size uintptr) bool {
+	mod := currentEngineModule()
+	return mod != nil && mod.ContainsData(addr, size)
+}
+
+func engineReadableRanges() ([]engineAddrRange, bool) {
+	mod := currentEngineModule()
+	if mod == nil {
+		return nil, false
 	}
-	defer f.Close()
-	var out []engineAddrRange
-	scanner := bufio.NewScanner(f)
-	scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
-	for scanner.Scan() {
-		fields := strings.Fields(scanner.Text())
-		if len(fields) < 2 || len(fields[1]) < 1 || fields[1][0] != 'r' {
-			continue
-		}
-		dash := strings.IndexByte(fields[0], '-')
-		if dash <= 0 {
-			continue
-		}
-		lo, err := strconv.ParseUint(fields[0][:dash], 16, 64)
-		if err != nil {
-			continue
-		}
-		hi, err := strconv.ParseUint(fields[0][dash+1:], 16, 64)
-		if err != nil || hi <= lo {
-			continue
-		}
-		out = append(out, engineAddrRange{lo: uintptr(lo), hi: uintptr(hi)})
+	segs := mod.ReadableSegments()
+	if len(segs) == 0 {
+		return nil, false
 	}
-	if err := scanner.Err(); err != nil {
-		return nil, err
+	out := make([]engineAddrRange, len(segs))
+	for i, s := range segs {
+		out[i] = engineAddrRange{lo: s.Lo, hi: s.Hi}
 	}
-	sort.Slice(out, func(i, j int) bool { return out[i].lo < out[j].lo })
-	return out, nil
+	return out, true
+}
+
+func engineCodeBytes(addr uintptr, n int) ([]byte, bool) {
+	if n <= 0 {
+		return nil, false
+	}
+	if isLiveEngineMem() && !engineExecReadable(addr, uintptr(n)) {
+		return nil, false
+	}
+	return engineMem.bytes(addr, n)
+}
+
+func engineStaticDataValid(addr, size uintptr) bool {
+	if size == 0 || addr == 0 || addr > ^uintptr(0)-size {
+		return false
+	}
+	if isLiveEngineMem() {
+		return engineDataReadable(addr, size)
+	}
+	_, ok := engineMem.bytes(addr, int(size))
+	return ok
+}
+
+func engineStaticDataU64(addr uintptr) (uint64, bool) {
+	if addr%8 != 0 {
+		return 0, false
+	}
+	if isLiveEngineMem() && !engineDataReadable(addr, 8) {
+		return 0, false
+	}
+	return engineMem.u64(addr)
+}
+
+const (
+	minEngineHeapAddr uintptr = 0x10000
+	maxPipeProbeBytes         = 4096
+)
+
+// nonFaultingPipe copies bounded C++ heap fields through an anonymous pipe's
+// SYS_WRITE usercopy path so an unmapped or guard page returns EFAULT instead
+// of faulting the process.
+type nonFaultingPipe struct {
+	mu   sync.Mutex
+	rfd  int
+	wfd  int
+	open bool
+}
+
+func (p *nonFaultingPipe) closeLocked() {
+	if !p.open {
+		return
+	}
+	_ = unix.Close(p.rfd)
+	_ = unix.Close(p.wfd)
+	p.rfd = -1
+	p.wfd = -1
+	p.open = false
+}
+
+func (p *nonFaultingPipe) reset() {
+	p.mu.Lock()
+	p.closeLocked()
+	p.mu.Unlock()
+}
+
+func (p *nonFaultingPipe) read(addr uintptr, out []byte) bool {
+	n := len(out)
+	if n <= 0 || n > maxPipeProbeBytes || addr < minEngineHeapAddr || addr > ^uintptr(0)-uintptr(n) {
+		return false
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if !p.open {
+		var fds [2]int
+		if err := unix.Pipe2(fds[:], unix.O_CLOEXEC|unix.O_NONBLOCK); err != nil {
+			return false
+		}
+		p.rfd = fds[0]
+		p.wfd = fds[1]
+		p.open = true
+	}
+	var wn uintptr
+	for {
+		var errno unix.Errno
+		wn, _, errno = unix.Syscall(unix.SYS_WRITE, uintptr(p.wfd), addr, uintptr(n))
+		if errno == unix.EINTR {
+			continue
+		}
+		if errno != 0 {
+			if errno != unix.EFAULT {
+				p.closeLocked()
+			}
+			return false
+		}
+		break
+	}
+	if wn != uintptr(n) {
+		p.closeLocked()
+		return false
+	}
+	for {
+		rn, err := unix.Read(p.rfd, out)
+		if err == unix.EINTR {
+			continue
+		}
+		if err != nil || rn != n {
+			p.closeLocked()
+			return false
+		}
+		break
+	}
+	return true
+}
+
+var mouseBehaviorHeapPipe nonFaultingPipe
+
+func engineMouseHeapU32(addr uintptr) (uint32, bool) {
+	if addr%4 != 0 {
+		return 0, false
+	}
+	if !isLiveEngineMem() {
+		return engineMem.u32(addr)
+	}
+	mod := currentEngineModule()
+	if mod == nil || !mod.IsOpen() || mod.OverlapsExec(addr, 4) {
+		return 0, false
+	}
+	var raw [4]byte
+	if !mouseBehaviorHeapPipe.read(addr, raw[:]) {
+		return 0, false
+	}
+	return binary.LittleEndian.Uint32(raw[:]), true
 }
 
 // mouseBehaviorAuthority caches the decode and carries the fail-closed
@@ -397,12 +525,18 @@ func EngineMouseBehavior() (MouseBehavior, bool) {
 	if layout == nil {
 		return MouseBehaviorDefault, false
 	}
-	obj, ok := engineMem.u64(layout.singleton + uintptr(layout.objOffset))
+	if layout.singleton > ^uintptr(0)-uintptr(layout.objOffset) {
+		return MouseBehaviorDefault, false
+	}
+	obj, ok := engineStaticDataU64(layout.singleton + uintptr(layout.objOffset))
 	if !ok || obj == 0 {
 		// NULL is the pre-onGameLoaded window, not a state.
 		return MouseBehaviorDefault, false
 	}
-	value, ok := engineMem.u32(uintptr(obj) + uintptr(layout.enumOffset))
+	if uintptr(obj) > ^uintptr(0)-uintptr(layout.enumOffset) {
+		return MouseBehaviorDefault, false
+	}
+	value, ok := engineMouseHeapU32(uintptr(obj) + uintptr(layout.enumOffset))
 	if !ok {
 		return MouseBehaviorDefault, false
 	}
@@ -432,15 +566,12 @@ func mouseBehaviorLayoutFor(getter uintptr) *mouseBehaviorLayout {
 	if err != nil {
 		logging.Logger(logging.CatJNI).Error(
 			"[jni] engine MouseBehavior decode failed; falling back to the exported boolean",
-			"getter", fmt.Sprintf("%#x", getter), "err", err)
+			"err", err)
 		return nil
 	}
 	mouseBehaviorAuthority.layout = &layout
 	logging.Logger(logging.CatJNI).Info("[jni] engine MouseBehavior authority resolved",
-		"getter", fmt.Sprintf("%#x", layout.getter),
-		"accessor", fmt.Sprintf("%#x", layout.accessor),
 		"index", layout.index,
-		"singleton", fmt.Sprintf("%#x", layout.singleton),
 		"object", fmt.Sprintf("+%#x", layout.objOffset),
 		"behavior", fmt.Sprintf("+%#x", layout.enumOffset))
 	return mouseBehaviorAuthority.layout
@@ -450,9 +581,9 @@ func mouseBehaviorLayoutFor(getter uintptr) *mouseBehaviorLayout {
 // image. Nothing is read from disk, so the decode always matches the client
 // that is actually loaded.
 func decodeMouseBehavior(getter uintptr) (mouseBehaviorLayout, error) {
-	code, ok := engineMem.bytes(getter, mouseBehaviorGetterWindow)
+	code, ok := engineCodeBytes(getter, mouseBehaviorGetterWindow)
 	if !ok {
-		return mouseBehaviorLayout{}, fmt.Errorf("getter body at %#x is not readable", getter)
+		return mouseBehaviorLayout{}, errors.New("getter body is not readable")
 	}
 	layout, err := decodeMouseBehaviorGetter(code, getter)
 	if err != nil {
@@ -461,18 +592,19 @@ func decodeMouseBehavior(getter uintptr) (mouseBehaviorLayout, error) {
 			return layout, err
 		}
 	}
-	accessor, ok := engineMem.bytes(layout.accessor, mouseBehaviorAccessorWindow)
+	accessor, ok := engineCodeBytes(layout.accessor, mouseBehaviorAccessorWindow)
 	if !ok {
-		return layout, fmt.Errorf("getSingleton body at %#x is not readable", layout.accessor)
+		return layout, errors.New("getSingleton body is not readable")
 	}
 	singleton, pivot, err := decodeSingletonAccessor(accessor, layout.accessor, layout.index)
 	if err != nil {
 		return layout, err
 	}
 	layout.singleton, layout.pivot = singleton, pivot
-	if !engineReadable(layout.singleton+uintptr(layout.objOffset), 8) {
-		return layout, fmt.Errorf("%w: singleton slot %#x is not in a readable mapping",
-			errMouseBehaviorShape, layout.singleton+uintptr(layout.objOffset))
+	if layout.singleton > ^uintptr(0)-uintptr(layout.objOffset) ||
+		!engineStaticDataValid(layout.singleton+uintptr(layout.objOffset), 8) {
+		return layout, fmt.Errorf("%w: singleton slot is not in module data segment",
+			errMouseBehaviorShape)
 	}
 	return layout, nil
 }

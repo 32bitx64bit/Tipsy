@@ -15,11 +15,16 @@ import (
 	"io"
 	"math"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
 	"unsafe"
+
+	"github.com/tipsy-linux/tipsy/internal/loader"
+	"golang.org/x/sys/unix"
 )
 
 // loadCopiedEngineImage maps a copied libroblox.so's PT_LOAD segments into one
@@ -561,23 +566,117 @@ func TestLocateCameraProps(t *testing.T) {
 	}
 }
 
+func openTestEngineModule(t *testing.T) (mod *loader.Module, getterAddr, singletonAddr uintptr) {
+	t.Helper()
+	dir := t.TempDir()
+	asmPath := filepath.Join(dir, "engine_fixture.s")
+	soPath := filepath.Join(dir, "libtest_engine.so")
+	const asmSrc = `
+.text
+.globl test_mouse_locked
+.type test_mouse_locked, @function
+test_mouse_locked:
+	.byte 0xbf, 0x01, 0x00, 0x00, 0x00
+	call test_get_singleton
+	.byte 0x48, 0x89, 0xc3
+	.byte 0x48, 0x8b, 0x83, 0x80, 0x00, 0x00, 0x00
+	.byte 0x83, 0xb8, 0x90, 0x00, 0x00, 0x00, 0x01
+	.byte 0x0f, 0x94, 0xc0
+	ret
+	.space 160, 0x90
+
+.globl test_get_singleton
+.type test_get_singleton, @function
+test_get_singleton:
+	.byte 0x89, 0xfb
+	.byte 0x83, 0xfb, 0x01
+	leaq test_singleton_a(%rip), %rcx
+	leaq test_singleton_b(%rip), %rax
+	.byte 0x48, 0x0f, 0x44, 0xc1
+	ret
+	.space 160, 0x90
+
+.data
+.balign 8
+.globl test_singleton_a
+.type test_singleton_a, @object
+test_singleton_a:
+	.space 512, 0x01
+.globl test_singleton_b
+.type test_singleton_b, @object
+test_singleton_b:
+	.space 512, 0x01
+`
+	if err := os.WriteFile(asmPath, []byte(asmSrc), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cmd := exec.Command("cc", "-shared", "-fPIC", "-nostdlib", "-Wl,-Bsymbolic", "-Wl,-z,max-page-size=0x1000", "-o", soPath, asmPath)
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("build test engine module: %v: %s", err, out)
+	}
+	mod, err := loader.Open(soPath, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		clearRobloxEngineModule()
+		_ = mod.Close()
+	})
+	getterAddr, err = mod.Lookup("test_mouse_locked")
+	if err != nil {
+		t.Fatal(err)
+	}
+	singletonAddr, err = mod.Lookup("test_singleton_a")
+	if err != nil {
+		t.Fatal(err)
+	}
+	return mod, getterAddr, singletonAddr
+}
+
 func TestEngineCameraMemoryIsIsolatedAndGuarded(t *testing.T) {
+	mod, getterAddr, singletonAddr := openTestEngineModule(t)
+
 	data := make([]byte, 64)
 	binary.LittleEndian.PutUint64(data[8:], 0x1122334455667788)
 	binary.LittleEndian.PutUint32(data[16:], 0xcafef00d)
 	base := uintptr(unsafe.Pointer(&data[0]))
 
+	guardPage, err := unix.Mmap(-1, 0, unix.Getpagesize(), unix.PROT_NONE, unix.MAP_PRIVATE|unix.MAP_ANONYMOUS)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = unix.Munmap(guardPage) })
+	guardAddr := uintptr(unsafe.Pointer(&guardPage[0]))
+
 	var m engineCameraMemory
 	if _, ok := m.u64(base + 8); ok {
-		t.Fatal("read before the first snapshot succeeded")
+		t.Fatal("read before refresh succeeded")
 	}
-	if !m.refresh() {
-		t.Fatal("no /proc/self/maps snapshot")
+	// Without a wired engine module, refresh must fail closed.
+	clearRobloxEngineModule()
+	if m.refresh() {
+		t.Fatal("refresh succeeded without wired engine module")
 	}
-	engineMaps.mu.Lock()
-	sharedReads := engineMaps.reads
-	engineMaps.mu.Unlock()
 
+	SetRobloxEngineModule(mod)
+	t.Cleanup(clearRobloxEngineModule)
+	if !m.refresh() {
+		t.Fatal("refresh failed with open engine module")
+	}
+
+	// Static singleton slots must reside strictly inside the module's data segments.
+	*(*uint64)(ptrFromUintptr(singletonAddr + 16)) = 0x5566778899aabbcc
+	if v, ok := m.staticU64(singletonAddr + 16); !ok || v != 0x5566778899aabbcc {
+		t.Fatalf("staticU64(data) = %#x %v", v, ok)
+	}
+	if _, ok := m.staticU64(base + 8); ok {
+		t.Fatal("staticU64 accepted heap address outside module data segment")
+	}
+	if _, ok := m.staticU64(getterAddr &^ 7); ok {
+		t.Fatal("staticU64 accepted executable .text address")
+	}
+
+	// Heap reads succeed on live heap bytes and fail closed on guard, low, exec, and wrapping spans.
 	if v, ok := m.u64(base + 8); !ok || v != 0x1122334455667788 {
 		t.Fatalf("u64 %#x %v", v, ok)
 	}
@@ -587,9 +686,15 @@ func TestEngineCameraMemoryIsIsolatedAndGuarded(t *testing.T) {
 	if _, ok := m.u64(base + 9); ok {
 		t.Fatal("misaligned u64 read")
 	}
-	for i := 0; i < 200; i++ {
+	if _, ok := m.u64(guardAddr); ok {
+		t.Fatal("PROT_NONE guard page read succeeded")
+	}
+	if _, ok := m.bytes(getterAddr, 8); ok {
+		t.Fatal("executable .text span accepted by camera heap reader")
+	}
+	for i := 0; i < 64; i++ {
 		if _, ok := m.u64(0x10 + uintptr(i)*8); ok {
-			t.Fatalf("read of unmapped address %#x", 0x10+i*8)
+			t.Fatalf("read of low unmapped address %#x", 0x10+i*8)
 		}
 	}
 	if _, ok := m.bytes(^uintptr(0)-3, 8); ok {
@@ -598,12 +703,25 @@ func TestEngineCameraMemoryIsIsolatedAndGuarded(t *testing.T) {
 	if b, ok := m.bytes(base+8, 4); !ok || !bytes.Equal(b, data[8:12]) {
 		t.Fatalf("bytes %x %v", b, ok)
 	}
-	engineMaps.mu.Lock()
-	after := engineMaps.reads
-	engineMaps.mu.Unlock()
-	if after != sharedReads {
-		t.Fatalf("camera reads spent the shared maps budget: %d -> %d", sharedReads, after)
+
+	// Camera pipe state is isolated from MouseBehavior's pipe state.
+	if v, ok := engineMouseHeapU32(base + 16); !ok || v != 0xcafef00d {
+		t.Fatalf("mouseBehavior heap read = %#x %v", v, ok)
 	}
+	mouseBehaviorHeapPipe.reset()
+	if !m.pipe.open {
+		t.Fatal("resetting MouseBehavior heap pipe closed camera pipe")
+	}
+	if v, ok := m.u32(base + 16); !ok || v != 0xcafef00d {
+		t.Fatalf("camera u32 after MouseBehavior reset = %#x %v", v, ok)
+	}
+
+	// ClearRobloxDirectInputTarget invalidates the wired module for camera refreshes.
+	ClearRobloxDirectInputTarget()
+	if m.refresh() {
+		t.Fatal("refresh succeeded after ClearRobloxDirectInputTarget")
+	}
+	runtime.KeepAlive(data)
 }
 
 func TestEngineCameraFirstPersonDetector(t *testing.T) {
@@ -724,5 +842,21 @@ func TestEngineCameraRunNeverLatchesOff(t *testing.T) {
 	}, stop)
 	if len(lines) != 1 || !strings.Contains(lines[0], "unresolved: "+errEngineCameraShape.Error()) {
 		t.Fatalf("decode failure lines %q", lines)
+	}
+}
+
+func TestCameraTraceBuildGating(t *testing.T) {
+	t.Setenv("TIPSY_TRACE_CAMERA", "1")
+	buf := captureLogs(t)
+	cameraTraceLogger()("sample=%d", 7)
+	out := buf.String()
+	if cameraTraceCompiledIn {
+		if !strings.Contains(out, "[jni] camera trace: sample=7") {
+			t.Fatalf("expected dev camera trace output, got %q", out)
+		}
+	} else {
+		if out != "" {
+			t.Fatalf("official_release build emitted TIPSY_TRACE_CAMERA output: %q", out)
+		}
 	}
 }

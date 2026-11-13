@@ -12,13 +12,11 @@ package jni
 import "C"
 
 import (
-	"fmt"
 	"os"
 	"sort"
 	"strings"
 	"sync"
 	"sync/atomic"
-	"unsafe"
 
 	"github.com/tipsy-linux/tipsy/internal/config"
 	"github.com/tipsy-linux/tipsy/internal/gamepad"
@@ -182,10 +180,10 @@ func SetRobloxDirectGamepadTarget(env, class, axisFn, buttonFn, connectFn, disco
 	logging.Logger(logging.CatJNI).Info("[jni] gamepad delivery path",
 		"mode", GamepadInputPath(),
 		"directReady", ready,
-		"axisEvent", fmt.Sprintf("%#x", axisFn),
-		"buttonEvent", fmt.Sprintf("%#x", buttonFn),
-		"connectEvent", fmt.Sprintf("%#x", connectFn),
-		"disconnectEvent", fmt.Sprintf("%#x", disconnectFn))
+		"axisReady", axisFn != 0,
+		"buttonReady", buttonFn != 0,
+		"connectReady", connectFn != 0,
+		"disconnectReady", disconnectFn != 0)
 	return ready
 }
 
@@ -259,7 +257,7 @@ func DispatchRobloxDirectGamepadButton(deviceID, keyCode int32, pressed bool) bo
 	if pressed {
 		down = 1
 	}
-	C.tipsy_direct_gamepad_button(unsafe.Pointer(fn), C.uintptr_t(env), C.uintptr_t(class),
+	C.tipsy_direct_gamepad_button(ptrFromUintptr(fn), C.uintptr_t(env), C.uintptr_t(class),
 		C.int(deviceID), C.int(keyCode), down)
 	atomic.AddUint64(&gamepadStats.ButtonDelivered, 1)
 	if gamepadDebug() {
@@ -280,7 +278,7 @@ func DispatchRobloxDirectGamepadAxis(deviceID, axisID int32, f1, f2, f3 float32)
 		gpDrop("axis: no direct gamepad target wired")
 		return false
 	}
-	C.tipsy_direct_gamepad_axis(unsafe.Pointer(fn), C.uintptr_t(env), C.uintptr_t(class),
+	C.tipsy_direct_gamepad_axis(ptrFromUintptr(fn), C.uintptr_t(env), C.uintptr_t(class),
 		C.int(deviceID), C.int(axisID), C.float(f1), C.float(f2), C.float(f3))
 	atomic.AddUint64(&gamepadStats.AxisDelivered, 1)
 	if gamepadDebug() {
@@ -300,7 +298,7 @@ func DispatchRobloxDirectGamepadConnect(deviceID, gamepadType int32) bool {
 		gpDrop("connect: no direct gamepad target wired")
 		return false
 	}
-	C.tipsy_direct_gamepad_connect(unsafe.Pointer(fn), C.uintptr_t(env), C.uintptr_t(class),
+	C.tipsy_direct_gamepad_connect(ptrFromUintptr(fn), C.uintptr_t(env), C.uintptr_t(class),
 		C.int(deviceID), C.int(gamepadType))
 	atomic.AddUint64(&gamepadStats.ConnectDelivered, 1)
 	return true
@@ -316,7 +314,7 @@ func DispatchRobloxDirectGamepadDisconnect(deviceID int32) bool {
 		gpDrop("disconnect: no direct gamepad target wired")
 		return false
 	}
-	C.tipsy_direct_gamepad_disconnect(unsafe.Pointer(fn), C.uintptr_t(env), C.uintptr_t(class),
+	C.tipsy_direct_gamepad_disconnect(ptrFromUintptr(fn), C.uintptr_t(env), C.uintptr_t(class),
 		C.int(deviceID))
 	atomic.AddUint64(&gamepadStats.DisconnectDelivered, 1)
 	return true
@@ -336,7 +334,7 @@ func DispatchRobloxDirectGamepadSetKey(deviceID, keyCode int32, supported bool, 
 	if supported {
 		sup = 1
 	}
-	C.tipsy_direct_gamepad_set_key(unsafe.Pointer(fn), C.uintptr_t(env), C.uintptr_t(class),
+	C.tipsy_direct_gamepad_set_key(ptrFromUintptr(fn), C.uintptr_t(env), C.uintptr_t(class),
 		C.int(deviceID), C.int(keyCode), sup, C.int(gamepadType))
 	atomic.AddUint64(&gamepadStats.CapabilityDelivered, 1)
 	return true
@@ -356,7 +354,7 @@ func DispatchRobloxDirectGamepadSetMotion(deviceID, axisID, arg int32, supported
 	if supported {
 		sup = 1
 	}
-	C.tipsy_direct_gamepad_set_motion(unsafe.Pointer(fn), C.uintptr_t(env), C.uintptr_t(class),
+	C.tipsy_direct_gamepad_set_motion(ptrFromUintptr(fn), C.uintptr_t(env), C.uintptr_t(class),
 		C.int(deviceID), C.int(axisID), C.int(arg), sup, C.int(gamepadType))
 	atomic.AddUint64(&gamepadStats.CapabilityDelivered, 1)
 	return true

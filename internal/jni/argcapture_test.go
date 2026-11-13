@@ -100,8 +100,11 @@ func TestLifecycleHandleDiagnostic(t *testing.T) {
 	if got := strings.Count(out, "[jni] lifecycle-handle"); got != 2 {
 		t.Fatalf("lifecycle-handle diagnostics = %d, want 2: %s", got, out)
 	}
-	if !strings.Contains(out, "handle=4886718345") || !strings.Contains(out, "handle=4886718352") {
-		t.Fatalf("missing captured handles: %s", out)
+	if strings.Contains(out, "4886718345") || strings.Contains(out, "4886718352") || strings.Contains(out, "handle=") {
+		t.Fatalf("lifecycle-handle leaked raw handle value: %s", out)
+	}
+	if !strings.Contains(out, "nonZero=true") {
+		t.Fatalf("missing nonZero indicator on lifecycle-handle: %s", out)
 	}
 	if !strings.Contains(out, "[jni] onGameLoaded") {
 		t.Fatalf("missing onGameLoaded receiver record: %s", out)
