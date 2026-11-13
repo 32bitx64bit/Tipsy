@@ -5,16 +5,14 @@ package app
 
 import (
 	"context"
-	"errors"
 
 	"github.com/tipsy-linux/tipsy/internal/setupsvc"
 )
 
 // PackageAuthorizationTrust is the package-install trust policy for a Tipsy
-// session. It uses the same authority decision as launch, except that a source
-// or development AppImage without persisted consent still authorizes the
-// official Roblox APK as DevelopmentUnrestricted. A broken official AppImage
-// fails closed; that path never becomes development package authority.
+// session. Official release builds require authenticated release identity and
+// fail closed otherwise; non-official builds allow development package trust
+// only when compiled without official_release.
 func PackageAuthorizationTrust(ctx context.Context, approveDevelopment bool) (setupsvc.TrustPolicy, error) {
 	return packageAuthorizationTrust(ctx, approveDevelopment, defaultAuthorityDependencies())
 }
@@ -31,8 +29,8 @@ func packageAuthorizationTrust(ctx context.Context, approveDevelopment bool, dep
 	if err == nil {
 		return authority.Trust, nil
 	}
-	if errors.Is(err, ErrDevelopmentConsentRequired) {
-		return setupsvc.DevelopmentTrustPolicy(), nil
+	if trust, ok := fallbackPackageAuthorizationTrust(err); ok {
+		return trust, nil
 	}
 	return setupsvc.TrustPolicy{}, err
 }

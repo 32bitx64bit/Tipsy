@@ -13,8 +13,6 @@ import (
 	"github.com/tipsy-linux/tipsy/internal/setupsvc"
 )
 
-const DevelopmentUnrestrictedWarning = "WARNING: DevelopmentUnrestricted mode is active; this is not an OfficialVerified Tipsy session."
-
 var ErrAuthorizedLaunchSessionClosed = errors.New("authorized launch session is closed")
 
 // LaunchSessionError preserves a completed authority decision when generation
@@ -93,11 +91,11 @@ func resolveLaunchAuthorityState(ctx context.Context, approveDevelopment bool, d
 	}
 	authority, err := resolveAuthority(ctx, cfg, deps)
 	if err != nil {
-		return LaunchAuthorityState{DevelopmentConsentRequired: errors.Is(err, ErrDevelopmentConsentRequired)}, authorityResolution{}, err
+		return LaunchAuthorityState{DevelopmentConsentRequired: isDevelopmentConsentRequired(err)}, authorityResolution{}, err
 	}
-	state := LaunchAuthorityState{Mode: authority.Mode}
-	if authority.Mode == setupsvc.DevelopmentUnrestricted {
-		state.Warning = DevelopmentUnrestrictedWarning
+	state := LaunchAuthorityState{
+		Mode:    authority.Mode,
+		Warning: authorityWarningForMode(authority.Mode),
 	}
 	return state, authority, nil
 }

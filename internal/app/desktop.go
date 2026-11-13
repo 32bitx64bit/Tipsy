@@ -86,12 +86,13 @@ func desktopStatus(args []string, stdout, stderr io.Writer) int {
 	if asJSON {
 		out, err := marshalIndent(struct {
 			desktop.Status
-			Medium  desktop.Medium `json:"medium"`
-			Origin  string         `json:"origin,omitempty"`
-			Version string         `json:"version"`
-			Channel string         `json:"channel"`
-			Plan    desktop.Action `json:"plan"`
-		}{status, medium, origin, version.String(), version.Channel, plan})
+			Medium     desktop.Medium `json:"medium"`
+			Origin     string         `json:"origin,omitempty"`
+			Version    string         `json:"version"`
+			Channel    string         `json:"channel"`
+			Provenance string         `json:"provenance"`
+			Plan       desktop.Action `json:"plan"`
+		}{status, medium, origin, version.String(), version.Channel, version.Provenance(), plan})
 		if err != nil {
 			fmt.Fprintln(stderr, err)
 			return 1
@@ -100,6 +101,7 @@ func desktopStatus(args []string, stdout, stderr io.Writer) int {
 		return 0
 	}
 	fmt.Fprintf(stdout, "This build:   %s %s (%s channel, %s)\n", id.Name, version.String(), version.Channel, describeMedium(medium, origin))
+	fmt.Fprintf(stdout, "Provenance:   %s\n", version.Provenance())
 	fmt.Fprintf(stdout, "Identity:     %s\n", id.File(desktop.Play))
 	if status.Owner == nil {
 		fmt.Fprintln(stdout, "Launcher:     not provided by any installation")

@@ -13,7 +13,6 @@ import (
 	"github.com/tipsy-linux/tipsy/internal/android"
 	"github.com/tipsy-linux/tipsy/internal/apk"
 	"github.com/tipsy-linux/tipsy/internal/compat"
-	"github.com/tipsy-linux/tipsy/internal/config"
 	"github.com/tipsy-linux/tipsy/internal/elfinspect"
 	"github.com/tipsy-linux/tipsy/internal/logging"
 	"github.com/tipsy-linux/tipsy/internal/rbxuri"
@@ -40,12 +39,12 @@ func cmdSetup(ctx context.Context, args []string, stdout, stderr io.Writer) int 
 		return 2
 	}
 	if f.help {
-		fmt.Fprint(stdout, setupHelp)
+		fmt.Fprint(stdout, setupHelpText())
 		return 0
 	}
 	if len(f.rest) == 0 {
 		fmt.Fprintln(stderr, "pass official APK/dir")
-		fmt.Fprint(stderr, setupHelp)
+		fmt.Fprint(stderr, setupHelpText())
 		return 2
 	}
 	cfg, err := loadConfigWithDevelopmentConsent(development)
@@ -58,9 +57,7 @@ func cmdSetup(ctx context.Context, args []string, stdout, stderr io.Writer) int 
 		fmt.Fprintln(stderr, logging.Redact(err.Error()))
 		return 1
 	}
-	if authority.Mode == setupsvc.DevelopmentUnrestricted {
-		printDevelopmentWarning(stderr)
-	}
+	printAuthorityWarning(stderr, authority.Mode)
 	service := setupsvc.New(SetupHooks())
 	service.Trust = authority.Trust
 	res, err := service.Install(ctx, setupsvc.InstallRequest{Mode: setupsvc.InstallLocal, LocalPaths: f.rest}, nil)
@@ -91,19 +88,19 @@ func cmdLaunchWithDependencies(ctx context.Context, args []string, stdout, stder
 	for len(rest) > 0 {
 		switch {
 		case rest[0] == "-h" || rest[0] == "--help":
-			fmt.Fprint(stdout, launchHelp)
+			fmt.Fprint(stdout, launchHelpText())
 			return 0
 		case rest[0] == "--probe":
 			probe = true
 			rest = rest[1:]
-		case rest[0] == "--development":
+		case parseLaunchDevelopmentFlag(rest[0]):
 			development = true
 			rest = rest[1:]
 		case rest[0] == "--":
 			rest = rest[1:]
 			if len(rest) == 0 {
 				fmt.Fprintln(stderr, "launch: missing URI after --")
-				fmt.Fprint(stderr, launchHelp)
+				fmt.Fprint(stderr, launchHelpText())
 				return 2
 			}
 			uri = rest[0]
@@ -113,7 +110,7 @@ func cmdLaunchWithDependencies(ctx context.Context, args []string, stdout, stder
 			rest = rest[1:]
 		default:
 			fmt.Fprintf(stderr, "launch: unexpected argument %q\n", rest[0])
-			fmt.Fprint(stderr, launchHelp)
+			fmt.Fprint(stderr, launchHelpText())
 			return 2
 		}
 	}
@@ -148,46 +145,6 @@ func cmdLaunchWithDependencies(ctx context.Context, args []string, stdout, stder
 		fmt.Fprintln(stdout, "probe: libroblox.so loaded, JNI_OnLoad returned")
 	}
 	return 0
-}
-
-func parseSetupFlags(args []string) (flags, bool, error) {
-	var ordinary []string
-	development := false
-	for _, arg := range args {
-		if arg == "--development" {
-			development = true
-			continue
-		}
-		ordinary = append(ordinary, arg)
-	}
-	f, err := parseFlags(ordinary)
-	return f, development, err
-}
-
-func loadConfigWithDevelopmentConsent(requested bool) (*config.Config, error) {
-	cfg, err := config.Load()
-	if err != nil {
-		return nil, err
-	}
-	if !requested || cfg.DevelopmentApproved() {
-		return cfg, nil
-	}
-	// Recording consent is a read-modify-write: Update holds the cross-process
-	// config lock across load→mutate→save so a concurrent `config set` on the
-	// same file cannot be clobbered by this stale snapshot.
-	err = config.Update(func(c *config.Config) error {
-		c.ApproveDevelopment()
-		cfg = c
-		return nil
-	})
-	if err != nil {
-		return nil, fmt.Errorf("record explicit development authorization: %w", err)
-	}
-	return cfg, nil
-}
-
-func printDevelopmentWarning(w io.Writer) {
-	fmt.Fprintln(w, DevelopmentUnrestrictedWarning)
 }
 
 func cmdInspect(ctx context.Context, args []string, stdout, stderr io.Writer) int {

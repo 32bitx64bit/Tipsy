@@ -27,6 +27,12 @@ func Run(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 		return 2
 	}
 
+	logging.Logger(logging.CatRuntime).Info("tipsy startup",
+		"version", version.String(),
+		"channel", version.Channel,
+		"provenance", version.Provenance(),
+		"sourceCommit", version.SourceCommit)
+
 	cmd, rest := args[0], args[1:]
 	switch cmd {
 	case "help", "-h", "--help":
@@ -34,6 +40,9 @@ func Run(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 		return 0
 	case "version", "--version", "-v":
 		fmt.Fprintln(stdout, version.String())
+		if !version.IsOfficialBuild() {
+			fmt.Fprintln(stdout, version.UnofficialBuildLabel)
+		}
 		return 0
 	case "doctor":
 		return cmdDoctor(ctx, rest, stdout, stderr)
@@ -97,6 +106,9 @@ func cmdDoctor(ctx context.Context, args []string, stdout, stderr io.Writer) int
 		}
 		_, _ = stdout.Write(b)
 		return 0
+	}
+	if !version.IsOfficialBuild() {
+		fmt.Fprintln(stdout, version.UnofficialBuildLabel)
 	}
 	fmt.Fprint(stdout, diagnostics.FormatDoctor(rep))
 	return 0

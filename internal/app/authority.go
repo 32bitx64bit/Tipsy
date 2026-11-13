@@ -13,8 +13,6 @@ import (
 	"github.com/tipsy-linux/tipsy/internal/setupsvc"
 )
 
-var ErrDevelopmentConsentRequired = errors.New("official release authority is unavailable; run once with --development to explicitly authorize a non-official (local or source) build")
-
 type authorityResolution struct {
 	Mode  setupsvc.AuthorizationMode
 	Trust setupsvc.TrustPolicy
@@ -28,12 +26,13 @@ func defaultAuthorityDependencies() authorityDependencies {
 	return authorityDependencies{identifyOfficialRelease: identifyOfficialRelease}
 }
 
-// resolveAuthority is the single app-level trust decision. An artifact whose
-// build-info.json carries an official releaseKind is OfficialVerified using
-// the compiled Roblox signer floor. Cryptographic admission stays in release
-// CI and in the package manager's signature check at install; the running
-// binary cannot usefully attest itself. Local builds of any medium and
-// developer wraps require explicit --development consent.
+// resolveAuthority is the single app-level trust decision. A binary compiled
+// with -tags official_release and stamped with official release metadata is
+// OfficialVerified using the compiled Roblox signer floor. Cryptographic
+// admission stays in release CI and in the package manager's signature check
+// at install; runtime markers such as build-info.json never grant authority.
+// Local builds of any medium and developer wraps require explicit
+// --development consent.
 func resolveAuthority(ctx context.Context, cfg *config.Config, deps authorityDependencies) (authorityResolution, error) {
 	if ctx == nil {
 		ctx = context.Background()
@@ -48,10 +47,7 @@ func resolveAuthority(ctx context.Context, cfg *config.Config, deps authorityDep
 			return authorityResolution{}, fmt.Errorf("official release identity: %w", err)
 		}
 	}
-	if cfg != nil && cfg.DevelopmentApproved() {
-		return authorityResolution{Mode: setupsvc.DevelopmentUnrestricted, Trust: setupsvc.DevelopmentTrustPolicy()}, nil
-	}
-	return authorityResolution{}, ErrDevelopmentConsentRequired
+	return resolveFallbackAuthority(cfg)
 }
 
 func generationStoreRoot() string {

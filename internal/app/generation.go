@@ -55,7 +55,7 @@ func openOrRepairGeneration(ctx context.Context, authority authorityResolution, 
 			_ = generation.Close()
 		}
 	}
-	retained, err := retainedAPKCandidates(storeRoot, authority.Mode == setupsvc.DevelopmentUnrestricted)
+	retained, err := retainedAPKCandidates(storeRoot, allowLegacyDevelopmentAPK(authority.Mode))
 	if err != nil {
 		return nil, fmt.Errorf("inspect retained package set: %w", err)
 	}
@@ -91,13 +91,7 @@ func requireGenerationMode(generation launchGeneration, mode setupsvc.Authorizat
 	if authorization.Mode != mode {
 		return fmt.Errorf("runtime generation authorization differs from the selected mode")
 	}
-	if mode == setupsvc.OfficialVerified && !authorization.PolicyAuthorized {
-		return fmt.Errorf("official runtime generation lacks authenticated policy authorization")
-	}
-	if mode == setupsvc.DevelopmentUnrestricted && authorization.PolicyAuthorized {
-		return fmt.Errorf("development runtime generation claims official policy authorization")
-	}
-	return nil
+	return validateGenerationModeAuthorization(mode, authorization)
 }
 
 var retainedBlobName = regexp.MustCompile(`^[a-f0-9]{64}\.apk$`)
@@ -149,13 +143,6 @@ func regularAPKFiles(dir string, contentAddressed bool) ([]string, error) {
 	}
 	sort.Strings(paths)
 	return paths, nil
-}
-
-func setupCommand(mode setupsvc.AuthorizationMode) string {
-	if mode == setupsvc.OfficialVerified {
-		return "tipsy setup <official-apk-or-dir>"
-	}
-	return "tipsy setup --development <official-apk-or-dir>"
 }
 
 // selectRetainedAPK keeps a single package for repair. Content-addressed

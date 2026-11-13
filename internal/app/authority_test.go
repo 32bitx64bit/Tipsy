@@ -1,6 +1,8 @@
 // Copyright 2026 The Tipsy Authors
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
+//go:build !official_release
+
 package app
 
 import (
@@ -314,4 +316,57 @@ func TestRepairPicksNewestOfMultipleRetainedAPKs(t *testing.T) {
 		t.Fatalf("official repair = %#v, %v", got, err)
 	}
 	defer got.Close()
+}
+
+func TestRunLaunchRequiresExplicitDevelopmentConsentWhenOfficialAuthorityIsAbsent(t *testing.T) {
+	t.Setenv("XDG_DATA_HOME", t.TempDir())
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	code, _, errOut := runArgs(t, "launch", "--probe")
+	if code != 1 {
+		t.Fatalf("exit %d, want 1; stderr=%s", code, errOut)
+	}
+	if !strings.Contains(errOut, "--development") {
+		t.Fatalf("stderr=%s", errOut)
+	}
+}
+
+func TestRunLaunchNeedsSetupAfterExplicitDevelopmentConsent(t *testing.T) {
+	t.Setenv("XDG_DATA_HOME", t.TempDir())
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	code, _, errOut := runArgs(t, "launch", "--development", "--probe")
+	if code != 1 {
+		t.Fatalf("exit %d, want 1; stderr=%s", code, errOut)
+	}
+	if !strings.Contains(errOut, "DevelopmentUnrestricted") || !strings.Contains(errOut, "runtime not set up") {
+		t.Fatalf("stderr=%s", errOut)
+	}
+	cfg, err := config.Load()
+	if err != nil || !cfg.DevelopmentApproved() {
+		t.Fatalf("explicit consent was not persisted: %+v, %v", cfg, err)
+	}
+}
+
+func TestRunSetupRejectsUnverifiedPackage(t *testing.T) {
+	xdg := t.TempDir()
+	t.Setenv("XDG_DATA_HOME", xdg)
+	t.Setenv("XDG_CACHE_HOME", filepath.Join(xdg, "cache-home"))
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(xdg, "config-home"))
+	src := t.TempDir()
+	apkPath := filepath.Join(src, "base.apk")
+	writeCLITestAPK(t, apkPath, map[string][]byte{
+		"AndroidManifest.xml":     []byte("manifest"),
+		"lib/x86_64/libroblox.so": []byte("cli-setup-lib"),
+		"assets/a.txt":            []byte("asset"),
+	})
+
+	code, out, errOut := runArgs(t, "setup", "--development", apkPath)
+	if code != 1 {
+		t.Fatalf("exit %d stdout=%s stderr=%s", code, out, errOut)
+	}
+	if !strings.Contains(errOut, "package inspection failed") && !strings.Contains(errOut, "signature") {
+		t.Fatalf("expected actionable verification failure: %s", errOut)
+	}
+	if _, err := os.Stat(filepath.Join(xdg, "tipsy", "runtime")); !os.IsNotExist(err) {
+		t.Fatalf("unverified package created runtime: %v", err)
+	}
 }

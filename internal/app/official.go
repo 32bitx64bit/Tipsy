@@ -4,37 +4,26 @@
 package app
 
 import (
-	"bufio"
 	"context"
-	"encoding/json"
 	"errors"
-	"fmt"
-	"os"
-	"path/filepath"
-	"strings"
-	"syscall"
 
-	"github.com/tipsy-linux/tipsy/internal/desktop"
+	"github.com/tipsy-linux/tipsy/internal/version"
 )
 
-// releaseKind values the build scripts write into build-info.json. Every
-// local build of every medium is development-unrestricted.
+// releaseKind values the official build scripts stamp into the binary at
+// link time (and record in the packaging build-info.json evidence). Every
+// local build of every medium is development-unrestricted or unstamped.
 const (
-	releaseKindDevelopment = "development-unrestricted"
-	// build-appdir.sh --mode official: release-candidate AppImage, no cosign.
-	releaseKindCandidateUnsigned = "release-candidate-unsigned"
-	// build-appdir.sh --mode github-signed: cosign keyless AppImage.
-	releaseKindCandidateKeyless = "release-candidate-keyless"
-	// build-deb/rpm/pacman/flatpak.sh --mode official: built for the
-	// GPG-signed APT/RPM/pacman/OSTree repository; apt, dnf, pacman and
-	// flatpak verify that signature when the package is installed.
-	releaseKindRepositorySigned = "release-repository-signed"
+	releaseKindDevelopment       = version.ReleaseKindDevelopment
+	releaseKindCandidateUnsigned = version.ReleaseKindCandidateUnsigned
+	releaseKindCandidateKeyless  = version.ReleaseKindCandidateKeyless
+	releaseKindRepositorySigned  = version.ReleaseKindRepositorySigned
 )
 
-// errOfficialReleaseUnavailable means this process is not running from a
-// GitHub-built artifact: no AppRun handoff, and not installed as the Flatpak
-// or a root-owned repository package that carries an official build-info.
-var errOfficialReleaseUnavailable = errors.New("official release identity is unavailable outside a GitHub-built AppImage, Flatpak, or repository package")
+// errOfficialReleaseUnavailable means this binary is not an official Tipsy
+// release: it was not compiled with -tags official_release and stamped with
+// official release metadata by the release build scripts.
+var errOfficialReleaseUnavailable = errors.New("official release identity is unavailable: this binary was not compiled and stamped as an official Tipsy release")
 
 func officialReleaseKind(kind string) error {
 	switch kind {
@@ -45,132 +34,25 @@ func officialReleaseKind(kind string) error {
 	}
 }
 
-// identifyOfficialRelease is the app-level release identity. The AppImage
-// branch keeps its AppRun contract; otherwise the executable must live in one
-// of the trusted install roots below next to an official build-info.json.
-// None of this authenticates the binary cryptographically; it stops a local
-// build from ever presenting itself as an official release.
+// identifyOfficialRelease is the app-level release identity. It is decided at
+// compile time: version.IsOfficialBuild requires the official_release build
+// tag plus linker-stamped release metadata (stable channel, official
+// ReleaseKind, non-dev Version). Runtime markers — the AppRun handoff
+// (TIPSY_RELEASE_ARTIFACT / TIPSY_RELEASE_APPDIR), an installed
+// build-info.json, install roots, or file ownership — are packaging evidence
+// only and never grant authority, so a forged marker cannot turn a local
+// `go build` into an OfficialVerified release. Cryptographic admission of the
+// artifact stays in release CI (Sigstore) and the package manager's signature
+// check at install.
 func identifyOfficialRelease(ctx context.Context) error {
-	err := identifyOfficialAppImage(ctx)
-	if err == nil || !errors.Is(err, errOfficialReleaseUnavailable) {
-		return err
+	if ctx == nil {
+		ctx = context.Background()
 	}
-	return identifyOfficialInstall(ctx)
-}
-
-// installRoot is a location only a package manager writes to.
-type installRoot struct {
-	medium    string
-	binDir    string
-	buildInfo string
-	// flatpakApp requires /.flatpak-info to name this application: the
-	// binary was installed by flatpak under our ID, and /app is read-only.
-	flatpakApp string
-	// rootOwned requires the executable and build-info to be owned by root
-	// and not writable by anyone else: the shape dpkg/rpm leave behind, and
-	// one a user's own prefix install never has.
-	rootOwned bool
-}
-
-var officialInstallRoots = []installRoot{
-	{medium: "flatpak", binDir: "/app/bin", buildInfo: "/app/share/tipsy/build-info.json", flatpakApp: desktop.Base},
-	{medium: "package", binDir: "/usr/bin", buildInfo: "/usr/share/tipsy/build-info.json", rootOwned: true},
-}
-
-var (
-	flatpakInfoPath   = "/.flatpak-info"
-	currentExecutable = os.Executable
-	ownedByRoot       = func(info os.FileInfo) bool {
-		st, ok := info.Sys().(*syscall.Stat_t)
-		return ok && st.Uid == 0
-	}
-)
-
-func identifyOfficialInstall(ctx context.Context) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	exe, err := currentExecutable()
-	if err != nil {
-		return fmt.Errorf("resolve running executable: %w", err)
-	}
-	if resolved, err := filepath.EvalSymlinks(exe); err == nil {
-		exe = resolved
-	}
-	name := filepath.Base(exe)
-	if name != "tipsy" && name != "tipsy-gui" {
+	if !version.IsOfficialBuild() {
 		return errOfficialReleaseUnavailable
 	}
-	for _, root := range officialInstallRoots {
-		if filepath.Dir(exe) != filepath.Clean(root.binDir) {
-			continue
-		}
-		return root.identify(exe)
-	}
-	return errOfficialReleaseUnavailable
-}
-
-func (root installRoot) identify(exe string) error {
-	if root.flatpakApp != "" && flatpakApplication() != root.flatpakApp {
-		return errOfficialReleaseUnavailable
-	}
-	info, err := os.Lstat(root.buildInfo)
-	if err != nil {
-		if errors.Is(err, os.ErrNotExist) {
-			// Repackaged or hand-installed without our marker: honest dev.
-			return errOfficialReleaseUnavailable
-		}
-		return fmt.Errorf("%s build-info: %w", root.medium, err)
-	}
-	if !info.Mode().IsRegular() || info.Size() > maxBuildInfoBytes {
-		return fmt.Errorf("%s build-info is not a small regular file", root.medium)
-	}
-	if root.rootOwned {
-		exeInfo, err := os.Lstat(exe)
-		if err != nil {
-			return fmt.Errorf("%s executable: %w", root.medium, err)
-		}
-		for _, candidate := range []os.FileInfo{exeInfo, info} {
-			if !ownedByRoot(candidate) || candidate.Mode().Perm()&0o022 != 0 {
-				return errOfficialReleaseUnavailable
-			}
-		}
-	}
-	raw, err := os.ReadFile(root.buildInfo)
-	if err != nil {
-		return fmt.Errorf("%s build-info: %w", root.medium, err)
-	}
-	var parsed payloadBuildInfo
-	if err := json.Unmarshal(raw, &parsed); err != nil || parsed.Format != "tipsy.build-info.v1" {
-		// A marker exists but is not ours: fail closed rather than fall back
-		// to development consent.
-		return fmt.Errorf("%s build-info is not a tipsy.build-info.v1 document", root.medium)
-	}
-	return officialReleaseKind(parsed.ReleaseKind)
-}
-
-// flatpakApplication returns the [Application] name from /.flatpak-info, or
-// "" outside a Flatpak sandbox.
-func flatpakApplication() string {
-	f, err := os.Open(flatpakInfoPath)
-	if err != nil {
-		return ""
-	}
-	defer f.Close()
-	scanner := bufio.NewScanner(f)
-	inApplication := false
-	for scanner.Scan() {
-		line := strings.TrimSpace(scanner.Text())
-		if strings.HasPrefix(line, "[") {
-			inApplication = line == "[Application]"
-			continue
-		}
-		if !inApplication {
-			continue
-		}
-		if key, value, ok := strings.Cut(line, "="); ok && strings.TrimSpace(key) == "name" {
-			return strings.TrimSpace(value)
-		}
-	}
-	return ""
+	return nil
 }

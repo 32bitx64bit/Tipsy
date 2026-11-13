@@ -109,13 +109,7 @@ Load an authenticated Android x86-64 runtime generation. Run tipsy setup first.
   --probe   Load libroblox.so, run JNI_OnLoad, then exit (no game loop)
   uri       Optional Roblox website or protocol URI (roblox-player:,
             roblox://experiences/start, or https://www.roblox.com/games/...)
-
-  TIPSY_TEST_RENDERER=opengl
-            One launch only: request the EGL/OpenGL client path for visual
-            compatibility testing. This does not alter saved renderer or
-            client settings. A guest EGL swap is required to confirm client
-            selection; Vulkan is intentionally not a test value.
-
+` + launchTestRendererHelp + `
 A website Play URI that includes an official authentication ticket signs the
 Android session in through the same private cookie store as in-app login.
 Ticket and cookie values are never logged.
