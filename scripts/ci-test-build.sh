@@ -28,6 +28,9 @@ command -v Xvfb >/dev/null 2>&1 || fail 'Xvfb is not on PATH'
 
 export CGO_ENABLED="${CGO_ENABLED:-1}"
 export GOAMD64="${GOAMD64:-v3}"
+# Full RELRO plus immediate binding at load time. Go's PIE link, which cgo
+# forces through the external linker, passes these to the host linker.
+export CGO_LDFLAGS="${CGO_LDFLAGS:+$CGO_LDFLAGS }-Wl,-z,relro,-z,now"
 export QT_QPA_PLATFORM="${QT_QPA_PLATFORM:-offscreen}"
 if [ -d /tmp/tipsy-ci-pkgconfig ]; then
 	export PKG_CONFIG_PATH="/tmp/tipsy-ci-pkgconfig${PKG_CONFIG_PATH:+:$PKG_CONFIG_PATH}"
@@ -80,7 +83,7 @@ if [ "$mode" = full ]; then
 		-gcflags="${mod}/internal/runtime=-d=checkptr=0" \
 		./internal/jni ./internal/runtime
 fi
-go build -o bin/tipsy ./cmd/tipsy
-go build -o bin/tipsy-gui ./cmd/tipsy-gui
+go build -buildmode=pie -trimpath -o bin/tipsy ./cmd/tipsy
+go build -buildmode=pie -trimpath -o bin/tipsy-gui ./cmd/tipsy-gui
 test -x bin/tipsy || fail 'CLI binary was not built'
 test -x bin/tipsy-gui || fail 'GUI binary was not built'

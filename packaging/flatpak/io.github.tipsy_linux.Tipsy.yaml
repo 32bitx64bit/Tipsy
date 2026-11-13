@@ -64,8 +64,9 @@ modules:
       env:
         CGO_ENABLED: '1'
         CGO_CFLAGS: -O2 -g -march=x86-64-v3 -fno-plt -fno-semantic-interposition
+        CGO_LDFLAGS: -Wl,-z,relro,-z,now
         GOAMD64: v3
-        GOFLAGS: -buildvcs=false -mod=readonly -modcacherw -trimpath
+        GOFLAGS: -buildvcs=false -mod=readonly -modcacherw -buildmode=pie -trimpath
         GOTOOLCHAIN: local
         GOCACHE: /run/build/tipsy/.gocache
         GOMODCACHE: /run/build/tipsy/.gomodcache
@@ -81,10 +82,15 @@ modules:
         tag: main
     build-commands:
       - mkdir -p /app/bin
-      - if [ -f cmd/tipsy/default.pgo ]; then set -- -pgo=cmd/tipsy/default.pgo; else set --; fi; go build "$@" -ldflags "-buildid= -s -w -X github.com/tipsy-linux/tipsy/internal/version.Version=@VERSION@
-          -X github.com/tipsy-linux/tipsy/internal/version.Channel=stable" -o /app/bin/tipsy ./cmd/tipsy
-      - if [ -f cmd/tipsy-gui/default.pgo ]; then set -- -pgo=cmd/tipsy-gui/default.pgo; else set --; fi; go build "$@" -ldflags "-buildid= -s -w -X github.com/tipsy-linux/tipsy/internal/version.Version=@VERSION@
-          -X github.com/tipsy-linux/tipsy/internal/version.Channel=stable" -o /app/bin/tipsy-gui ./cmd/tipsy-gui
+      # @OFFICIAL_TAG@ expands to the official release build tag for
+      # --mode official and to nothing for developer builds. The
+      # ReleaseKind/SourceCommit stamps are the compile-time official
+      # identity read by version.IsOfficialBuild; build-info.json below is
+      # packaging evidence only and is never trusted at runtime for authority.
+      - if [ -f cmd/tipsy/default.pgo ]; then set -- -pgo=cmd/tipsy/default.pgo; else set --; fi; go build "$@" @OFFICIAL_TAG@ -ldflags "-buildid= -s -w -X github.com/tipsy-linux/tipsy/internal/version.Version=@VERSION@
+          -X github.com/tipsy-linux/tipsy/internal/version.Channel=stable -X github.com/tipsy-linux/tipsy/internal/version.ReleaseKind=@RELEASE_KIND@ -X github.com/tipsy-linux/tipsy/internal/version.SourceCommit=$(git rev-parse HEAD)" -o /app/bin/tipsy ./cmd/tipsy
+      - if [ -f cmd/tipsy-gui/default.pgo ]; then set -- -pgo=cmd/tipsy-gui/default.pgo; else set --; fi; go build "$@" @OFFICIAL_TAG@ -ldflags "-buildid= -s -w -X github.com/tipsy-linux/tipsy/internal/version.Version=@VERSION@
+          -X github.com/tipsy-linux/tipsy/internal/version.Channel=stable -X github.com/tipsy-linux/tipsy/internal/version.ReleaseKind=@RELEASE_KIND@ -X github.com/tipsy-linux/tipsy/internal/version.SourceCommit=$(git rev-parse HEAD)" -o /app/bin/tipsy-gui ./cmd/tipsy-gui
       # Flatpak only exports icons and desktop files named after the app id, so
       # the app-id file must exist under its exported name. tipsy.png is
       # installed alongside it because the GUI resolves its brand icon from
@@ -101,9 +107,11 @@ modules:
           /app/share/metainfo/io.github.tipsy_linux.Tipsy.metainfo.xml
       - install -Dm0644 LICENSE /app/share/licenses/tipsy/LICENSE
       - install -Dm0644 NOTICE /app/share/licenses/tipsy/NOTICE
-      # Release identity read by internal/app/official.go. build-flatpak.sh
-      # fills @RELEASE_KIND@: development-unrestricted by default, and
-      # release-repository-signed only for --mode official (GitHub Actions).
+      # Packaging evidence only: runtime authority is the compile-time
+      # official release identity stamped into the binaries above.
+      # build-flatpak.sh fills @RELEASE_KIND@: development-unrestricted by
+      # default, and release-repository-signed only for --mode official
+      # (GitHub Actions).
       - mkdir -p /app/share/tipsy
       - printf '%s\n' '{"architecture":"x86_64","format":"tipsy.build-info.v1","medium":"flatpak","name":"Tipsy","releaseKind":"@RELEASE_KIND@","source":{"commit":"'"$(git rev-parse HEAD 2>/dev/null || echo unknown)"'","tree":"clean"},"version":"@VERSION@"}'
           > /app/share/tipsy/build-info.json

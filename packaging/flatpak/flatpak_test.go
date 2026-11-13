@@ -39,13 +39,16 @@ func TestBuildFlatpakRendersManifestForBothModes(t *testing.T) {
 			for _, want := range []string{
 				"tag: v1.2.3\n",
 				"internal/version.Version=1.2.3\n",
-				"internal/version.Channel=stable\"",
+				"internal/version.Channel=stable -X github.com/tipsy-linux/tipsy/internal/version.ReleaseKind=" + tc.kind,
+				"internal/version.SourceCommit=$(git rev-parse HEAD)",
 				`"releaseKind":"` + tc.kind + `"`,
 				`"version":"1.2.3"`,
 				"/app/share/tipsy/build-info.json",
 				"install -Dm0644 tipsy.png /app/share/icons/hicolor/512x512/apps/io.github.tipsy_linux.Tipsy.png\n",
 				"install -Dm0644 tipsy.png /app/share/icons/hicolor/512x512/apps/tipsy.png\n",
 				"GOAMD64: v3",
+				"GOFLAGS: -buildvcs=false -mod=readonly -modcacherw -buildmode=pie -trimpath",
+				"CGO_LDFLAGS: -Wl,-z,relro,-z,now",
 				"path: webkit-prefix",
 				"PKG_CONFIG_PATH: /app/lib/pkgconfig",
 				"WEBKIT_EXEC_PATH=/app/libexec/webkit2gtk-4.1",
@@ -55,7 +58,15 @@ func TestBuildFlatpakRendersManifestForBothModes(t *testing.T) {
 					t.Errorf("rendered manifest lacks %q", want)
 				}
 			}
-			for _, stale := range []string{"@VERSION@", "@RELEASE_KIND@", "\n        tag: main\n"} {
+			// Only the official mode compiles the official_release tag.
+			if tc.mode == "official" {
+				if !strings.Contains(manifest, "-tags official_release") {
+					t.Error("official manifest must compile with -tags official_release")
+				}
+			} else if strings.Contains(manifest, "official_release") {
+				t.Error("developer manifest must not compile the official_release tag")
+			}
+			for _, stale := range []string{"@VERSION@", "@RELEASE_KIND@", "@OFFICIAL_TAG@", "\n        tag: main\n"} {
 				if strings.Contains(manifest, stale) {
 					t.Errorf("rendered manifest still contains %q", stale)
 				}

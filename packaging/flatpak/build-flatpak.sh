@@ -12,9 +12,9 @@
 # --render-manifest writes the rewritten manifest to OUT.yaml and exits without
 # flatpak; packaging/flatpak/flatpak_test.go uses it to pin the rewrite.
 #
-# --mode official (GitHub Actions only) marks the bundle release-repository-signed
-# so the installed Flatpak runs OfficialVerified; the default developer build
-# stays development-unrestricted and asks for --development consent.
+# --mode official (GitHub Actions only) compiles with -tags official_release and
+# stamps release-repository-signed linker metadata so the installed Flatpak runs
+# OfficialVerified; the default developer build stays development-unrestricted.
 #
 # Runtimes come from Flathub into the user installation (the remote is added
 # when missing). Uses the flatpak-builder binary when installed, otherwise the
@@ -45,7 +45,11 @@ done
 [[ "$tag" =~ ^[0-9A-Za-z][0-9A-Za-z._/+~-]*$ ]] || fail 'invalid tag'
 [[ "$mode" == developer || "$mode" == official ]] || fail 'mode must be developer or official'
 release_kind=development-unrestricted
-[[ "$mode" != official ]] || release_kind=release-repository-signed
+official_tag=
+if [[ "$mode" == official ]]; then
+  release_kind=release-repository-signed
+  official_tag='-tags official_release'
+fi
 
 repo=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
 app_id=io.github.tipsy_linux.Tipsy
@@ -58,12 +62,17 @@ render_manifest() {
   local out=$1
   sed -e "s|^\(\s*\)tag: main$|\1tag: $tag|" -e "s|@VERSION@|$version|g" \
     -e "s|@RELEASE_KIND@|$release_kind|g" \
+    -e "s|@OFFICIAL_TAG@|$official_tag|g" \
     "$repo/packaging/flatpak/$app_id.yaml" > "$out"
   grep -q "^\s*tag: $tag\$" "$out" || fail 'manifest tag rewrite failed'
   grep -qF -- "internal/version.Version=$version" "$out" || fail 'manifest version rewrite failed'
+  grep -qF -- "internal/version.ReleaseKind=$release_kind" "$out" || fail 'manifest linker release-kind rewrite failed'
   grep -qF -- "\"version\":\"$version\"" "$out" || fail 'manifest build-info version rewrite failed'
   grep -qF -- "\"releaseKind\":\"$release_kind\"" "$out" || fail 'manifest release-kind rewrite failed'
-  ! grep -q '@VERSION@\|@RELEASE_KIND@' "$out" || fail 'manifest still has an unexpanded placeholder'
+  if [[ "$mode" == official ]]; then
+    grep -qF -- '-tags official_release' "$out" || fail 'official manifest must compile with -tags official_release'
+  fi
+  ! grep -q '@VERSION@\|@RELEASE_KIND@\|@OFFICIAL_TAG@' "$out" || fail 'manifest still has an unexpanded placeholder'
 }
 
 # org.kde.Sdk has gtk+-3.0 but not webkit2gtk-4.1. GNOME 49 sits on the same

@@ -882,10 +882,118 @@ func TestWorkflowDependenciesAreImmutableAndLeastPrivilege(t *testing.T) {
 		t.Fatal(err)
 	}
 	testText := string(testBuild)
-	for _, required := range []string{"go vet -unsafeptr=false ./...", "go test", "-race", "go build -o bin/tipsy ./cmd/tipsy", "go build -o bin/tipsy-gui ./cmd/tipsy-gui", "Xvfb", "/tmp/tipsy-ci-pkgconfig"} {
+	for _, required := range []string{"go vet -unsafeptr=false ./...", "go test", "-race", "go build -buildmode=pie -trimpath -o bin/tipsy ./cmd/tipsy", "go build -buildmode=pie -trimpath -o bin/tipsy-gui ./cmd/tipsy-gui", "Xvfb", "/tmp/tipsy-ci-pkgconfig"} {
 		if !strings.Contains(testText, required) {
 			t.Errorf("ci-test-build.sh is missing %q", required)
 		}
+	}
+}
+
+func TestNativeBuildsRequestPIEAndFullRELRO(t *testing.T) {
+	repo := repoRoot(t)
+	for _, test := range []struct {
+		path     string
+		required []string
+	}{
+		{
+			path: "scripts/build-tipsy-binaries.sh",
+			required: []string{
+				"-buildmode=pie",
+				"-trimpath",
+				"CGO_LDFLAGS=",
+				"-Wl,-z,relro,-z,now",
+				"--official",
+				"-tags official_release",
+			},
+		},
+		{
+			path: "scripts/build-appdir.sh",
+			required: []string{
+				"-buildmode=pie",
+				"-trimpath",
+				"CGO_LDFLAGS=",
+				"-Wl,-z,relro,-z,now",
+				`[[ "$mode" == developer ]] || build_tags=(-tags official_release)`,
+			},
+		},
+		{
+			path: "scripts/ci-test-build.sh",
+			required: []string{
+				"CGO_LDFLAGS=",
+				"-Wl,-z,relro,-z,now",
+				"go build -buildmode=pie -trimpath -o bin/tipsy ./cmd/tipsy",
+				"go build -buildmode=pie -trimpath -o bin/tipsy-gui ./cmd/tipsy-gui",
+			},
+		},
+		{
+			path: "packaging/flatpak/io.github.tipsy_linux.Tipsy.yaml",
+			required: []string{
+				"-buildmode=pie",
+				"-trimpath",
+				"CGO_LDFLAGS: -Wl,-z,relro,-z,now",
+			},
+		},
+	} {
+		t.Run(test.path, func(t *testing.T) {
+			data, err := os.ReadFile(filepath.Join(repo, filepath.FromSlash(test.path)))
+			if err != nil {
+				t.Fatal(err)
+			}
+			text := string(data)
+			for _, required := range test.required {
+				if !strings.Contains(text, required) {
+					t.Errorf("%s is missing %q", test.path, required)
+				}
+			}
+		})
+	}
+}
+
+// The publish workflow must ship official_release-tagged binaries: either by
+// extracting the Sigstore/GitHub-attested release.yml AppDir archive (built by
+// build-appdir.sh --mode github-signed with -tags official_release), or, if it
+// ever invokes build-tipsy-binaries.sh directly, by passing --official.
+func TestOfficialPublishBuildPassesOfficialFlag(t *testing.T) {
+	data, err := os.ReadFile(filepath.Join(repoRoot(t), ".github", "workflows", "publish-repo.yml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(data)
+	call := "scripts/build-tipsy-binaries.sh"
+	if index := strings.Index(text, call); index >= 0 {
+		end := strings.Index(text[index:], "--output-dir")
+		if end < 0 || !strings.Contains(text[index:index+end], "--official") {
+			t.Fatal("official publish build must pass --official to build-tipsy-binaries.sh")
+		}
+		return
+	}
+	for _, required := range []string{
+		"cosign verify-blob",
+		"gh attestation verify",
+		`--signer-workflow "$SOURCE_REPO/.github/workflows/release.yml"`,
+		"scripts/check-release-tree.sh",
+		"TIPSY_BINARIES_DIR: ${{ github.workspace }}/verified-bin",
+	} {
+		if !strings.Contains(text, required) {
+			t.Fatalf("publish workflow does not rebuild with --official and is missing attested release.yml binary check %q", required)
+		}
+	}
+}
+
+func TestBuildTipsyBinariesRecognizesOfficialFlag(t *testing.T) {
+	script := filepath.Join(repoRoot(t), "scripts", "build-tipsy-binaries.sh")
+	// An empty version fails before any compile runs, so this only exercises
+	// argument parsing.
+	command := exec.Command("bash", script, "--official", "--version", "", "--output-dir", t.TempDir())
+	output, err := command.CombinedOutput()
+	if err == nil {
+		t.Fatal("build-tipsy-binaries accepted an empty version")
+	}
+	if strings.Contains(string(output), "unknown argument") {
+		t.Fatalf("build-tipsy-binaries does not recognize --official: %s", output)
+	}
+	if !strings.Contains(string(output), "Invalid VERSION") {
+		t.Fatalf("unexpected argument-parsing failure: %s", output)
 	}
 }
 

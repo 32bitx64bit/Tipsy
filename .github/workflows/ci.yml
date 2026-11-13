@@ -84,6 +84,45 @@ jobs:
       - name: Vet, test, and build
         run: scripts/ci-test-build.sh ${{ matrix.mode }}
 
+      - name: Vet, test, and build (official_release)
+        if: matrix.mode == 'full'
+        run: |
+          set -euo pipefail
+          export CGO_LDFLAGS="${CGO_LDFLAGS:+$CGO_LDFLAGS }-Wl,-z,relro,-z,now"
+          if [ -d /tmp/tipsy-ci-pkgconfig ]; then
+            export PKG_CONFIG_PATH="/tmp/tipsy-ci-pkgconfig${PKG_CONFIG_PATH:+:$PKG_CONFIG_PATH}"
+          fi
+          export QT_QPA_PLATFORM="${QT_QPA_PLATFORM:-offscreen}"
+          export DISPLAY=:98
+          Xvfb "$DISPLAY" -screen 0 1280x720x24 -nolisten tcp >/tmp/tipsy-xvfb-official.log 2>&1 &
+          xvfb_pid=$!
+          trap 'kill "$xvfb_pid" >/dev/null 2>&1 || true' EXIT
+          for _ in $(seq 1 50); do
+            [ -S /tmp/.X11-unix/X98 ] && break
+            sleep 0.1
+          done
+          [ -S /tmp/.X11-unix/X98 ]
+          go vet -tags official_release -unsafeptr=false ./...
+          mod="$(go list -m)"
+          plain_pkgs=()
+          while IFS= read -r pkg; do
+            case "${pkg#"$mod"/}" in
+              internal/android | internal/config | internal/loader | internal/x11 | internal/jni | internal/runtime) ;;
+              *) plain_pkgs+=("$pkg") ;;
+            esac
+          done < <(go list -tags official_release ./...)
+          go test -tags official_release -count=1 -timeout 20m "${plain_pkgs[@]}"
+          go test -tags official_release -race -count=1 -timeout 10m ./internal/android ./internal/config ./internal/loader ./internal/x11
+          go test -tags official_release -race -count=1 -timeout 10m \
+            -gcflags="${mod}/internal/jni=-d=checkptr=0" \
+            -gcflags="${mod}/internal/runtime=-d=checkptr=0" \
+            ./internal/jni ./internal/runtime
+          mkdir -p bin
+          go build -tags official_release -buildmode=pie -trimpath -o bin/tipsy ./cmd/tipsy
+          go build -tags official_release -buildmode=pie -trimpath -o bin/tipsy-gui ./cmd/tipsy-gui
+          test -x bin/tipsy
+          test -x bin/tipsy-gui
+
   distro:
     name: ${{ matrix.name }}
     runs-on: ubuntu-24.04

@@ -318,10 +318,12 @@ emulator. It is a compatibility runtime: the official Android x86-64
 | Android / JNI | Tipsy | Enough bionic, JNI, and GameActivity for the official client to start, log in, and present. Missing APIs fail loudly. |
 | Roblox | Roblox | Login, Home, networking, experiences. Tipsy does not patch `libroblox.so` and does not ship it. |
 
-Packages built by GitHub Actions (AppImage, Flatpak, `.deb` / `.rpm` / pacman
-from the signed repository) present as verified Tipsy releases. A local build
-of any medium does not; it asks for `--development` on first launch. See
-[Build from source](#build-from-source).
+Packages built by the official release pipeline (AppImage, Flatpak,
+`.deb` / `.rpm` / pacman from the signed repository) are compiled with the
+`official_release` build tag and stamped with release metadata, so they
+present as verified Tipsy releases. A local build of any medium does not: it
+is marked `Unofficial / Local Build` and asks for `--development` on first
+launch. See [Build from source](#build-from-source).
 
 ```mermaid
 flowchart TB
@@ -559,9 +561,12 @@ That also registers `roblox` / `roblox-player` URI handling on the Play desktop
 file when `xdg-mime` is available. Put `~/.local/bin` on your `PATH` if it is
 not already.
 
-Only GitHub-built AppImages, Flatpaks, and repository packages can present as
-official Tipsy releases. Anything you build yourself cannot. Consent is
-explicit and sticky:
+Only the official release pipeline can produce an official Tipsy release:
+those binaries are compiled with the `official_release` build tag and stamped
+with release metadata at link time. Anything you build yourself is marked
+`Unofficial / Local Build` and cannot present as official, even if you copy an
+official `build-info.json` next to it or set `TIPSY_RELEASE_*` variables —
+those are packaging evidence, not authority. Consent is explicit and sticky:
 
 ```sh
 bin/tipsy-gui
@@ -603,8 +608,27 @@ APT/RPM/pacman/Flatpak repositories. Native packages never replace the AppImage.
 
 ## License
 
-Tipsy is [AGPL-3.0-or-later](LICENSE). See [NOTICE](NOTICE) for third-party
-notes.
+Tipsy is [AGPL-3.0-or-later](LICENSE) with additional terms under AGPLv3
+section 7, stated in [NOTICE](NOTICE):
+
+- **Attribution**: copyright notices, license notices, and author
+  attributions must be preserved (section 7(b)).
+- **Origin**: modified or unofficial builds must be marked as different from
+  official Tipsy releases and must not misrepresent their origin. Tipsy marks
+  every non-official build `Unofficial / Local Build` in version output,
+  logs, window titles, and its own User-Agent (section 7(c)).
+- **Trademarks**: no trademark rights are granted for the Tipsy name, logo,
+  or the `io.github.tipsy_linux.Tipsy` application identity; unofficial
+  distributions must not present themselves as official Tipsy releases
+  (section 7(e)).
+
+The LICENSE file itself is the verbatim AGPLv3 text and is unchanged. See
+[NOTICE](NOTICE) for the full additional terms and third-party notes.
+
+The AGPL's network clause (section 13) applies: if you run a modified
+version of Tipsy so that other people interact with it over a network, you
+must offer those users the corresponding source. Releases before 2026-11-13
+remain available under GPL-3.0-or-later.
 
 Roblox is copyright Roblox Corporation and is not part of this project. Please
 obtain official packages through legitimate channels.

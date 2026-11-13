@@ -163,6 +163,9 @@ export GOAMD64=v3
 # Append the release ISA flags to whatever the caller set instead of dropping
 # their hardening, include, or sysroot flags.
 export CGO_CFLAGS="${CGO_CFLAGS:+$CGO_CFLAGS }-O2 -g -march=x86-64-v3 -fno-plt -fno-semantic-interposition"
+# Full RELRO plus immediate binding at load time. Go's PIE link, which cgo
+# forces through the external linker, passes these to the host linker.
+export CGO_LDFLAGS="${CGO_LDFLAGS:+$CGO_LDFLAGS }-Wl,-z,relro,-z,now"
 export CGO_ENABLED=1
 export GOTOOLCHAIN=local
 export GOPROXY=off
@@ -191,10 +194,26 @@ install -d \
 
 channel=stable
 [[ "$mode" != developer ]] || channel=dev
+case "$mode" in
+	developer) release_kind=development-unrestricted ;;
+	official) release_kind=release-candidate-unsigned ;;
+	github-signed) release_kind=release-candidate-keyless ;;
+esac
+# Official builds compile the official_release build tag; a developer build
+# stays untagged so local diagnostics remain available.
+build_tags=()
+[[ "$mode" == developer ]] || build_tags=(-tags official_release)
 ldflags="-buildid= -s -w -X github.com/tipsy-linux/tipsy/internal/version.Version=$version -X github.com/tipsy-linux/tipsy/internal/version.Channel=$channel"
-tipsy_build=(go build -buildvcs=false -mod=readonly -trimpath -ldflags "$ldflags" -o "$appdir/usr/bin/tipsy")
+if [[ "$mode" != developer ]]; then
+	# Compile-time official identity: the official_release tag alone is not
+	# enough; version.IsOfficialBuild also requires this stamped metadata.
+	# The build-info.json below stays packaging evidence only and is never
+	# trusted at runtime for authority.
+	ldflags+=" -X github.com/tipsy-linux/tipsy/internal/version.ReleaseKind=$release_kind -X github.com/tipsy-linux/tipsy/internal/version.SourceCommit=$source_commit"
+fi
+tipsy_build=(go build -buildmode=pie -trimpath -buildvcs=false -mod=readonly "${build_tags[@]}" -ldflags "$ldflags" -o "$appdir/usr/bin/tipsy")
 [[ ! -f "$repo/cmd/tipsy/default.pgo" ]] || tipsy_build+=(-pgo="$repo/cmd/tipsy/default.pgo")
-gui_build=(go build -buildvcs=false -mod=readonly -trimpath -ldflags "$ldflags" -o "$appdir/usr/bin/tipsy-gui")
+gui_build=(go build -buildmode=pie -trimpath -buildvcs=false -mod=readonly "${build_tags[@]}" -ldflags "$ldflags" -o "$appdir/usr/bin/tipsy-gui")
 [[ ! -f "$repo/cmd/tipsy-gui/default.pgo" ]] || gui_build+=(-pgo="$repo/cmd/tipsy-gui/default.pgo")
 (cd "$repo" && "${tipsy_build[@]}" ./cmd/tipsy)
 (cd "$repo" && "${gui_build[@]}" ./cmd/tipsy-gui)
@@ -406,11 +425,6 @@ done < <(find "$appdir/usr/plugins" -type f -name '*.so' -print0)
 
 qt_version=$(pkg-config --modversion Qt6Core)
 go_version=$(go env GOVERSION)
-case "$mode" in
-	developer) release_kind=development-unrestricted ;;
-	official) release_kind=release-candidate-unsigned ;;
-	github-signed) release_kind=release-candidate-keyless ;;
-esac
 cat > "$appdir/usr/share/tipsy/build-info" <<BUILD_INFO
 format=tipsy.build-info.v1
 name=Tipsy

@@ -45,6 +45,7 @@ on:
 
 permissions:
   contents: read
+  attestations: read
 
 concurrency:
   group: publish-linux-repos-${{ github.event.release.tag_name || inputs.version || github.event.workflow_run.head_sha }}
@@ -160,6 +161,106 @@ jobs:
           TIPSY_GPG_PRIVATE_KEY: ${{ secrets.TIPSY_GPG_PRIVATE_KEY }}
           TIPSY_GPG_KEY_ID: ${{ secrets.TIPSY_GPG_KEY_ID }}
 
+      - name: Install the pinned keyless verification tool
+        uses: sigstore/cosign-installer@756fe2d284c7292c4e9b62c8a28f1e5629c59532 # v4.1.3; scripts/release-inputs.lock.json
+        with:
+          cosign-release: v3.1.3
+
+      - name: Download and verify attested release.yml artifacts
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          readonly tag='${{ needs.prepare.outputs.tag }}'
+          readonly version='${{ needs.prepare.outputs.version }}'
+          readonly tag_commit=$(git rev-parse --verify "refs/tags/${tag}^{commit}")
+          readonly issuer=https://token.actions.githubusercontent.com
+          readonly tag_identity="https://github.com/${SOURCE_REPO}/.github/workflows/release.yml@refs/tags/${tag}"
+          readonly dispatch_identity="https://github.com/${SOURCE_REPO}/.github/workflows/release.yml@refs/heads/main"
+
+          rm -rf verified-release
+          install -d -m 0700 verified-release
+          gh release download "$tag" \
+            --repo "$SOURCE_REPO" \
+            --dir verified-release \
+            --pattern "Tipsy-${version}-x86_64.AppImage" \
+            --pattern "Tipsy-${version}-x86_64.AppImage.sha256" \
+            --pattern "Tipsy-${version}-x86_64.AppImage.sigstore.json" \
+            --pattern "Tipsy-${version}-x86_64.AppDir.tar.gz" \
+            --pattern "Tipsy-${version}-x86_64.AppDir.tar.gz.sha256" \
+            --pattern "Tipsy-${version}-x86_64.AppDir.tar.gz.sigstore.json" \
+            --pattern "Tipsy-${version}-x86_64.evidence.tar.gz" \
+            --pattern "Tipsy-${version}-x86_64.release-sha256.txt"
+
+          readonly appimage="verified-release/Tipsy-${version}-x86_64.AppImage"
+          readonly archive="verified-release/Tipsy-${version}-x86_64.AppDir.tar.gz"
+          readonly evidence_archive="verified-release/Tipsy-${version}-x86_64.evidence.tar.gz"
+          for item in \
+            "$appimage" "${appimage}.sha256" "${appimage}.sigstore.json" \
+            "$archive" "${archive}.sha256" "${archive}.sigstore.json" \
+            "$evidence_archive" "verified-release/Tipsy-${version}-x86_64.release-sha256.txt"; do
+            [[ -f "$item" && ! -L "$item" && -s "$item" ]]
+          done
+
+          (
+            cd verified-release
+            sha256sum --strict --check "Tipsy-${version}-x86_64.AppImage.sha256"
+            sha256sum --strict --check "Tipsy-${version}-x86_64.AppDir.tar.gz.sha256"
+            sha256sum --strict --check "Tipsy-${version}-x86_64.release-sha256.txt"
+          )
+
+          tar -xzf "$evidence_archive" -C verified-release
+          readonly evidence_dir="verified-release/Tipsy-${version}-x86_64.evidence"
+          [[ -d "$evidence_dir" && ! -L "$evidence_dir" ]]
+          (
+            cd verified-release
+            sha256sum --strict --check "Tipsy-${version}-x86_64.evidence/release-hashes.sha256"
+          )
+
+          for artifact in "$appimage" "$archive"; do
+            bundle="${artifact}.sigstore.json"
+            if ! cosign verify-blob "$artifact" --bundle "$bundle" \
+              --certificate-identity "$tag_identity" \
+              --certificate-oidc-issuer "$issuer"; then
+              cosign verify-blob "$artifact" --bundle "$bundle" \
+                --certificate-identity "$dispatch_identity" \
+                --certificate-oidc-issuer "$issuer" \
+                --certificate-github-workflow-repository "$SOURCE_REPO" \
+                --certificate-github-workflow-trigger workflow_dispatch \
+                --certificate-github-workflow-sha "$tag_commit"
+            fi
+            gh attestation verify "$artifact" \
+              --repo "$SOURCE_REPO" \
+              --signer-workflow "$SOURCE_REPO/.github/workflows/release.yml" \
+              --cert-oidc-issuer "$issuer" \
+              --source-digest "$tag_commit" \
+              --deny-self-hosted-runners
+            gh attestation verify "$artifact" \
+              --repo "$SOURCE_REPO" \
+              --bundle "$evidence_dir/github-attestation.sigstore.json" \
+              --signer-workflow "$SOURCE_REPO/.github/workflows/release.yml" \
+              --cert-oidc-issuer "$issuer" \
+              --source-digest "$tag_commit" \
+              --deny-self-hosted-runners
+          done
+
+          python3 - "$evidence_dir/provenance-input.json" "$tag_commit" <<'PY'
+          import json
+          import sys
+          from pathlib import Path
+
+          statement = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
+          if statement.get("predicateType") != "https://slsa.dev/provenance/v1":
+              raise SystemExit("release evidence has an unexpected predicate type")
+          deps = statement.get("predicate", {}).get("buildDefinition", {}).get("resolvedDependencies", [])
+          if {
+              "uri": "git+https://github.com/32bitx64bit/Tipsy",
+              "digest": {"gitCommit": sys.argv[2]},
+          } not in deps:
+              raise SystemExit("release evidence is not bound to the verified release tag commit")
+          PY
+
       - name: Select Go toolchain
         if: github.event_name != 'workflow_dispatch' || inputs.native_packages
         uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
@@ -168,7 +269,7 @@ jobs:
           check-latest: false
           cache: false
 
-      - name: Free runner disk space (Qt + Go builds need gigabytes)
+      - name: Free runner disk space
         shell: bash
         run: |
           set -euo pipefail
@@ -192,45 +293,56 @@ jobs:
             export PKG_CONFIG_PATH="/tmp/tipsy-ci-pkgconfig${PKG_CONFIG_PATH:+:$PKG_CONFIG_PATH}"
           fi
           sudo apt-get install -y --no-install-recommends \
-            dpkg-dev rpm createrepo-c gnupg lintian libarchive-tools zstd fakeroot
+            dpkg-dev rpm createrepo-c gnupg lintian libarchive-tools zstd fakeroot \
+            binutils file libcap2-bin patchelf
           command -v dpkg-deb && command -v rpmbuild && command -v createrepo_c
-          command -v bsdtar
+          command -v bsdtar && command -v patchelf && command -v getcap
 
-      - name: Download the signed AppImage from the Tipsy release
-        if: github.event_name != 'workflow_dispatch' || inputs.native_packages
-        env:
-          GH_TOKEN: ${{ github.token }}
-        shell: bash
-        run: |
-          set -euo pipefail
-          mkdir -p dist
-          gh release download '${{ needs.prepare.outputs.tag }}' \
-            --repo "$SOURCE_REPO" \
-            --dir dist \
-            --pattern 'Tipsy-*-x86_64.AppImage'
-          ls dist/Tipsy-*-x86_64.AppImage
-
-      - name: Build the tipsy binaries once
+      - name: Extract and stage attested release.yml binaries
         if: github.event_name != 'workflow_dispatch' || inputs.native_packages
         shell: bash
         run: |
           set -euo pipefail
-          export GOAMD64=v3 CGO_ENABLED=1
-          scripts/build-tipsy-binaries.sh \
-            --version '${{ needs.prepare.outputs.version }}' --channel stable \
-            --output-dir build-bin
-          find build-bin -maxdepth 1 -type f -printf '%f %s bytes\n'
+          readonly tag='${{ needs.prepare.outputs.tag }}'
+          readonly version='${{ needs.prepare.outputs.version }}'
+          readonly tag_commit=$(git rev-parse --verify "refs/tags/${tag}^{commit}")
+          readonly archive="verified-release/Tipsy-${version}-x86_64.AppDir.tar.gz"
+          readonly appimage="verified-release/Tipsy-${version}-x86_64.AppImage"
 
-      - name: Assemble .deb, .rpm, and pacman packages from those binaries
+          mkdir -p dist verified-appdir verified-bin
+          install -m 0755 "$appimage" "dist/Tipsy-${version}-x86_64.AppImage"
+
+          tar -xzf "$archive" -C verified-appdir
+          readonly appdir="verified-appdir/Tipsy-${version}-x86_64.AppDir"
+          [[ -d "$appdir" && ! -L "$appdir" ]]
+          scripts/check-release-tree.sh "$appdir"
+          grep -Fx 'release_kind=release-candidate-keyless' "$appdir/usr/share/tipsy/build-info"
+          grep -Fx 'source_tree=clean' "$appdir/usr/share/tipsy/build-info"
+          grep -Fx "source_commit=$tag_commit" "$appdir/usr/share/tipsy/build-info"
+
+          install -m 0755 "$appdir/usr/bin/tipsy" verified-bin/tipsy
+          install -m 0755 "$appdir/usr/bin/tipsy-gui" verified-bin/tipsy-gui
+          # System packages (/usr/bin) resolve distribution shared libraries via
+          # the standard loader rather than the AppDir's $ORIGIN/../lib RUNPATH.
+          patchelf --remove-rpath verified-bin/tipsy verified-bin/tipsy-gui
+          for bin in verified-bin/tipsy verified-bin/tipsy-gui; do
+            readelf -h "$bin" | grep -q 'DYN'
+            readelf -l "$bin" | grep -q 'GNU_RELRO'
+            readelf -d "$bin" | grep -Eq 'BIND_NOW|\(FLAGS\).*BIND_NOW|\(FLAGS_1\).*NOW'
+          done
+          find verified-bin -maxdepth 1 -type f -printf '%f %s bytes\n'
+
+      - name: Assemble .deb, .rpm, and pacman packages from attested binaries
         if: github.event_name != 'workflow_dispatch' || inputs.native_packages
         shell: bash
         env:
-          TIPSY_BINARIES_DIR: ${{ github.workspace }}/build-bin
+          TIPSY_BINARIES_DIR: ${{ github.workspace }}/verified-bin
         run: |
           set -euo pipefail
           # --mode official: only this workflow marks packages
           # release-repository-signed (OfficialVerified once installed from the
-          # GPG-signed repository). Local builds stay development-unrestricted.
+          # GPG-signed repository). Binaries come strictly from the verified
+          # release.yml AppDir archive, never an unattested rebuild.
           bash packaging/deb/build-deb.sh \
             --version '${{ needs.prepare.outputs.version }}' --output-dir dist --mode official
           bash packaging/rpm/build-rpm.sh \
@@ -239,24 +351,24 @@ jobs:
             --version '${{ needs.prepare.outputs.version }}' --output-dir dist --mode official
           ls -la dist/
 
-      - name: Reuse .deb, .rpm, pacman, and AppImage from Tipsy-repo
+      - name: Reuse .deb, .rpm, and pacman from Tipsy-repo with verified AppImage
         if: github.event_name == 'workflow_dispatch' && inputs.native_packages == false
         env:
           GH_TOKEN: ${{ secrets.TIPSY_REPO_TOKEN }}
         shell: bash
         run: |
           set -euo pipefail
+          readonly version='${{ needs.prepare.outputs.version }}'
           mkdir -p dist
           gh release download '${{ needs.prepare.outputs.tag }}' \
             --repo "$DISTRO_REPO" \
             --dir dist \
-            --pattern 'Tipsy-*-x86_64.AppImage' \
             --pattern 'tipsy_*_amd64.deb' \
             --pattern 'tipsy-*.rpm' \
             --pattern 'tipsy-*.pkg.tar.zst'
+          install -m 0755 "verified-release/Tipsy-${version}-x86_64.AppImage" "dist/Tipsy-${version}-x86_64.AppImage"
           rm -f dist/SHA256SUMS dist/Tipsy-*.flatpak
           ls -la dist/
-          version='${{ needs.prepare.outputs.version }}'
           [[ -f dist/Tipsy-${version}-x86_64.AppImage ]]
           [[ -f dist/tipsy_${version}_amd64.deb ]]
           [[ -f dist/tipsy-${version}-1.x86_64.rpm ]]

@@ -407,13 +407,16 @@ jobs:
               raise SystemExit("release evidence is not bound to the reviewed lock")
           PY
           printf 'appimage=%s\n' "$appimage" >> "$GITHUB_OUTPUT"
+          printf 'archive=%s\n' "$archive" >> "$GITHUB_OUTPUT"
           printf 'evidence=%s\n' "$evidence" >> "$GITHUB_OUTPUT"
 
-      - name: Attest the AppImage build provenance
+      - name: Attest the AppImage and release archive build provenance
         id: attest
         uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2; scripts/release-inputs.lock.json
         with:
-          subject-path: ${{ steps.candidate.outputs.appimage }}
+          subject-path: |
+            ${{ steps.candidate.outputs.appimage }}
+            ${{ steps.candidate.outputs.archive }}
           show-summary: false
 
       - name: Install the pinned keyless signing tool
@@ -421,21 +424,27 @@ jobs:
         with:
           cosign-release: v3.1.3
 
-      - name: Keylessly sign and verify the AppImage
+      - name: Keylessly sign and verify the AppImage and release archive
         id: signature
         shell: bash
         run: |
           set -euo pipefail
           readonly appimage='${{ steps.candidate.outputs.appimage }}'
+          readonly archive='${{ steps.candidate.outputs.archive }}'
           readonly bundle="${appimage}.sigstore.json"
+          readonly archive_bundle="${archive}.sigstore.json"
           readonly identity="https://github.com/${GITHUB_REPOSITORY}/.github/workflows/release.yml@${GITHUB_REF}"
           readonly issuer=https://token.actions.githubusercontent.com
-          cosign sign-blob --yes --bundle "$bundle" "$appimage"
-          [[ -f "$bundle" && ! -L "$bundle" && -s "$bundle" ]]
-          cosign verify-blob "$appimage" --bundle "$bundle" \
-            --certificate-identity "$identity" \
-            --certificate-oidc-issuer "$issuer"
+          for artifact in "$appimage" "$archive"; do
+            artifact_bundle="${artifact}.sigstore.json"
+            cosign sign-blob --yes --bundle "$artifact_bundle" "$artifact"
+            [[ -f "$artifact_bundle" && ! -L "$artifact_bundle" && -s "$artifact_bundle" ]]
+            cosign verify-blob "$artifact" --bundle "$artifact_bundle" \
+              --certificate-identity "$identity" \
+              --certificate-oidc-issuer "$issuer"
+          done
           printf 'bundle=%s\n' "$bundle" >> "$GITHUB_OUTPUT"
+          printf 'archive_bundle=%s\n' "$archive_bundle" >> "$GITHUB_OUTPUT"
           printf 'identity=%s\n' "$identity" >> "$GITHUB_OUTPUT"
           printf 'issuer=%s\n' "$issuer" >> "$GITHUB_OUTPUT"
 
@@ -445,11 +454,13 @@ jobs:
         run: |
           set -euo pipefail
           readonly appimage='${{ steps.candidate.outputs.appimage }}'
+          readonly archive='${{ steps.candidate.outputs.archive }}'
           readonly evidence='${{ steps.candidate.outputs.evidence }}'
           readonly output=$(dirname -- "$appimage")
           readonly version='${{ steps.preflight.outputs.version }}'
           readonly release_tag='${{ steps.preflight.outputs.tag }}'
           readonly sigstore_bundle='${{ steps.signature.outputs.bundle }}'
+          readonly archive_bundle='${{ steps.signature.outputs.archive_bundle }}'
           readonly github_bundle='${{ steps.attest.outputs.bundle-path }}'
           readonly verification="$output/Tipsy-${version}-x86_64.VERIFY.txt"
           readonly evidence_archive="$output/Tipsy-${version}-x86_64.evidence.tar.gz"
@@ -460,11 +471,28 @@ jobs:
 
           install -m 0644 "$github_bundle" "$evidence/github-attestation.sigstore.json"
           install -m 0644 "$sigstore_bundle" "$evidence/$(basename "$sigstore_bundle")"
-          sha256sum "$evidence/github-attestation.sigstore.json" > "$evidence/github-attestation.sigstore.sha256"
-          sha256sum "$evidence/$(basename "$sigstore_bundle")" > "$evidence/$(basename "$sigstore_bundle").sha256"
+          install -m 0644 "$archive_bundle" "$evidence/$(basename "$archive_bundle")"
+          (
+            cd "$evidence"
+            sha256sum "github-attestation.sigstore.json" > "github-attestation.sigstore.sha256"
+            sha256sum "$(basename "$sigstore_bundle")" > "$(basename "$sigstore_bundle").sha256"
+            sha256sum "$(basename "$archive_bundle")" > "$(basename "$archive_bundle").sha256"
+          )
           tar --sort=name --owner=0 --group=0 --numeric-owner -C "$output" -czf "$evidence_archive" "$(basename "$evidence")"
-          sha256sum "$appimage" > "${appimage}.sha256"
-          sha256sum "$appimage" "${appimage}.sha256" "$sigstore_bundle" "$evidence_archive" > "$checksums"
+          (
+            cd "$output"
+            sha256sum "$(basename "$appimage")" > "$(basename "${appimage}.sha256")"
+            sha256sum "$(basename "$archive")" > "$(basename "${archive}.sha256")"
+            sha256sum \
+              "$(basename "$appimage")" \
+              "$(basename "${appimage}.sha256")" \
+              "$(basename "$sigstore_bundle")" \
+              "$(basename "$archive")" \
+              "$(basename "${archive}.sha256")" \
+              "$(basename "$archive_bundle")" \
+              "$(basename "$evidence_archive")" \
+              > "$(basename "$checksums")"
+          )
 
           # Auto-generated changelog from the commit range since the previous
           # tag. Git history is the source of truth here: this repository
@@ -493,18 +521,22 @@ jobs:
           printf '%s\n' \
             'Tipsy GitHub-signed release verification' \
             '' \
-            "Artifact: $(basename "$appimage")" \
-            "Sigstore bundle: $(basename "$sigstore_bundle")" \
+            "AppImage: $(basename "$appimage")" \
+            "AppImage Sigstore bundle: $(basename "$sigstore_bundle")" \
+            "Release archive: $(basename "$archive")" \
+            "Release archive Sigstore bundle: $(basename "$archive_bundle")" \
             "GitHub provenance: github-attestation.sigstore.json (inside $(basename "$evidence_archive"))" \
             '' \
-            '1. Verify the artifact SHA-256:' \
-            "   sha256sum --strict --check $(basename "${appimage}.sha256")" \
+            '1. Verify the artifact SHA-256 checksums:' \
+            "   sha256sum --strict --check $(basename "${appimage}.sha256") $(basename "${archive}.sha256")" \
             '' \
-            '2. Verify the keyless Sigstore signature:' \
+            '2. Verify the keyless Sigstore signatures:' \
             "   cosign verify-blob $(basename "$appimage") --bundle $(basename "$sigstore_bundle") --certificate-identity $identity --certificate-oidc-issuer $issuer" \
+            "   cosign verify-blob $(basename "$archive") --bundle $(basename "$archive_bundle") --certificate-identity $identity --certificate-oidc-issuer $issuer" \
             '' \
             '3. Verify GitHub build provenance:' \
-            "   gh attestation verify $(basename "$appimage") --repo $GITHUB_REPOSITORY --signer-workflow .github/workflows/release.yml --source-ref $GITHUB_REF --deny-self-hosted-runners" \
+            "   gh attestation verify $(basename "$appimage") --repo $GITHUB_REPOSITORY --signer-workflow $GITHUB_REPOSITORY/.github/workflows/release.yml --source-ref $GITHUB_REF --deny-self-hosted-runners" \
+            "   gh attestation verify $(basename "$archive") --repo $GITHUB_REPOSITORY --signer-workflow $GITHUB_REPOSITORY/.github/workflows/release.yml --source-ref $GITHUB_REF --deny-self-hosted-runners" \
             > "$verification"
           printf '%s\n' \
             "Tipsy ${version}" \
@@ -525,13 +557,13 @@ jobs:
             '' \
             '## Verify' \
             '' \
-            'This AppImage was built by an unprivileged GitHub Actions job, keylessly signed with GitHub Actions OIDC and Sigstore, and issued a GitHub build-provenance attestation.' \
-            'No private signing key, signing secret, or release credential is embedded in the artifact or repository.' \
+            'This AppImage and reproducible release archive were built by an unprivileged GitHub Actions job, keylessly signed with GitHub Actions OIDC and Sigstore, and issued a GitHub build-provenance attestation.' \
+            'No private signing key, signing secret, or release credential is embedded in the artifacts or repository.' \
             '' \
-            'Download the AppImage, its SHA-256 file, its Sigstore bundle, and VERIFY.txt. The evidence archive contains the GitHub provenance bundle and deterministic build evidence.' \
+            'Download the AppImage (or release archive), its SHA-256 file, its Sigstore bundle, and VERIFY.txt. The evidence archive contains the GitHub provenance bundle and deterministic build evidence.' \
             'See VERIFY.txt for the exact verification commands.' \
             > "$notes"
-          for item in "$appimage" "${appimage}.sha256" "$sigstore_bundle" "$evidence_archive" "$checksums" "$verification" "$notes"; do
+          for item in "$appimage" "${appimage}.sha256" "$sigstore_bundle" "$archive" "${archive}.sha256" "$archive_bundle" "$evidence_archive" "$checksums" "$verification" "$notes"; do
             [[ -f "$item" && ! -L "$item" && -s "$item" ]]
           done
           printf 'checksums=%s\n' "$checksums" >> "$GITHUB_OUTPUT"
@@ -539,7 +571,7 @@ jobs:
           printf 'notes=%s\n' "$notes" >> "$GITHUB_OUTPUT"
           printf 'verification=%s\n' "$verification" >> "$GITHUB_OUTPUT"
 
-      - name: Publish the signed AppImage to GitHub Releases
+      - name: Publish the signed AppImage and release archive to GitHub Releases
         env:
           GH_TOKEN: ${{ github.token }}
         shell: bash
@@ -555,6 +587,9 @@ jobs:
             '${{ steps.candidate.outputs.appimage }}' \
             '${{ steps.candidate.outputs.appimage }}.sha256' \
             '${{ steps.signature.outputs.bundle }}' \
+            '${{ steps.candidate.outputs.archive }}' \
+            '${{ steps.candidate.outputs.archive }}.sha256' \
+            '${{ steps.signature.outputs.archive_bundle }}' \
             '${{ steps.release_files.outputs.evidence_archive }}' \
             '${{ steps.release_files.outputs.checksums }}' \
             '${{ steps.release_files.outputs.verification }}' \

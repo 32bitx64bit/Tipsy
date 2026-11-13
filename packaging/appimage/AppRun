@@ -22,9 +22,11 @@ export LD_LIBRARY_PATH="$appdir/usr/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
 export QT_PLUGIN_PATH="$appdir/usr/plugins"
 export QT_QPA_PLATFORM_PLUGIN_PATH="$appdir/usr/plugins/platforms"
 
-# AppRun identifies a GitHub AppImage payload so tipsy can use OfficialVerified
-# with the compiled Roblox signer floor. Cryptographic AppImage admission stays
-# in release CI (cosign). Source builds never receive this handoff.
+# AppRun records the GitHub AppImage handoff for desktop integration and
+# packaging evidence. Official release identity is compile-time (the
+# official_release build tag plus stamped linker metadata); these environment
+# variables and the payload build-info.json never grant OfficialVerified
+# authority. Cryptographic AppImage admission stays in release CI (cosign).
 if [ -n "${APPIMAGE:-}" ]; then
 	case "$APPIMAGE" in
 		/*)

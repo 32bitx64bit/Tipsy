@@ -6,7 +6,58 @@ it under the terms of the GNU Affero General Public License as published by
 the Free Software Foundation, either version 3 of the License, or
 (at your option) any later version.
 
-See the LICENSE file for the full license text.
+See the LICENSE file for the full license text. The LICENSE file is the
+verbatim GNU Affero General Public License version 3 and is not modified.
+The additional terms below are issued under section 7 of the AGPLv3 and
+apply to the Tipsy project code.
+
+Tipsy versions released before 2026-11-13 were licensed under
+GPL-3.0-or-later and remain available under that license. Code added from
+that date is licensed under AGPL-3.0-or-later.
+
+-----------------------------------------------------------------------------
+Additional terms for Tipsy code (GNU AGPL version 3, section 7)
+-----------------------------------------------------------------------------
+
+The Tipsy project code is licensed under AGPL-3.0-or-later with the following
+additional terms, as permitted by section 7 of the GNU Affero General Public
+License version 3. If you convey the Tipsy code, or modified versions of it,
+you must comply with these terms in addition to the AGPLv3.
+
+1. Preservation of legal notices and attribution (section 7(b)).
+   You must preserve all copyright notices, license notices, and author
+   attributions in the Tipsy code, in this NOTICE file, and in the Appropriate
+   Legal Notices displayed by works containing it. You may not remove or
+   alter the notices that identify the Tipsy Authors as the copyright holders
+   of this code.
+
+2. Origin marking; no misrepresentation (section 7(c)).
+   You must not misrepresent the origin of this material. Modified versions,
+   forks, and any build not produced by the official Tipsy release pipeline
+   must be marked in reasonable ways as different from the original version,
+   and must not be presented as official Tipsy releases. Tipsy marks such
+   builds "Unofficial / Local Build" in version output, logs, window titles,
+   and its own User-Agent, and reserves the "Official Release" identity for
+   binaries compiled with the official_release build tag and stamped with
+   official release metadata by the release build scripts. Removing or
+   falsifying that marking, or presenting a non-official build as an official
+   Tipsy release (including claiming OfficialVerified status for it),
+   violates these terms.
+
+3. Trademarks and application identity (section 7(e)).
+   "Tipsy", the Tipsy logo, and the application identifiers
+   "io.github.tipsy_linux.Tipsy" and "io.github.tipsy_linux.Tipsy.Dev" are
+   trade names, trademarks, and service marks of the Tipsy project. No rights
+   under trademark law are granted for their use, except that you may use
+   them for truthful attribution of unmodified code (for example, "based on
+   Tipsy" or "unofficial build of Tipsy"). Modified or unofficial
+   distributions must not use these marks, the official branding, or the
+   io.github.tipsy_linux.Tipsy application identity in a way that suggests
+   they are official Tipsy releases or are endorsed by the Tipsy project.
+
+These additional terms apply only to the Tipsy project code. They do not
+apply to Roblox software, which is not distributed by this project, or to
+third-party components, which remain under their own licenses below.
 
 -----------------------------------------------------------------------------
 Third-party and adjacent works
@@ -31,7 +82,3 @@ MIQT (github.com/mappu/miqt)
 
 Other third-party Go modules
     Subject to their respective licenses. See go.mod / go.sum.
-
-Tipsy versions released before 2026-11-13 were licensed under
-AGPL-3.0-or-later and remain available under that license. Code added from
-that date is licensed under AGPL-3.0-or-later.
