@@ -1033,18 +1033,19 @@ static void tipsy_handle_raw_motion(Display *dpy, Window win,
 
 // End an acquired grab exactly once. A focus/close cancellation also emits
 // one secondary-button release when its physical release can no longer be
-// trusted to arrive, preventing a stuck Roblox button state.
+// trusted to arrive, preventing a stuck Roblox button state. This release is
+// synthesized even without an active pointer grab so a held button in a
+// non-captured state cannot lose its matching up event on focus loss.
 static int tipsy_pointer_unlock(Display *dpy, Window win, int notify,
 	int cancel_right_button) {
-	if (!tipsy_capture.active || tipsy_capture.dpy != dpy ||
-		tipsy_capture.win != win) {
-		if (cancel_right_button) tipsy_capture.right_down = 0;
-		return 0;
-	}
 	if (cancel_right_button && tipsy_capture.right_down) {
 		tipsy_input_push(TIPSY_INPUT_POINTER, 1, Button3, 0,
 			(float)tipsy_capture.anchor_x, (float)tipsy_capture.anchor_y);
 		tipsy_capture.right_down = 0;
+	}
+	if (!tipsy_capture.active || tipsy_capture.dpy != dpy ||
+		tipsy_capture.win != win) {
+		return 0;
 	}
 	// Leave the desktop pointer at the grab anchor. First-person look uses
 	// the window center; held-RMB look uses the click. Warping to a different

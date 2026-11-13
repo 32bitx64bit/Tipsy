@@ -1946,6 +1946,46 @@ func TestTouchModeCoherentDelivery(t *testing.T) {
 // — SOURCE_MOUSE (0x2002) +
 // TOOL_TYPE_MOUSE (3), right-button delivery, and BUTTON_PRIMARY-derived
 // buttonState on the primitives.
+func TestFocusLossClearsHeldPointerButtonState(t *testing.T) {
+	selectPointerPath(t, "direct")
+	wireRecordingDirectTarget(t, 0x1234, 0x5678)
+	stubCaptureSeams(t)
+	vm := newCaptureVM(t)
+	enterExperienceForTest(t, vm, 79966250354565)
+	testDirectRecSetMouseLocked(false)
+	resetPointerCaptureState()
+
+	if got := pointerButtonState(1, true); got != 1 {
+		t.Fatalf("primary down state=%d, want 1", got)
+	}
+	directSecondaryHeld.Store(true)
+	pointerGestureStart(monotimeMillis())
+
+	handleX11InputEvent(x11.InputEvent{Kind: x11.InputFocus, FocusGained: false})
+
+	if got := pointerButtonsHeld(); got != 0 {
+		t.Fatalf("pointerButtons after focus loss=%d, want 0", got)
+	}
+	if directSecondaryHeld.Load() {
+		t.Fatal("directSecondaryHeld still set after focus loss")
+	}
+	if secondaryButtonHeld() {
+		t.Fatal("secondaryButtonHeld still set after focus loss")
+	}
+	if pointerGestureOpen() {
+		t.Fatal("pointer gesture still open after focus loss")
+	}
+
+	handleX11InputEvent(x11.InputEvent{Kind: x11.InputPointer, PointerAction: x11.PointerUp, Button: 1, X: 10, Y: 20})
+	handleX11InputEvent(x11.InputEvent{Kind: x11.InputPointer, PointerAction: x11.PointerUp, Button: 3, X: 10, Y: 20})
+	if got := pointerButtonsHeld(); got != 0 {
+		t.Fatalf("pointerButtons after synthetic releases=%d, want 0", got)
+	}
+	if secondaryButtonHeld() {
+		t.Fatal("secondary still held after synthetic releases")
+	}
+}
+
 func TestPointerDeviceMouseIdentity(t *testing.T) {
 	selectPointerPath(t, "gameactivity")
 	t.Setenv("TIPSY_INPUT_DEVICE", "")

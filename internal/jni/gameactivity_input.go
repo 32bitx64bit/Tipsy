@@ -1488,7 +1488,21 @@ func resetPointerCaptureState() {
 	windowUnfocused.Store(false)
 	persistentCause.Store(0)
 	lastCaptureState.Store(0)
+	clearPointerButtonState()
+}
+
+// clearPointerButtonState reconciles held pointer state after the host loses
+// the ability to deliver matching releases (X11 focus loss or a full input
+// reset). Synthetic X11 button releases may still arrive later; the Go-side
+// state must not stay stuck either way.
+func clearPointerButtonState() {
+	pointerButtons.mu.Lock()
+	pointerButtons.state = 0
+	pointerButtons.mu.Unlock()
 	directSecondaryHeld.Store(false)
+	gestureClock.mu.Lock()
+	gestureClock.pointerOpen = false
+	gestureClock.mu.Unlock()
 }
 
 // pointerCaptureAvailable reports whether the desktop persistent capture
@@ -1861,6 +1875,11 @@ func handleX11InputEvent(ev x11.InputEvent) {
 		if !ev.FocusGained {
 			// Host focus loss already ungrabs in X11, so no explicit unlock is
 			// sent here; the state is Free until FocusIn re-reads the engine.
+			// Reconcile held pointer state before X11's synthetic button
+			// releases (if any) are delivered, so a missed release cannot leave
+			// secondary/direct held tracking or pointerButtons stuck across the
+			// focus transition.
+			clearPointerButtonState()
 			if ev.FocusAltHeld || altToggleConsumed.Load() {
 				// Alt-Tab chord evidence: the Alt press belonged to the window-
 				// manager chord, not a standalone capture toggle. Restore the
