@@ -111,3 +111,70 @@ func TestGameActivityCommandWriterPrefersNamedAPI(t *testing.T) {
 		t.Fatalf("writer = %#v, want named API without descriptor", w)
 	}
 }
+
+func TestGameActivityCommandWriterRejectsUnmappedAndOverflowHandles(t *testing.T) {
+	mapped, err := unix.Mmap(-1, 0, 2*unix.Getpagesize(), unix.PROT_NONE, unix.MAP_PRIVATE|unix.MAP_ANONYMOUS)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = unix.Munmap(mapped) })
+	guardAddr := uintptr(unsafe.Pointer(&mapped[0]))
+
+	for _, tc := range []struct {
+		handle uintptr
+		stage  GameActivityCommandStage
+	}{
+		{0x1000, GameActivityCommandHandle},
+		{guardAddr, GameActivityCommandDescriptor},
+		{^uintptr(0) - 0x80, GameActivityCommandDescriptor},
+	} {
+		_, err := NewGameActivityCommandWriter(tc.handle, 0)
+		var commandErr *GameActivityCommandError
+		if !errors.As(err, &commandErr) || commandErr.Stage != tc.stage {
+			t.Fatalf("handle %#x: error = %#v, want stage %q", tc.handle, err, tc.stage)
+		}
+	}
+}
+
+func TestGameActivityCommandWriterEnforcesModuleBounds(t *testing.T) {
+	mod, entry, _ := bionicSyncMappedFixture(t)
+
+	// Named write export must reside inside the module's executable segment.
+	w, err := NewGameActivityCommandWriter(0x20000, entry, mod)
+	if err != nil || w.namedWrite != entry {
+		t.Fatalf("valid module entry rejected: w=%#v err=%v", w, err)
+	}
+	if _, err := NewGameActivityCommandWriter(0x20000, mod.Base+uintptr(mod.Size)+0x1000, mod); err == nil {
+		t.Fatal("out-of-module namedWrite accepted")
+	}
+
+	// Fallback handle inside executable .text must be rejected without reading code bytes as FDs.
+	_, err = NewGameActivityCommandWriter(entry, 0, mod)
+	var commandErr *GameActivityCommandError
+	if !errors.As(err, &commandErr) || commandErr.Stage != GameActivityCommandHandle {
+		t.Fatalf("exec-segment handle: error = %#v, want GameActivityCommandHandle", err)
+	}
+
+	// Valid heap handle with live pipe descriptors succeeds when paired with an open module.
+	var fds [2]int
+	if err := unix.Pipe2(fds[:], unix.O_CLOEXEC|unix.O_NONBLOCK); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		_ = unix.Close(fds[0])
+		_ = unix.Close(fds[1])
+	})
+	handle, backing := gameActivityHandleForTest(t, fds[0], fds[1])
+	w2, err := NewGameActivityCommandWriter(handle, 0, mod)
+	if err != nil {
+		t.Fatalf("heap handle with valid module rejected: %v", err)
+	}
+	if err := w2.WriteCommand(9); err != nil {
+		t.Fatal(err)
+	}
+	var got [1]byte
+	if n, err := unix.Read(fds[0], got[:]); err != nil || n != 1 || got[0] != 9 {
+		t.Fatalf("pipe read n=%d err=%v got=%v", n, err, got)
+	}
+	runtime.KeepAlive(backing)
+}

@@ -376,7 +376,8 @@ func float32bits(f float32) uint32 {
 // Input delivery target: the (env, activity, handle) triple the engine's
 // registered GameActivity natives require. The runtime launcher knows all
 // three right after initializeNativeCode returns and wires them here; until
-// then events are counted as dropped, never queued or synthesized.
+// then the async bridge still queues events but each dispatch drops them
+// (counted, never synthesized), so nothing reaches an unwired engine.
 var inputTarget struct {
 	mu       sync.RWMutex
 	env      uintptr
@@ -401,9 +402,12 @@ var inputStats InputStats
 // returns a non-zero handle. Zero values park delivery (events drop).
 func SetGameActivityInputTarget(env, activity, handle uintptr) {
 	inputTarget.mu.Lock()
-	defer inputTarget.mu.Unlock()
 	inputTarget.env, inputTarget.activity, inputTarget.handle = env, activity, handle
+	inputTarget.mu.Unlock()
 	if handle != 0 {
+		// A live target (re)binds the async input bridge: a prior Clear may
+		// have stopped the worker, and re-wiring must deliver again.
+		bindX11InputBridge()
 		touch := pointerDeviceIsTouch()
 		mode := "mouse"
 		if touch {
@@ -421,9 +425,11 @@ func SetGameActivityInputTarget(env, activity, handle uintptr) {
 	}
 }
 
-// ClearGameActivityInputTarget parks delivery (e.g. on teardown).
+// ClearGameActivityInputTarget parks delivery (e.g. on teardown) and stops the
+// async input worker so a wedged engine call cannot hang shutdown.
 func ClearGameActivityInputTarget() {
 	SetGameActivityInputTarget(0, 0, 0)
+	stopX11InputBridge()
 }
 
 // InputDeliveryStats returns a snapshot of delivery counters.
@@ -479,7 +485,7 @@ func DispatchGameActivityFocus(gained bool) bool {
 	if gained {
 		z = 1
 	}
-	C.tipsy_input_call_void4(unsafe.Pointer(fn), C.uintptr_t(env), C.uintptr_t(activity), C.uintptr_t(handle), C.uintptr_t(z))
+	C.tipsy_input_call_void4(ptrFromUintptr(fn), C.uintptr_t(env), C.uintptr_t(activity), C.uintptr_t(handle), C.uintptr_t(z))
 	atomic.AddUint64(&inputStats.FocusDelivered, 1)
 	return true
 }
@@ -603,7 +609,7 @@ func dispatchGameActivityKey(keyCode int32, scanCode int32, pressed bool, repeat
 		// reference from the VM's own env, so no per-edge reference remains.
 		vm.deleteLocal(evID)
 	}
-	consumed := C.tipsy_input_call_bool4(unsafe.Pointer(fn), C.uintptr_t(env), C.uintptr_t(activity), C.uintptr_t(handle), C.uintptr_t(obj)) != 0
+	consumed := C.tipsy_input_call_bool4(ptrFromUintptr(fn), C.uintptr_t(env), C.uintptr_t(activity), C.uintptr_t(handle), C.uintptr_t(obj)) != 0
 	vm.mu.RLock()
 	action, _ := ev.fields["action"].(int32)
 	vm.mu.RUnlock()
@@ -669,7 +675,7 @@ func DispatchGameActivityPointer(action int32, x, y float32, buttonState int32) 
 		// See dispatchGameActivityKey: drop the creation local reference.
 		vm.deleteLocal(evID)
 	}
-	consumed := C.tipsy_input_call_touch(unsafe.Pointer(fn),
+	consumed := C.tipsy_input_call_touch(ptrFromUintptr(fn),
 		C.uintptr_t(env), C.uintptr_t(activity), C.uintptr_t(handle), C.uintptr_t(obj),
 		// i1..i5: pointerCount, historySize, deviceId, source, action
 		// (GameActivity.N1 register order, proven from the APK DEX).
@@ -1746,12 +1752,203 @@ func secondaryButtonHeld() bool {
 	return pointerButtonsHeld()&2 != 0 || directSecondaryHeld.Load()
 }
 
-// bindX11InputBridge subscribes the GameActivity input dispatcher to the
-// X11 window's captured input events. Called from NewVM; a VM without a
-// launched window simply never sees events.
-func bindX11InputBridge() {
-	x11.OnInput(handleX11InputEvent)
+// inputBridgeDispatch is the worker's per-event dispatch. Production always
+// uses handleX11InputEvent; tests substitute a blocking function to prove the
+// X11 pump never waits on a wedged engine call. The worker captures it once at
+// start, so a test restores the seam only after the worker has been joined.
+var inputBridgeDispatch = handleX11InputEvent
+
+// The X11->GameActivity input bridge is asynchronous: Window.OnInput (called
+// on the win.Pump goroutine) only enqueues, and a dedicated worker delivers
+// events to the engine in order. The engine's registered input natives are
+// synchronous and unbounded (dispatchGameActivityKey/Pointer call straight
+// into libroblox), so delivering them on the pump goroutine let a stalled
+// engine wedge win.Pump itself — WM_DELETE_WINDOW, focus-out pointer unlock
+// and ctx cancellation then never ran. Enqueue is non-blocking and bounded;
+// the worker alone can block, and teardown abandons it after a deadline
+// rather than hanging on a wedged native call.
+const (
+	// inputBridgeQueueCap bounds the pending-event queue. It is generous for
+	// a burst of key/button/focus edges; high-frequency motion coalesces at
+	// the tail once the queue is saturated instead of growing without bound.
+	inputBridgeQueueCap = 256
+	// inputBridgeStopTimeout bounds teardown's wait for the worker. A single
+	// in-flight native call may be wedged in a dead engine; waiting forever
+	// would reintroduce the hung shutdown this bridge exists to remove.
+	inputBridgeStopTimeout = 500 * time.Millisecond
+)
+
+// inputBridgeState is one generation of the worker. Each bind owns its own
+// queue and channels so a worker abandoned at teardown (wedged in a native
+// call) can never touch a later generation's queue: it observes its own
+// closed stop channel as soon as the call returns and exits.
+type inputBridgeState struct {
+	mu      sync.Mutex
+	running bool
+	queue   []x11.InputEvent
+	wake    chan struct{}
+	stop    chan struct{}
+	done    chan struct{}
 }
+
+var inputBridge struct {
+	mu     sync.Mutex
+	inst   *inputBridgeState
+	cancel func()
+}
+
+// bindX11InputBridge subscribes the GameActivity input dispatcher to the
+// X11 window's captured input events and starts the async delivery worker.
+// Called from NewVM and whenever a live input target is wired; idempotent
+// while a worker is running. A VM without a launched window never sees events.
+func bindX11InputBridge() {
+	inputBridge.mu.Lock()
+	if inputBridge.inst != nil {
+		inputBridge.mu.Unlock()
+		return
+	}
+	inst := &inputBridgeState{
+		running: true,
+		queue:   make([]x11.InputEvent, 0, inputBridgeQueueCap),
+		wake:    make(chan struct{}, 1),
+		stop:    make(chan struct{}),
+		done:    make(chan struct{}),
+	}
+	inputBridge.inst = inst
+	inputBridge.cancel = x11.OnInput(enqueueX11InputEvent)
+	inputBridge.mu.Unlock()
+	go inputBridgeWorker(inst)
+}
+
+// enqueueX11InputEvent is the Window.OnInput callback. It runs on the win.Pump
+// goroutine and must return promptly: it only appends to the bounded queue
+// (coalescing trailing motion when saturated) and never calls the engine, so
+// a wedged delivery worker cannot block the pump.
+func enqueueX11InputEvent(ev x11.InputEvent) {
+	inputBridge.mu.Lock()
+	inst := inputBridge.inst
+	inputBridge.mu.Unlock()
+	if inst == nil {
+		dropEvent("bridge: not bound")
+		return
+	}
+	inst.mu.Lock()
+	if !inst.running {
+		inst.mu.Unlock()
+		dropEvent("bridge: stopped")
+		return
+	}
+	if len(inst.queue) < inputBridgeQueueCap {
+		inst.queue = append(inst.queue, ev)
+	} else if !coalesceInputQueueLocked(inst.queue, ev) {
+		inst.mu.Unlock()
+		dropEvent("bridge: queue saturated")
+		return
+	}
+	inst.mu.Unlock()
+	select {
+	case inst.wake <- struct{}{}:
+	default:
+	}
+}
+
+// coalesceInputQueueLocked merges a saturated queue's newest motion into the
+// pending tail motion, reporting whether it did. Only a trailing pure move
+// coalesces, so a move can never cross a key/button/focus/scroll edge and
+// reorder it; captured relative deltas accumulate so coalescing loses no
+// camera motion. Non-motion events are never merged — the caller drops the
+// excess instead. Caller holds inst.mu.
+func coalesceInputQueueLocked(q []x11.InputEvent, ev x11.InputEvent) bool {
+	if ev.Kind != x11.InputPointer || ev.PointerAction != x11.PointerMove || len(q) == 0 {
+		return false
+	}
+	tail := &q[len(q)-1]
+	if tail.Kind != x11.InputPointer || tail.PointerAction != x11.PointerMove || tail.Relative != ev.Relative {
+		return false
+	}
+	if ev.Relative {
+		ev.DeltaX += tail.DeltaX
+		ev.DeltaY += tail.DeltaY
+	}
+	*tail = ev
+	return true
+}
+
+// inputBridgeWorker delivers queued events to the engine in order. It is the
+// only goroutine that may block in an input native; it checks the stop channel
+// between events so teardown does not wait for the whole queue to drain.
+func inputBridgeWorker(inst *inputBridgeState) {
+	dispatch := inputBridgeDispatch
+	defer close(inst.done)
+	for {
+		select {
+		case <-inst.stop:
+			return
+		case <-inst.wake:
+		}
+		for {
+			inst.mu.Lock()
+			if len(inst.queue) == 0 {
+				inst.queue = inst.queue[:0]
+				inst.mu.Unlock()
+				break
+			}
+			ev := inst.queue[0]
+			n := len(inst.queue)
+			copy(inst.queue, inst.queue[1:])
+			inst.queue[n-1] = x11.InputEvent{}
+			inst.queue = inst.queue[:n-1]
+			inst.mu.Unlock()
+			dispatch(ev)
+			select {
+			case <-inst.stop:
+				return
+			default:
+			}
+		}
+	}
+}
+
+// stopX11InputBridge tears down the async worker: it unsubscribes from X11,
+// signals stop and waits a bounded time for the worker to exit. A worker
+// wedged in a single in-flight native call is abandoned after the deadline —
+// it observes the closed stop channel when the call returns and dispatches
+// nothing further — so a dead engine cannot hang shutdown. Idempotent.
+func stopX11InputBridge() {
+	inputBridge.mu.Lock()
+	inst := inputBridge.inst
+	cancel := inputBridge.cancel
+	inputBridge.inst = nil
+	inputBridge.cancel = nil
+	inputBridge.mu.Unlock()
+	if inst == nil {
+		return
+	}
+	inst.mu.Lock()
+	if !inst.running {
+		inst.mu.Unlock()
+		return
+	}
+	inst.running = false
+	inst.queue = nil
+	close(inst.stop)
+	inst.mu.Unlock()
+	if cancel != nil {
+		cancel()
+	}
+	select {
+	case <-inst.done:
+	case <-time.After(inputBridgeStopTimeout):
+		logging.Logger(logging.CatJNI).Warn("[jni] input bridge worker did not stop before deadline; abandoning",
+			"timeout", inputBridgeStopTimeout)
+	}
+}
+
+// StopX11InputBridge is the public teardown for the async X11->GameActivity
+// input worker. ClearGameActivityInputTarget calls it; the runtime may also
+// call it early in shutdown (before terminateNativeCode) so no queued input
+// crosses engine teardown, mirroring StopRobloxDirectGamepadPump.
+func StopX11InputBridge() { stopX11InputBridge() }
 
 // A physical key gesture must keep the listener that received its initial
 // down. In particular, nativePassKeyEvent for slash can synchronously make

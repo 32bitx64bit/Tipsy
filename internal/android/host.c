@@ -22,6 +22,8 @@ extern void GoAndroid_LogMissing(char *name);
 extern void GoAndroid_LogWrite(int prio, char *tag, char *text);
 
 static void *lib_libc;
+static void *lib_libpthread;
+static void *lib_ld_linux;
 static void *lib_libm;
 static void *lib_libz;
 static void *lib_egl;
@@ -760,69 +762,105 @@ static void *open_lib(const char *name)
 static void open_host_abi_libraries(void)
 {
 	lib_libc = open_lib("libc.so.6");
+	lib_libpthread = dlopen("libpthread.so.0", RTLD_NOW | RTLD_LOCAL | RTLD_NOLOAD);
+	if (lib_libpthread == NULL) {
+		lib_libpthread = open_lib("libpthread.so.0");
+	}
+	lib_ld_linux = dlopen("ld-linux-x86-64.so.2", RTLD_NOW | RTLD_LOCAL | RTLD_NOLOAD);
+	if (lib_ld_linux == NULL) {
+		lib_ld_linux = dlopen("/lib64/ld-linux-x86-64.so.2", RTLD_NOW | RTLD_LOCAL | RTLD_NOLOAD);
+	}
 	lib_libm = open_lib("libm.so.6");
 	lib_libz = open_lib("libz.so.1");
+}
+
+static int handle_owns_base(void *handle, const void *fbase)
+{
+	struct link_map *map = NULL;
+
+	if (handle == NULL || fbase == NULL) {
+		return 0;
+	}
+	if (dlinfo(handle, RTLD_DI_LINKMAP, &map) != 0 || map == NULL) {
+		return 0;
+	}
+	return fbase == (const void *)map->l_addr;
 }
 
 /* Resolve from one exact host ELF object. dlsym(handle, ...) also searches an
  * object's dependencies, so confirm the returned address belongs to the
  * requested object's own link_map before treating it as an owned Android ABI
- * capability. */
+ * capability. Android's unified libc.so maps to glibc's libc.so.6 plus any
+ * split libpthread.so.0 / ld-linux-x86-64.so.2 SONAMEs on older toolchains. */
 void *tipsy_host_dlsym_library(const char *lib, const char *name)
 {
-	void *handle = NULL;
-	void *p;
+	void *p = NULL;
 	Dl_info info;
-	struct link_map *map = NULL;
 
 	if (lib == NULL || name == NULL) {
 		return NULL;
 	}
 	pthread_once(&host_abi_once, open_host_abi_libraries);
 	if (strcmp(lib, "libc.so") == 0) {
-		handle = lib_libc;
-	} else if (strcmp(lib, "libm.so") == 0) {
-		handle = lib_libm;
-	} else if (strcmp(lib, "libz.so") == 0) {
-		handle = lib_libz;
+		if (lib_libc != NULL) {
+			p = dlsym(lib_libc, name);
+		}
+		if (p == NULL && lib_libpthread != NULL) {
+			p = dlsym(lib_libpthread, name);
+		}
+		if (p == NULL && lib_ld_linux != NULL) {
+			p = dlsym(lib_ld_linux, name);
+		}
+		if (p == NULL || dladdr(p, &info) == 0) {
+			return NULL;
+		}
+		if (!handle_owns_base(lib_libc, info.dli_fbase) &&
+		    !handle_owns_base(lib_libpthread, info.dli_fbase) &&
+		    !handle_owns_base(lib_ld_linux, info.dli_fbase)) {
+			return NULL;
+		}
+		return p;
 	}
-	if (handle == NULL) {
-		return NULL;
+	if (strcmp(lib, "libm.so") == 0) {
+		if (lib_libm == NULL) {
+			return NULL;
+		}
+		p = dlsym(lib_libm, name);
+		if (p == NULL || dladdr(p, &info) == 0 ||
+		    !handle_owns_base(lib_libm, info.dli_fbase)) {
+			return NULL;
+		}
+		return p;
 	}
-	p = dlsym(handle, name);
-	if (p == NULL || dlinfo(handle, RTLD_DI_LINKMAP, &map) != 0 || map == NULL ||
-	    dladdr(p, &info) == 0 || info.dli_fbase != (void *)map->l_addr) {
-		return NULL;
+	if (strcmp(lib, "libz.so") == 0) {
+		if (lib_libz == NULL) {
+			return NULL;
+		}
+		p = dlsym(lib_libz, name);
+		if (p == NULL || dladdr(p, &info) == 0 ||
+		    !handle_owns_base(lib_libz, info.dli_fbase)) {
+			return NULL;
+		}
+		return p;
 	}
-	return p;
+	return NULL;
 }
 
 void *tipsy_host_dlsym(const char *name)
 {
+	static const char *const host_abi_libs[] = {
+		"libc.so",
+		"libm.so",
+		"libz.so",
+	};
+	size_t i;
 	void *p;
 
 	if (name == NULL) {
 		return NULL;
 	}
-	p = dlsym(RTLD_DEFAULT, name);
-	if (p != NULL) {
-		return p;
-	}
-	pthread_once(&host_abi_once, open_host_abi_libraries);
-	if (lib_libc != NULL) {
-		p = dlsym(lib_libc, name);
-		if (p != NULL) {
-			return p;
-		}
-	}
-	if (lib_libm != NULL) {
-		p = dlsym(lib_libm, name);
-		if (p != NULL) {
-			return p;
-		}
-	}
-	if (lib_libz != NULL) {
-		p = dlsym(lib_libz, name);
+	for (i = 0; i < sizeof(host_abi_libs) / sizeof(host_abi_libs[0]); i++) {
+		p = tipsy_host_dlsym_library(host_abi_libs[i], name);
 		if (p != NULL) {
 			return p;
 		}
