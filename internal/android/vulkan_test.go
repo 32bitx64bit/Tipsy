@@ -177,6 +177,27 @@ func TestVulkanUnpublishedTeardownPollsInsteadOfDraining(t *testing.T) {
 	}
 }
 
+func TestVulkanResizeFenceTimeoutSkipsAndReleases(t *testing.T) {
+	// A frame-size change must wait for earlier overlay draws, but a stalled
+	// guest fence on another image must never wedge present under the output
+	// mutex and reader lease: the bounded resize wait times out exactly once,
+	// the resize is skipped (the 1x1 foreground survives the 2x1 frame), and
+	// the lease and mutex are released before the guest present is forwarded.
+	got := testVulkanOutputTransactionFixture(14)
+	if !slices.Equal(got.order, []uint32{3}) || got.acquireCalls != 0 ||
+		got.compositionSubmitCalls != 0 || got.acquireConsumeCalls != 0 ||
+		got.guestPresentCalls != 1 || got.outputPresentCalls != 0 ||
+		!got.originalGuestForwarded || got.fullCopyCount != 0 ||
+		got.drawCount != 0 || got.uploadCount != 0 || got.quarantined ||
+		got.deviceTerminal || got.returnedResult != 0 ||
+		got.overlayAcquireCalls != 1 || got.presentMutexLocks != 1 ||
+		got.recordCalls != 0 || got.blockingFenceWaits != 1 ||
+		got.leaseReleaseCalls != 1 || !got.leaseReleasedBeforePresent ||
+		got.foregroundWidth != 1 || got.foregroundHeight != 1 {
+		t.Fatalf("resize fence timeout = %+v", got)
+	}
+}
+
 func TestVulkanSameQueueFailureMatrix(t *testing.T) {
 	tests := []struct {
 		scenario          uint32

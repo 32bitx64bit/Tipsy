@@ -26,10 +26,18 @@
 #define EGL_PLATFORM_X11_KHR 0x31D5
 #endif
 
-// Exported from notify_linux.go. Called at most once, from the swap pthread,
-// after a client presenter retires the sentinel. The handle is a cgo.Handle
-// owned by the EGL instance and stays valid until pthread_join.
+// Exported from notify_linux.go. Called exactly once with the instance's
+// cgo.Handle: by the swap pthread when it finishes, or by a bounded stop that
+// timed out joining it. The handle stays valid until that call; stop consumes
+// it under the lock before Go deletes it, so it is never used after deletion.
 extern void GoEGLHandoff(uintptr_t handle);
+
+// Test wedge hook, inert unless armed (tests only; production never arms it).
+// The swap loop calls it without holding p->mu so a test can stall the thread
+// past the bounded stop deadline and exercise the timed-out join path. Weak
+// so egl.c also links without the hook definition.
+#pragma weak tipsy_egl_swap_test_stall
+extern void tipsy_egl_swap_test_stall(void);
 
 static const char *tipsy_egl_path;
 
@@ -417,6 +425,27 @@ static void tipsy_swap_deadline(struct timespec *out) {
 	}
 }
 
+// Stop must not hang shutdown forever if eglSwapBuffers is wedged in the GPU
+// driver, so the join is bounded. pthread_timedjoin_np measures its deadline
+// against CLOCK_REALTIME (it has no clock attribute, unlike the MONOTONIC
+// cond above), so the deadline must be built from the realtime clock; a
+// MONOTONIC deadline would always be in the past and time out every join. A
+// deadline in the past (clock failure) makes timedjoin time out at once,
+// which is the safe non-blocking degradation.
+#define TIPSY_SWAP_STOP_JOIN_TIMEOUT_NS 500000000L
+static void tipsy_swap_stop_deadline(struct timespec *out) {
+	if (clock_gettime(CLOCK_REALTIME, out) != 0) {
+		out->tv_sec = 0;
+		out->tv_nsec = 0;
+		return;
+	}
+	out->tv_nsec += TIPSY_SWAP_STOP_JOIN_TIMEOUT_NS;
+	if (out->tv_nsec >= 1000000000L) {
+		out->tv_sec++;
+		out->tv_nsec -= 1000000000L;
+	}
+}
+
 static void tipsy_swap_finish(struct tipsy_swap *p, int source) {
 	pthread_mutex_lock(&p->mu);
 	if (!p->finished) {
@@ -426,11 +455,16 @@ static void tipsy_swap_finish(struct tipsy_swap *p, int source) {
 		}
 		pthread_cond_broadcast(&p->cond);
 	}
+	// Consume the handoff exactly once under the lock. A bounded stop may
+	// time out and consume it first (Go then deletes the cgo.Handle), so a
+	// stale handle must never be passed to GoEGLHandoff. The callback only
+	// posts one non-blocking capacity-1 token and never takes mu, so holding
+	// mu across it cannot deadlock stop nor block this pthread.
+	if (p->go_handle != 0) {
+		GoEGLHandoff(p->go_handle);
+		p->go_handle = 0;
+	}
 	pthread_mutex_unlock(&p->mu);
-	// This is safe even for stop/failure: StopSwapThread joins this pthread
-	// before deleting its cgo.Handle, and the callback only sends one
-	// capacity-1 token without entering EGL state.
-	GoEGLHandoff(p->go_handle);
 }
 
 static void *tipsy_swap_main(void *arg) {
@@ -467,6 +501,7 @@ static void *tipsy_swap_main(void *arg) {
 		}
 	}
 	for (;;) {
+		if (tipsy_egl_swap_test_stall != NULL) tipsy_egl_swap_test_stall();
 		int probe = 0;
 		pthread_mutex_lock(&p->mu);
 		if (!p->run || p->retired) {
@@ -568,7 +603,23 @@ int tipsy_egl_swap_thread_stop(uintptr_t ptr) {
 	p->run = 0;
 	pthread_cond_broadcast(&p->cond);
 	pthread_mutex_unlock(&p->mu);
-	pthread_join(p->thr, NULL);
+	struct timespec deadline;
+	tipsy_swap_stop_deadline(&deadline);
+	if (pthread_timedjoin_np(p->thr, NULL, &deadline) != 0) {
+		// eglSwapBuffers is wedged in the GPU driver and the thread may still
+		// touch p. Consume the handoff token now (non-blocking) and clear the
+		// handle under the lock so the thread's later finish cannot use a
+		// handle Go is about to delete. Deliberately leak p: freeing it or
+		// destroying its sync objects under a live thread is a use-after-free.
+		pthread_mutex_lock(&p->mu);
+		if (p->go_handle != 0) {
+			GoEGLHandoff(p->go_handle);
+			p->go_handle = 0;
+		}
+		fail = p->fail;
+		pthread_mutex_unlock(&p->mu);
+		return fail;
+	}
 	pthread_mutex_lock(&p->mu);
 	fail = p->fail;
 	pthread_mutex_unlock(&p->mu);

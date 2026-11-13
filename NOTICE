@@ -33,5 +33,5 @@ Other third-party Go modules
     Subject to their respective licenses. See go.mod / go.sum.
 
 Tipsy versions released before 2026-11-13 were licensed under
-GPL-3.0-or-later and remain available under that license. Code added from
+AGPL-3.0-or-later and remain available under that license. Code added from
 that date is licensed under AGPL-3.0-or-later.

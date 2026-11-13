@@ -416,6 +416,8 @@ type vulkanOutputTransactionFixture struct {
 	recordCalls                   uint32
 	leaseReleaseCalls             uint32
 	leaseReleasedBeforePresent    bool
+	foregroundWidth               uint32
+	foregroundHeight              uint32
 }
 
 func testVulkanOutputTransactionFixture(scenario uint32) vulkanOutputTransactionFixture {
@@ -481,6 +483,8 @@ func testVulkanOutputTransactionFromRaw(raw C.TipsyVkOutputTransactionFixture) v
 		recordCalls:                uint32(raw.record_calls),
 		leaseReleaseCalls:          uint32(raw.lease_release_calls),
 		leaseReleasedBeforePresent: raw.lease_released_before_present != 0,
+		foregroundWidth:            uint32(raw.foreground_width),
+		foregroundHeight:           uint32(raw.foreground_height),
 	}
 }
 

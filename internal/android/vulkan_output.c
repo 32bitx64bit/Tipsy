@@ -41,6 +41,11 @@
 #define TIPSY_VK_OUTPUT_MAX_IMAGES 16u
 #define TIPSY_VK_OUTPUT_MAX_WAITS 16u
 #define TIPSY_VK_OUTPUT_MAX_RETIRED 4u
+/* The foreground-resize path waits for earlier overlay draws while holding
+ * tipsy_output.mutex and an overlay reader lease. A stalled guest fence must
+ * never wedge present/destroy there, so the wait is bounded; on timeout the
+ * resize is skipped and the lease and mutex are released by the caller. */
+#define TIPSY_VK_OUTPUT_RESIZE_FENCE_TIMEOUT_NS UINT64_C(200000000)
 
 static const uint32_t tipsy_text_vertex_spirv[] =
 #include "vulkan_text_vert.inc"
@@ -1348,8 +1353,11 @@ static int tipsy_vk_output_prepare_foreground_locked(TipsyVkOutputPair *pair,
 		pair->foreground_width != (uint32_t)frame->width ||
 		pair->foreground_height != (uint32_t)frame->height) {
 		/* A new size replaces the image, view, and descriptor that earlier
-		 * overlay draws may still read, so only this rare path waits. */
-		if (tipsy_vk_output_wait_pair_fences_locked(pair, UINT64_MAX) != VK_SUCCESS) {
+		 * overlay draws may still read, so only this rare path waits. The
+		 * wait is bounded: a stalled fence skips the resize instead of
+		 * freezing present and swapchain/device destroy under the mutex. */
+		if (tipsy_vk_output_wait_pair_fences_locked(pair,
+			TIPSY_VK_OUTPUT_RESIZE_FENCE_TIMEOUT_NS) != VK_SUCCESS) {
 			return 0;
 		}
 		tipsy_vk_output_destroy_foreground_locked(pair);
@@ -1867,6 +1875,11 @@ static VKAPI_ATTR VkResult VKAPI_CALL tipsy_vk_output_fixture_wait_fences(
 	if (timeout != 0 && test_transaction_fixture != NULL) {
 		test_transaction_fixture->blocking_fence_waits++;
 	}
+	if (test_transaction_scenario == TIPSY_VK_OUTPUT_TX_RESIZE_FENCE_BUSY) {
+		/* The current source's 0-timeout poll succeeds; only the bounded
+		 * resize wait on the other image's stalled fence times out. */
+		return timeout != 0 ? VK_TIMEOUT : VK_SUCCESS;
+	}
 	if (test_transaction_scenario == TIPSY_VK_OUTPUT_TX_FRAME_BUSY ||
 		test_transaction_scenario == TIPSY_VK_OUTPUT_TX_UNPUBLISHED_TEARDOWN_BUSY) {
 		return VK_TIMEOUT;
@@ -2185,6 +2198,19 @@ void tipsy_test_vk_output_transaction_fixture(uint32_t scenario,
 		tipsy_output.active.source[1].completion_reusable = 0;
 		tipsy_output.active.source[1].in_flight = 1;
 	}
+	if (scenario == TIPSY_VK_OUTPUT_TX_RESIZE_FENCE_BUSY) {
+		/* A stalled overlay draw on another image must not wedge the
+		 * foreground resize: the bounded fence wait times out and the
+		 * resize is skipped, releasing the lease and the output mutex.
+		 * The 2x1 frame differs from the armed 1x1 foreground. */
+		tipsy_output.active.source_count = 2;
+		tipsy_output.active.source[1] = tipsy_output.active.source[0];
+		tipsy_output.active.source[1].image = (VkImage)(uintptr_t)0x55;
+		tipsy_output.active.source[1].fence = (VkFence)(uintptr_t)0x56;
+		tipsy_output.active.source[1].completion_reusable = 0;
+		tipsy_output.active.source[1].in_flight = 1;
+		test_transaction_frame_width = 2;
+	}
 	if (scenario == TIPSY_VK_OUTPUT_TX_UNPUBLISHED ||
 		scenario == TIPSY_VK_OUTPUT_TX_UNPUBLISHED_TEARDOWN ||
 		scenario == TIPSY_VK_OUTPUT_TX_UNPUBLISHED_TEARDOWN_BUSY) {
@@ -2233,6 +2259,8 @@ void tipsy_test_vk_output_transaction_fixture(uint32_t scenario,
 	out->quarantined = !tipsy_output.active.ready;
 	out->device_terminal = tipsy_output.device_lost;
 	out->returned_result = result;
+	out->foreground_width = tipsy_output.active.foreground_width;
+	out->foreground_height = tipsy_output.active.foreground_height;
 	test_transaction_fixture = NULL;
 	test_transaction_scenario = 0;
 	test_transaction_overlay_live = 1;

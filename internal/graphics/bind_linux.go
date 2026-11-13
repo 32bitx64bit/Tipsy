@@ -313,8 +313,10 @@ func (e *EGL) stopSwapThreadLocked() error {
 	e.swapGuestSurface = guestSwapDelivery{}
 	fail := C.tipsy_egl_swap_thread_stop(C.uintptr_t(e.swap))
 	e.swap = 0
-	// After pthread_join the C thread can no longer call GoEGLHandoff, so the
-	// handle is safe to delete; clearing swapWake fails the watcher's check.
+	// The bounded stop consumes the handoff under the swap mutex before
+	// returning (joined or timed out), so the C thread can no longer call
+	// GoEGLHandoff and the handle is safe to delete; clearing swapWake fails
+	// the watcher's check.
 	if e.swapHandle != 0 {
 		cgo.Handle(e.swapHandle).Delete()
 		e.swapHandle = 0

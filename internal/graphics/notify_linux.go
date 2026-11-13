@@ -12,11 +12,12 @@ import "C"
 
 import "runtime/cgo"
 
-// GoEGLHandoff is invoked once by the C sentinel swap thread when it finishes.
-// It must not block the C pthread, so it only posts a non-blocking token on
-// the instance's capacity-1 coalesced channel. The uintptr is a cgo.Handle for
-// that channel; StopSwapThread deletes the handle only after pthread_join, so
-// Value can never see a deleted handle.
+// GoEGLHandoff is invoked exactly once with the instance's cgo.Handle: by the
+// C sentinel swap thread when it finishes, or by a bounded stop that timed out
+// joining it. It must not block the C pthread, so it only posts a non-blocking
+// token on the instance's capacity-1 coalesced channel. The handle is consumed
+// under the swap mutex before StopSwapThread deletes it, so Value can never
+// see a deleted handle.
 //
 //export GoEGLHandoff
 func GoEGLHandoff(handle C.uintptr_t) {

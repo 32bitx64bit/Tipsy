@@ -10,12 +10,14 @@
 #include <fontconfig/fcfreetype.h>
 #include <pango/pangocairo.h>
 #include <pango/pangofc-fontmap.h>
+#include <errno.h>
 #include <math.h>
 #include <pthread.h>
 #include <stdatomic.h>
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 
 #ifndef M_PI
 #define M_PI 3.14159265358979323846
@@ -33,6 +35,10 @@ struct tipsy_focused_overlay {
 	pthread_mutex_t mutex;
 	pthread_cond_t readers_done;
 	unsigned readers;
+	/* Deferred cleanup when a reader lease outlives a bounded drain, guarded
+	 * by mutex: 0 = live, 1 = wipe the frame on the last release, 2 = the
+	 * owner freed the overlay and the last release must complete the free. */
+	int retire;
 	int published;
 	int x, y, width, height, stride;
 	uint64_t version, generation;
@@ -58,6 +64,8 @@ struct tipsy_update_notice {
 	pthread_mutex_t mutex;
 	pthread_cond_t readers_done;
 	unsigned readers;
+	/* Same deferred-cleanup states as the text overlay, guarded by mutex. */
+	int retire;
 	int published;
 	int x, y, width, height, stride;
 	int viewport_width, viewport_height;
@@ -84,7 +92,52 @@ static struct tipsy_update_notice update_notice = {
 static struct tipsy_update_notice *published_notice;
 static _Atomic uint32_t overlay_live;
 
+/* The notice is a static object, so its cond starts as PTHREAD_COND_INITIALIZER
+ * (CLOCK_REALTIME). Re-init it once against CLOCK_MONOTONIC so a bounded drain
+ * is immune to wall-clock jumps; fall back to REALTIME if that ever fails. */
+static pthread_once_t notice_cond_once = PTHREAD_ONCE_INIT;
+static clockid_t notice_cond_clock = CLOCK_REALTIME;
+static void notice_cond_init(void)
+{
+	pthread_condattr_t attr;
+	if (pthread_condattr_init(&attr) != 0) return;
+	if (pthread_condattr_setclock(&attr, CLOCK_MONOTONIC) == 0 &&
+		pthread_cond_destroy(&update_notice.readers_done) == 0) {
+		if (pthread_cond_init(&update_notice.readers_done, &attr) == 0) {
+			notice_cond_clock = CLOCK_MONOTONIC;
+		} else {
+			/* The static cond was already destroyed; restore a usable
+			 * one. REALTIME is an acceptable fallback, but leaving it
+			 * destroyed would make the next timedwait undefined. */
+			(void)pthread_cond_init(&update_notice.readers_done, NULL);
+		}
+	}
+	pthread_condattr_destroy(&attr);
+}
+
 static void wipe(void *p, size_t n) { if (p != NULL && n != 0) memset(p, 0, n); }
+
+/* A compositor reader can wedge in a guest fence wait, so the writer must
+ * never block the launch loop on a lease indefinitely. Drain waits are
+ * bounded; on timeout the caller defers the destructive wipe/free to the
+ * last reader release instead of corrupting a live lease. */
+#define TIPSY_OVERLAY_DRAIN_TIMEOUT_NS 120000000L
+
+static void overlay_drain_deadline(struct timespec *out, clockid_t clock)
+{
+	if (clock_gettime(clock, out) != 0) {
+		/* A deadline in the past makes timedwait time out at once, which
+		 * is the safe non-blocking degradation. */
+		out->tv_sec = 0;
+		out->tv_nsec = 0;
+		return;
+	}
+	out->tv_nsec += TIPSY_OVERLAY_DRAIN_TIMEOUT_NS;
+	if (out->tv_nsec >= 1000000000L) {
+		out->tv_sec++;
+		out->tv_nsec -= 1000000000L;
+	}
+}
 
 static void tipsy_focused_overlay_update_live_locked(void)
 {
@@ -134,20 +187,35 @@ static void discard_surface(struct tipsy_focused_overlay *o) {
 	o->surface_width = o->surface_height = 0;
 }
 
-static void wait_readers_locked(struct tipsy_focused_overlay *o) {
-	while (o->readers != 0) pthread_cond_wait(&o->readers_done, &o->mutex);
+/* Returns 1 when every reader lease returned, 0 if the bounded drain timed
+ * out with a reader still active. The caller must not wipe or free the frame
+ * in the latter case. */
+static int wait_readers_locked(struct tipsy_focused_overlay *o) {
+	struct timespec deadline;
+	overlay_drain_deadline(&deadline, CLOCK_MONOTONIC);
+	while (o->readers != 0) {
+		int rc = pthread_cond_timedwait(&o->readers_done, &o->mutex, &deadline);
+		if (rc != 0) return o->readers == 0;
+	}
+	return 1;
 }
 
 /* Unpublishes o, then wipes its frame once every lease returns. The published
- * lock is dropped first so other acquires return immediately meanwhile. */
+ * lock is dropped first so other acquires return immediately meanwhile. If a
+ * reader is stuck past the bounded drain, the wipe is deferred to the last
+ * release rather than zeroing pixels under a live lease. */
 static void unpublish_and_wipe(struct tipsy_focused_overlay *o) {
 	pthread_mutex_lock(&published_mutex);
 	pthread_mutex_lock(&o->mutex);
 	tipsy_focused_overlay_clear_publish_locked(o);
 	pthread_mutex_unlock(&published_mutex);
-	wait_readers_locked(o);
-	if (o->rgba != NULL) wipe(o->rgba, (size_t)o->stride * (size_t)o->height);
-	o->version = 0;
+	if (wait_readers_locked(o)) {
+		if (o->rgba != NULL) wipe(o->rgba, (size_t)o->stride * (size_t)o->height);
+		o->version = 0;
+		o->retire = 0;
+	} else {
+		o->retire = 1;
+	}
 	pthread_mutex_unlock(&o->mutex);
 	clear_surface(o);
 }
@@ -341,7 +409,15 @@ uintptr_t tipsy_focused_overlay_new(void) {
 	if (pthread_mutex_init(&o->mutex, NULL) != 0) {
 		pthread_mutex_destroy(&o->writer); free(o); return 0;
 	}
-	if (pthread_cond_init(&o->readers_done, NULL) != 0) {
+	pthread_condattr_t attr;
+	if (pthread_condattr_init(&attr) != 0) {
+		pthread_mutex_destroy(&o->mutex); pthread_mutex_destroy(&o->writer);
+		free(o); return 0;
+	}
+	int cond_rc = pthread_condattr_setclock(&attr, CLOCK_MONOTONIC);
+	if (cond_rc == 0) cond_rc = pthread_cond_init(&o->readers_done, &attr);
+	pthread_condattr_destroy(&attr);
+	if (cond_rc != 0) {
 		pthread_mutex_destroy(&o->mutex); pthread_mutex_destroy(&o->writer);
 		free(o); return 0;
 	}
@@ -380,7 +456,14 @@ int tipsy_focused_overlay_update(uintptr_t ptr, int visible, uint64_t version,
 	}
 	pthread_mutex_lock(&published_mutex); pthread_mutex_lock(&o->mutex);
 	if (dirty) {
-		wait_readers_locked(o);
+		if (!wait_readers_locked(o)) {
+			/* A stuck reader still holds the old frame; replacing pixels
+			 * under it would corrupt the lease. Keep the old frame published
+			 * and let the next update retry once the lease returns. */
+			pthread_mutex_unlock(&o->mutex); pthread_mutex_unlock(&published_mutex);
+			pthread_mutex_unlock(&o->writer); return -1;
+		}
+		o->retire = 0;
 		if (publish_pixels_locked(o, x, y) != 0) {
 			tipsy_focused_overlay_clear_publish_locked(o);
 			pthread_mutex_unlock(&o->mutex); pthread_mutex_unlock(&published_mutex);
@@ -402,14 +485,33 @@ void tipsy_focused_overlay_free(uintptr_t ptr) {
 	pthread_mutex_lock(&o->writer);
 	unpublish_and_wipe(o);
 	discard_surface(o); close_font(o);
+	pthread_mutex_lock(&o->mutex);
+	if (o->readers != 0) {
+		/* A stuck reader still references the frame and the sync objects;
+		 * freeing them here would be a use-after-free. The last reader
+		 * release completes the free instead (retire == 2). */
+		o->retire = 2;
+		pthread_mutex_unlock(&o->mutex);
+		pthread_mutex_unlock(&o->writer);
+		return;
+	}
+	o->retire = 0;
+	pthread_mutex_unlock(&o->mutex);
 	free(o->rgba); o->rgba = NULL;
 	pthread_mutex_unlock(&o->writer);
 	pthread_cond_destroy(&o->readers_done); pthread_mutex_destroy(&o->mutex);
 	pthread_mutex_destroy(&o->writer); wipe(o, sizeof(*o)); free(o);
 }
 
-static void notice_wait_readers_locked(struct tipsy_update_notice *n) {
-	while (n->readers != 0) pthread_cond_wait(&n->readers_done, &n->mutex);
+static int notice_wait_readers_locked(struct tipsy_update_notice *n) {
+	struct timespec deadline;
+	pthread_once(&notice_cond_once, notice_cond_init);
+	overlay_drain_deadline(&deadline, notice_cond_clock);
+	while (n->readers != 0) {
+		int rc = pthread_cond_timedwait(&n->readers_done, &n->mutex, &deadline);
+		if (rc != 0) return n->readers == 0;
+	}
+	return 1;
 }
 
 static void notice_clear_surface(struct tipsy_update_notice *n) {
@@ -436,8 +538,12 @@ static void notice_unpublish(struct tipsy_update_notice *n) {
 	n->published = 0;
 	tipsy_focused_overlay_update_live_locked();
 	pthread_mutex_unlock(&published_mutex);
-	notice_wait_readers_locked(n);
-	if (n->rgba != NULL) wipe(n->rgba, (size_t)n->stride * (size_t)n->height);
+	if (notice_wait_readers_locked(n)) {
+		if (n->rgba != NULL) wipe(n->rgba, (size_t)n->stride * (size_t)n->height);
+		n->retire = 0;
+	} else {
+		n->retire = 1;
+	}
 	pthread_mutex_unlock(&n->mutex);
 }
 
@@ -589,7 +695,15 @@ int tipsy_update_notice_update(int visible, int viewport_width, int viewport_hei
 
 	pthread_mutex_lock(&published_mutex);
 	pthread_mutex_lock(&n->mutex);
-	notice_wait_readers_locked(n);
+	if (!notice_wait_readers_locked(n)) {
+		/* A stuck reader still holds the old card; do not realloc or
+		 * overwrite its pixels. Keep it published and retry next update. */
+		pthread_mutex_unlock(&n->mutex);
+		pthread_mutex_unlock(&published_mutex);
+		pthread_mutex_unlock(&n->writer);
+		return -1;
+	}
+	n->retire = 0;
 	if (n->rgba == NULL || n->width != width || n->height != height) {
 		if (n->rgba != NULL) {
 			wipe(n->rgba, (size_t)n->stride * (size_t)n->height);
@@ -636,6 +750,17 @@ void tipsy_update_notice_free(void) {
 	pthread_mutex_lock(&n->writer);
 	notice_unpublish(n);
 	notice_discard_surface(n);
+	pthread_mutex_lock(&n->mutex);
+	if (n->readers != 0) {
+		/* A stuck reader still references rgba; defer its wipe/free to the
+		 * last release instead of freeing under a live lease. */
+		n->retire = 2;
+		pthread_mutex_unlock(&n->mutex);
+		pthread_mutex_unlock(&n->writer);
+		return;
+	}
+	n->retire = 0;
+	pthread_mutex_unlock(&n->mutex);
 	if (n->rgba != NULL) wipe(n->rgba, (size_t)n->stride * (size_t)n->height);
 	free(n->rgba);
 	n->rgba = NULL;
@@ -647,13 +772,57 @@ void tipsy_update_notice_free(void) {
 
 static void release_text_reader(struct tipsy_focused_overlay *o) {
 	pthread_mutex_lock(&o->mutex);
-	if (o->readers != 0 && --o->readers == 0) pthread_cond_broadcast(&o->readers_done);
+	if (o->readers == 0 || --o->readers != 0) {
+		pthread_mutex_unlock(&o->mutex);
+		return;
+	}
+	pthread_cond_broadcast(&o->readers_done);
+	int retire = o->retire;
+	o->retire = 0;
+	if (retire == 1) {
+		/* The writer timed out unpublishing; wipe now that no lease remains. */
+		if (o->rgba != NULL) wipe(o->rgba, (size_t)o->stride * (size_t)o->height);
+		o->version = 0;
+	}
 	pthread_mutex_unlock(&o->mutex);
+	if (retire != 2) return;
+	/* The owner's free timed out on this stuck lease. Complete it now that
+	 * the frame is unreferenced. Taking the writer lock serializes with the
+	 * owner's free returning, so the sync objects are never destroyed while
+	 * it still holds them. */
+	pthread_mutex_lock(&o->writer);
+	if (o->rgba != NULL) wipe(o->rgba, (size_t)o->stride * (size_t)o->height);
+	free(o->rgba); o->rgba = NULL;
+	pthread_cond_destroy(&o->readers_done);
+	pthread_mutex_destroy(&o->mutex);
+	pthread_mutex_unlock(&o->writer);
+	pthread_mutex_destroy(&o->writer);
+	wipe(o, sizeof(*o));
+	free(o);
+}
+
+/* Caller holds n->mutex. */
+static void release_notice_reader_locked(struct tipsy_update_notice *n) {
+	if (n->readers == 0 || --n->readers != 0) return;
+	pthread_cond_broadcast(&n->readers_done);
+	int retire = n->retire;
+	n->retire = 0;
+	if (retire == 0) return;
+	if (n->rgba != NULL) wipe(n->rgba, (size_t)n->stride * (size_t)n->height);
+	if (retire == 2) {
+		/* The notice is static; only its frame is owned. The owner's free
+		 * already returned without touching rgba, so this is safe. */
+		free(n->rgba);
+		n->rgba = NULL;
+		n->x = n->y = n->width = n->height = n->stride = 0;
+		n->viewport_width = n->viewport_height = 0;
+		n->generation = 0;
+	}
 }
 
 static void release_notice_reader(struct tipsy_update_notice *n) {
 	pthread_mutex_lock(&n->mutex);
-	if (n->readers != 0 && --n->readers == 0) pthread_cond_broadcast(&n->readers_done);
+	release_notice_reader_locked(n);
 	pthread_mutex_unlock(&n->mutex);
 }
 
@@ -767,7 +936,7 @@ int tipsy_focused_text_frame_acquire(struct tipsy_focused_text_frame *out) {
 		out->height = o->height; out->stride = o->stride; out->generation = o->generation;
 		out->lease = (uintptr_t)o;
 		if (n != NULL) {
-			if (n->readers != 0 && --n->readers == 0) pthread_cond_broadcast(&n->readers_done);
+			release_notice_reader_locked(n);
 			pthread_mutex_unlock(&n->mutex);
 		}
 		pthread_mutex_unlock(&o->mutex);
