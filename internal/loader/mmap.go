@@ -178,6 +178,7 @@ func (m *Module) mapLoads(fd *os.File, ef *elf.File) error {
 		})
 	}
 	m.hoistRelocSpans()
+	m.ensureSegmentRanges()
 
 	for _, p := range ef.Progs {
 		if p.Type == elf.PT_GNU_RELRO {

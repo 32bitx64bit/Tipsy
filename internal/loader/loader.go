@@ -37,23 +37,30 @@ type Module struct {
 	Size   uint64
 	Needed []string
 
-	mu       sync.Mutex
-	closed   bool
-	inited   bool
-	resolver Resolver
-	ef       *elf.File // closed after Open; may be nil
-	file     *os.File
+	mu         sync.Mutex
+	closed     bool
+	inited     bool
+	initErr    error
+	initFlight *initFlight // in-progress Init; constructors run without mu
+	resolver   Resolver
+	ef         *elf.File // closed after Open; may be nil
+	file       *os.File
 
-	bias       uintptr
-	mapStart   uintptr
-	mapSize    uintptr
-	minVaddr   uint64
-	segs       []loadSeg
-	relro      []loadSeg
-	execSpans  []vaddrSpan
-	writeSpans []vaddrSpan
-	spansReady bool
-	tlsPresent bool
+	bias           uintptr
+	mapStart       uintptr
+	mapSize        uintptr
+	minVaddr       uint64
+	segs           []loadSeg
+	relro          []loadSeg
+	execSpans      []vaddrSpan
+	writeSpans     []vaddrSpan
+	spansReady     bool
+	readRanges     []SegmentRange
+	execRanges     []SegmentRange
+	codeRanges     []SegmentRange
+	dataRanges     []SegmentRange
+	segRangesReady bool
+	tlsPresent     bool
 
 	dyn           *dynInfo
 	syms          []dynSym
@@ -327,10 +334,28 @@ func (m *Module) Lookup(sym string) (uintptr, error) {
 	return m.symbolAddr(s)
 }
 
+// initFlight is one in-progress Init attempt. err is written before done is
+// closed, so waiters may read it without mu after receiving from done.
+type initFlight struct {
+	done chan struct{}
+	err  error
+}
+
 // Init runs DT_PREINIT_ARRAY, DT_INIT, and DT_INIT_ARRAY (after dependencies).
+// Constructors execute without m.mu held: Lookup is registered as the
+// libroblox dlsym provider before Init, so a constructor resolving a symbol
+// re-enters Lookup on the same thread and must not self-deadlock. Concurrent
+// Init callers wait for the in-flight attempt instead of re-running it.
 func (m *Module) Init() error {
+	return m.init(nil)
+}
+
+func (m *Module) init(visiting map[*Module]struct{}) error {
 	if m == nil {
 		return errors.New("loader: nil module")
+	}
+	if _, ok := visiting[m]; ok {
+		return nil
 	}
 	m.mu.Lock()
 	if m.closed {
@@ -338,83 +363,183 @@ func (m *Module) Init() error {
 		return errors.New("loader: module closed")
 	}
 	if m.inited {
+		err := m.initErr
 		m.mu.Unlock()
-		return nil
+		return err
 	}
+	if f := m.initFlight; f != nil {
+		m.mu.Unlock()
+		<-f.done
+		return f.err
+	}
+	f := &initFlight{done: make(chan struct{})}
+	m.initFlight = f
+	authorizedRoot := m.authorizedRoot
+	authorized := m.authorized
+	deps := m.deps
 	m.mu.Unlock()
-	if m.authorizedRoot {
-		if err := m.authorized.verify(context.Background()); err != nil {
+
+	finished := false
+	defer func() {
+		if !finished {
+			m.mu.Lock()
+			f.err = errors.New("loader: constructor panicked")
+			m.initFlight = nil
+			m.mu.Unlock()
+			close(f.done)
+		}
+	}()
+
+	err := m.runInit(authorizedRoot, authorized, deps, visiting)
+
+	m.mu.Lock()
+	f.err = err
+	if !m.closed {
+		m.inited = true
+		m.initErr = err
+	}
+	m.initFlight = nil
+	m.mu.Unlock()
+	finished = true
+	close(f.done)
+	return err
+}
+
+// runInit performs one claimed Init attempt: descriptor re-verification,
+// dependency initialization, then this module's constructors.
+func (m *Module) runInit(authorizedRoot bool, authorized *authorizedFiles, deps []*Module, visiting map[*Module]struct{}) error {
+	if authorizedRoot {
+		if err := authorized.verify(context.Background()); err != nil {
 			return fmt.Errorf("loader: authorized descriptors changed before constructors: %w", err)
 		}
 	}
-
-	for _, d := range m.deps {
-		if err := d.Init(); err != nil {
-			return err
+	if len(deps) > 0 {
+		if visiting == nil {
+			visiting = make(map[*Module]struct{}, len(deps)+1)
+		}
+		visiting[m] = struct{}{}
+		defer delete(visiting, m)
+		for _, d := range deps {
+			if err := d.init(visiting); err != nil {
+				return err
+			}
 		}
 	}
 
+	// Snapshot the constructor targets under m.mu, then drop the mutex for
+	// the native calls so re-entrant Lookup and concurrent readers proceed.
 	m.mu.Lock()
-	defer m.mu.Unlock()
-	if m.inited || m.closed {
-		return nil
+	if m.closed {
+		m.mu.Unlock()
+		return errors.New("loader: module closed")
 	}
 	slog.Info("[loader] constructors",
 		"preinit", m.dyn.preinitSz/8,
 		"dt_init", m.dyn.init != 0,
 		"init_array", m.dyn.initArraySz/8)
-	if err := m.callArray("preinit_array", m.dyn.preinitArray, m.dyn.preinitSz); err != nil {
+	preinit, err := m.snapshotCtors("preinit_array", m.dyn.preinitArray, m.dyn.preinitSz)
+	if err != nil {
+		m.mu.Unlock()
 		return err
 	}
+	var dtInit uintptr
 	if m.dyn.init != 0 {
-		call0(m.bias + uintptr(m.dyn.init))
+		dtInit = m.bias + uintptr(m.dyn.init)
 	}
-	if err := m.callArray("init_array", m.dyn.initArray, m.dyn.initArraySz); err != nil {
+	initArray, err := m.snapshotCtors("init_array", m.dyn.initArray, m.dyn.initArraySz)
+	if err != nil {
+		m.mu.Unlock()
 		return err
 	}
-	m.inited = true
+	m.mu.Unlock()
+
+	preinit.run()
+	if dtInit != 0 {
+		call0(dtInit)
+	}
+	initArray.run()
 	return nil
 }
 
-// callArray walks one PT_DYNAMIC function-pointer array (vaddr, size). The
+// ctorCall is one relocated constructor target captured for execution.
+type ctorCall struct {
+	index uint64  // position in the original array (trace logging only)
+	addr  uintptr // runtime address read from the relocated array slot
+}
+
+// ctorArray is a snapshot of one PT_DYNAMIC function-pointer array. The
 // entries must already be relocated: Open applies DT_RELA / DT_JMPREL /
 // DT_ANDROID_RELA (APS2) to the mapping before Init runs. Entry values 0 and
 // ^0 are skipped (bionic skips them too); everything else is called in order.
-func (m *Module) callArray(name string, vaddr, size uint64) error {
+type ctorArray struct {
+	name    string
+	entries uint64
+	calls   []ctorCall
+	skipped int
+}
+
+// snapshotCtors reads one constructor array with m.mu held so the native
+// calls can run without the mutex. It returns nil when the array is absent.
+func (m *Module) snapshotCtors(name string, vaddr, size uint64) (*ctorArray, error) {
 	if vaddr == 0 || size == 0 {
-		return nil
+		return nil, nil
 	}
 	n := size / 8
-	var called, skipped int
+	a := &ctorArray{
+		name:    name,
+		entries: n,
+		calls:   make([]ctorCall, 0, n),
+	}
 	for i := uint64(0); i < n; i++ {
 		fn, err := m.read64(vaddr + i*8)
 		if err != nil {
-			return err
+			return nil, err
 		}
 		if fn == 0 || fn == ^uint64(0) {
-			skipped++
+			a.skipped++
 			continue
 		}
-		if i < 8 {
-			slog.Info("[loader] constructor", "index", i, "fn", fmt.Sprintf("%#x", fn))
-		}
-		called++
-		call0(uintptr(fn))
+		a.calls = append(a.calls, ctorCall{index: i, addr: uintptr(fn)})
 	}
-	slog.Info("[loader] constructors walked",
-		"array", name, "entries", n, "called", called, "skipped", skipped)
-	return nil
+	return a, nil
 }
 
-// Close unmaps this image and any DT_NEEDED modules loaded with it.
+// run executes the captured constructors in order without m.mu held.
+func (a *ctorArray) run() {
+	if a == nil {
+		return
+	}
+	for _, c := range a.calls {
+		if c.index < 8 {
+			slog.Info("[loader] constructor", "index", c.index)
+		}
+		call0(c.addr)
+	}
+	slog.Info("[loader] constructors walked",
+		"array", a.name, "entries", a.entries, "called", len(a.calls), "skipped", a.skipped)
+}
+
+// Close unmaps this image and any DT_NEEDED modules loaded with it. It waits
+// for in-flight constructors first; calling it from a constructor deadlocks.
 func (m *Module) Close() error {
 	if m == nil {
 		return nil
 	}
-	m.mu.Lock()
-	if m.closed {
+	// Constructors run without m.mu, so wait out any in-flight Init before
+	// unmapping. Once closed is set under the same lock, no new attempt can
+	// start; loop in case a retry claimed a fresh flight while we waited.
+	for {
+		m.mu.Lock()
+		if m.closed {
+			m.mu.Unlock()
+			return nil
+		}
+		f := m.initFlight
+		if f == nil {
+			break
+		}
 		m.mu.Unlock()
-		return nil
+		<-f.done
 	}
 	m.closed = true
 	deps := m.deps
@@ -429,8 +554,21 @@ func (m *Module) Close() error {
 	}
 	start, size := m.mapStart, m.mapSize
 	m.mapStart = 0
+	m.mapSize = 0
 	m.bias = 0
 	m.Base = 0
+	m.Size = 0
+	m.minVaddr = 0
+	m.segs = nil
+	m.relro = nil
+	m.execSpans = nil
+	m.writeSpans = nil
+	m.spansReady = false
+	m.readRanges = nil
+	m.execRanges = nil
+	m.codeRanges = nil
+	m.dataRanges = nil
+	m.segRangesReady = false
 	m.mu.Unlock()
 
 	err := rawMunmap(start, size)

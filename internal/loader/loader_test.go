@@ -7,14 +7,20 @@ package loader
 
 import (
 	"bytes"
+	"context"
 	"debug/elf"
 	"encoding/binary"
+	"fmt"
+	"io"
 	"log/slog"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"syscall"
 	"testing"
+	"time"
 	"unsafe"
 )
 
@@ -326,15 +332,16 @@ func TestCallJNIOnLoadTrampoline(t *testing.T) {
 }
 
 type synthOpts struct {
-	needed        []string
-	imports       []string
-	soname        string
-	versionNeeds  []synthVersionNeed
-	versionDefs   []synthVersionDef
-	withAPS2      bool
-	withIRel      bool
-	withTextReloc bool
-	writableExec  bool
+	needed         []string
+	imports        []string
+	soname         string
+	versionNeeds   []synthVersionNeed
+	versionDefs    []synthVersionDef
+	withAPS2       bool
+	withIRel       bool
+	withTextReloc  bool
+	writableExec   bool
+	ctorCallImport string // when non-empty, init_array ctor calls this imported function then increments vaGuard
 }
 
 type synthVersionNeed struct {
@@ -352,6 +359,9 @@ type synthVersionDef struct {
 }
 
 func buildSynthELF(opt synthOpts) []byte {
+	if opt.ctorCallImport != "" {
+		opt.imports = append(append([]string(nil), opt.imports...), opt.ctorCallImport)
+	}
 	fileSize := synthRWVaddr + synthRWFile
 	buf := make([]byte, fileSize)
 
@@ -359,13 +369,35 @@ func buildSynthELF(opt synthOpts) []byte {
 	// the guard byte and returns (movb $1, [rip+disp32]; ret).
 	buf[vaInit] = 0xC3
 	copy(buf[vaIFunc:], []byte{0xB8, 0xBB, 0xAA, 0x00, 0x00, 0xC3})
-	// C6 05 <rel32> 01  C3: movb $1, [rip+rel32]; ret. Instruction is 7
-	// bytes, so the RIP-relative displacement is vaGuard - (vaCtor + 7).
-	ctorDisp := int32(vaGuard - (vaCtor + 7))
-	copy(buf[vaCtor:], []byte{
-		0xC6, 0x05, byte(ctorDisp), byte(ctorDisp >> 8), byte(ctorDisp >> 16), byte(ctorDisp >> 24), 0x01,
-		0xC3,
-	})
+	if opt.ctorCallImport != "" {
+		// vaCtor calls the function pointer in vaGlobSlot (GLOB_DAT), then
+		// atomically increments the guard byte at vaGuard:
+		//   sub $8, %rsp               ; 48 83 EC 08       (4B, next +4)
+		//   mov (%rip+loadDisp), %rax  ; 48 8B 05 <disp32> (7B, next +11)
+		//   call *%rax                 ; FF D0             (2B, next +13)
+		//   add $8, %rsp               ; 48 83 C4 08       (4B, next +17)
+		//   lock incb (%rip+guardDisp) ; F0 FE 05 <disp32> (7B, next +24)
+		//   ret                        ; C3                (1B, next +25)
+		// The sub/add keep RSP 16-byte aligned before call per SysV AMD64 ABI.
+		loadDisp := int32(vaGlobSlot - (vaCtor + 11))
+		guardDisp := int32(vaGuard - (vaCtor + 24))
+		copy(buf[vaCtor:], []byte{
+			0x48, 0x83, 0xEC, 0x08,
+			0x48, 0x8B, 0x05, byte(loadDisp), byte(loadDisp >> 8), byte(loadDisp >> 16), byte(loadDisp >> 24),
+			0xFF, 0xD0,
+			0x48, 0x83, 0xC4, 0x08,
+			0xF0, 0xFE, 0x05, byte(guardDisp), byte(guardDisp >> 8), byte(guardDisp >> 16), byte(guardDisp >> 24),
+			0xC3,
+		})
+	} else {
+		// C6 05 <rel32> 01  C3: movb $1, [rip+rel32]; ret. Instruction is 7
+		// bytes, so the RIP-relative displacement is vaGuard - (vaCtor + 7).
+		ctorDisp := int32(vaGuard - (vaCtor + 7))
+		copy(buf[vaCtor:], []byte{
+			0xC6, 0x05, byte(ctorDisp), byte(ctorDisp >> 8), byte(ctorDisp >> 16), byte(ctorDisp >> 24), 0x01,
+			0xC3,
+		})
+	}
 
 	type ds struct {
 		name  string
@@ -503,9 +535,13 @@ func buildSynthELF(opt synthOpts) []byte {
 	relInfo := func(sym uint32, typ elf.R_X86_64) uint64 {
 		return makeRelInfo(sym, uint32(typ))
 	}
+	initArrTarget := int64(vaInit)
+	if opt.ctorCallImport != "" {
+		initArrTarget = int64(vaCtor)
+	}
 	var relas []Reloc
 	relas = append(relas, Reloc{Off: vaRelSlot, Info: relInfo(0, elf.R_X86_64_RELATIVE), Addend: 0x42})
-	relas = append(relas, Reloc{Off: vaInitArr, Info: relInfo(0, elf.R_X86_64_RELATIVE), Addend: int64(vaInit)})
+	relas = append(relas, Reloc{Off: vaInitArr, Info: relInfo(0, elf.R_X86_64_RELATIVE), Addend: initArrTarget})
 	if opt.withIRel {
 		relas = append(relas, Reloc{Off: vaIRelSlot, Info: relInfo(0, elf.R_X86_64_IRELATIVE), Addend: int64(vaIFunc)})
 	}
@@ -649,4 +685,437 @@ func buildSynthELF(opt synthOpts) []byte {
 // peek64 is a test-only read alias used by the synthetic-module assertions.
 func (m *Module) peek64(vaddr uint64) (uint64, error) {
 	return m.read64(vaddr)
+}
+
+func TestModuleSegmentBoundsAndCloseInvalidation(t *testing.T) {
+	if syscall.Getpagesize() != synthPage {
+		t.Skip("test ELF layout assumes 4KiB pages")
+	}
+	t.Setenv("TIPSY_TRACE_CTORS", "1")
+	path := filepath.Join(t.TempDir(), "libsegments.so")
+	raw := buildSynthELF(synthOpts{withAPS2: true, withIRel: true})
+	if err := os.WriteFile(path, raw, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	var logBuf bytes.Buffer
+	prev := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&logBuf, nil)))
+	defer slog.SetDefault(prev)
+
+	m, err := Open(path, mapRes{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	closed := false
+	defer func() {
+		if !closed {
+			_ = m.Close()
+		}
+	}()
+
+	if !m.IsOpen() {
+		t.Fatal("expected module IsOpen() == true")
+	}
+	if got := len(m.ReadableSegments()); got != 2 {
+		t.Fatalf("ReadableSegments len = %d, want 2", got)
+	}
+	if got := len(m.ExecutableSegments()); got != 1 {
+		t.Fatalf("ExecutableSegments len = %d, want 1", got)
+	}
+	if got := len(m.DataSegments()); got != 1 {
+		t.Fatalf("DataSegments len = %d, want 1", got)
+	}
+
+	rxLo, rxHi := m.Base, m.Base+synthRXEnd
+	rwLo, rwHi := m.Base+synthRWVaddr, m.Base+synthRWVaddr+synthRWMem
+
+	if !m.ContainsExec(rxLo+vaInit, 16) || !m.ContainsReadable(rxLo+vaInit, 16) {
+		t.Fatal("expected RX code range to be executable and readable")
+	}
+	if m.ContainsData(rxLo+vaInit, 16) {
+		t.Fatal("RX segment must not satisfy ContainsData")
+	}
+	if !m.OverlapsExec(rxLo-8, 16) || !m.OverlapsExec(rxHi-4, 8) {
+		t.Fatal("boundary spans crossing RX segment must report OverlapsExec")
+	}
+
+	if !m.ContainsData(rwLo, 16) || !m.ContainsData(m.Base+vaBSSCheck, 16) || !m.ContainsReadable(m.Base+vaBSSCheck, 16) {
+		t.Fatal("expected RW data and BSS ranges to satisfy ContainsData and ContainsReadable")
+	}
+	if m.ContainsExec(rwLo, 16) || m.OverlapsExec(rwLo, synthRWMem) {
+		t.Fatal("RW/BSS segment must not satisfy ContainsExec or OverlapsExec")
+	}
+
+	// Unmapped hole between RX and RW, zero, and overflow spans fail closed.
+	if m.ContainsReadable(rxHi, 8) || m.ContainsExec(rxHi, 8) || m.ContainsData(rxHi, 8) || m.OverlapsExec(rxHi, synthRWVaddr-synthRXEnd) {
+		t.Fatal("unmapped hole between PT_LOAD segments accepted")
+	}
+	if m.ContainsReadable(0, 8) || m.ContainsReadable(rxLo, 0) || m.ContainsReadable(^uintptr(0)-3, 8) || m.OverlapsExec(^uintptr(0)-3, 8) {
+		t.Fatal("zero or wrapping address span accepted")
+	}
+	if m.ContainsReadable(rwHi-4, 8) || m.ContainsData(rwHi-4, 8) {
+		t.Fatal("span crossing end of RW segment accepted")
+	}
+
+	if err := m.Init(); err != nil {
+		t.Fatal(err)
+	}
+	logs := logBuf.String()
+	if !strings.Contains(logs, "[loader] constructor") || !strings.Contains(logs, "index=0") {
+		t.Fatalf("expected constructor trace with index, got:\n%s", logs)
+	}
+	if strings.Contains(logs, "0x") || strings.Contains(logs, "fn=") {
+		t.Fatalf("loader Info/Warn logs leaked raw ASLR pointer:\n%s", logs)
+	}
+
+	if err := m.Close(); err != nil {
+		t.Fatal(err)
+	}
+	closed = true
+	if m.IsOpen() {
+		t.Fatal("expected IsOpen() == false after Close")
+	}
+	if len(m.ReadableSegments()) != 0 || len(m.ExecutableSegments()) != 0 || len(m.DataSegments()) != 0 {
+		t.Fatal("expected segment slices cleared after Close")
+	}
+	if m.ContainsReadable(rxLo, 8) || m.ContainsExec(rxLo, 8) || m.ContainsData(rwLo, 8) || m.OverlapsExec(rxLo, 8) {
+		t.Fatal("segment queries succeeded after Close")
+	}
+}
+
+// ctorInterceptHandler intercepts the unsupported-function fallback log record
+// emitted synchronously on the native constructor pthread when a synthetic
+// constructor calls an unresolved STT_FUNC import through vaGlobSlot.
+type ctorInterceptHandler struct {
+	next   slog.Handler
+	target string
+	onHit  func()
+}
+
+func (h *ctorInterceptHandler) Enabled(_ context.Context, _ slog.Level) bool {
+	return true
+}
+
+func (h *ctorInterceptHandler) Handle(ctx context.Context, r slog.Record) error {
+	if r.Message == h.target && h.onHit != nil {
+		h.onHit()
+	}
+	return h.next.Handle(ctx, r)
+}
+
+func (h *ctorInterceptHandler) WithAttrs(attrs []slog.Attr) slog.Handler {
+	return &ctorInterceptHandler{next: h.next.WithAttrs(attrs), target: h.target, onHit: h.onHit}
+}
+
+func (h *ctorInterceptHandler) WithGroup(name string) slog.Handler {
+	return &ctorInterceptHandler{next: h.next.WithGroup(name), target: h.target, onHit: h.onHit}
+}
+
+var ctorProbeSeq atomic.Uint64
+
+func installCtorProbe(t *testing.T, prefix string, onHit func()) string {
+	t.Helper()
+	t.Setenv("TIPSY_STRICT_SYMBOLS", "")
+	sym := fmt.Sprintf("%s_%d", prefix, ctorProbeSeq.Add(1))
+	prev := slog.Default()
+	slog.SetDefault(slog.New(&ctorInterceptHandler{
+		next:   slog.NewTextHandler(io.Discard, nil),
+		target: "unsupported native function called: " + sym,
+		onHit:  onHit,
+	}))
+	t.Cleanup(func() { slog.SetDefault(prev) })
+	return sym
+}
+
+// TestInitConstructorLookupReentrant pins the dlsym self-deadlock fix: Init
+// must not hold m.mu while constructors run, because a constructor resolving
+// a symbol re-enters Lookup on the same module.
+func TestInitConstructorLookupReentrant(t *testing.T) {
+	if syscall.Getpagesize() != synthPage {
+		t.Skip("test ELF layout assumes 4KiB pages")
+	}
+
+	var (
+		mu           sync.Mutex
+		mod          *Module
+		calls        int
+		lookupAddr   uintptr
+		lookupErr    error
+		containsExec bool
+	)
+	sym := installCtorProbe(t, "tipsy_ctor_reentrant_lookup", func() {
+		mu.Lock()
+		m := mod
+		calls++
+		mu.Unlock()
+		addr, err := m.Lookup("JNI_OnLoad")
+		execOK := m.ContainsExec(addr, 1)
+		mu.Lock()
+		lookupAddr, lookupErr, containsExec = addr, err, execOK
+		mu.Unlock()
+	})
+
+	path := filepath.Join(t.TempDir(), "libreentrant.so")
+	raw := buildSynthELF(synthOpts{ctorCallImport: sym})
+	if err := os.WriteFile(path, raw, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	m, err := Open(path, mapRes{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	needClose := true
+	defer func() {
+		if needClose {
+			_ = m.Close()
+		}
+	}()
+	mu.Lock()
+	mod = m
+	mu.Unlock()
+
+	done := make(chan error, 1)
+	go func() { done <- m.Init() }()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("Init: %v", err)
+		}
+	case <-time.After(10 * time.Second):
+		needClose = false
+		t.Fatal("Init deadlocked: constructor Lookup re-entered the module mutex")
+	}
+
+	mu.Lock()
+	gotCalls, gotAddr, gotErr, gotExec := calls, lookupAddr, lookupErr, containsExec
+	mu.Unlock()
+	if gotCalls != 1 {
+		t.Fatalf("constructor callback count = %d, want 1", gotCalls)
+	}
+	if gotErr != nil {
+		t.Fatalf("Lookup inside constructor: %v", gotErr)
+	}
+	if want := m.bias + vaInit; gotAddr != want {
+		t.Fatalf("Lookup inside constructor = %#x, want %#x", gotAddr, want)
+	}
+	if !gotExec {
+		t.Fatal("ContainsExec inside constructor returned false for JNI_OnLoad")
+	}
+	guard, err := m.peek64(vaGuard)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if guard&0xff != 1 {
+		t.Fatalf("guard after Init = %#x, want byte 1 (constructor did not finish)", guard)
+	}
+}
+
+// TestInitConcurrentSingleFlight pins that concurrent Init callers wait for
+// the in-flight constructor walk rather than returning early or running
+// constructors more than once, while concurrent Lookup callers proceed.
+func TestInitConcurrentSingleFlight(t *testing.T) {
+	if syscall.Getpagesize() != synthPage {
+		t.Skip("test ELF layout assumes 4KiB pages")
+	}
+
+	entered := make(chan struct{})
+	release := make(chan struct{})
+	var enteredOnce sync.Once
+	var probeCalls atomic.Int32
+
+	sym := installCtorProbe(t, "tipsy_ctor_singleflight", func() {
+		probeCalls.Add(1)
+		enteredOnce.Do(func() { close(entered) })
+		<-release
+	})
+
+	path := filepath.Join(t.TempDir(), "libsingleflight.so")
+	raw := buildSynthELF(synthOpts{ctorCallImport: sym})
+	if err := os.WriteFile(path, raw, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	m, err := Open(path, mapRes{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	needClose := true
+	defer func() {
+		if needClose {
+			_ = m.Close()
+		}
+	}()
+
+	type initResult struct {
+		err   error
+		guard uint64
+	}
+	var wg sync.WaitGroup
+	var finished atomic.Int32
+	results := make(chan initResult, 3)
+	startInit := func() {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			err := m.Init()
+			g, peekErr := m.peek64(vaGuard)
+			if err == nil && peekErr != nil {
+				err = peekErr
+			}
+			finished.Add(1)
+			results <- initResult{err: err, guard: g}
+		}()
+	}
+
+	startInit() // claims the flight, then pauses inside the native constructor
+	select {
+	case <-entered:
+	case <-time.After(10 * time.Second):
+		needClose = false
+		close(release)
+		t.Fatal("constructor never entered")
+	}
+
+	// Concurrent Lookup on another goroutine must not block while constructors run.
+	lookupDone := make(chan error, 1)
+	go func() {
+		addr, err := m.Lookup("JNI_OnLoad")
+		if err == nil && addr != m.bias+vaInit {
+			err = fmt.Errorf("Lookup = %#x, want %#x", addr, m.bias+vaInit)
+		}
+		lookupDone <- err
+	}()
+	select {
+	case err := <-lookupDone:
+		if err != nil {
+			needClose = false
+			close(release)
+			t.Fatalf("concurrent Lookup during Init: %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		needClose = false
+		close(release)
+		t.Fatal("concurrent Lookup blocked while constructor was in flight")
+	}
+
+	startInit() // must wait for the in-flight attempt, not return early
+	startInit()
+	time.Sleep(50 * time.Millisecond)
+	if n := finished.Load(); n != 0 {
+		needClose = false
+		close(release)
+		t.Fatalf("%d Init calls returned while constructors were still in flight", n)
+	}
+
+	close(release)
+	waited := make(chan struct{})
+	go func() { wg.Wait(); close(waited) }()
+	select {
+	case <-waited:
+	case <-time.After(10 * time.Second):
+		needClose = false
+		t.Fatal("concurrent Init deadlocked")
+	}
+	close(results)
+	for res := range results {
+		if res.err != nil {
+			t.Fatalf("concurrent Init: %v", res.err)
+		}
+		if res.guard&0xff != 1 {
+			t.Fatalf("caller observed guard=%#x upon Init return, want 1", res.guard)
+		}
+	}
+
+	if got := probeCalls.Load(); got != 1 {
+		t.Fatalf("constructor probe ran %d times, want 1", got)
+	}
+	guard, err := m.peek64(vaGuard)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if guard&0xff != 1 {
+		t.Fatalf("guard after Init = %#x, want 1 (constructor ran %d times)", guard, guard&0xff)
+	}
+	if err := m.Init(); err != nil {
+		t.Fatalf("Init after completion: %v", err)
+	}
+	guard, err = m.peek64(vaGuard)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if guard&0xff != 1 {
+		t.Fatalf("constructors re-ran on idempotent Init: guard=%#x", guard)
+	}
+}
+
+// TestCloseWaitsForInFlightInit verifies Close does not unmap module segments
+// while a constructor is still executing native instructions.
+func TestCloseWaitsForInFlightInit(t *testing.T) {
+	if syscall.Getpagesize() != synthPage {
+		t.Skip("test ELF layout assumes 4KiB pages")
+	}
+
+	entered := make(chan struct{})
+	release := make(chan struct{})
+	var enteredOnce sync.Once
+	sym := installCtorProbe(t, "tipsy_ctor_close_wait", func() {
+		enteredOnce.Do(func() { close(entered) })
+		<-release
+	})
+
+	path := filepath.Join(t.TempDir(), "libclosewait.so")
+	raw := buildSynthELF(synthOpts{ctorCallImport: sym})
+	if err := os.WriteFile(path, raw, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	m, err := Open(path, mapRes{})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	initDone := make(chan error, 1)
+	go func() { initDone <- m.Init() }()
+	select {
+	case <-entered:
+	case <-time.After(10 * time.Second):
+		close(release)
+		t.Fatal("constructor never entered")
+	}
+
+	var closeFinished atomic.Bool
+	closeDone := make(chan error, 1)
+	go func() {
+		err := m.Close()
+		closeFinished.Store(true)
+		closeDone <- err
+	}()
+	time.Sleep(50 * time.Millisecond)
+	if closeFinished.Load() {
+		close(release)
+		t.Fatal("Close returned while constructor was still executing")
+	}
+
+	close(release)
+	select {
+	case err := <-initDone:
+		if err != nil {
+			t.Fatalf("Init: %v", err)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("Init hung while Close was waiting")
+	}
+	select {
+	case err := <-closeDone:
+		if err != nil {
+			t.Fatalf("Close: %v", err)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("Close hung after Init finished")
+	}
+	if m.IsOpen() {
+		t.Fatal("expected IsOpen() == false after Close")
+	}
+	if _, err := m.Lookup("JNI_OnLoad"); err == nil {
+		t.Fatal("expected Lookup error after Close")
+	}
 }
