@@ -12,7 +12,7 @@ import (
 )
 
 func TestStartFromEnvIsNoopWhenUnset(t *testing.T) {
-	t.Setenv(EnvProfileDir, "")
+	t.Setenv("TIPSY_PPROF_DIR", "")
 	stop, err := StartFromEnv()
 	if err != nil {
 		t.Fatal(err)

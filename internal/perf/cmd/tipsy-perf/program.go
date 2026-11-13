@@ -44,6 +44,10 @@ const (
 	defaultCLISurfaceFlush = 10 * time.Second
 	defaultProgramFlush    = 30 * time.Second
 	programBackstopSlack   = 15 * time.Second
+	// envProfileDir is the process-profile directory variable the captures
+	// set on the child. It stays local so this tool does not depend on the
+	// perf package's dev-only diagnostic constants.
+	envProfileDir = "TIPSY_PPROF_DIR"
 )
 
 func runProgramCapture(parent context.Context, opt options) programResult {
@@ -284,7 +288,7 @@ func programEnv(opt options, args []string, profileDir string, cliSurface bool) 
 	filtered := env[:0]
 	for _, entry := range env {
 		key, _, ok := strings.Cut(entry, "=")
-		if !ok || key == perf.EnvProfileDir || key == perf.EnvProfileContention || key == perf.EnvCLISurface {
+		if !ok || key == envProfileDir || key == perf.EnvProfileContention || key == perf.EnvCLISurface {
 			continue
 		}
 		if !launch && key == "GOMAXPROCS" {
@@ -292,7 +296,7 @@ func programEnv(opt options, args []string, profileDir string, cliSurface bool) 
 		}
 		filtered = append(filtered, entry)
 	}
-	filtered = append(filtered, perf.EnvProfileDir+"="+profileDir)
+	filtered = append(filtered, envProfileDir+"="+profileDir)
 	if opt.programContention {
 		filtered = append(filtered, perf.EnvProfileContention+"=1")
 	}

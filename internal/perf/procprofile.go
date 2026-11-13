@@ -20,11 +20,6 @@ import (
 const processProfileSnapshotInterval = 15 * time.Second
 
 const (
-	// EnvProfileDir enables process-wide profiles on the real tipsy binary.
-	// The directory is created with mode 0700. Profiles contain function
-	// names and addresses only, never a log of user input, cookies, or
-	// account state.
-	EnvProfileDir = "TIPSY_PPROF_DIR"
 	// EnvProfileContention enables mutex and block profiles. Those rates
 	// add observer work and belong only on an instrumented capture arm.
 	EnvProfileContention = "TIPSY_PPROF_CONTENTION"
@@ -57,15 +52,6 @@ func ProfileOptionsFromEnv() ProfileOptions {
 	opt := DefaultProcessProfileOptions()
 	opt.Contention = strings.TrimSpace(os.Getenv(EnvProfileContention)) == "1"
 	return opt
-}
-
-// StartFromEnv starts process-wide profiling when TIPSY_PPROF_DIR is set.
-func StartFromEnv() (func(), error) {
-	dir := strings.TrimSpace(os.Getenv(EnvProfileDir))
-	if dir == "" {
-		return func() {}, nil
-	}
-	return StartProcessProfile(dir, ProfileOptionsFromEnv())
 }
 
 // CLISurfaceRequested is true when the linked binary should loop the
@@ -230,30 +216,14 @@ func (p *processProfile) writeProfilesLocked() {
 }
 
 func writeProfileFile(path, lookup string, direct func(io.Writer) error) error {
-	tmp := path + ".tmp"
-	f, err := os.OpenFile(tmp, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0o600)
-	if err != nil {
-		return err
-	}
-	var writeErr error
-	if direct != nil {
-		writeErr = direct(f)
-	} else {
+	return writeAtomic(path, func(w io.Writer) error {
+		if direct != nil {
+			return direct(w)
+		}
 		prof := pprof.Lookup(lookup)
 		if prof == nil {
-			writeErr = fmt.Errorf("unknown pprof profile %q", lookup)
-		} else {
-			writeErr = prof.WriteTo(f, 0)
+			return fmt.Errorf("unknown pprof profile %q", lookup)
 		}
-	}
-	closeErr := f.Close()
-	if writeErr != nil {
-		_ = os.Remove(tmp)
-		return writeErr
-	}
-	if closeErr != nil {
-		_ = os.Remove(tmp)
-		return closeErr
-	}
-	return os.Rename(tmp, path)
+		return prof.WriteTo(w, 0)
+	})
 }

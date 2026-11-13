@@ -41,14 +41,11 @@ func EnvFromOS() Env {
 		env.DataHome = filepath.Join(home, ".local", "share")
 		env.ConfigHome = filepath.Join(home, ".config")
 	} else {
-		env.DataHome = os.Getenv("XDG_DATA_HOME")
-		if env.DataHome == "" {
-			env.DataHome = filepath.Join(home, ".local", "share")
-		}
-		env.ConfigHome = os.Getenv("XDG_CONFIG_HOME")
-		if env.ConfigHome == "" {
-			env.ConfigHome = filepath.Join(home, ".config")
-		}
+		// The XDG base directory specification requires ignoring relative
+		// paths, so a relative value falls back to the home default rather
+		// than resolving against the process working directory.
+		env.DataHome = xdgHome("XDG_DATA_HOME", filepath.Join(home, ".local", "share"))
+		env.ConfigHome = xdgHome("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
 	}
 	dirs := os.Getenv("XDG_DATA_DIRS")
 	if dirs == "" || inFlatpak {
@@ -66,6 +63,16 @@ func EnvFromOS() Env {
 		}
 	}
 	return env
+}
+
+// xdgHome returns the value of an XDG base-directory variable when it is an
+// absolute path, and fallback otherwise. The XDG base directory specification
+// requires ignoring relative values.
+func xdgHome(name, fallback string) string {
+	if v := os.Getenv(name); filepath.IsAbs(v) {
+		return v
+	}
+	return fallback
 }
 
 // InFlatpak reports whether the process runs inside a Flatpak sandbox.

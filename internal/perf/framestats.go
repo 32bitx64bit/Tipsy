@@ -513,22 +513,31 @@ func writeFrameTimeText(path, text string) error {
 }
 
 func writeAtomic(path string, write func(io.Writer) error) error {
-	tmp := path + ".tmp"
-	f, err := os.OpenFile(tmp, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0o600)
+	// CreateTemp opens with O_EXCL and a random name, so a planted symlink at a
+	// predictable temp path cannot redirect the write and concurrent writers
+	// cannot share one temp file.
+	tmp, err := os.CreateTemp(filepath.Dir(path), "."+filepath.Base(path)+".*")
 	if err != nil {
 		return err
 	}
-	writeErr := write(f)
-	closeErr := f.Close()
-	if writeErr != nil {
-		_ = os.Remove(tmp)
-		return writeErr
+	tmpPath := tmp.Name()
+	defer os.Remove(tmpPath)
+	if err := write(tmp); err != nil {
+		tmp.Close()
+		return err
 	}
-	if closeErr != nil {
-		_ = os.Remove(tmp)
-		return closeErr
+	if err := tmp.Chmod(0o600); err != nil {
+		tmp.Close()
+		return err
 	}
-	return os.Rename(tmp, path)
+	if err := tmp.Sync(); err != nil {
+		tmp.Close()
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		return err
+	}
+	return os.Rename(tmpPath, path)
 }
 
 // FormatFrameTimeText renders the human-readable framestats.txt body.

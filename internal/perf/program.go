@@ -44,9 +44,9 @@ func WholeProgramCLICommands() [][]string {
 	return commands
 }
 
-// WholeProgramCapturePlan is immutable runner metadata. Enabling
-// TIPSY_PPROF_DIR is an instrumented arm and must not be compared to an
-// unprofiled launch as an FPS result.
+// WholeProgramCapturePlan is immutable runner metadata. Enabling the
+// process-profile directory is an instrumented arm and must not be compared
+// to an unprofiled launch as an FPS result.
 func WholeProgramCapturePlan() ProgramCapturePlan {
 	return ProgramCapturePlan{
 		Instrumented: CaptureMode{
@@ -54,7 +54,7 @@ func WholeProgramCapturePlan() ProgramCapturePlan {
 			Purpose: "Rank CPU, allocation, and goroutine cost inside one real tipsy process while privacy-safe pprof files are written.",
 			Required: []string{
 				"the linked production binary, not a per-package test binary",
-				"TIPSY_PPROF_DIR process-wide CPU plus heap/alloc dumps",
+				"the process-profile directory drives process-wide CPU plus heap/alloc dumps",
 				"ranked pprof -top hotspots with function names only",
 				"userspace perf record call-graph when -program-perf is set",
 			},
@@ -68,7 +68,7 @@ func WholeProgramCapturePlan() ProgramCapturePlan {
 		},
 		Clean: CaptureMode{
 			ID:      "whole-program-clean",
-			Purpose: "Confirm the same argv still behaves correctly with TIPSY_PPROF_DIR unset.",
+			Purpose: "Confirm the same argv still behaves correctly with the process-profile directory unset.",
 			Required: []string{
 				"same binary and argv as the instrumented arm",
 				"no process-wide pprof rates",

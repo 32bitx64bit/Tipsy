@@ -2,6 +2,7 @@ package perf
 
 import (
 	"encoding/json"
+	"io"
 	"math"
 	"os"
 	"os/exec"
@@ -692,5 +693,66 @@ func TestStartProcessProfileWritesFrameStats(t *testing.T) {
 		if info.Size() == 0 {
 			t.Fatalf("%s is empty", name)
 		}
+	}
+}
+
+// TestWriteAtomicIgnoresPlantedTempSymlink pins the O_EXCL temp-file behaviour:
+// a symlink left at the old predictable "<path>.tmp" location must not receive
+// the write, and the real output must still be produced.
+func TestWriteAtomicIgnoresPlantedTempSymlink(t *testing.T) {
+	dir := t.TempDir()
+	victim := filepath.Join(dir, "victim")
+	if err := os.WriteFile(victim, []byte("sentinel"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(dir, "framestats.json")
+	if err := os.Symlink(victim, path+".tmp"); err != nil {
+		t.Fatal(err)
+	}
+	if err := writeFrameTimeJSON(path, FrameTimeSummary{Metric: "present"}); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := os.ReadFile(victim); err != nil || string(got) != "sentinel" {
+		t.Fatalf("victim = %q, %v; want unchanged sentinel", got, err)
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Mode().Perm() != 0o600 {
+		t.Fatalf("framestats.json mode = %v, want 0600", info.Mode().Perm())
+	}
+	if raw, err := os.ReadFile(path); err != nil || !strings.Contains(string(raw), `"present"`) {
+		t.Fatalf("framestats.json = %q, %v", raw, err)
+	}
+	if target, err := os.Readlink(path + ".tmp"); err != nil || target != victim {
+		t.Fatalf("planted symlink changed: %q, %v", target, err)
+	}
+}
+
+// TestWriteProfileFileIgnoresPlantedTempSymlink covers the profiler writer,
+// which shares writeAtomic but writes pprof bodies instead of frame stats.
+func TestWriteProfileFileIgnoresPlantedTempSymlink(t *testing.T) {
+	dir := t.TempDir()
+	victim := filepath.Join(dir, "victim")
+	if err := os.WriteFile(victim, []byte("sentinel"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(dir, "heap.pprof")
+	if err := os.Symlink(victim, path+".tmp"); err != nil {
+		t.Fatal(err)
+	}
+	write := func(w io.Writer) error {
+		_, err := io.WriteString(w, "profile-body")
+		return err
+	}
+	if err := writeProfileFile(path, "", write); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := os.ReadFile(victim); err != nil || string(got) != "sentinel" {
+		t.Fatalf("victim = %q, %v; want unchanged sentinel", got, err)
+	}
+	if got, err := os.ReadFile(path); err != nil || string(got) != "profile-body" {
+		t.Fatalf("heap.pprof = %q, %v", got, err)
 	}
 }
