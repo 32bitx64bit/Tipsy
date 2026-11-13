@@ -6,6 +6,7 @@ package discord
 import (
 	"encoding/binary"
 	"encoding/json"
+	"errors"
 	"io"
 	"net"
 	"path/filepath"
@@ -105,6 +106,33 @@ func TestHandshakeAndSetActivityRoundTrip(t *testing.T) {
 	}
 	if containsAny(raw, "ticket", "userId", "accessCode", "gameinfo") {
 		t.Fatalf("activity leaked secrets: %s", raw)
+	}
+}
+
+func TestWriteTimesOutWhenPeerStopsReading(t *testing.T) {
+	peer, conn := net.Pipe()
+	defer peer.Close()
+	client := newClient(conn, 4242)
+	client.writeTimeout = 50 * time.Millisecond
+	defer client.Close()
+
+	errc := make(chan error, 1)
+	go func() {
+		// net.Pipe is unbuffered, so a peer that never reads blocks the write
+		// until the deadline expires.
+		errc <- client.write(opFrame, []byte(`{"cmd":"SET_ACTIVITY"}`))
+	}()
+	select {
+	case err := <-errc:
+		if err == nil {
+			t.Fatal("write to a peer that stopped reading succeeded")
+		}
+		var ne net.Error
+		if !errors.As(err, &ne) || !ne.Timeout() {
+			t.Fatalf("write error=%v, want a timeout", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("write did not time out; a wedged IPC peer blocks teardown")
 	}
 }
 

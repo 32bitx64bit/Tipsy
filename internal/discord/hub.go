@@ -31,18 +31,26 @@ type Options struct {
 	HandshakeWait time.Duration
 }
 
+// maxLookupAttempts caps consecutive failed or empty catalog lookups for one
+// place. Without it a permanently unresolvable place fires three HTTPS calls
+// every poll for the lifetime of the session.
+const maxLookupAttempts = 3
+
 // Hub publishes Rich Presence for the live Roblox process. It never fails launch.
 type Hub struct {
 	opts   Options
 	place  atomic.Int64
 	closed atomic.Bool
 
-	kick chan struct{}
-	done chan struct{}
+	kick   chan struct{}
+	done   chan struct{}
+	cancel context.CancelFunc
 
-	mu     sync.Mutex
-	client *Client
-	cache  map[int64]Place
+	mu         sync.Mutex
+	client     *Client
+	cache      map[int64]Place
+	lookupID   int64
+	lookupMiss int
 }
 
 // Start runs the presence loop until ctx is cancelled or Close is called.
@@ -68,13 +76,15 @@ func Start(ctx context.Context, opts Options) *Hub {
 	if opts.Lookup == nil {
 		opts.Lookup = Catalog{}.Lookup
 	}
+	hctx, cancel := context.WithCancel(ctx)
 	h := &Hub{
-		opts:  opts,
-		kick:  make(chan struct{}, 1),
-		done:  make(chan struct{}),
-		cache: make(map[int64]Place),
+		opts:   opts,
+		kick:   make(chan struct{}, 1),
+		done:   make(chan struct{}),
+		cancel: cancel,
+		cache:  make(map[int64]Place),
 	}
-	go h.loop(ctx)
+	go h.loop(hctx)
 	return h
 }
 
@@ -114,11 +124,14 @@ func (h *Hub) SetLoadedPlaceID(placeID int64) {
 	h.signal()
 }
 
-// Close clears Discord activity and stops the loop.
+// Close clears Discord activity and stops the loop. It cancels the hub's own
+// context first so an in-flight settings load or catalog lookup aborts instead
+// of being waited out.
 func (h *Hub) Close() {
 	if h == nil || h.closed.Swap(true) {
 		return
 	}
+	h.cancel()
 	h.signal()
 	<-h.done
 }
@@ -132,6 +145,7 @@ func (h *Hub) signal() {
 
 func (h *Hub) loop(ctx context.Context) {
 	defer close(h.done)
+	defer h.cancel()
 	defer h.disconnect(true)
 
 	settings := Settings{Enabled: true}
@@ -156,6 +170,9 @@ func (h *Hub) loop(ctx context.Context) {
 		}
 		if loaded, err := h.load(ctx); err == nil {
 			settings = loaded
+		}
+		if h.closed.Load() || ctx.Err() != nil {
+			return
 		}
 		if !settings.Enabled || h.opts.ApplicationID == "" {
 			h.disconnect(true)
@@ -238,12 +255,21 @@ func (h *Hub) resolve(ctx context.Context, id int64) Place {
 		h.mu.Unlock()
 		return cached
 	}
+	if h.lookupID != id {
+		h.lookupID = id
+		h.lookupMiss = 0
+	}
+	if h.lookupMiss >= maxLookupAttempts {
+		h.mu.Unlock()
+		return Place{ID: id}
+	}
 	h.mu.Unlock()
 	place := Place{ID: id}
 	if h.opts.Lookup != nil {
 		got, err := h.opts.Lookup(ctx, id)
 		if err != nil {
 			logging.Logger(logging.CatNetwork).Info("discord catalog lookup failed", "placeId", id, "err", err)
+			h.missLookup(id)
 			return place
 		}
 		if got.ID == 0 {
@@ -254,9 +280,27 @@ func (h *Hub) resolve(ctx context.Context, id int64) Place {
 	if place.Name != "" || place.IconURL != "" {
 		h.mu.Lock()
 		h.cache[id] = place
+		if h.lookupID == id {
+			h.lookupMiss = 0
+		}
 		h.mu.Unlock()
+		return place
 	}
+	h.missLookup(id)
 	return place
+}
+
+// missLookup records an unresolved lookup. Once maxLookupAttempts consecutive
+// attempts fail for one place no further catalog calls are made until the
+// place changes.
+func (h *Hub) missLookup(id int64) {
+	h.mu.Lock()
+	if h.lookupID != id {
+		h.lookupID = id
+		h.lookupMiss = 0
+	}
+	h.lookupMiss++
+	h.mu.Unlock()
 }
 
 func (h *Hub) ensureClient() error {

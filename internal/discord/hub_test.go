@@ -403,6 +403,143 @@ func TestApplicationIDIsPublicSnowflake(t *testing.T) {
 	}
 }
 
+func TestHubCloseCancelsInFlightLookup(t *testing.T) {
+	entered := make(chan struct{}, 1)
+	hub := Start(context.Background(), Options{
+		ApplicationID: "42",
+		Paths:         []string{filepath.Join(t.TempDir(), "absent")},
+		DialTimeout:   5 * time.Millisecond,
+		Poll:          time.Hour,
+		Retry:         time.Hour,
+		Load: func(context.Context) (Settings, error) {
+			return Settings{Enabled: true}, nil
+		},
+		Lookup: func(ctx context.Context, id int64) (Place, error) {
+			select {
+			case entered <- struct{}{}:
+			default:
+			}
+			<-ctx.Done()
+			return Place{}, ctx.Err()
+		},
+	})
+	hub.SetPlaceID(1818)
+	select {
+	case <-entered:
+	case <-time.After(2 * time.Second):
+		t.Fatal("catalog lookup never started")
+	}
+
+	closed := make(chan struct{})
+	go func() {
+		hub.Close()
+		close(closed)
+	}()
+	select {
+	case <-closed:
+	case <-time.After(2 * time.Second):
+		t.Fatal("Hub.Close blocked on an in-flight lookup instead of cancelling it")
+	}
+}
+
+func TestHubCloseCancelsInFlightSettingsLoad(t *testing.T) {
+	entered := make(chan struct{}, 1)
+	hub := Start(context.Background(), Options{
+		ApplicationID: "42",
+		Paths:         []string{filepath.Join(t.TempDir(), "absent")},
+		DialTimeout:   5 * time.Millisecond,
+		Poll:          time.Hour,
+		Retry:         time.Hour,
+		Load: func(ctx context.Context) (Settings, error) {
+			select {
+			case entered <- struct{}{}:
+			default:
+			}
+			<-ctx.Done()
+			return Settings{}, ctx.Err()
+		},
+		Lookup: func(context.Context, int64) (Place, error) {
+			return Place{}, nil
+		},
+	})
+	select {
+	case <-entered:
+	case <-time.After(2 * time.Second):
+		t.Fatal("settings load never started")
+	}
+
+	closed := make(chan struct{})
+	go func() {
+		hub.Close()
+		close(closed)
+	}()
+	select {
+	case <-closed:
+	case <-time.After(2 * time.Second):
+		t.Fatal("Hub.Close blocked on an in-flight settings load instead of cancelling it")
+	}
+}
+
+func TestHubStopsRetryingUnresolvablePlace(t *testing.T) {
+	cases := []struct {
+		name   string
+		lookup func(context.Context, int64) (Place, error)
+	}{
+		{"error", func(context.Context, int64) (Place, error) {
+			return Place{}, fmt.Errorf("catalog http 404")
+		}},
+		{"empty", func(_ context.Context, id int64) (Place, error) {
+			return Place{ID: id}, nil
+		}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var lookups atomic.Int32
+			hub := Start(context.Background(), Options{
+				ApplicationID: "42",
+				Paths:         []string{filepath.Join(t.TempDir(), "absent")},
+				DialTimeout:   5 * time.Millisecond,
+				Poll:          10 * time.Millisecond,
+				Retry:         time.Hour,
+				Load: func(context.Context) (Settings, error) {
+					return Settings{Enabled: true}, nil
+				},
+				Lookup: func(ctx context.Context, id int64) (Place, error) {
+					lookups.Add(1)
+					return tc.lookup(ctx, id)
+				},
+			})
+			defer hub.Close()
+
+			hub.SetPlaceID(1818)
+			waitLookups(t, &lookups, maxLookupAttempts)
+			time.Sleep(100 * time.Millisecond)
+			if got := lookups.Load(); got != maxLookupAttempts {
+				t.Fatalf("after retry cap lookups=%d, want %d", got, maxLookupAttempts)
+			}
+
+			hub.SetPlaceID(2222)
+			waitLookups(t, &lookups, 2*maxLookupAttempts)
+			time.Sleep(100 * time.Millisecond)
+			if got := lookups.Load(); got != 2*maxLookupAttempts {
+				t.Fatalf("after place change lookups=%d, want %d", got, 2*maxLookupAttempts)
+			}
+		})
+	}
+}
+
+func waitLookups(t *testing.T, lookups *atomic.Int32, want int32) {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if lookups.Load() >= want {
+			return
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	t.Fatalf("lookups=%d, want at least %d", lookups.Load(), want)
+}
+
 func waitPayload(t *testing.T, mu *sync.Mutex, payloads *[]string, needle string) {
 	t.Helper()
 	deadline := time.Now().Add(2 * time.Second)

@@ -26,6 +26,11 @@ const (
 	opPong      = 4
 	ipcVersion  = 1
 	maxFrame    = 16 << 10
+
+	// ipcWriteTimeout bounds every IPC write so a peer that stops reading
+	// cannot wedge setActivity or teardown. It matches the handshake read
+	// timeout.
+	ipcWriteTimeout = 2 * time.Second
 )
 
 var (
@@ -35,16 +40,17 @@ var (
 
 // Client is a Discord IPC connection used only for SET_ACTIVITY.
 type Client struct {
-	conn  net.Conn
-	nonce atomic.Uint64
-	pid   int
+	conn         net.Conn
+	nonce        atomic.Uint64
+	pid          int
+	writeTimeout time.Duration
 }
 
 func newClient(conn net.Conn, pid int) *Client {
 	if pid <= 0 {
 		pid = os.Getpid()
 	}
-	return &Client{conn: conn, pid: pid}
+	return &Client{conn: conn, pid: pid, writeTimeout: ipcWriteTimeout}
 }
 
 func (c *Client) Close() error {
@@ -113,6 +119,11 @@ func (c *Client) write(op uint32, payload []byte) error {
 	if len(payload) > maxFrame {
 		return errFrame
 	}
+	timeout := c.writeTimeout
+	if timeout <= 0 {
+		timeout = ipcWriteTimeout
+	}
+	_ = c.conn.SetWriteDeadline(time.Now().Add(timeout))
 	var hdr [8]byte
 	binary.LittleEndian.PutUint32(hdr[0:4], op)
 	binary.LittleEndian.PutUint32(hdr[4:8], uint32(len(payload)))
